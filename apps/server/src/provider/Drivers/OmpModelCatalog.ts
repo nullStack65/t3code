@@ -38,6 +38,9 @@ import { buildSelectOptionDescriptor } from "../providerSnapshot.ts";
 /** The single RPC request that answers the whole catalog. */
 export const OMP_AVAILABLE_MODELS_REQUEST_ID = "t3-model-catalog";
 
+/** The follow-up request that names omp's active model. */
+export const OMP_STATE_REQUEST_ID = "t3-model-state";
+
 /**
  * omp's thinking ladder, in ascending order, with the picker labels T3 uses.
  * `off`/`auto` are session-level values omp adds to every model's select;
@@ -207,7 +210,10 @@ export function buildOmpModelCapabilities(input: {
  * slug (`<provider>/<id>`) and sorted by display name: the catalog is 121
  * entries deep on a default install.
  */
-export function catalogFromOmpModelEntries(entries: ReadonlyArray<unknown>): OmpModelCatalog {
+export function catalogFromOmpModelEntries(
+  entries: ReadonlyArray<unknown>,
+  activeSlug?: string | undefined,
+): OmpModelCatalog {
   const models: Array<ServerProviderModel> = [];
   const metadataBySlug = new Map<string, OmpModelMetadata>();
   for (const entry of entries) {
@@ -236,6 +242,10 @@ export function catalogFromOmpModelEntries(entries: ReadonlyArray<unknown>): Omp
       name: trimmedString(model.name) || slug,
       ...(provider.length > 0 ? { subProvider: titleCaseSlug(provider) } : {}),
       isCustom: false,
+      // Without a default the client cannot resolve a model for a fresh
+      // thread, and an unresolved model takes the composer's whole traits
+      // control with it — the thinking ladder included.
+      ...(activeSlug !== undefined && slug === activeSlug ? { isDefault: true } : {}),
       capabilities: buildOmpModelCapabilities({
         reasoningEfforts,
         defaultLevel: trimmedString(thinking.defaultLevel) || undefined,
@@ -257,6 +267,24 @@ function modelEntriesFromFrame(frame: Record<string, unknown>): ReadonlyArray<un
 }
 
 /**
+ * The slug omp has selected, read from a `get_state` response. omp reports
+ * the model as `{ provider, id }`, which is the same pair the ACP `model`
+ * select advertises as `<provider>/<id>`.
+ */
+function activeSlugFromFrame(frame: Record<string, unknown>): string | undefined {
+  if (frame.type !== "response" || frame.command !== "get_state") {
+    return undefined;
+  }
+  const model = (frame.data as Record<string, unknown> | undefined)?.model;
+  if (typeof model !== "object" || model === null) return undefined;
+  const record = model as Record<string, unknown>;
+  const id = trimmedString(record.id);
+  if (id.length === 0) return undefined;
+  const provider = trimmedString(record.provider);
+  return provider.length > 0 ? `${provider}/${id}` : id;
+}
+
+/**
  * Read the `get_available_models` response out of an RPC JSONL transcript.
  * Frames that are not that response (`ready`, `available_commands_update`,
  * `extension_ui_request`) are skipped, so the same transcript can also feed
@@ -264,6 +292,7 @@ function modelEntriesFromFrame(frame: Record<string, unknown>): ReadonlyArray<un
  */
 export function decodeOmpModelCatalog(stdout: string): OmpModelCatalog {
   const entries: Array<unknown> = [];
+  let activeSlug: string | undefined;
   for (const line of stdout.split("\n")) {
     const trimmedLine = line.trim();
     if (trimmedLine.length === 0) continue;
@@ -275,9 +304,11 @@ export function decodeOmpModelCatalog(stdout: string): OmpModelCatalog {
       continue;
     }
     if (typeof frame !== "object" || frame === null) continue;
-    for (const entry of modelEntriesFromFrame(frame as Record<string, unknown>)) {
+    const record = frame as Record<string, unknown>;
+    activeSlug = activeSlugFromFrame(record) ?? activeSlug;
+    for (const entry of modelEntriesFromFrame(record)) {
       entries.push(entry);
     }
   }
-  return catalogFromOmpModelEntries(entries);
+  return catalogFromOmpModelEntries(entries, activeSlug);
 }

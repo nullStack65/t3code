@@ -40,6 +40,7 @@ import { collectStreamAsString } from "../providerSnapshot.ts";
 import {
   decodeOmpModelCatalog,
   OMP_AVAILABLE_MODELS_REQUEST_ID,
+  OMP_STATE_REQUEST_ID,
   type OmpModelCatalog,
 } from "./OmpModelCatalog.ts";
 
@@ -217,6 +218,10 @@ export const discoverOmpCommandCatalog = Effect.fn("discoverOmpCommandCatalog")(
                 id: OMP_AVAILABLE_MODELS_REQUEST_ID,
                 type: "get_available_models",
               })}\n`,
+              // The active model marks the catalog's default; without one the
+              // client cannot resolve a model for a fresh thread.
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - JSONL transport frame.
+              `${JSON.stringify({ id: OMP_STATE_REQUEST_ID, type: "get_state" })}\n`,
             ),
           ),
           child.stdin,
