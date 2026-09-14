@@ -32,7 +32,7 @@ import {
   checkOmpProviderStatus,
   enrichOmpSnapshot,
 } from "../Layers/OmpProvider.ts";
-import { discoverOmpSkills } from "./OmpSkills.ts";
+import { discoverOmpCommandCatalog } from "./OmpCommands.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -168,25 +168,32 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
           ? snapshot.getSnapshot
           : Effect.all([
               snapshot.getSnapshot,
-              discoverOmpSkills(effectiveConfig, processEnv, workspaceCwd).pipe(
+              discoverOmpCommandCatalog(effectiveConfig, processEnv, workspaceCwd).pipe(
                 Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
                 Effect.mapError(
                   (cause) =>
                     new ProviderDriverError({
                       driver: DRIVER_KIND,
                       instanceId,
-                      detail: `Failed to discover Oh My Pi skills for '${workspaceCwd}'`,
+                      detail: `Failed to discover Oh My Pi commands for '${workspaceCwd}'`,
                       cause,
                     }),
                 ),
               ),
             ]).pipe(
-              Effect.tap(([, skills]) =>
+              Effect.tap(([, catalog]) =>
                 Effect.sync(() => {
-                  skillNamesByCwd.set(workspaceCwd, new Set(skills.map((skill) => skill.name)));
+                  skillNamesByCwd.set(
+                    workspaceCwd,
+                    new Set(catalog.skills.map((skill) => skill.name)),
+                  );
                 }),
               ),
-              Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
+              Effect.map(([machineSnapshot, catalog]) => ({
+                ...machineSnapshot,
+                skills: catalog.skills,
+                slashCommands: catalog.slashCommands,
+              })),
             );
 
       return {
