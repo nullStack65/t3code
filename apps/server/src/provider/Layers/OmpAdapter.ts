@@ -76,10 +76,9 @@ import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
   applyOmpAcpModelSelection,
   makeOmpAcpRuntime,
-  parseOmpForkedSessionId,
-  parseOmpSessionList,
   resolveOmpAcpBaseModelId,
 } from "../acp/OmpAcpSupport.ts";
+import { type AnsiFilter, makeAnsiFilter } from "../acp/OmpAnsi.ts";
 import { type OmpAdapterShape } from "../Services/OmpAdapter.ts";
 import { rewriteOmpSkillMentions } from "../Drivers/OmpSkillDispatch.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -174,6 +173,8 @@ interface OmpSessionContext {
    * into the same turn does not repeat the warning. */
   modelWarningTurnId: TurnId | undefined;
   lastPlanFingerprint: string | undefined;
+  /** Strips omp's terminal escapes out of streamed message text. */
+  readonly ansiFilter: AnsiFilter;
   activeTurnId: TurnId | undefined;
   /** Context occupancy last reported by omp's `usage_update`. The
    * `session/prompt` response only carries per-turn tokens, so the context
@@ -1523,6 +1524,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             ompSubagentActivity: new Map(),
             turns: [],
             lastPlanFingerprint: undefined,
+            ansiFilter: makeAnsiFilter(),
             activeTurnId: undefined,
             modelWarningTurnId: undefined,
             lastContextUsedTokens: undefined,
@@ -1553,7 +1555,24 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       }),
                     );
                     return;
-                  case "AssistantItemCompleted":
+                  case "AssistantItemCompleted": {
+                    // A chunk boundary can split an escape sequence, so the
+                    // stripper holds a partial tail back: release whatever
+                    // turned out to be real text before closing the item.
+                    const tail = ctx.ansiFilter.flush();
+                    if (tail.length > 0) {
+                      yield* offerRuntimeEvent(
+                        makeAcpContentDeltaEvent({
+                          stamp: yield* makeEventStamp(),
+                          provider: PROVIDER,
+                          threadId: ctx.threadId,
+                          turnId: ctx.activeTurnId,
+                          itemId: event.itemId,
+                          text: tail,
+                          rawPayload: undefined,
+                        }),
+                      );
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp: yield* makeEventStamp(),
@@ -1565,6 +1584,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       }),
                     );
                     return;
+                  }
                   case "PlanUpdated":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* emitPlanUpdate(ctx, event.payload, event.rawPayload);
@@ -1584,8 +1604,15 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                     yield* emitOmpSubagentEvents(ctx, event.toolCall);
                     return;
                   case "ThoughtDelta":
-                  case "ContentDelta":
+                  case "ContentDelta": {
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
+                    // omp writes terminal output into chat text (`/context`
+                    // draws colored bars), and the escapes would render as
+                    // literal `[38;2;…m` noise.
+                    const text = ctx.ansiFilter.push(event.text);
+                    if (text.length === 0) {
+                      return;
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp: yield* makeEventStamp(),
@@ -1598,11 +1625,12 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                         ...(event._tag === "ThoughtDelta"
                           ? { streamKind: "reasoning_text" as const }
                           : {}),
-                        text: event.text,
+                        text,
                         rawPayload: event.rawPayload,
                       }),
                     );
                     return;
+                  }
                 }
               }),
             ),
@@ -2117,117 +2145,6 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
     const stopAll: OmpAdapterShape["stopAll"] = () =>
       Effect.forEach(sessions.values(), stopSessionInternal, { discard: true });
 
-    const forkSession: OmpAdapterShape["forkSession"] = (threadId) =>
-      Effect.gen(function* () {
-        const ctx = yield* requireSession(threadId);
-        const sessionId = parseOmpResume(ctx.session.resumeCursor)?.sessionId;
-        const cwd = ctx.session.cwd;
-        // `cwd` is required: omitting it fails inside omp with a bare
-        // "path must be of type string" internal error (verified on 18.1.x).
-        if (sessionId === undefined || cwd === undefined) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "session/fork",
-            detail: "The Oh My Pi session has no native session id and cwd to fork.",
-          });
-        }
-        const response = yield* ctx.acp
-          .request("session/fork", { sessionId, cwd })
-          .pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "session/fork", error),
-            ),
-          );
-        const forkedSessionId = parseOmpForkedSessionId(response);
-        if (forkedSessionId === undefined) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "session/fork",
-            detail: "Oh My Pi returned no session id for the forked session.",
-          });
-        }
-        return {
-          sessionId: forkedSessionId,
-          cwd,
-          resumeCursor: { schemaVersion: OMP_RESUME_VERSION, sessionId: forkedSessionId },
-        };
-      });
-
-    /**
-     * Runs one `session/list` request on a dedicated, scoped `omp acp`
-     * child that is only initialized — no session is created, so discovery
-     * never shows up in the very list it is reading.
-     *
-     * A live session's connection is deliberately NOT reused: which
-     * sessions exist is a property of the configured binary and profile,
-     * not of whichever thread happens to be open, and an open session may
-     * have been spawned from an older settings snapshot.
-     */
-    const requestSessionList = (input: {
-      readonly cwd: string;
-      readonly payload: Record<string, string>;
-    }) =>
-      Effect.gen(function* () {
-        const effectiveOmpSettings = options?.resolveSettings
-          ? yield* options.resolveSettings
-          : ompSettings;
-        return yield* Effect.scoped(
-          Effect.gen(function* () {
-            const acp = yield* makeOmpAcpRuntime({
-              ompSettings: effectiveOmpSettings,
-              ...(options?.environment ? { environment: options.environment } : {}),
-              childProcessSpawner,
-              cwd: input.cwd,
-              clientInfo: { name: "t3-code", version: "0.0.0" },
-              // Nothing answers elicitation on a discovery connection.
-              enableElicitation: false,
-            }).pipe(Effect.provideService(Crypto.Crypto, crypto));
-            yield* acp.initialize();
-            return yield* acp.request("session/list", input.payload);
-          }),
-        );
-      });
-
-    const listNativeSessions: OmpAdapterShape["listNativeSessions"] = (input) =>
-      Effect.gen(function* () {
-        const cwd = input.cwd.trim();
-        if (!cwd) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "listNativeSessions",
-            issue: "cwd is required and must be non-empty.",
-          });
-        }
-        const filterCwd = input.filterCwd?.trim();
-        const cursor = input.cursor?.trim();
-        const response = yield* requestSessionList({
-          cwd: path.resolve(cwd),
-          payload: {
-            ...(filterCwd ? { cwd: path.resolve(filterCwd) } : {}),
-            ...(cursor ? { cursor } : {}),
-          },
-        }).pipe(
-          Effect.mapError(
-            (error) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session/list",
-                detail: error.message,
-                cause: error,
-              }),
-          ),
-        );
-        const listing = parseOmpSessionList(response);
-        return {
-          sessions: listing.sessions.map((session) => ({
-            ...session,
-            resumeCursor: { schemaVersion: OMP_RESUME_VERSION, sessionId: session.sessionId },
-          })),
-          ...(listing.nextCursor ? { nextCursor: listing.nextCursor } : {}),
-          skippedCount: listing.skippedCount,
-        };
-      });
-
     yield* Effect.addFinalizer(() =>
       Effect.forEach(sessions.values(), stopSessionInternal, { discard: true }).pipe(
         Effect.catch((cause) =>
@@ -2261,8 +2178,6 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
       respondToUserInput,
       stopSession,
       listSessions,
-      forkSession,
-      listNativeSessions,
       hasSession,
       stopAll,
       streamEvents,

@@ -2728,103 +2728,17 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
     }),
   );
 
-  it.effect("forks the live session into a new omp session and leaves it usable", () =>
+  // The migrating-terminal-user path: the session id comes from the imported
+  // transcript on disk, and `session/load` has to reopen exactly it.
+  it.effect("resumes an omp session named by an imported cursor", () =>
     Effect.gen(function* () {
       const adapter = yield* OmpAdapter;
       const settings = yield* ServerSettingsService;
-      const threadId = ThreadId.make("omp-fork-thread");
 
       const wrapperPath = yield* Effect.promise(() =>
         makeMockAgentWrapper({ T3_ACP_OMP_SESSION_STORE: "1" }),
       );
       yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
-
-      const session = yield* adapter.startSession({
-        threadId,
-        provider: ProviderDriverKind.make("omp"),
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-      });
-      const cursor = session.resumeCursor;
-      assert.isTrue(
-        typeof cursor === "object" && cursor !== null && "sessionId" in cursor,
-        "startSession must persist an omp resume cursor",
-      );
-      const originalSessionId =
-        typeof cursor === "object" && cursor !== null && "sessionId" in cursor
-          ? String(cursor.sessionId)
-          : "";
-
-      const fork = yield* adapter.forkSession(threadId);
-      assert.notEqual(fork.sessionId, originalSessionId);
-      assert.equal(fork.sessionId, `${originalSessionId}-fork-1`);
-      assert.deepStrictEqual(fork.resumeCursor, { schemaVersion: 1, sessionId: fork.sessionId });
-      assert.equal(fork.cwd, session.cwd);
-
-      // The fork is a copy: the original thread keeps running on its own
-      // session id and can still take a turn.
-      const turn = yield* adapter.sendTurn({ threadId, input: "still alive", attachments: [] });
-      assert.equal(String(turn.threadId), String(threadId));
-      assert.deepStrictEqual(
-        (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId)?.resumeCursor,
-        { schemaVersion: 1, sessionId: originalSessionId },
-      );
-
-      yield* adapter.stopSession(threadId);
-    }),
-  );
-
-  it.effect("refuses to fork a thread with no live omp session", () =>
-    Effect.gen(function* () {
-      const adapter = yield* OmpAdapter;
-      const exit = yield* Effect.exit(adapter.forkSession(ThreadId.make("omp-fork-missing")));
-      assert.isTrue(Exit.isFailure(exit));
-    }),
-  );
-
-  // The migrating-terminal-user path: no session is open here, so discovery
-  // has to stand up its own connection.
-  it.effect("discovers omp's own sessions without a live session and resumes one", () =>
-    Effect.gen(function* () {
-      const adapter = yield* OmpAdapter;
-      const settings = yield* ServerSettingsService;
-
-      const wrapperPath = yield* Effect.promise(() =>
-        makeMockAgentWrapper({
-          T3_ACP_OMP_SESSION_STORE: "1",
-          T3_ACP_SESSION_LIST_CWD: process.cwd(),
-        }),
-      );
-      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
-
-      const page = yield* adapter.listNativeSessions({ cwd: process.cwd() });
-      assert.equal(page.nextCursor, "mock-cursor-2");
-      assert.equal(page.skippedCount, 0);
-      assert.deepStrictEqual(
-        page.sessions.map((entry) => entry.sessionId),
-        ["omp-session-terminal-1", "omp-session-elsewhere-1"],
-      );
-      const terminalSession = page.sessions[0];
-      assert.isDefined(terminalSession);
-      assert.equal(terminalSession?.title, "Terminal session");
-      assert.equal(terminalSession?.updatedAt, "2026-02-03T04:05:06.000Z");
-      assert.equal(terminalSession?.cwd, process.cwd());
-      assert.equal(terminalSession?.messageCount, 12);
-      assert.deepStrictEqual(terminalSession?.resumeCursor, {
-        schemaVersion: 1,
-        sessionId: "omp-session-terminal-1",
-      });
-
-      // A session from another workspace is still listed; the filter is the
-      // caller's choice, not an implicit one.
-      const filtered = yield* adapter.listNativeSessions({
-        cwd: process.cwd(),
-        filterCwd: process.cwd(),
-      });
-      assert.deepStrictEqual(
-        filtered.sessions.map((entry) => entry.sessionId),
-        ["omp-session-terminal-1"],
-      );
 
       const threadId = ThreadId.make("omp-resume-discovered-thread");
       const resumed = yield* adapter.startSession({
@@ -2832,7 +2746,7 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
         provider: ProviderDriverKind.make("omp"),
         cwd: process.cwd(),
         runtimeMode: "full-access",
-        resumeCursor: terminalSession?.resumeCursor,
+        resumeCursor: { schemaVersion: 1, sessionId: "omp-session-terminal-1" },
       });
       assert.deepStrictEqual(resumed.resumeCursor, {
         schemaVersion: 1,
