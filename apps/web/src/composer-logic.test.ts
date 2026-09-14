@@ -167,6 +167,18 @@ describe("detectComposerTrigger", () => {
     });
   });
 
+  it("covers the whole argument token when the caret sits inside it", () => {
+    const text = "/compact remx";
+
+    expect(detectComposerTrigger(text, "/compact rem".length)).toEqual({
+      kind: "slash-argument",
+      command: "compact",
+      query: "rem",
+      rangeStart: "/compact ".length,
+      rangeEnd: text.length,
+    });
+  });
+
   it("stops triggering once a second argument word is typed", () => {
     const text = "/compact remote focus here";
 

@@ -21,10 +21,15 @@ const ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex
   /\u001B\[[0-9;:?]*[ -/]*[@-~]|\u001B\][\s\S]*?(?:\u0007|\u001B\\)|\u001B[ -/]+[0-~]|\u001B[@-Z\\-_]/g;
 
-/** A tail that could still become a complete sequence once more text arrives. */
+/**
+ * A tail that could still become a complete sequence once more text arrives.
+ * The OSC branch requires the sequence to be unterminated: a `ESC ]…BEL`
+ * that already closed is a complete escape, and treating it as a tail would
+ * withhold every character printed after it.
+ */
 const PARTIAL_ANSI_TAIL_PATTERN =
   // eslint-disable-next-line no-control-regex
-  /\u001B(?:\[[0-9;:?]*[ -/]*|\][\s\S]*)?$/;
+  /\u001B(?:\[[0-9;:?]*[ -/]*|\](?:(?!\u0007|\u001B\\)[\s\S])*)?$/;
 
 /** Remove every terminal escape sequence from a complete string. */
 export function stripAnsi(text: string): string {

@@ -19,8 +19,8 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 > - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
 > - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
 > - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
+> - Oh My Pi (omp): install [Oh My Pi](https://github.com/can1357/oh-my-pi) and run `omp setup`
 > - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Oh My Pi (omp): install [Oh My Pi](https://github.com/can1357/oh-my-pi) and run `omp`
 > - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
 
 ### Try it out (install-free)

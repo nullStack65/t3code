@@ -350,6 +350,50 @@ it.layer(testLayer)("OmpDriver", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  // A cache hit re-records the cwd so the LRU keeps it, which must not also
+  // restart its freshness window: a polled cwd would then never re-probe and
+  // a skill installed out of band would stay invisible for the session.
+  it.effect("re-probes after the freshness window even while the cwd is polled", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-driver-stale-" });
+      const probeLogPath = path.join(root, "probes.log");
+      const fakePath = yield* makeFakeOmp({
+        prefix: "t3-omp-driver-stale-bin-",
+        checkOutput: "Current version: 18.1.18\n",
+        probeLogPath,
+      });
+      const instance = yield* createTestInstance("omp-catalog-stale", {
+        binaryPath: fakePath,
+        enabled: true,
+      });
+      const snapshotForCwd = instance.snapshotForCwd;
+      if (!snapshotForCwd)
+        return yield* Effect.die("OmpDriver does not expose workspace snapshots.");
+      const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-stale-ws-" });
+
+      const realNow = Date.now;
+      let clockOffsetMillis = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMillis);
+      try {
+        yield* snapshotForCwd(workspace);
+        // Polls inside the window are served from cache.
+        clockOffsetMillis = 20_000;
+        yield* snapshotForCwd(workspace);
+        clockOffsetMillis = 29_000;
+        yield* snapshotForCwd(workspace);
+        expect(yield* readProbeCount(probeLogPath, workspace)).toBe(1);
+
+        clockOffsetMillis = 31_000;
+        yield* snapshotForCwd(workspace);
+        expect(yield* readProbeCount(probeLogPath, workspace)).toBe(2);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("applies a live available_commands_update without a second probe", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

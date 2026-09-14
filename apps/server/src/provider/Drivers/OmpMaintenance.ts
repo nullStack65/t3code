@@ -2,13 +2,14 @@
  * OmpMaintenance — update capabilities and workspace-snapshot helpers for the
  * Oh My Pi (`omp`) driver.
  *
- * omp is its own updater: it ships outside npm/homebrew, so no package
- * manager owns its install. `omp update --check` prints the installed
- * version (`Current version: X`) and, when behind, the version it would
- * install (`New version available: Y`); `omp update` performs the install.
- * The maintenance resolver therefore advertises the resolved `omp` binary
- * itself as the updater and bakes the `--check` output into `latestVersion`,
- * instead of guessing a registry the way npm/homebrew-backed drivers do.
+ * omp is its own updater: `omp update` detects how this copy was installed
+ * (Homebrew, mise, Bun, npm, or a direct binary) and delegates to it, so no
+ * single registry describes the install. `omp update --check` prints the
+ * installed version (`Current version: X`) and, when behind, the version it
+ * would install (`New version available: Y`). The maintenance resolver
+ * therefore advertises the resolved `omp` binary itself as the updater and
+ * bakes the `--check` output into `latestVersion`, instead of guessing a
+ * registry the way npm/homebrew-backed drivers do.
  *
  * @module provider/Drivers/OmpMaintenance
  */

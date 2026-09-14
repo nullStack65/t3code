@@ -873,9 +873,7 @@ describe("isOpenableSkillPath", () => {
   });
 
   it("refuses internal URLs and blank paths", () => {
-    expect(
-      isOpenableSkillPath("C:\Storage\AI\Agents\.omp\curated-skills\matt\matt-tdd\SKILL.md"),
-    ).toBe(false);
+    expect(isOpenableSkillPath("skill://tdd/SKILL.md")).toBe(false);
     expect(isOpenableSkillPath("https://example.com/SKILL.md")).toBe(false);
     expect(isOpenableSkillPath("   ")).toBe(false);
   });

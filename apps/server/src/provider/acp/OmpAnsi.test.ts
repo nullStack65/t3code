@@ -40,6 +40,20 @@ describe("makeAnsiFilter", () => {
     expect(filter.flush()).toBe("");
   });
 
+  it("keeps text printed after a terminated hyperlink in the same chunk", () => {
+    const filter = makeAnsiFilter();
+
+    expect(filter.push("\u001B]8;;http://x\u0007label after")).toBe("label after");
+    expect(filter.flush()).toBe("");
+  });
+
+  it("still holds an unterminated hyperlink until it closes", () => {
+    const filter = makeAnsiFilter();
+
+    expect(filter.push("start \u001B]8;;http://x")).toBe("start ");
+    expect(filter.push("\u0007label")).toBe("label");
+  });
+
   it("discards a partial escape that the stream never completed", () => {
     const filter = makeAnsiFilter();
 

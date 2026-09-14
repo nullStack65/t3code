@@ -137,8 +137,9 @@ Token and cost reporting arrive as an unstable ACP extension: omp sends `usage_u
 totals on the prompt response. `usedTokens` tracks context occupancy, so per-turn totals must not
 overwrite it or the meter shrinks every turn.
 
-omp ships outside npm and Homebrew and updates itself: `omp update --check` reports the current
-and latest version and `omp update` installs, which is the only advisory source T3 trusts for it.
+omp updates itself through whichever installer it detects (Homebrew, mise, Bun, npm, or a direct
+binary), so no registry describes it: `omp update --check` reports the current and latest version
+and `omp update` installs, which is the only advisory source T3 trusts for it.
 Subscription limits come from `omp usage --json`, which enumerates authenticated accounts per
 provider and doubles as the auth probe — a failed probe must stay `unknown` rather than report
 `unauthenticated`.

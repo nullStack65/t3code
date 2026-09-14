@@ -133,14 +133,20 @@ export const makeOmpTextGeneration = Effect.fn("makeOmpTextGeneration")(function
         ),
       );
 
+      // A cancelled turn is a failure even when omp already streamed
+      // parseable output: the text is a fragment of an answer nobody
+      // finished, not a result.
+      if (promptResult.stopReason === "cancelled") {
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Oh My Pi ACP request was cancelled.",
+        });
+      }
       const rawResult = (yield* Ref.get(outputRef)).trim();
       if (!rawResult) {
         return yield* new TextGenerationError({
           operation,
-          detail:
-            promptResult.stopReason === "cancelled"
-              ? "Oh My Pi ACP request was cancelled."
-              : "Oh My Pi returned empty output.",
+          detail: "Oh My Pi returned empty output.",
         });
       }
 

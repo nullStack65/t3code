@@ -180,10 +180,16 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
         workspaceCwd: string,
         catalog: OmpCommandCatalog,
         checkedAt: string,
+        probedAtMillis?: number,
       ): void => {
         skillNamesByCwd.set(workspaceCwd, new Set(catalog.skills.map((skill) => skill.name)));
+        // The stamp is the probe's own time: re-recording a cached catalog
+        // keeps the cwd hot in the LRU without extending its freshness
+        // window, or a cwd polled faster than the window would never
+        // re-probe and an out-of-band skill install would stay invisible.
         // @effect-diagnostics-next-line globalDate:off - cache stamp shares Date.now with the freshness read below; Effect Clock is unavailable in the sync callback path.
-        catalogCacheByCwd.set(workspaceCwd, { catalog, cachedAt: Date.now() });
+        const cachedAt = probedAtMillis ?? Date.now();
+        catalogCacheByCwd.set(workspaceCwd, { catalog, cachedAt });
         retainedWorkspaceSnapshots = appendOmpWorkspaceSnapshot(retainedWorkspaceSnapshots, {
           cwd: workspaceCwd,
           checkedAt,
@@ -264,8 +270,14 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
             Effect.flatMap((machineSnapshot) =>
               Effect.map(DateTime.now, (now) => {
                 // Re-record so a revisited cwd moves last and an evicted one
-                // comes back; the timestamp slides while the cwd stays hot.
-                rememberCatalog(workspaceCwd, cached.catalog, DateTime.formatIso(now));
+                // comes back; the probe's own timestamp carries over so the
+                // freshness window still expires on schedule.
+                rememberCatalog(
+                  workspaceCwd,
+                  cached.catalog,
+                  DateTime.formatIso(now),
+                  cached.cachedAt,
+                );
                 return {
                   ...machineSnapshot,
                   skills: cached.catalog.skills,

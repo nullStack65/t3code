@@ -15,7 +15,9 @@ the accounts omp is authenticated with. If `omp` is not on the server's `PATH`,
 set **Binary path** on the card.
 
 When omp is behind its latest release, the card offers **Update now**, which runs
-omp's own updater (`omp update`). No other installer is involved.
+`omp update`. omp installs through whichever route it finds your copy came from
+— Homebrew, mise, Bun, npm, or its own binary — so the update matches how you
+installed it.
 
 **Setup** (the first-run wizard) lists Oh My Pi next to Claude Code and Codex,
 with the same inline terminal: **Install** pre-types omp's own installer, and
