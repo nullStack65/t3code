@@ -58,6 +58,18 @@ const emitTaskTool = process.env.T3_ACP_EMIT_TASK_TOOL === "1";
 const emitElicitation = process.env.T3_ACP_EMIT_ELICITATION === "1";
 const emitTaskToolBatch = process.env.T3_ACP_EMIT_TASK_TOOL_BATCH === "1";
 const emitTaskToolFail = process.env.T3_ACP_EMIT_TASK_TOOL_FAIL === "1";
+// omp streams subagent state inside the task tool's own payload
+// (`details.progress` while agents run, `details.results` once they
+// settle). Off by default so the suites sharing this agent keep their
+// event counts.
+const emitTaskToolProgress = process.env.T3_ACP_EMIT_TASK_TOOL_PROGRESS === "1";
+// omp republishes its command catalog per session while a turn runs.
+const emitSessionCommands = process.env.T3_ACP_EMIT_SESSION_COMMANDS === "1";
+// omp advertises session list/fork/close and serves both methods.
+const ompSessionStore = process.env.T3_ACP_OMP_SESSION_STORE === "1";
+// One malformed entry mixed into session/list is impossible to send
+// through the typed agent response, so list shapes stay well-formed here.
+const sessionListCwd = process.env.T3_ACP_SESSION_LIST_CWD;
 // omp reports context occupancy through `usage_update` and the finished
 // turn's token split through the `session/prompt` response; both are
 // off by default so the suites sharing this agent keep their event counts.
@@ -459,6 +471,48 @@ const program = Effect.gen(function* () {
       },
     });
 
+  if (ompSessionStore) {
+    // Mirrors omp: the store is global, so a cwd filter narrows the same
+    // list a caller would otherwise get in full, and transcript stats ride
+    // along under `_meta`.
+    const storedSessions = [
+      {
+        sessionId: "omp-session-terminal-1",
+        cwd: sessionListCwd ?? process.cwd(),
+        title: "Terminal session",
+        updatedAt: "2026-02-03T04:05:06.000Z",
+        _meta: { messageCount: 12, size: 8192 },
+      },
+      {
+        sessionId: "omp-session-elsewhere-1",
+        cwd: "/somewhere/else",
+        updatedAt: "2026-02-02T01:02:03.000Z",
+        _meta: { messageCount: 3, size: 512 },
+      },
+    ];
+    yield* agent.handleListSessions((request) =>
+      Effect.succeed({
+        sessions: request.cwd
+          ? storedSessions.filter((entry) => entry.cwd === request.cwd)
+          : storedSessions,
+        nextCursor: "mock-cursor-2",
+      }),
+    );
+    yield* agent.handleForkSession((request) =>
+      request.cwd
+        ? Effect.succeed({
+            sessionId: `${request.sessionId}-fork-1`,
+            modes: modeState(),
+            models: modelState(),
+            configOptions: configOptions(),
+          })
+        : // omp fails a cwd-less fork inside its own path handling.
+          AcpError.AcpRequestError.internalError(
+            'The "path" property must be of type string, got undefined',
+          ),
+    );
+  }
+
   yield* agent.handleInitialize((request) =>
     Effect.gen(function* () {
       if (floodStderr) {
@@ -486,7 +540,12 @@ const program = Effect.gen(function* () {
       }
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: ompSessionStore
+            ? { list: {}, fork: {}, resume: {}, close: {} }
+            : { resume: {} },
+        },
         // Grok advertises model state before any session exists; the provider
         // health check reads it from here without authenticating.
         _meta: { modelState: modelState() },
@@ -738,6 +797,25 @@ const program = Effect.gen(function* () {
 
       if (Number.isFinite(promptDelayMs) && promptDelayMs > 0) {
         yield* Effect.sleep(`${promptDelayMs} millis`);
+      }
+
+      // omp republishes the whole catalog — native commands and the
+      // `skill:`-prefixed ones alike — when a session's command set changes.
+      if (emitSessionCommands) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: [
+              { name: "compact", description: "Compact the context" },
+              {
+                name: "skill:tdd",
+                description: "Test-driven development",
+                input: { hint: "task" },
+              },
+            ],
+          },
+        });
       }
 
       if (failPrompt) {
@@ -1134,6 +1212,139 @@ const program = Effect.gen(function* () {
             rawInput,
           },
         });
+
+        // omp's real task payload: `{ content, details }`, with a
+        // `details.progress` snapshot per in-flight agent and
+        // `details.results` once they settle.
+        if (emitTaskToolProgress) {
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              status: "in_progress",
+              rawOutput: {
+                content: [{ type: "text", text: "Running agent Worker..." }],
+                details: {
+                  projectAgentsDir: null,
+                  results: [],
+                  totalDurationMs: 1200,
+                  progress: [
+                    {
+                      index: 0,
+                      id: "Worker",
+                      agent: "worker",
+                      agentSource: "bundled",
+                      status: "running",
+                      task: "Implement the feature",
+                      assignment: "Implement the feature",
+                      description: "Implement the feature",
+                      lastIntent: "Reading the adapter",
+                      currentTool: "read",
+                      recentTools: [{ tool: "glob", args: "src/**/*.ts", endMs: 1749200040000 }],
+                      recentOutput: [],
+                      toolCount: 4,
+                      requests: 2,
+                      tokens: 1200,
+                      cost: 0.01,
+                      durationMs: 1200,
+                      contextTokens: 900,
+                      contextWindow: 200000,
+                      resolvedModel: "anthropic/claude-sonnet",
+                    },
+                  ],
+                },
+              },
+            },
+          });
+          // Same agent snapshot, more streamed tool output: the tool row
+          // grows (so the ACP runtime forwards the update) while the
+          // subagent state omp reports is unchanged.
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              status: "in_progress",
+              content: [{ type: "content", content: { type: "text", text: "y".repeat(400) } }],
+              rawOutput: {
+                content: [{ type: "text", text: "Running agent Worker..." }],
+                details: {
+                  projectAgentsDir: null,
+                  results: [],
+                  totalDurationMs: 1400,
+                  progress: [
+                    {
+                      index: 0,
+                      id: "Worker",
+                      agent: "worker",
+                      agentSource: "bundled",
+                      status: "running",
+                      task: "Implement the feature",
+                      assignment: "Implement the feature",
+                      description: "Implement the feature",
+                      lastIntent: "Reading the adapter",
+                      currentTool: "read",
+                      recentTools: [{ tool: "glob", args: "src/**/*.ts", endMs: 1749200040000 }],
+                      recentOutput: [],
+                      toolCount: 4,
+                      requests: 2,
+                      tokens: 1200,
+                      cost: 0.01,
+                      durationMs: 1400,
+                      contextTokens: 900,
+                      contextWindow: 200000,
+                      resolvedModel: "anthropic/claude-sonnet",
+                    },
+                  ],
+                },
+              },
+            },
+          });
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId,
+              status: "completed",
+              rawOutput: {
+                content: [{ type: "text", text: "Agent Worker completed." }],
+                details: {
+                  projectAgentsDir: null,
+                  totalDurationMs: 4800,
+                  results: [
+                    {
+                      index: 0,
+                      id: "Worker",
+                      agent: "worker",
+                      agentSource: "bundled",
+                      description: "Implement the feature",
+                      task: "Implement the feature",
+                      assignment: "Implement the feature",
+                      exitCode: 0,
+                      output: "subagent finished the work",
+                      truncated: false,
+                      durationMs: 4800,
+                      tokens: 3400,
+                      requests: 5,
+                      contextTokens: 2100,
+                      contextWindow: 200000,
+                      resolvedModel: "anthropic/claude-sonnet",
+                    },
+                  ],
+                },
+              },
+            },
+          });
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "task tool done" },
+            },
+          });
+          return { stopReason: "end_turn" };
+        }
 
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,

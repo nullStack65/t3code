@@ -23,6 +23,7 @@ import {
   createModelCapabilities,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
+  readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
@@ -138,9 +139,13 @@ function normalizeOmpReasoningValue(value: string | null | undefined): string | 
     case "off":
     case "none":
       return "off";
-    // omp's thinking select legitimately offers {off, auto} on auto models.
+    // omp's own ladder is off|minimal|low|medium|high|xhigh|max|auto; the ACP
+    // thought_level select advertises a model-dependent subset (e.g. only
+    // {off, auto} on auto models). Aliases normalize so the picker round-trips
+    // through resolveOmpAcpConfigUpdates back to the raw advertised value.
     case "auto":
       return "auto";
+    case "minimal":
     case "low":
     case "medium":
     case "high":
@@ -243,15 +248,18 @@ export function buildOmpCapabilitiesFromConfigOptions(
   if (!configOptions || configOptions.length === 0) {
     return EMPTY_CAPABILITIES;
   }
-
   const reasoningConfig = findOmpEffortConfigOption(configOptions);
+  // Aliased raw values (none/off, extra-high/xhigh) normalize to one picker
+  // id; first wins so the descriptor never offers duplicate ids for one slot.
+  const seenReasoningValues = new Set<string>();
   const reasoningEffortLevels =
     reasoningConfig?.type === "select"
       ? flattenSessionConfigSelectOptions(reasoningConfig).flatMap((entry) => {
           const normalizedValue = normalizeOmpReasoningValue(entry.value);
-          if (!normalizedValue) {
+          if (!normalizedValue || seenReasoningValues.has(normalizedValue)) {
             return [];
           }
+          seenReasoningValues.add(normalizedValue);
           return [
             {
               value: normalizedValue,
@@ -379,12 +387,12 @@ function buildOmpDiscoveredModelsFromConfigOptions(
   if (!modelOption) {
     return [];
   }
-  // The probe session's configOptions describe the model it currently has
-  // selected (omp re-validates dependent options per model). Advertising
-  // those capabilities for every catalog entry would offer invalid
-  // reasoning choices on other models, so only the probed model carries
-  // them; the rest report null and the adapter re-reads options per model
-  // at selection time.
+  // Capability-truthfulness rule: omp re-validates dependent options per model
+  // and ACP offers no per-model probe, so only the probe session's current
+  // model carries capabilities (exactly the option set its session advertised).
+  // Every other entry reports null (unknown) so the UI never offers reasoning
+  // levels omp would reject; the adapter re-reads options per model at
+  // selection time. No ACP session is ever spawned per model.
   const currentModelId =
     modelOption.type === "select" ? modelOption.currentValue?.trim() : undefined;
   const probedCapabilities = buildOmpCapabilitiesFromConfigOptions(configOptions);
@@ -455,10 +463,70 @@ export const discoverOmpModelsViaAcp = (
     Effect.scoped,
   );
 
+/**
+ * Bare custom slugs were never probe-validated, so stamping the driver's
+ * empty default descriptor set on them would falsely assert "no options".
+ * Report unknown (null) instead; entries that declare their own capabilities
+ * keep them.
+ */
+function withUnknownBareCustomCapabilities(
+  models: ReadonlyArray<ServerProviderModel>,
+  customModels: Pick<OmpSettings, "customModels">["customModels"],
+): ReadonlyArray<ServerProviderModel> {
+  const declaredBySlug = new Map(
+    readCustomModelEntries(customModels).map((entry) => [entry.slug, entry.capabilities] as const),
+  );
+  return models.map((model) => {
+    if (!model.isCustom || declaredBySlug.get(model.slug) !== null) {
+      return model;
+    }
+    return { ...model, capabilities: null };
+  });
+}
+
+/**
+ * Mirrors the adapter's write guard: `applyOmpAcpModelSelection` skips the
+ * model write when the requested base id is absent from the live catalog and
+ * the turn is answered by the session's kept model instead. The snapshot can
+ * predict that divergence for configured custom models, so it names them
+ * rather than leaving the user silently answered by a different model. With
+ * no discovered catalog there is nothing to check against, so no warning.
+ */
+function buildUnadvertisedCustomModelMessage(
+  discoveredModels: ReadonlyArray<ServerProviderModel> | undefined,
+  customModels: Pick<OmpSettings, "customModels">["customModels"],
+): string | undefined {
+  if (!discoveredModels || discoveredModels.length === 0) {
+    return undefined;
+  }
+  const advertised = new Set(discoveredModels.map((model) => model.slug));
+  const unadvertised: Array<string> = [];
+  for (const entry of readCustomModelEntries(customModels)) {
+    // Same base-id comparison as the adapter: bracket traits
+    // (`model[fast=true]`) are stripped before the catalog lookup.
+    const base = entry.slug.includes("[")
+      ? entry.slug.slice(0, entry.slug.indexOf("[")).trim()
+      : entry.slug;
+    if (base.length > 0 && !advertised.has(base) && !unadvertised.includes(entry.slug)) {
+      unadvertised.push(entry.slug);
+    }
+  }
+  if (unadvertised.length === 0) {
+    return undefined;
+  }
+  const names = unadvertised.map((slug) => `"${slug}"`).join(", ");
+  return unadvertised.length === 1
+    ? `Custom model ${names} is not advertised by omp; turns that request it will be answered by omp's configured model instead.`
+    : `Custom models ${names} are not advertised by omp; turns that request them will be answered by omp's configured model instead.`;
+}
+
 export function getOmpFallbackModels(
   ompSettings: Pick<OmpSettings, "customModels">,
 ): ReadonlyArray<ServerProviderModel> {
-  return providerModelsFromSettings([], ompSettings.customModels, EMPTY_CAPABILITIES);
+  return withUnknownBareCustomCapabilities(
+    providerModelsFromSettings([], ompSettings.customModels, EMPTY_CAPABILITIES),
+    ompSettings.customModels,
+  );
 }
 
 function normalizeOmpConfigOptionToken(value: string | null | undefined): string {
@@ -587,20 +655,28 @@ export function buildOmpProviderSnapshot(input: {
   readonly usageLimits?: ServerProviderUsageLimits;
 }): ServerProviderDraft {
   const status = input.status ?? "ready";
-  const message = joinProviderMessages(input.message, input.discoveryWarning);
+  const unadvertisedModelMessage = buildUnadvertisedCustomModelMessage(
+    input.discoveredModels,
+    input.ompSettings.customModels,
+  );
+  const combinedWarning = joinProviderMessages(input.discoveryWarning, unadvertisedModelMessage);
+  const message = joinProviderMessages(input.message, combinedWarning);
   return buildServerProvider({
     presentation: OMP_PRESENTATION,
     enabled: input.ompSettings.enabled,
     checkedAt: input.checkedAt,
-    models: providerModelsFromSettings(
-      input.discoveredModels ?? [],
+    models: withUnknownBareCustomCapabilities(
+      providerModelsFromSettings(
+        input.discoveredModels ?? [],
+        input.ompSettings.customModels,
+        EMPTY_CAPABILITIES,
+      ),
       input.ompSettings.customModels,
-      EMPTY_CAPABILITIES,
     ),
     probe: {
       installed: true,
       version: input.version,
-      status: input.discoveryWarning && status === "ready" ? "warning" : status,
+      status: combinedWarning && status === "ready" ? "warning" : status,
       auth: input.auth ?? { status: "unknown" },
       ...(message ? { message } : {}),
       ...(input.usageLimits ? { usageLimits: input.usageLimits } : {}),

@@ -20,6 +20,8 @@ import {
   RuntimeRequestId,
   RuntimeTaskId,
   type RuntimeMode,
+  type RuntimeTaskStatus,
+  type RuntimeTaskUsage,
   type ThreadId,
   type ThreadTokenUsageSnapshot,
   TurnId,
@@ -74,6 +76,8 @@ import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
   applyOmpAcpModelSelection,
   makeOmpAcpRuntime,
+  parseOmpForkedSessionId,
+  parseOmpSessionList,
   resolveOmpAcpBaseModelId,
 } from "../acp/OmpAcpSupport.ts";
 import { type OmpAdapterShape } from "../Services/OmpAdapter.ts";
@@ -120,6 +124,21 @@ export interface OmpAdapterLiveOptions {
    * empty set leave the prompt untouched.
    */
   readonly resolveSkillNames?: (cwd: string) => ReadonlySet<string>;
+  /**
+   * Receives omp's `available_commands_update` for a session: the session
+   * cwd and the raw command entries, skill entries and all. The driver
+   * folds them into the per-cwd catalog its startup probe built, so a
+   * command (or skill) added while a session is open reaches the composer
+   * without a new discovery process.
+   */
+  readonly onSessionCommands?: (
+    cwd: string,
+    commands: ReadonlyArray<{
+      readonly name: string;
+      readonly description?: string;
+      readonly input?: { readonly hint: string };
+    }>,
+  ) => void;
 }
 
 interface PendingApproval {
@@ -147,7 +166,13 @@ interface OmpSessionContext {
   /** omp subagent spawns (task tool calls) keyed by toolCallId, awaiting a
    * terminal tool_call_update so task.completed can repeat the linkage. */
   readonly ompSubagentTasks: Map<string, ReadonlyArray<OmpSubagentSpawn>>;
+  /** Last emitted subagent snapshot per task id. omp repeats every agent's
+   * full state on each tick, so only material changes become events. */
+  readonly ompSubagentActivity: Map<string, string>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Turn that already reported a model substitution, so a steer folded
+   * into the same turn does not repeat the warning. */
+  modelWarningTurnId: TurnId | undefined;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   /** Context occupancy last reported by omp's `usage_update`. The
@@ -571,16 +596,140 @@ export function parseOmpSubagentSpawns(
   return single ? [single] : [];
 }
 
+/**
+ * omp's task tool reports through the ordinary tool-call payload: its
+ * result object is `{ content: [...], details: { progress?, results? } }`.
+ * `content[].text` is the human summary, so a summary lookup has to reach
+ * into the content blocks, not only flat string fields.
+ */
 function summarizeOmpTaskResult(rawOutput: unknown): string | undefined {
-  const text =
-    typeof rawOutput === "string"
-      ? rawOutput
-      : isRecord(rawOutput)
-        ? ["output", "content", "result", "text", "stdout"]
-            .map((field) => rawOutput[field])
-            .find((value): value is string => typeof value === "string" && value.trim().length > 0)
-        : undefined;
-  return text ? truncateTaskText(text, OMP_TASK_RESULT_MAX_CHARS) : undefined;
+  if (typeof rawOutput === "string") {
+    return rawOutput.trim() ? truncateTaskText(rawOutput, OMP_TASK_RESULT_MAX_CHARS) : undefined;
+  }
+  if (!isRecord(rawOutput)) {
+    return undefined;
+  }
+  const flat = ["output", "result", "text", "stdout"]
+    .map((field) => rawOutput[field])
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (flat) {
+    return truncateTaskText(flat, OMP_TASK_RESULT_MAX_CHARS);
+  }
+  const content = rawOutput.content;
+  if (typeof content === "string" && content.trim().length > 0) {
+    return truncateTaskText(content, OMP_TASK_RESULT_MAX_CHARS);
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const blockText = content
+    .flatMap((block) => (isRecord(block) && typeof block.text === "string" ? [block.text] : []))
+    .join("\n");
+  return blockText.trim() ? truncateTaskText(blockText, OMP_TASK_RESULT_MAX_CHARS) : undefined;
+}
+
+/**
+ * One omp subagent's state inside a `task` tool-call payload. omp streams
+ * `details.progress` while agents run and `details.results` once they
+ * settle; both are per-spawn arrays carrying the same identity fields, so
+ * they are projected onto one shape.
+ */
+interface OmpSubagentActivity {
+  readonly index: number | undefined;
+  readonly status: RuntimeTaskStatus | undefined;
+  /** `lastIntent` while running, the spawn's own description otherwise. */
+  readonly description: string | undefined;
+  readonly lastToolName: string | undefined;
+  readonly summary: string | undefined;
+  readonly error: string | undefined;
+  readonly model: string | undefined;
+  readonly usage: RuntimeTaskUsage | undefined;
+}
+
+const OMP_SUBAGENT_STATUSES: Record<string, RuntimeTaskStatus> = {
+  pending: "pending",
+  running: "running",
+  completed: "completed",
+  failed: "failed",
+  // omp aborts a subagent on interrupt or runtime cap; T3's vocabulary
+  // calls that cancelled.
+  aborted: "cancelled",
+};
+
+function parseOmpSubagentActivity(entry: Record<string, unknown>): OmpSubagentActivity {
+  const reportedStatus =
+    typeof entry.status === "string" ? OMP_SUBAGENT_STATUSES[entry.status] : undefined;
+  const error = optionalTrimmedString(entry.error);
+  const exitCode = typeof entry.exitCode === "number" ? entry.exitCode : undefined;
+  // Settled entries (`details.results`) carry no status field: omp encodes
+  // the outcome as aborted / exitCode / error instead.
+  const settledStatus =
+    entry.aborted === true
+      ? ("cancelled" as const)
+      : exitCode === undefined
+        ? undefined
+        : exitCode === 0 && error === undefined
+          ? ("completed" as const)
+          : ("failed" as const);
+  const recentTools = Array.isArray(entry.recentTools) ? entry.recentTools : [];
+  const lastTool = recentTools.find(
+    (tool): tool is Record<string, unknown> => isRecord(tool) && typeof tool.tool === "string",
+  );
+  const totalTokens = nonNegativeTokenCount(
+    typeof entry.tokens === "number" ? entry.tokens : undefined,
+  );
+  const toolUses = nonNegativeTokenCount(
+    typeof entry.toolCount === "number" ? entry.toolCount : undefined,
+  );
+  const durationMs = nonNegativeTokenCount(
+    typeof entry.durationMs === "number" ? entry.durationMs : undefined,
+  );
+  const output = optionalTrimmedString(entry.output);
+  return {
+    index: typeof entry.index === "number" && entry.index >= 0 ? entry.index : undefined,
+    status: reportedStatus ?? settledStatus,
+    description:
+      optionalTrimmedString(entry.lastIntent) ?? optionalTrimmedString(entry.description),
+    lastToolName:
+      optionalTrimmedString(entry.currentTool) ??
+      (lastTool ? optionalTrimmedString(lastTool.tool) : undefined),
+    summary: output
+      ? truncateTaskText(output, OMP_TASK_RESULT_MAX_CHARS)
+      : error
+        ? truncateTaskText(error, OMP_TASK_RESULT_MAX_CHARS)
+        : undefined,
+    error: error ? truncateTaskText(error, OMP_TASK_RESULT_MAX_CHARS) : undefined,
+    model: optionalTrimmedString(entry.resolvedModel),
+    usage:
+      totalTokens === undefined
+        ? undefined
+        : {
+            totalTokens,
+            ...(toolUses !== undefined ? { toolUses } : {}),
+            ...(durationMs !== undefined ? { durationMs } : {}),
+          },
+  };
+}
+
+/**
+ * Splits a task tool-call payload into the in-flight and settled subagent
+ * entries omp reported. Anything else in `details` (agent directories,
+ * aggregate usage, output paths) belongs to the tool row, not the Agents
+ * panel.
+ */
+export function parseOmpSubagentActivities(rawOutput: unknown): {
+  readonly progress: ReadonlyArray<OmpSubagentActivity>;
+  readonly results: ReadonlyArray<OmpSubagentActivity>;
+} {
+  const details = isRecord(rawOutput) ? rawOutput.details : undefined;
+  if (!isRecord(details)) {
+    return { progress: [], results: [] };
+  }
+  const read = (value: unknown) =>
+    Array.isArray(value)
+      ? value.flatMap((entry) => (isRecord(entry) ? [parseOmpSubagentActivity(entry)] : []))
+      : [];
+  return { progress: read(details.progress), results: read(details.results) };
 }
 
 function nonNegativeTokenCount(value: number | null | undefined): number | undefined {
@@ -784,8 +933,13 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
     /**
      * Projects omp's `task` tool calls into Agents-panel lifecycle events.
      * The plain tool_call runtime event is still emitted alongside (Claude
-     * shows its Task tool in the timeline as well); omp never forwards
-     * subagent-internal activity, so only start and terminal rows exist.
+     * shows its Task tool in the timeline as well).
+     *
+     * omp carries live subagent state inside the task tool's own payload:
+     * `rawOutput.details.progress` while agents run, `details.results` once
+     * they settle. Those arrays are the only subagent activity omp reports
+     * over ACP, so every richer event below comes from them and nothing is
+     * synthesized between ticks.
      */
     const emitOmpSubagentEvents = (ctx: OmpSessionContext, toolCall: AcpToolCallState) =>
       Effect.gen(function* () {
@@ -816,12 +970,114 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           }
         }
 
-        if (toolCall.status !== "completed" && toolCall.status !== "failed") {
+        const spawns = tracked;
+        // omp keys its entries by spawn index; a single spawn still reports
+        // index 0 while its task id is the bare tool call id, so position in
+        // the tracked array — not the reported index — resolves identity.
+        const spawnFor = (activity: OmpSubagentActivity) =>
+          spawns[activity.index ?? 0] ?? (spawns.length === 1 ? spawns[0] : undefined);
+        const activities = parseOmpSubagentActivities(toolCall.data.rawOutput);
+        const terminal = toolCall.status === "completed" || toolCall.status === "failed";
+
+        for (const activity of activities.progress) {
+          const spawn = spawnFor(activity);
+          if (!spawn) {
+            continue;
+          }
+          // omp repeats every agent's full snapshot on each tick; without a
+          // material-change filter a fan-out of N agents costs N events per
+          // tick for state the client already renders.
+          const fingerprint = [
+            activity.status ?? "",
+            activity.description ?? "",
+            activity.lastToolName ?? "",
+            activity.error ?? "",
+            activity.model ?? "",
+            activity.usage?.totalTokens ?? "",
+            activity.usage?.toolUses ?? "",
+          ].join("\u001f");
+          if (ctx.ompSubagentActivity.get(spawn.taskId) === fingerprint) {
+            continue;
+          }
+          const previous = ctx.ompSubagentActivity.get(spawn.taskId);
+          ctx.ompSubagentActivity.set(spawn.taskId, fingerprint);
+          const linkage = {
+            taskType: "subagent" as const,
+            title: spawn.title,
+            ...(spawn.role ? { role: spawn.role } : {}),
+            ...(spawn.effort ? { effort: spawn.effort } : {}),
+            ...(activity.model ? { model: activity.model } : {}),
+            toolUseId: toolCall.toolCallId,
+          };
+          // A status-only tick is a status patch, not an activity row: the
+          // Agents panel renders the two differently and a progress row with
+          // no description would render blank.
+          if (activity.status !== undefined && previous?.split("\u001f")[0] !== activity.status) {
+            yield* offerRuntimeEvent({
+              type: "task.updated",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: ctx.threadId,
+              turnId: ctx.activeTurnId,
+              payload: {
+                taskId: RuntimeTaskId.make(spawn.taskId),
+                status: activity.status,
+                ...(activity.description ? { description: activity.description } : {}),
+                ...(activity.error ? { error: activity.error } : {}),
+                ...linkage,
+              },
+            });
+          }
+          if (activity.description === undefined) {
+            continue;
+          }
+          yield* offerRuntimeEvent({
+            type: "task.progress",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId: ctx.activeTurnId,
+            payload: {
+              taskId: RuntimeTaskId.make(spawn.taskId),
+              description: activity.description,
+              ...(activity.status ? { status: activity.status } : {}),
+              ...(activity.lastToolName ? { lastToolName: activity.lastToolName } : {}),
+              ...(activity.error ? { error: activity.error } : {}),
+              ...(activity.usage ? { typedUsage: activity.usage } : {}),
+              ...linkage,
+            },
+          });
+        }
+
+        if (!terminal) {
           return;
         }
         ctx.ompSubagentTasks.delete(toolCall.toolCallId);
         const summary = summarizeOmpTaskResult(toolCall.data.rawOutput);
-        for (const spawn of tracked) {
+        const resultFor = new Map<string, OmpSubagentActivity>();
+        for (const result of activities.results) {
+          const spawn = spawnFor(result);
+          if (spawn) {
+            resultFor.set(spawn.taskId, result);
+          }
+        }
+        for (const spawn of spawns) {
+          ctx.ompSubagentActivity.delete(spawn.taskId);
+          const result = resultFor.get(spawn.taskId);
+          // Per-agent outcome wins over the tool call's: one failed agent in
+          // a fan-out must not mark its siblings failed, and a fan-out that
+          // fails overall must not report a succeeded agent as failed.
+          const status =
+            result?.status === "cancelled"
+              ? ("stopped" as const)
+              : result?.status === "failed"
+                ? ("failed" as const)
+                : result?.status === "completed"
+                  ? ("completed" as const)
+                  : toolCall.status === "failed"
+                    ? ("failed" as const)
+                    : ("completed" as const);
+          const resolvedSummary = result?.summary ?? summary;
           yield* offerRuntimeEvent({
             type: "task.completed",
             ...(yield* makeEventStamp()),
@@ -830,12 +1086,14 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             turnId: ctx.activeTurnId,
             payload: {
               taskId: RuntimeTaskId.make(spawn.taskId),
-              status: toolCall.status,
-              ...(summary ? { summary } : {}),
+              status,
+              ...(resolvedSummary ? { summary: resolvedSummary } : {}),
+              ...(result?.usage ? { typedUsage: result.usage } : {}),
               taskType: "subagent",
               title: spawn.title,
               ...(spawn.role ? { role: spawn.role } : {}),
               ...(spawn.effort ? { effort: spawn.effort } : {}),
+              ...(result?.model ? { model: result.model } : {}),
               toolUseId: toolCall.toolCallId,
             },
           });
@@ -1129,27 +1387,59 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               }
               return runElicitationFlow("elicitation/create", params, params);
             });
-            // Side channel for the two session/update kinds the shared ACP
-            // parser drops: `usage_update` (context meter) and a `plan` with
-            // zero entries (omp's todo_auto_clear, which the todo panel
-            // reads as "clear the plan"). Handlers are additive, so the
-            // runtime's own parser still owns every other update kind; this
-            // one drains the runtime's event queue first so a clear can
-            // never overtake the plan it clears.
+            // Side channel for the session/update kinds the shared ACP
+            // parser drops or routes elsewhere: `usage_update` (context
+            // meter), a `plan` with zero entries (omp's todo_auto_clear,
+            // which the todo panel reads as "clear the plan"), and
+            // `available_commands_update` (the driver's per-cwd command
+            // catalog). Handlers are additive, so the runtime's own parser
+            // still owns every other update kind; this one drains the
+            // runtime's event queue first so a clear can never overtake the
+            // plan it clears.
             yield* acp.handleSessionUpdate((notification) =>
               Effect.gen(function* () {
                 const sessionCtx = sessions.get(input.threadId);
+                const update = notification.update;
+                if (rootSessionId === undefined || notification.sessionId !== rootSessionId) {
+                  return;
+                }
+                // The command catalog is session state, not turn content:
+                // it arrives before `sessions` has the context (omp
+                // publishes it during session setup) and a replayed copy on
+                // session/load is still the current catalog, so it is
+                // forwarded under a looser gate than the timeline kinds.
+                if (update.sessionUpdate === "available_commands_update") {
+                  if (sessionCtx?.stopped === true) {
+                    return;
+                  }
+                  yield* logNative(input.threadId, "session/update", notification);
+                  yield* Effect.sync(() =>
+                    options?.onSessionCommands?.(
+                      cwd,
+                      // Names keep omp's own prefixes (`skill:` included);
+                      // only optional fields are narrowed to the shape the
+                      // driver's catalog reads.
+                      update.availableCommands.map((command) => ({
+                        name: command.name,
+                        ...(typeof command.description === "string"
+                          ? { description: command.description }
+                          : {}),
+                        ...(command.input && typeof command.input.hint === "string"
+                          ? { input: { hint: command.input.hint } }
+                          : {}),
+                      })),
+                    ),
+                  );
+                  return;
+                }
                 if (
                   sessionCtx === undefined ||
                   sessionCtx.stopped ||
                   sessionCtx.acp !== acp ||
-                  rootSessionId === undefined ||
-                  notification.sessionId !== rootSessionId ||
                   sessionUpdateIsReplay(notification)
                 ) {
                   return;
                 }
-                const update = notification.update;
                 if (update.sessionUpdate === "usage_update") {
                   yield* logNative(sessionCtx.threadId, "session/update", notification);
                   sessionCtx.lastContextUsedTokens =
@@ -1230,9 +1520,11 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             pendingUserInputs,
             cancelledTurnIds: new Set(),
             ompSubagentTasks: new Map(),
+            ompSubagentActivity: new Map(),
             turns: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
+            modelWarningTurnId: undefined,
             lastContextUsedTokens: undefined,
             lastContextWindowTokens: undefined,
             promptsInFlight: 0,
@@ -1559,6 +1851,33 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           );
           const effectiveModel = configuration.model ?? resolvedModel;
 
+          // omp keeps its configured model when the requested slug is not
+          // advertised by the session (see applyOmpAcpModelSelection): the
+          // turn still runs, but a different model answers it. Say so once
+          // per turn instead of letting the substitution pass silently.
+          if (
+            resolvedModel !== undefined &&
+            configuration.model !== resolvedModel &&
+            ctx.modelWarningTurnId !== turnId
+          ) {
+            ctx.modelWarningTurnId = turnId;
+            const answering = configuration.model ?? "its configured model";
+            yield* offerRuntimeEvent({
+              type: "runtime.warning",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId,
+              payload: {
+                message: `Oh My Pi does not offer '${resolvedModel}' in this session and answered with ${answering} instead.`,
+                detail: {
+                  requestedModel: resolvedModel,
+                  ...(configuration.model ? { effectiveModel: configuration.model } : {}),
+                },
+              },
+            });
+          }
+
           if (promptFiber === undefined) {
             return {
               threadId: input.threadId,
@@ -1798,6 +2117,117 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
     const stopAll: OmpAdapterShape["stopAll"] = () =>
       Effect.forEach(sessions.values(), stopSessionInternal, { discard: true });
 
+    const forkSession: OmpAdapterShape["forkSession"] = (threadId) =>
+      Effect.gen(function* () {
+        const ctx = yield* requireSession(threadId);
+        const sessionId = parseOmpResume(ctx.session.resumeCursor)?.sessionId;
+        const cwd = ctx.session.cwd;
+        // `cwd` is required: omitting it fails inside omp with a bare
+        // "path must be of type string" internal error (verified on 18.1.x).
+        if (sessionId === undefined || cwd === undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/fork",
+            detail: "The Oh My Pi session has no native session id and cwd to fork.",
+          });
+        }
+        const response = yield* ctx.acp
+          .request("session/fork", { sessionId, cwd })
+          .pipe(
+            Effect.mapError((error) =>
+              mapAcpToAdapterError(PROVIDER, threadId, "session/fork", error),
+            ),
+          );
+        const forkedSessionId = parseOmpForkedSessionId(response);
+        if (forkedSessionId === undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/fork",
+            detail: "Oh My Pi returned no session id for the forked session.",
+          });
+        }
+        return {
+          sessionId: forkedSessionId,
+          cwd,
+          resumeCursor: { schemaVersion: OMP_RESUME_VERSION, sessionId: forkedSessionId },
+        };
+      });
+
+    /**
+     * Runs one `session/list` request on a dedicated, scoped `omp acp`
+     * child that is only initialized — no session is created, so discovery
+     * never shows up in the very list it is reading.
+     *
+     * A live session's connection is deliberately NOT reused: which
+     * sessions exist is a property of the configured binary and profile,
+     * not of whichever thread happens to be open, and an open session may
+     * have been spawned from an older settings snapshot.
+     */
+    const requestSessionList = (input: {
+      readonly cwd: string;
+      readonly payload: Record<string, string>;
+    }) =>
+      Effect.gen(function* () {
+        const effectiveOmpSettings = options?.resolveSettings
+          ? yield* options.resolveSettings
+          : ompSettings;
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const acp = yield* makeOmpAcpRuntime({
+              ompSettings: effectiveOmpSettings,
+              ...(options?.environment ? { environment: options.environment } : {}),
+              childProcessSpawner,
+              cwd: input.cwd,
+              clientInfo: { name: "t3-code", version: "0.0.0" },
+              // Nothing answers elicitation on a discovery connection.
+              enableElicitation: false,
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+            yield* acp.initialize();
+            return yield* acp.request("session/list", input.payload);
+          }),
+        );
+      });
+
+    const listNativeSessions: OmpAdapterShape["listNativeSessions"] = (input) =>
+      Effect.gen(function* () {
+        const cwd = input.cwd.trim();
+        if (!cwd) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "listNativeSessions",
+            issue: "cwd is required and must be non-empty.",
+          });
+        }
+        const filterCwd = input.filterCwd?.trim();
+        const cursor = input.cursor?.trim();
+        const response = yield* requestSessionList({
+          cwd: path.resolve(cwd),
+          payload: {
+            ...(filterCwd ? { cwd: path.resolve(filterCwd) } : {}),
+            ...(cursor ? { cursor } : {}),
+          },
+        }).pipe(
+          Effect.mapError(
+            (error) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/list",
+                detail: error.message,
+                cause: error,
+              }),
+          ),
+        );
+        const listing = parseOmpSessionList(response);
+        return {
+          sessions: listing.sessions.map((session) => ({
+            ...session,
+            resumeCursor: { schemaVersion: OMP_RESUME_VERSION, sessionId: session.sessionId },
+          })),
+          ...(listing.nextCursor ? { nextCursor: listing.nextCursor } : {}),
+          skippedCount: listing.skippedCount,
+        };
+      });
+
     yield* Effect.addFinalizer(() =>
       Effect.forEach(sessions.values(), stopSessionInternal, { discard: true }).pipe(
         Effect.catch((cause) =>
@@ -1831,6 +2261,8 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
       respondToUserInput,
       stopSession,
       listSessions,
+      forkSession,
+      listNativeSessions,
       hasSession,
       stopAll,
       streamEvents,

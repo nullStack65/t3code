@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { decodeOmpCommandCatalog } from "./OmpCommands.ts";
+import { catalogFromCommandEntries, decodeOmpCommandCatalog } from "./OmpCommands.ts";
 
 const frame = (commands: ReadonlyArray<unknown>) =>
   // @effect-diagnostics-next-line preferSchemaOverJson:off - building a raw RPC frame.
@@ -127,5 +127,40 @@ describe("decodeOmpCommandCatalog", () => {
       skills: [],
       slashCommands: [],
     });
+  });
+});
+
+describe("catalogFromCommandEntries", () => {
+  it("splits raw live entries with the same skill: rule as the probe", () => {
+    const catalog = catalogFromCommandEntries([
+      { name: "skill:tdd", description: "Test-driven development." },
+      { name: "skillful", description: "Toggle skill listing." },
+      { name: "security", description: "Run security scans", input: { hint: "<plan|scan>" } },
+      { name: "skill:" },
+      { name: "   " },
+      "not-an-object",
+    ]);
+
+    expect(catalog.skills).toEqual([
+      {
+        name: "tdd",
+        path: "skill://tdd/SKILL.md",
+        enabled: true,
+        description: "Test-driven development.",
+      },
+    ]);
+    expect(catalog.slashCommands).toEqual([
+      { name: "security", description: "Run security scans", input: { hint: "<plan|scan>" } },
+      { name: "skillful", description: "Toggle skill listing." },
+    ]);
+  });
+
+  it("matches decodeOmpCommandCatalog for the same entries", () => {
+    const entries = [
+      { name: "skill:deploy", description: "Deploy the app" },
+      { name: "share", description: "Share the session" },
+      { name: "skill:deploy", description: "Deploy the app (updated)" },
+    ];
+    expect(catalogFromCommandEntries(entries)).toEqual(decodeOmpCommandCatalog(frame(entries)));
   });
 });

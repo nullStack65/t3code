@@ -7,6 +7,8 @@ import {
   applyOmpAcpModelSelection,
   buildOmpAcpSpawnInput,
   ompAcpSpawnArgs,
+  parseOmpForkedSessionId,
+  parseOmpSessionList,
   resolveOmpAcpBaseModelId,
 } from "./OmpAcpSupport.ts";
 
@@ -308,4 +310,82 @@ describe("applyOmpAcpModelSelection", () => {
       expect(applied.model).toBe("zhipu-coding-plan/glm-5.3");
     }),
   );
+});
+
+describe("parseOmpSessionList", () => {
+  it("keeps cwd, title, updatedAt and omp's transcript stats", () => {
+    const listing = parseOmpSessionList({
+      sessions: [
+        {
+          sessionId: "omp-1",
+          cwd: "C:/work/repo",
+          title: "Terminal session",
+          updatedAt: "2026-02-03T04:05:06.000Z",
+          _meta: { messageCount: 12, size: 8192 },
+        },
+      ],
+      nextCursor: "cursor-2",
+    });
+
+    expect(listing).toEqual({
+      sessions: [
+        {
+          sessionId: "omp-1",
+          cwd: "C:/work/repo",
+          title: "Terminal session",
+          updatedAt: "2026-02-03T04:05:06.000Z",
+          messageCount: 12,
+          sizeBytes: 8192,
+        },
+      ],
+      nextCursor: "cursor-2",
+      skippedCount: 0,
+    });
+  });
+
+  it("skips unusable entries instead of failing the whole page", () => {
+    const listing = parseOmpSessionList({
+      sessions: [
+        { sessionId: "omp-ok", cwd: "/work" },
+        { sessionId: 42, cwd: "/work" },
+        { sessionId: "omp-no-cwd" },
+        { cwd: "/work" },
+        null,
+        "nonsense",
+      ],
+    });
+
+    expect(listing.sessions).toEqual([{ sessionId: "omp-ok", cwd: "/work" }]);
+    expect(listing.skippedCount).toBe(5);
+    expect(listing.nextCursor).toBeUndefined();
+  });
+
+  it("reads a non-numeric transcript stat as absent rather than as a count", () => {
+    const listing = parseOmpSessionList({
+      sessions: [{ sessionId: "omp-1", cwd: "/work", _meta: { messageCount: "many", size: -1 } }],
+    });
+
+    expect(listing.sessions[0]).toEqual({ sessionId: "omp-1", cwd: "/work" });
+  });
+
+  it("returns an empty page for a response without a sessions array", () => {
+    expect(parseOmpSessionList({ sessions: "none" })).toEqual({
+      sessions: [],
+      skippedCount: 0,
+    });
+    expect(parseOmpSessionList(undefined)).toEqual({ sessions: [], skippedCount: 0 });
+  });
+});
+
+describe("parseOmpForkedSessionId", () => {
+  it("reads the forked session id out of a full session setup response", () => {
+    expect(
+      parseOmpForkedSessionId({ sessionId: "omp-1-fork-1", configOptions: [], modes: null }),
+    ).toBe("omp-1-fork-1");
+  });
+
+  it("reports a response without a usable id", () => {
+    expect(parseOmpForkedSessionId({ configOptions: [] })).toBeUndefined();
+    expect(parseOmpForkedSessionId({ sessionId: "  " })).toBeUndefined();
+  });
 });

@@ -160,6 +160,19 @@ const makeResolveOmpSettings = Effect.gen(function* () {
   );
 });
 
+interface SessionCommandCall {
+  readonly cwd: string;
+  readonly commands: ReadonlyArray<{
+    readonly name: string;
+    readonly description?: string;
+    readonly input?: { readonly hint: string };
+  }>;
+}
+
+// The suite shares one adapter, so the callback records into a module-level
+// sink each test drains for its own thread.
+const sessionCommandCalls: Array<SessionCommandCall> = [];
+
 const makeOmpAdapterTestLayer = (instanceId?: ProviderInstanceId) =>
   Layer.effect(
     OmpAdapter,
@@ -170,6 +183,9 @@ const makeOmpAdapterTestLayer = (instanceId?: ProviderInstanceId) =>
         ...(instanceId ? { instanceId } : {}),
         resolveSettings,
         resolveSkillNames: () => new Set(["tdd"]),
+        onSessionCommands: (cwd, commands) => {
+          sessionCommandCalls.push({ cwd, commands });
+        },
       });
     }),
   ).pipe(
@@ -2706,6 +2722,373 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
           event.type === "turn.plan.updated" ? event.payload.plan.length : -1,
         ),
         [2, 0],
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("forks the live session into a new omp session and leaves it usable", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-fork-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_OMP_SESSION_STORE: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const cursor = session.resumeCursor;
+      assert.isTrue(
+        typeof cursor === "object" && cursor !== null && "sessionId" in cursor,
+        "startSession must persist an omp resume cursor",
+      );
+      const originalSessionId =
+        typeof cursor === "object" && cursor !== null && "sessionId" in cursor
+          ? String(cursor.sessionId)
+          : "";
+
+      const fork = yield* adapter.forkSession(threadId);
+      assert.notEqual(fork.sessionId, originalSessionId);
+      assert.equal(fork.sessionId, `${originalSessionId}-fork-1`);
+      assert.deepStrictEqual(fork.resumeCursor, { schemaVersion: 1, sessionId: fork.sessionId });
+      assert.equal(fork.cwd, session.cwd);
+
+      // The fork is a copy: the original thread keeps running on its own
+      // session id and can still take a turn.
+      const turn = yield* adapter.sendTurn({ threadId, input: "still alive", attachments: [] });
+      assert.equal(String(turn.threadId), String(threadId));
+      assert.deepStrictEqual(
+        (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId)?.resumeCursor,
+        { schemaVersion: 1, sessionId: originalSessionId },
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("refuses to fork a thread with no live omp session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const exit = yield* Effect.exit(adapter.forkSession(ThreadId.make("omp-fork-missing")));
+      assert.isTrue(Exit.isFailure(exit));
+    }),
+  );
+
+  // The migrating-terminal-user path: no session is open here, so discovery
+  // has to stand up its own connection.
+  it.effect("discovers omp's own sessions without a live session and resumes one", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_OMP_SESSION_STORE: "1",
+          T3_ACP_SESSION_LIST_CWD: process.cwd(),
+        }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const page = yield* adapter.listNativeSessions({ cwd: process.cwd() });
+      assert.equal(page.nextCursor, "mock-cursor-2");
+      assert.equal(page.skippedCount, 0);
+      assert.deepStrictEqual(
+        page.sessions.map((entry) => entry.sessionId),
+        ["omp-session-terminal-1", "omp-session-elsewhere-1"],
+      );
+      const terminalSession = page.sessions[0];
+      assert.isDefined(terminalSession);
+      assert.equal(terminalSession?.title, "Terminal session");
+      assert.equal(terminalSession?.updatedAt, "2026-02-03T04:05:06.000Z");
+      assert.equal(terminalSession?.cwd, process.cwd());
+      assert.equal(terminalSession?.messageCount, 12);
+      assert.deepStrictEqual(terminalSession?.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "omp-session-terminal-1",
+      });
+
+      // A session from another workspace is still listed; the filter is the
+      // caller's choice, not an implicit one.
+      const filtered = yield* adapter.listNativeSessions({
+        cwd: process.cwd(),
+        filterCwd: process.cwd(),
+      });
+      assert.deepStrictEqual(
+        filtered.sessions.map((entry) => entry.sessionId),
+        ["omp-session-terminal-1"],
+      );
+
+      const threadId = ThreadId.make("omp-resume-discovered-thread");
+      const resumed = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: terminalSession?.resumeCursor,
+      });
+      assert.deepStrictEqual(resumed.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "omp-session-terminal-1",
+      });
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("forwards omp's session command catalog with its skill entries intact", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-session-commands-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EMIT_SESSION_COMMANDS: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+      sessionCommandCalls.length = 0;
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hello mock", attachments: [] });
+
+      const call = sessionCommandCalls.at(-1);
+      assert.isDefined(call);
+      assert.equal(call?.cwd, NodePath.resolve(process.cwd()));
+      assert.deepStrictEqual(call?.commands, [
+        { name: "compact", description: "Compact the context" },
+        {
+          name: "skill:tdd",
+          description: "Test-driven development",
+          input: { hint: "task" },
+        },
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("publishes omp's live subagent progress and its settled result", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-task-progress-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_EMIT_TASK_TOOL: "1",
+          T3_ACP_EMIT_TASK_TOOL_PROGRESS: "1",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "spawn a subagent", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const updates = runtimeEvents.filter((event) => event.type === "task.updated");
+      const progress = runtimeEvents.filter((event) => event.type === "task.progress");
+
+      assert.lengthOf(updates, 1);
+      const update = updates[0];
+      if (update?.type === "task.updated") {
+        assert.equal(String(update.payload.taskId), "task-tool-call-1");
+        assert.equal(update.payload.status, "running");
+        assert.equal(update.payload.title, "Implement the feature");
+      }
+
+      // Two in-flight ticks reach the adapter but carry the same subagent
+      // state, so only the first becomes a row.
+      assert.lengthOf(progress, 1);
+      const row = progress[0];
+      if (row?.type === "task.progress") {
+        assert.equal(String(row.payload.taskId), "task-tool-call-1");
+        assert.equal(row.payload.description, "Reading the adapter");
+        assert.equal(row.payload.lastToolName, "read");
+        assert.equal(row.payload.status, "running");
+        assert.equal(row.payload.model, "anthropic/claude-sonnet");
+        assert.deepStrictEqual(row.payload.typedUsage, {
+          totalTokens: 1200,
+          toolUses: 4,
+          durationMs: 1200,
+        });
+      }
+
+      const completed = runtimeEvents.find((event) => event.type === "task.completed");
+      assert.isDefined(completed);
+      if (completed?.type === "task.completed") {
+        assert.equal(completed.payload.status, "completed");
+        assert.equal(completed.payload.summary, "subagent finished the work");
+        assert.deepStrictEqual(completed.payload.typedUsage, {
+          totalTokens: 3400,
+          durationMs: 4800,
+        });
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  // Without a per-agent progress payload there is nothing to report: the
+  // adapter must not invent rows between start and completion.
+  it.effect("emits no task progress when omp reports no subagent state", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-task-no-progress-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EMIT_TASK_TOOL: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "spawn a subagent", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.lengthOf(
+        runtimeEvents.filter(
+          (event) => event.type === "task.progress" || event.type === "task.updated",
+        ),
+        0,
+      );
+      assert.lengthOf(
+        runtimeEvents.filter((event) => event.type === "task.completed"),
+        1,
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  // A model omp does not offer is answered by whatever the session has
+  // configured. The turn still succeeds, so the substitution has to be said
+  // out loud or the user never learns which model replied.
+  it.effect("warns once per turn when a different model answers than requested", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-model-substitution-thread");
+
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hello mock",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("omp"),
+          model: "anthropic/claude-fable-5",
+        },
+      });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const warnings = runtimeEvents.filter((event) => event.type === "runtime.warning");
+      assert.lengthOf(warnings, 1);
+      const warning = warnings[0];
+      if (warning?.type === "runtime.warning") {
+        assert.include(warning.payload.message, "anthropic/claude-fable-5");
+        assert.include(warning.payload.message, "zhipu-coding-plan/glm-5.3");
+        assert.deepStrictEqual(warning.payload.detail, {
+          requestedModel: "anthropic/claude-fable-5",
+          effectiveModel: "zhipu-coding-plan/glm-5.3",
+        });
+      }
+      const completion = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(
+        completion?.type === "turn.completed" ? completion.payload.state : undefined,
+        "completed",
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("stays silent when the requested model is the one that answers", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-model-advertised-thread");
+
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hello mock",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("omp"),
+          model: "openai/gpt-5.4",
+        },
+      });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.lengthOf(
+        runtimeEvents.filter((event) => event.type === "runtime.warning"),
+        0,
       );
 
       yield* adapter.stopSession(threadId);

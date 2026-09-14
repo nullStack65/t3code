@@ -52,6 +52,14 @@ function selectDescriptor(
   };
 }
 
+function booleanDescriptor(id: string, label: string, currentValue?: boolean) {
+  return {
+    id,
+    label,
+    type: "boolean" as const,
+    ...(typeof currentValue === "boolean" ? { currentValue } : {}),
+  };
+}
 const makeMockAgentWrapper = Effect.fn("makeMockAgentWrapper")(function* (
   extraEnv?: Record<string, string>,
 ) {
@@ -322,6 +330,14 @@ describe("getOmpFallbackModels", () => {
       }).map((model) => model.slug),
     ).toEqual(["internal/omp-model"]);
   });
+
+  it("reports unknown capabilities for custom models the probe never validated", () => {
+    expect(
+      getOmpFallbackModels({
+        customModels: ["internal/omp-model"],
+      }).map((model) => model.capabilities),
+    ).toEqual([null]);
+  });
 });
 
 describe("buildOmpProviderSnapshot", () => {
@@ -396,6 +412,62 @@ describe("buildOmpProviderSnapshot", () => {
     expect(snapshot.auth).toEqual({ status: "unknown" });
     expect(snapshot.usageLimits).toBeUndefined();
   });
+
+  it("names a custom model omp does not advertise instead of failing silently", () => {
+    const snapshot = buildOmpProviderSnapshot({
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      ompSettings: { ...baseOmpSettings, customModels: ["ghost/model"] },
+      version: "18.0.6",
+      discoveredModels: [
+        {
+          slug: "anthropic/claude-opus-4-6",
+          name: "Claude Opus 4.6",
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+    });
+    expect(snapshot.status).toBe("warning");
+    expect(snapshot.message).toContain('"ghost/model"');
+  });
+
+  it("stays quiet when every custom model is advertised", () => {
+    const snapshot = buildOmpProviderSnapshot({
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      ompSettings: { ...baseOmpSettings, customModels: ["anthropic/claude-opus-4-6"] },
+      version: "18.0.6",
+      message: "1 upstream provider configured through Oh My Pi.",
+      discoveredModels: [
+        {
+          slug: "anthropic/claude-opus-4-6",
+          name: "Claude Opus 4.6",
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+    });
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.message).toBe("1 upstream provider configured through Oh My Pi.");
+  });
+
+  it("cannot judge custom models without a discovered catalog", () => {
+    const snapshot = buildOmpProviderSnapshot({
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      ompSettings: { ...baseOmpSettings, customModels: ["ghost/model"] },
+      version: "18.0.6",
+    });
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.message).toBeUndefined();
+  });
+
+  it("reports unknown capabilities for custom models the probe never validated", () => {
+    const snapshot = buildOmpProviderSnapshot({
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      ompSettings: { ...baseOmpSettings, customModels: ["internal/omp-model"] },
+      version: "18.0.6",
+    });
+    expect(snapshot.models.map((model) => model.capabilities)).toEqual([null]);
+  });
 });
 
 describe("buildOmpCapabilitiesFromConfigOptions", () => {
@@ -448,6 +520,138 @@ describe("buildOmpCapabilitiesFromConfigOptions", () => {
     );
     expect(buildOmpCapabilitiesFromConfigOptions(undefined)).toEqual(
       createModelCapabilities({ optionDescriptors: [] }),
+    );
+  });
+
+  it("mirrors the full omp ladder including minimal and xhigh", () => {
+    expect(
+      buildOmpCapabilitiesFromConfigOptions([
+        {
+          type: "select",
+          currentValue: "xhigh",
+          options: [
+            { name: "Off", value: "off" },
+            { name: "Minimal", value: "minimal" },
+            { name: "Low", value: "low" },
+            { name: "Medium", value: "medium" },
+            { name: "High", value: "high" },
+            { name: "Extra High", value: "xhigh" },
+            { name: "Max", value: "max" },
+            { name: "Auto", value: "auto" },
+          ],
+          category: "thought_level",
+          id: "thinking",
+          name: "Thinking",
+        },
+      ]),
+    ).toEqual(
+      createModelCapabilities({
+        optionDescriptors: [
+          selectDescriptor("reasoning", "Thinking", [
+            { id: "off", label: "Off" },
+            { id: "minimal", label: "Minimal" },
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+            { id: "high", label: "High" },
+            { id: "xhigh", label: "Extra High", isDefault: true },
+            { id: "max", label: "Max" },
+            { id: "auto", label: "Auto" },
+          ]),
+        ],
+      }),
+    );
+  });
+
+  it("dedupes aliased thinking values to one picker option", () => {
+    expect(
+      buildOmpCapabilitiesFromConfigOptions([
+        {
+          type: "select",
+          currentValue: "off",
+          options: [
+            { name: "None", value: "none" },
+            { name: "Off", value: "off" },
+            { name: "Extra High", value: "extra-high" },
+            { name: "XHigh", value: "xhigh" },
+          ],
+          category: "thought_level",
+          id: "thinking",
+          name: "Thinking",
+        },
+      ]),
+    ).toEqual(
+      createModelCapabilities({
+        optionDescriptors: [
+          selectDescriptor("reasoning", "Thinking", [
+            { id: "off", label: "None", isDefault: true },
+            { id: "xhigh", label: "Extra High" },
+          ]),
+        ],
+      }),
+    );
+  });
+
+  it("maps the context_size select onto a contextWindow descriptor", () => {
+    expect(
+      buildOmpCapabilitiesFromConfigOptions([
+        {
+          type: "select",
+          currentValue: "1m",
+          options: [
+            { name: "272K", value: "272k" },
+            { name: "1M", value: "1m" },
+          ],
+          category: "model_config",
+          id: "context_size",
+          name: "Context",
+        },
+      ]),
+    ).toEqual(
+      createModelCapabilities({
+        optionDescriptors: [
+          selectDescriptor("contextWindow", "Context", [
+            { id: "272k", label: "272K" },
+            { id: "1m", label: "1M", isDefault: true },
+          ]),
+        ],
+      }),
+    );
+  });
+
+  it("maps the boolean fast toggle onto a fastMode descriptor", () => {
+    expect(
+      buildOmpCapabilitiesFromConfigOptions([
+        {
+          type: "boolean",
+          currentValue: true,
+          category: "model_config",
+          id: "fast",
+          name: "Fast",
+        },
+      ]),
+    ).toEqual(
+      createModelCapabilities({
+        optionDescriptors: [booleanDescriptor("fastMode", "Fast", true)],
+      }),
+    );
+    expect(
+      buildOmpCapabilitiesFromConfigOptions([
+        {
+          type: "select",
+          currentValue: "true",
+          options: [
+            { name: "Off", value: "false" },
+            { name: "Fast", value: "true" },
+          ],
+          category: "model_config",
+          id: "fast",
+          name: "Fast",
+        },
+      ]),
+    ).toEqual(
+      createModelCapabilities({
+        optionDescriptors: [booleanDescriptor("fastMode", "Fast", true)],
+      }),
     );
   });
 });
@@ -574,6 +778,40 @@ describe("discoverOmpModelsViaAcp", () => {
     }),
   );
 
+  effectIt.live("marks only the probe-validated model capable", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* node(makeMockAgentWrapper());
+
+      const models = yield* node(
+        discoverOmpModelsViaAcp({
+          enabled: true,
+          binaryPath: wrapperPath,
+          customModels: [],
+        }).pipe(Effect.scoped),
+      );
+
+      // The mock probe session sits on zhipu-coding-plan/glm-5.3, so only that
+      // entry may carry the probed reasoning options; the rest stay unknown.
+      const bySlug = new Map(models.map((model) => [model.slug, model]));
+      expect(bySlug.get("anthropic/claude-opus-4-6")?.capabilities).toBeNull();
+      expect(bySlug.get("openai/gpt-5.4")?.capabilities).toBeNull();
+      const probed = bySlug.get("zhipu-coding-plan/glm-5.3")?.capabilities;
+      expect(probed).toEqual(
+        createModelCapabilities({
+          optionDescriptors: [
+            selectDescriptor("reasoning", "Thinking", [
+              { id: "off", label: "Off" },
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High", isDefault: true },
+              { id: "max", label: "Max" },
+            ]),
+          ],
+        }),
+      );
+    }),
+  );
+
   // Stopping the probe kills the agent with SIGTERM; Windows terminates the
   // process instead, so the mock never sees a signal to log.
   effectIt.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
@@ -633,6 +871,34 @@ describe("resolveOmpAcpConfigUpdates", () => {
         [{ id: "reasoning", value: "auto" }],
       ),
     ).toEqual([{ configId: "thinking", value: "auto" }]);
+  });
+
+  it("writes minimal and xhigh back to their advertised raw values", () => {
+    const ladder = [
+      {
+        type: "select",
+        currentValue: "off",
+        options: [
+          { name: "Off", value: "off" },
+          { name: "Minimal", value: "minimal" },
+          { name: "Low", value: "low" },
+          { name: "Medium", value: "medium" },
+          { name: "High", value: "high" },
+          { name: "Extra High", value: "extra-high" },
+          { name: "Max", value: "max" },
+          { name: "Auto", value: "auto" },
+        ],
+        category: "thought_level",
+        id: "thinking",
+        name: "Thinking",
+      },
+    ] satisfies ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+    expect(resolveOmpAcpConfigUpdates(ladder, [{ id: "reasoning", value: "minimal" }])).toEqual([
+      { configId: "thinking", value: "minimal" },
+    ]);
+    expect(resolveOmpAcpConfigUpdates(ladder, [{ id: "reasoning", value: "xhigh" }])).toEqual([
+      { configId: "thinking", value: "extra-high" },
+    ]);
   });
 
   it("ignores unknown reasoning values and empty selections", () => {

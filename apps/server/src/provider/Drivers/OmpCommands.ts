@@ -80,18 +80,62 @@ function commandEntriesFromFrame(frame: Record<string, unknown>): ReadonlyArray<
 }
 
 /**
- * Split an RPC `available_commands_update` frame into provider skills and
- * slash commands. Skill `path` carries omp's own `skill://` URL: the runtime
- * resolves a skill by name through several roots and the command list does not
- * report the file it came from, so there is no filesystem path to hand back.
+ * Fold raw `available_commands_update` entries into provider skills and slash
+ * commands. Shared by the RPC startup probe (`decodeOmpCommandCatalog`) and
+ * the live session path: the adapter forwards `available_commands_update`
+ * payloads verbatim (including `skill:`-prefixed entries) through
+ * `onSessionCommands`, and the driver maps them here so both catalogs split
+ * identically. Skill `path` carries omp's own `skill://` URL: the runtime
+ * resolves a skill by name through several roots and the command list does
+ * not report the file it came from, so there is no filesystem path to hand
+ * back.
  *
  * Subcommands stay folded into their parent: T3's composer has no nested
  * commands, and omp's parent entry already advertises them through its input
  * hint (`/security <plan|scan|…>`).
  */
-export function decodeOmpCommandCatalog(stdout: string): OmpCommandCatalog {
+export function catalogFromCommandEntries(entries: ReadonlyArray<unknown>): OmpCommandCatalog {
   const skillsByName = new Map<string, ServerProviderSkill>();
   const commandsByName = new Map<string, ServerProviderSlashCommand>();
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const command = entry as Record<string, unknown>;
+    const commandName = trimmedString(command.name);
+    if (commandName.length === 0) continue;
+    const description = trimmedString(command.description);
+    if (commandName.startsWith(SKILL_COMMAND_PREFIX)) {
+      const name = commandName.slice(SKILL_COMMAND_PREFIX.length).trim();
+      if (name.length === 0) continue;
+      skillsByName.set(name, {
+        name,
+        path: `skill://${name}/SKILL.md`,
+        enabled: true,
+        ...(description.length > 0 ? { description } : {}),
+      });
+      continue;
+    }
+    const hint = trimmedString((command.input as Record<string, unknown> | undefined)?.hint);
+    commandsByName.set(commandName, {
+      name: commandName,
+      ...(description.length > 0 ? { description } : {}),
+      ...(hint.length > 0 ? { input: { hint } } : {}),
+    });
+  }
+  return {
+    skills: [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name)),
+    slashCommands: [...commandsByName.values()].sort((left, right) =>
+      left.name.localeCompare(right.name),
+    ),
+  };
+}
+
+/**
+ * Split an RPC `available_commands_update` frame into provider skills and
+ * slash commands. Parses the JSONL transport, then folds every frame's
+ * entries through {@link catalogFromCommandEntries}.
+ */
+export function decodeOmpCommandCatalog(stdout: string): OmpCommandCatalog {
+  const entries: Array<unknown> = [];
   for (const line of stdout.split("\n")) {
     const trimmedLine = line.trim();
     if (trimmedLine.length === 0) continue;
@@ -104,36 +148,10 @@ export function decodeOmpCommandCatalog(stdout: string): OmpCommandCatalog {
     }
     if (typeof frame !== "object" || frame === null) continue;
     for (const entry of commandEntriesFromFrame(frame as Record<string, unknown>)) {
-      if (typeof entry !== "object" || entry === null) continue;
-      const command = entry as Record<string, unknown>;
-      const commandName = trimmedString(command.name);
-      if (commandName.length === 0) continue;
-      const description = trimmedString(command.description);
-      if (commandName.startsWith(SKILL_COMMAND_PREFIX)) {
-        const name = commandName.slice(SKILL_COMMAND_PREFIX.length).trim();
-        if (name.length === 0) continue;
-        skillsByName.set(name, {
-          name,
-          path: `skill://${name}/SKILL.md`,
-          enabled: true,
-          ...(description.length > 0 ? { description } : {}),
-        });
-        continue;
-      }
-      const hint = trimmedString((command.input as Record<string, unknown> | undefined)?.hint);
-      commandsByName.set(commandName, {
-        name: commandName,
-        ...(description.length > 0 ? { description } : {}),
-        ...(hint.length > 0 ? { input: { hint } } : {}),
-      });
+      entries.push(entry);
     }
   }
-  return {
-    skills: [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name)),
-    slashCommands: [...commandsByName.values()].sort((left, right) =>
-      left.name.localeCompare(right.name),
-    ),
-  };
+  return catalogFromCommandEntries(entries);
 }
 
 /**

@@ -16,8 +16,19 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { createProviderVersionAdvisory } from "../providerMaintenance.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
+import { vi } from "vite-plus/test";
 import { OmpDriver } from "./OmpDriver.ts";
 
+const capturedAdapterOptions = vi.hoisted(() => [] as Array<unknown>);
+
+vi.mock("../Layers/OmpAdapter.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../Layers/OmpAdapter.ts")>();
+  const makeOmpAdapter = (...args: Parameters<typeof actual.makeOmpAdapter>) => {
+    capturedAdapterOptions.push(args[1]);
+    return actual.makeOmpAdapter(...args);
+  };
+  return { ...actual, makeOmpAdapter };
+});
 const testLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-omp-driver-maintenance-",
 }).pipe(
@@ -57,9 +68,10 @@ function fakeOmpSource(input: {
   readonly mockAgentPath: string;
   readonly checkOutput: string;
   readonly ompShapesEnv: string;
+  readonly probeLogPath?: string;
 }): string {
   return [
-    'import { existsSync } from "node:fs";',
+    'import { appendFileSync, existsSync } from "node:fs";',
     'import { pathToFileURL } from "node:url";',
     "const args = process.argv.slice(2);",
     'if (args[0] === "--version") {',
@@ -71,6 +83,9 @@ function fakeOmpSource(input: {
     "  process.exit(0);",
     "}",
     'if (args[0] === "--mode") {',
+    ...(input.probeLogPath
+      ? [`  appendFileSync(${JSON.stringify(input.probeLogPath)}, "probe\\n");`]
+      : []),
     `  process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "available_commands_update", commands: catalogCommands })}\n`)});`,
     "  process.exit(0);",
     "}",
@@ -89,6 +104,7 @@ const makeFakeOmp = Effect.fn("makeFakeOmp")(function* (options: {
   readonly prefix: string;
   readonly checkOutput: string;
   readonly ompShapesEnv?: string;
+  readonly probeLogPath?: string;
 }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const mockAgentPath = yield* resolveMockAgentPath();
@@ -100,6 +116,7 @@ const makeFakeOmp = Effect.fn("makeFakeOmp")(function* (options: {
       mockAgentPath,
       checkOutput: options.checkOutput,
       ompShapesEnv: options.ompShapesEnv ?? 'process.env.T3_ACP_OMP_SHAPES = "1";',
+      ...(options.probeLogPath ? { probeLogPath: options.probeLogPath } : {}),
     }),
   });
 });
@@ -114,6 +131,30 @@ const createTestInstance = (
     enabled: input.enabled,
     environment: [],
     config: { ...OmpDriver.defaultConfig(), binaryPath: input.binaryPath },
+  });
+
+interface CapturedOmpAdapterOptions {
+  readonly resolveSkillNames?: (cwd: string) => ReadonlySet<string>;
+  readonly onSessionCommands?: (
+    cwd: string,
+    commands: ReadonlyArray<{
+      readonly name: string;
+      readonly description?: string;
+      readonly input?: { readonly hint: string };
+    }>,
+  ) => void;
+}
+
+const lastAdapterOptions = (): CapturedOmpAdapterOptions | undefined =>
+  capturedAdapterOptions.at(-1) as CapturedOmpAdapterOptions | undefined;
+
+const readProbeCount = (probeLogPath: string) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const text = yield* fileSystem
+      .readFileString(probeLogPath)
+      .pipe(Effect.orElseSucceed(() => ""));
+    return text.split("\n").filter((line) => line.length > 0).length;
   });
 
 it.layer(testLayer)("OmpDriver", (it) => {
@@ -262,6 +303,104 @@ it.layer(testLayer)("OmpDriver", (it) => {
         ["anthropic/claude-opus-4-6", "openai/gpt-5.4", "zhipu-coding-plan/glm-5.3"].sort(),
       );
       expect(after).not.toEqual(before);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reuses the probed catalog for a repeat snapshot inside the freshness window", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-driver-cache-" });
+      const probeLogPath = path.join(root, "probes.log");
+      const fakePath = yield* makeFakeOmp({
+        prefix: "t3-omp-driver-cache-bin-",
+        checkOutput: "Current version: 18.1.18\n",
+        probeLogPath,
+      });
+      const instance = yield* createTestInstance("omp-catalog-cache", {
+        binaryPath: fakePath,
+        enabled: true,
+      });
+      const snapshotForCwd = instance.snapshotForCwd;
+      if (!snapshotForCwd)
+        return yield* Effect.die("OmpDriver does not expose workspace snapshots.");
+      const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-cache-ws-" });
+      const first = yield* snapshotForCwd(workspace);
+      const second = yield* snapshotForCwd(workspace);
+      expect(second.skills).toEqual(first.skills);
+      expect(second.slashCommands).toEqual(first.slashCommands);
+      expect(yield* readProbeCount(probeLogPath)).toBe(1);
+
+      const other = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-cache-other-" });
+      yield* snapshotForCwd(other);
+      expect(yield* readProbeCount(probeLogPath)).toBe(2);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("applies a live available_commands_update without a second probe", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-driver-live-" });
+      const probeLogPath = path.join(root, "probes.log");
+      const fakePath = yield* makeFakeOmp({
+        prefix: "t3-omp-driver-live-bin-",
+        checkOutput: "Current version: 18.1.18\n",
+        probeLogPath,
+      });
+      const instance = yield* createTestInstance("omp-live-commands", {
+        binaryPath: fakePath,
+        enabled: true,
+      });
+      const snapshotForCwd = instance.snapshotForCwd;
+      if (!snapshotForCwd)
+        return yield* Effect.die("OmpDriver does not expose workspace snapshots.");
+      const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-live-ws-" });
+      const first = yield* snapshotForCwd(workspace);
+      expect(first.skills.map((skill) => skill.name)).toEqual(["deploy"]);
+      expect(yield* readProbeCount(probeLogPath)).toBe(1);
+
+      const options = lastAdapterOptions();
+      const onSessionCommands = options?.onSessionCommands;
+      if (!onSessionCommands)
+        return yield* Effect.die("OmpDriver did not pass onSessionCommands to the adapter.");
+      onSessionCommands(workspace, [
+        { name: "skill:fresh", description: "Freshly installed skill" },
+        { name: "newcmd", description: "New command", input: { hint: "<arg>" } },
+      ]);
+      // The `$mention` skill set refreshes with the live payload, no turn needed.
+      expect(options?.resolveSkillNames?.(workspace)).toEqual(new Set(["fresh"]));
+
+      const second = yield* snapshotForCwd(workspace);
+      expect(second.skills.map((skill) => skill.name)).toEqual(["fresh"]);
+      expect(second.slashCommands).toEqual([
+        { name: "newcmd", description: "New command", input: { hint: "<arg>" } },
+      ]);
+      expect(
+        second.workspaceSnapshots
+          ?.find((entry) => entry.cwd === workspace)
+          ?.skills.map((skill) => skill.name),
+      ).toEqual(["fresh"]);
+      // The live payload replaced the cached probe instead of re-spawning it.
+      expect(yield* readProbeCount(probeLogPath)).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps the omp advisory on update --check with no registry fallback", () =>
+    Effect.gen(function* () {
+      const fakePath = yield* makeFakeOmp({
+        prefix: "t3-omp-driver-advisory-",
+        checkOutput: "Current version: 18.1.18\nNew version available: 18.1.21\n",
+      });
+      const instance = yield* createTestInstance("omp-advisory-source", {
+        binaryPath: fakePath,
+        enabled: false,
+      });
+      const capabilities = yield* instance.snapshot.resolveMaintenance();
+      // A null packageName leaves the npm latest-version path unreachable, so
+      // the --check latest below is the only version the UI can show.
+      expect(capabilities.packageName).toBeNull();
+      expect(capabilities.latestVersion).toBe("18.1.21");
     }).pipe(Effect.scoped),
   );
 });

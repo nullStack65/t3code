@@ -38,7 +38,11 @@ import {
   checkOmpProviderStatus,
   enrichOmpSnapshot,
 } from "../Layers/OmpProvider.ts";
-import { discoverOmpCommandCatalog } from "./OmpCommands.ts";
+import {
+  catalogFromCommandEntries,
+  discoverOmpCommandCatalog,
+  type OmpCommandCatalog,
+} from "./OmpCommands.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -62,6 +66,31 @@ import {
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("omp");
+
+/**
+ * How long a probed per-cwd command catalog is reused without re-spawning
+ * `omp --mode rpc`. The registry already calls `snapshotForCwd` at most once
+ * per cwd per provider list (plus one in-flight dedup), so the remaining
+ * repeats are bursts — a turn start forking a workspace refresh while the
+ * composer opens the same cwd. Thirty seconds absorbs those bursts while
+ * bounding how stale an out-of-band install (no live session to announce it)
+ * can look. A live `available_commands_update` replaces the entry, so
+ * in-session installs surface immediately regardless of the window.
+ */
+export const OMP_COMMAND_CATALOG_FRESHNESS_MS = 30_000;
+
+/**
+ * One raw `available_commands_update` entry as the adapter forwards it:
+ * verbatim from omp, `skill:` prefix untouched. Mirrors the batch contract
+ * (`OmpAdapterLiveOptions.onSessionCommands`, owned by `OmpSessionLifecycle`);
+ * the `as` cast at the adapter call site keeps this compiling until that
+ * field lands.
+ */
+export interface OmpSessionCommandEntry {
+  readonly name: string;
+  readonly description?: string;
+  readonly input?: { readonly hint: string };
+}
 
 export type OmpDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
@@ -137,11 +166,48 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
       // Skills discovered per workspace. The adapter reads names from here to
       // rewrite `$name` mentions, so a turn never spawns its own probe.
       const skillNamesByCwd = new Map<string, ReadonlySet<string>>();
+      // Last catalog per cwd with its probe time. A repeat snapshot inside
+      // the freshness window reuses it instead of re-spawning the RPC probe.
+      const catalogCacheByCwd = new Map<
+        string,
+        { readonly catalog: OmpCommandCatalog; readonly cachedAt: number }
+      >();
+      // Per-workspace command catalogs. The composer only offers a workspace's
+      // menus once its snapshot is recorded, so every refresh retains the
+      // workspaces visited earlier in the session (Antigravity precedent).
+      let retainedWorkspaceSnapshots: ReadonlyArray<ServerProviderWorkspaceSnapshot> = [];
+      const rememberCatalog = (
+        workspaceCwd: string,
+        catalog: OmpCommandCatalog,
+        checkedAt: string,
+      ): void => {
+        skillNamesByCwd.set(workspaceCwd, new Set(catalog.skills.map((skill) => skill.name)));
+        // @effect-diagnostics-next-line globalDate:off - cache stamp shares Date.now with the freshness read below; Effect Clock is unavailable in the sync callback path.
+        catalogCacheByCwd.set(workspaceCwd, { catalog, cachedAt: Date.now() });
+        retainedWorkspaceSnapshots = appendOmpWorkspaceSnapshot(retainedWorkspaceSnapshots, {
+          cwd: workspaceCwd,
+          checkedAt,
+          slashCommands: catalog.slashCommands,
+          skills: catalog.skills,
+        });
+      };
+      // Live `available_commands_update` entries from the adapter, folded
+      // through the same `skill:` split as the RPC probe. Synchronous by
+      // contract, so it records the catalog for the next `snapshotForCwd`
+      // pull and refreshes the `$mention` skill set immediately.
+      const onSessionCommands = (
+        cwd: string,
+        commands: ReadonlyArray<OmpSessionCommandEntry>,
+      ): void => {
+        // @effect-diagnostics-next-line globalDate:off - `onSessionCommands` is sync void by contract, so no Effect Clock; ISO format matches DateTime.formatIso.
+        rememberCatalog(cwd, catalogFromCommandEntries(commands), new Date().toISOString());
+      };
       const adapter = yield* makeOmpAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
         resolveSkillNames: (cwd) => skillNamesByCwd.get(cwd) ?? new Set<string>(),
+        onSessionCommands,
       });
       const textGeneration = yield* makeOmpTextGeneration(effectiveConfig, processEnv);
 
@@ -187,56 +253,57 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
             }),
         ),
       );
-      // Per-workspace command catalogs. The composer only offers a workspace's
-      // menus once its snapshot is recorded, so every refresh retains the
-      // workspaces visited earlier in the session (Antigravity precedent).
-      let retainedWorkspaceSnapshots: ReadonlyArray<ServerProviderWorkspaceSnapshot> = [];
-      const snapshotForCwd = (workspaceCwd: string) =>
-        !effectiveConfig.enabled
-          ? snapshot.getSnapshot
-          : Effect.all([
-              snapshot.getSnapshot,
-              discoverOmpCommandCatalog(effectiveConfig, processEnv, workspaceCwd).pipe(
-                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderDriverError({
-                      driver: DRIVER_KIND,
-                      instanceId,
-                      detail: `Failed to discover Oh My Pi commands for '${workspaceCwd}'`,
-                      cause,
-                    }),
-                ),
-              ),
-            ]).pipe(
-              Effect.tap(([, catalog]) =>
-                Effect.sync(() => {
-                  skillNamesByCwd.set(
-                    workspaceCwd,
-                    new Set(catalog.skills.map((skill) => skill.name)),
-                  );
+      const snapshotForCwd = (
+        workspaceCwd: string,
+      ): Effect.Effect<ServerProvider, ProviderDriverError> => {
+        if (!effectiveConfig.enabled) return snapshot.getSnapshot;
+        const cached = catalogCacheByCwd.get(workspaceCwd);
+        // @effect-diagnostics-next-line globalDate:off - freshness read on the same Date.now clock as the cache stamp.
+        if (cached && Date.now() - cached.cachedAt < OMP_COMMAND_CATALOG_FRESHNESS_MS) {
+          return snapshot.getSnapshot.pipe(
+            Effect.flatMap((machineSnapshot) =>
+              Effect.map(DateTime.now, (now) => {
+                // Re-record so a revisited cwd moves last and an evicted one
+                // comes back; the timestamp slides while the cwd stays hot.
+                rememberCatalog(workspaceCwd, cached.catalog, DateTime.formatIso(now));
+                return {
+                  ...machineSnapshot,
+                  skills: cached.catalog.skills,
+                  slashCommands: cached.catalog.slashCommands,
+                  workspaceSnapshots: [...retainedWorkspaceSnapshots],
+                };
+              }),
+            ),
+          );
+        }
+        return Effect.all([
+          snapshot.getSnapshot,
+          discoverOmpCommandCatalog(effectiveConfig, processEnv, workspaceCwd).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.mapError(
+              (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: `Failed to discover Oh My Pi commands for '${workspaceCwd}'`,
+                  cause,
                 }),
-              ),
-              Effect.flatMap(([machineSnapshot, catalog]) =>
-                Effect.map(DateTime.now, (now) => {
-                  retainedWorkspaceSnapshots = appendOmpWorkspaceSnapshot(
-                    retainedWorkspaceSnapshots,
-                    {
-                      cwd: workspaceCwd,
-                      checkedAt: DateTime.formatIso(now),
-                      slashCommands: catalog.slashCommands,
-                      skills: catalog.skills,
-                    },
-                  );
-                  return {
-                    ...machineSnapshot,
-                    skills: catalog.skills,
-                    slashCommands: catalog.slashCommands,
-                    workspaceSnapshots: [...retainedWorkspaceSnapshots],
-                  };
-                }),
-              ),
-            );
+            ),
+          ),
+        ]).pipe(
+          Effect.flatMap(([machineSnapshot, catalog]) =>
+            Effect.map(DateTime.now, (now) => {
+              rememberCatalog(workspaceCwd, catalog, DateTime.formatIso(now));
+              return {
+                ...machineSnapshot,
+                skills: catalog.skills,
+                slashCommands: catalog.slashCommands,
+                workspaceSnapshots: [...retainedWorkspaceSnapshots],
+              };
+            }),
+          ),
+        );
+      };
 
       // A user who configures a new upstream inside omp re-probes the catalog
       // without restarting T3: the managed refresh re-runs the ACP discovery
