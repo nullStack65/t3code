@@ -55,6 +55,14 @@ export type ComposerCommandItem =
     }
   | {
       id: string;
+      type: "slash-argument";
+      /** The literal inserted into the prompt, e.g. `remote` for `/compact`. */
+      value: string;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
       type: "skill";
       provider: ProviderDriverKind;
       skill: ServerProviderSkill;

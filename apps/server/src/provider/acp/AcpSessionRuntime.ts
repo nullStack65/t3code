@@ -847,6 +847,18 @@ export const make = (
                 cause,
               }),
             ),
+            // A `session/load` that dies (agent defect, malformed reply) is
+            // still a failed resume: as a defect it escapes the error
+            // channel and the caller's turn waits forever instead.
+            Effect.catchCause((cause) =>
+              Cause.hasInterrupts(cause) || Cause.hasFails(cause)
+                ? Effect.failCause(cause)
+                : new EffectAcpErrors.AcpTransportError({
+                    method: "session/load",
+                    detail: `session/load failed: ${String(Cause.squash(cause))}`,
+                    cause,
+                  }),
+            ),
           );
 
           return loaded;

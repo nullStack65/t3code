@@ -2823,12 +2823,12 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
       const delta = Array.from(yield* Fiber.join(contentFiber))[0];
       assert.equal(delta?.type, "content.delta");
 
-      // The cursor follows the live session, so a later resume replays the
-      // session omp actually kept writing to.
+      // The cursor stays on the id the session was created with: that is
+      // the one `session/load` can replay, and the swapped id is not.
       const sessions = yield* adapter.listSessions();
       assert.deepStrictEqual(
         sessions.find((candidate) => candidate.threadId === threadId)?.resumeCursor,
-        { schemaVersion: 1, sessionId: "mock-session-after-fresh" },
+        { schemaVersion: 1, sessionId: "mock-session-1" },
       );
 
       yield* adapter.stopSession(threadId);

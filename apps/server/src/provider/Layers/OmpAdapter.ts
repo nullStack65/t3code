@@ -1226,18 +1226,12 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             runtimeMode: input.runtimeMode,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
-            // `/fresh` swaps omp's provider session; the thread keeps running
-            // on the same connection, so track the new id for update routing
-            // and for the cursor a later resume replays.
+            // `/fresh` swaps omp's provider session; updates then arrive
+            // under the new id, so the thread tracks it for routing. The
+            // resume cursor keeps the id the session was created with:
+            // that is the one `session/load` can replay.
             onAgentSessionIdChanged: (sessionId) => {
               liveSessionIds.add(sessionId);
-              const sessionCtx = sessions.get(input.threadId);
-              if (sessionCtx !== undefined) {
-                sessionCtx.session = {
-                  ...sessionCtx.session,
-                  resumeCursor: { schemaVersion: OMP_RESUME_VERSION, sessionId },
-                };
-              }
             },
             ...(mcpSession
               ? {
