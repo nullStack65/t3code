@@ -58,6 +58,15 @@ const emitTaskTool = process.env.T3_ACP_EMIT_TASK_TOOL === "1";
 const emitElicitation = process.env.T3_ACP_EMIT_ELICITATION === "1";
 const emitTaskToolBatch = process.env.T3_ACP_EMIT_TASK_TOOL_BATCH === "1";
 const emitTaskToolFail = process.env.T3_ACP_EMIT_TASK_TOOL_FAIL === "1";
+// omp reports context occupancy through `usage_update` and the finished
+// turn's token split through the `session/prompt` response; both are
+// off by default so the suites sharing this agent keep their event counts.
+const emitUsageUpdate = process.env.T3_ACP_EMIT_USAGE_UPDATE === "1";
+const usageUpdateSize = Number(process.env.T3_ACP_USAGE_UPDATE_SIZE ?? "1000000");
+const usageUpdateUsed = Number(process.env.T3_ACP_USAGE_UPDATE_USED ?? "39451");
+const emitPromptResponseUsage = process.env.T3_ACP_EMIT_PROMPT_RESPONSE_USAGE === "1";
+// omp's todo_auto_clear maps to a `plan` update with zero entries.
+const emitEmptyPlanAfterPlan = process.env.T3_ACP_EMIT_EMPTY_PLAN_AFTER_PLAN === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const setConfigOptionDelayMs = Number(process.env.T3_ACP_SET_CONFIG_OPTION_DELAY_MS ?? "0");
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
@@ -1483,6 +1492,25 @@ const program = Effect.gen(function* () {
         },
       });
 
+      if (emitEmptyPlanAfterPlan) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: { sessionUpdate: "plan", entries: [] },
+        });
+      }
+
+      if (emitUsageUpdate) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "usage_update",
+            size: usageUpdateSize,
+            used: usageUpdateUsed,
+            cost: { amount: 0.4466925, currency: "USD" },
+          },
+        });
+      }
+
       yield* agent.client.sessionUpdate({
         sessionId: requestedSessionId,
         update: {
@@ -1491,7 +1519,20 @@ const program = Effect.gen(function* () {
         },
       });
 
-      return { stopReason: "end_turn" };
+      return {
+        stopReason: "end_turn",
+        ...(emitPromptResponseUsage
+          ? {
+              usage: {
+                inputTokens: 1_234,
+                outputTokens: 567,
+                totalTokens: 1_801,
+                cachedReadTokens: 890,
+                cachedWriteTokens: 12,
+              },
+            }
+          : {}),
+      };
     }),
   );
 

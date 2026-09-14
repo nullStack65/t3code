@@ -12,8 +12,14 @@
  *
  * @module provider/Drivers/OmpDriver
  */
-import { OmpSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+import {
+  OmpSettings,
+  ProviderDriverKind,
+  type ServerProvider,
+  type ServerProviderWorkspaceSnapshot,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -42,21 +48,20 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import {
+  makeCachedProviderMaintenanceResolution,
+  resolveProviderMaintenanceCapabilitiesEffect,
+} from "../providerMaintenance.ts";
+import { makeOmpMaintenanceResolver, appendOmpWorkspaceSnapshot } from "./OmpMaintenance.ts";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
+
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("omp");
-// Manual-only maintenance: omp ships outside the registries T3 already knows
-// how to update, so T3 never guesses an update command for it.
-const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
-  provider: DRIVER_KIND,
-  packageName: null,
-});
 
 export type OmpDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
@@ -97,6 +102,8 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
@@ -113,10 +120,23 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
       });
       const effectiveConfig = { ...config, enabled } satisfies OmpSettings;
 
+      // omp is its own updater (`omp update`, latest from `omp update
+      // --check`), so the resolved executable is its own update command. A
+      // binary that cannot be resolved stays manual-only: nothing to update,
+      // not "whatever is on PATH".
+      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
+        resolveProviderMaintenanceCapabilitiesEffect(makeOmpMaintenanceResolver(), {
+          binaryPath: effectiveConfig.binaryPath,
+          env: processEnv,
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, pathService),
+        ),
+      );
       // Skills discovered per workspace. The adapter reads names from here to
       // rewrite `$name` mentions, so a turn never spawns its own probe.
       const skillNamesByCwd = new Map<string, ReadonlySet<string>>();
-
       const adapter = yield* makeOmpAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
@@ -133,7 +153,7 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<OmpSettings>>({
-        resolveMaintenance: () => Effect.succeed(MAINTENANCE_CAPABILITIES),
+        resolveMaintenance,
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
@@ -143,15 +163,19 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
         // Model catalog and capabilities come exclusively from the probe ACP
         // session's configOptions during provider checks.
         enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-          enrichOmpSnapshot({
-            settings: settings.provider,
-            snapshot: currentSnapshot,
-            maintenanceCapabilities: MAINTENANCE_CAPABILITIES,
-            enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-            publishSnapshot,
-            stampIdentity,
-            httpClient,
-          }),
+          resolveMaintenance().pipe(
+            Effect.flatMap((maintenanceCapabilities) =>
+              enrichOmpSnapshot({
+                settings: settings.provider,
+                snapshot: currentSnapshot,
+                maintenanceCapabilities,
+                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+                publishSnapshot,
+                stampIdentity,
+                httpClient,
+              }),
+            ),
+          ),
       }).pipe(
         Effect.mapError(
           (cause) =>
@@ -163,6 +187,10 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
             }),
         ),
       );
+      // Per-workspace command catalogs. The composer only offers a workspace's
+      // menus once its snapshot is recorded, so every refresh retains the
+      // workspaces visited earlier in the session (Antigravity precedent).
+      let retainedWorkspaceSnapshots: ReadonlyArray<ServerProviderWorkspaceSnapshot> = [];
       const snapshotForCwd = (workspaceCwd: string) =>
         !effectiveConfig.enabled
           ? snapshot.getSnapshot
@@ -189,12 +217,33 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
                   );
                 }),
               ),
-              Effect.map(([machineSnapshot, catalog]) => ({
-                ...machineSnapshot,
-                skills: catalog.skills,
-                slashCommands: catalog.slashCommands,
-              })),
+              Effect.flatMap(([machineSnapshot, catalog]) =>
+                Effect.map(DateTime.now, (now) => {
+                  retainedWorkspaceSnapshots = appendOmpWorkspaceSnapshot(
+                    retainedWorkspaceSnapshots,
+                    {
+                      cwd: workspaceCwd,
+                      checkedAt: DateTime.formatIso(now),
+                      slashCommands: catalog.slashCommands,
+                      skills: catalog.skills,
+                    },
+                  );
+                  return {
+                    ...machineSnapshot,
+                    skills: catalog.skills,
+                    slashCommands: catalog.slashCommands,
+                    workspaceSnapshots: [...retainedWorkspaceSnapshots],
+                  };
+                }),
+              ),
             );
+
+      // A user who configures a new upstream inside omp re-probes the catalog
+      // without restarting T3: the managed refresh re-runs the ACP discovery
+      // probe and publishes when the catalog moved.
+      const refreshModels: NonNullable<ProviderInstance["refreshModels"]> = Effect.fn(
+        "OmpDriver.refreshModels",
+      )(() => snapshot.refresh.pipe(Effect.asVoid));
 
       return {
         instanceId,
@@ -206,6 +255,7 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
         snapshot,
         adapter,
         snapshotForCwd,
+        refreshModels,
         textGeneration,
       } satisfies ProviderInstance;
     }),

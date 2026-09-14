@@ -2508,4 +2508,207 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
       // hang until the suite timeout instead of failing here.
     }).pipe(TestClock.withLive),
   );
+
+  it.effect("feeds the context meter from omp's usage_update", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-usage-update-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EMIT_USAGE_UPDATE: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({ threadId, input: "hello mock", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const usageEvent = runtimeEvents.find((event) => event.type === "thread.token-usage.updated");
+      assert.isDefined(usageEvent);
+      if (usageEvent?.type === "thread.token-usage.updated") {
+        assert.deepStrictEqual(usageEvent.payload.usage, {
+          usedTokens: 39451,
+          maxTokens: 1_000_000,
+        });
+        assert.equal(String(usageEvent.turnId), String(turn.turnId));
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reports the finished turn's token split from the prompt response", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-prompt-usage-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EMIT_PROMPT_RESPONSE_USAGE: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hello mock", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const usageEvent = runtimeEvents.find((event) => event.type === "thread.token-usage.updated");
+      assert.isDefined(usageEvent);
+      if (usageEvent?.type === "thread.token-usage.updated") {
+        // No usage_update was sent, so the turn total stands in for context
+        // occupancy and the snapshot carries no window.
+        assert.deepStrictEqual(usageEvent.payload.usage, {
+          usedTokens: 1_801,
+          inputTokens: 1_234,
+          cachedInputTokens: 890,
+          outputTokens: 567,
+          lastUsedTokens: 1_801,
+          lastInputTokens: 1_234,
+          lastCachedInputTokens: 890,
+          lastOutputTokens: 567,
+        });
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("advertises /compact compaction and leaves the session usable after it", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-compaction-probe");
+      assert.deepStrictEqual(adapter.compaction, {
+        type: "slash-command",
+        command: "/compact",
+      });
+
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "omp-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* serverSettings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.filter((event) => event.type === "turn.started" || event.type === "turn.completed"),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      // ProviderService dispatches a slash-command compaction as a turn.
+      const compactionTurn = yield* adapter.sendTurn({
+        threadId,
+        input: adapter.compaction?.type === "slash-command" ? adapter.compaction.command : "",
+        attachments: [],
+      });
+      const nextTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "after compaction",
+        attachments: [],
+      });
+      // A leaked in-flight count would make this a steer of the compaction
+      // turn instead of a new turn.
+      assert.notEqual(String(nextTurn.turnId), String(compactionTurn.turnId));
+
+      const turnEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.deepStrictEqual(
+        turnEvents.map((event) => event.type),
+        ["turn.started", "turn.completed", "turn.started", "turn.completed"],
+      );
+
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptTexts = requests
+        .filter((entry) => entry.method === "session/prompt")
+        .map(
+          (entry) =>
+            (entry.params as { prompt?: ReadonlyArray<{ text?: string }> } | undefined)?.prompt?.[0]
+              ?.text,
+        );
+      assert.deepStrictEqual(promptTexts, ["/compact", "after compaction"]);
+    }),
+  );
+
+  // omp maps its todo_auto_clear onto a `plan` update with zero entries, and
+  // the web timeline reads an empty plan as "clear the panel". The shared ACP
+  // parser drops empty plans, so without the adapter's own handling the panel
+  // kept showing a finished plan for the rest of the thread.
+  it.effect("forwards omp's cleared plan so the todo panel empties", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-plan-clear-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EMIT_EMPTY_PLAN_AFTER_PLAN: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hello mock", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const planUpdates = runtimeEvents.filter((event) => event.type === "turn.plan.updated");
+      assert.equal(planUpdates.length, 2);
+      assert.deepStrictEqual(
+        planUpdates.map((event) =>
+          event.type === "turn.plan.updated" ? event.payload.plan.length : -1,
+        ),
+        [2, 0],
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
 });

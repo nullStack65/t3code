@@ -21,6 +21,7 @@ import {
   RuntimeTaskId,
   type RuntimeMode,
   type ThreadId,
+  type ThreadTokenUsageSnapshot,
   TurnId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -67,6 +68,7 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
   parsePermissionRequest,
+  sessionUpdateIsReplay,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
@@ -148,6 +150,11 @@ interface OmpSessionContext {
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
+  /** Context occupancy last reported by omp's `usage_update`. The
+   * `session/prompt` response only carries per-turn tokens, so the context
+   * meter keeps reading these until omp reports a new occupancy. */
+  lastContextUsedTokens: number | undefined;
+  lastContextWindowTokens: number | undefined;
   /** Number of sendTurn prompts currently in flight or being prepared.
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
@@ -576,6 +583,63 @@ function summarizeOmpTaskResult(rawOutput: unknown): string | undefined {
   return text ? truncateTaskText(text, OMP_TASK_RESULT_MAX_CHARS) : undefined;
 }
 
+function nonNegativeTokenCount(value: number | null | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : undefined;
+}
+
+/**
+ * Projects omp's two token-usage sources onto one context-meter snapshot.
+ *
+ * `usage_update` carries the session's context occupancy (`used` of `size`);
+ * the `session/prompt` response carries the finished turn's token split. The
+ * meter reads `usedTokens`/`maxTokens`, so a prompt response alone (no
+ * context window observed yet) falls back to the turn's total and the
+ * `last*` fields stay the per-turn numbers, matching Claude and Codex.
+ *
+ * omp also reports a cumulative `cost` on `usage_update`; the runtime token
+ * snapshot has no currency field, so it is deliberately dropped here.
+ */
+function makeOmpTokenUsageSnapshot(input: {
+  readonly contextUsedTokens?: number | null | undefined;
+  readonly contextWindowTokens?: number | null | undefined;
+  readonly turnUsage?: EffectAcpSchema.Usage | null | undefined;
+}): ThreadTokenUsageSnapshot | undefined {
+  const contextWindowTokens = nonNegativeTokenCount(input.contextWindowTokens);
+  const maxTokens =
+    contextWindowTokens !== undefined && contextWindowTokens > 0 ? contextWindowTokens : undefined;
+  const turnTotalTokens = nonNegativeTokenCount(input.turnUsage?.totalTokens);
+  const activeTokens = nonNegativeTokenCount(input.contextUsedTokens) ?? turnTotalTokens;
+  if (activeTokens === undefined || activeTokens <= 0) {
+    return undefined;
+  }
+  const usedTokens = maxTokens === undefined ? activeTokens : Math.min(activeTokens, maxTokens);
+  const inputTokens = nonNegativeTokenCount(input.turnUsage?.inputTokens);
+  const outputTokens = nonNegativeTokenCount(input.turnUsage?.outputTokens);
+  const cachedInputTokens = nonNegativeTokenCount(input.turnUsage?.cachedReadTokens);
+  const reasoningOutputTokens = nonNegativeTokenCount(input.turnUsage?.thoughtTokens);
+
+  return {
+    usedTokens,
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(turnTotalTokens !== undefined && turnTotalTokens > usedTokens
+      ? { totalProcessedTokens: turnTotalTokens }
+      : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
+    ...(turnTotalTokens !== undefined ? { lastUsedTokens: turnTotalTokens } : {}),
+    ...(inputTokens !== undefined ? { lastInputTokens: inputTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { lastCachedInputTokens: cachedInputTokens } : {}),
+    ...(outputTokens !== undefined ? { lastOutputTokens: outputTokens } : {}),
+    ...(reasoningOutputTokens !== undefined
+      ? { lastReasoningOutputTokens: reasoningOutputTokens }
+      : {}),
+  };
+}
+
 export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiveOptions) {
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("omp");
@@ -688,6 +752,33 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             rawPayload,
           }),
         );
+      });
+
+    /**
+     * Publishes the context meter's feed. omp reports context occupancy on
+     * `usage_update` and the per-turn split on the `session/prompt`
+     * response, so both callers fold their numbers into the same snapshot
+     * shape the other adapters emit.
+     */
+    const emitTokenUsage = (
+      ctx: OmpSessionContext,
+      usage: ThreadTokenUsageSnapshot,
+      raw: { readonly method: string; readonly payload: unknown },
+    ) =>
+      Effect.gen(function* () {
+        yield* offerRuntimeEvent({
+          type: "thread.token-usage.updated",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId: ctx.activeTurnId,
+          payload: { usage },
+          raw: {
+            source: "acp.jsonrpc",
+            method: raw.method,
+            payload: raw.payload,
+          },
+        });
       });
 
     /**
@@ -823,6 +914,10 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
           let ctx!: OmpSessionContext;
+          // Bound after `acp.start()`; the side-channel session/update
+          // handler below is registered before the session exists and must
+          // ignore notifications until the root session id is known.
+          let rootSessionId: string | undefined;
 
           const resumeSessionId = parseOmpResume(input.resumeCursor)?.sessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
@@ -1034,12 +1129,69 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               }
               return runElicitationFlow("elicitation/create", params, params);
             });
+            // Side channel for the two session/update kinds the shared ACP
+            // parser drops: `usage_update` (context meter) and a `plan` with
+            // zero entries (omp's todo_auto_clear, which the todo panel
+            // reads as "clear the plan"). Handlers are additive, so the
+            // runtime's own parser still owns every other update kind; this
+            // one drains the runtime's event queue first so a clear can
+            // never overtake the plan it clears.
+            yield* acp.handleSessionUpdate((notification) =>
+              Effect.gen(function* () {
+                const sessionCtx = sessions.get(input.threadId);
+                if (
+                  sessionCtx === undefined ||
+                  sessionCtx.stopped ||
+                  sessionCtx.acp !== acp ||
+                  rootSessionId === undefined ||
+                  notification.sessionId !== rootSessionId ||
+                  sessionUpdateIsReplay(notification)
+                ) {
+                  return;
+                }
+                const update = notification.update;
+                if (update.sessionUpdate === "usage_update") {
+                  yield* logNative(sessionCtx.threadId, "session/update", notification);
+                  sessionCtx.lastContextUsedTokens =
+                    nonNegativeTokenCount(update.used) ?? sessionCtx.lastContextUsedTokens;
+                  sessionCtx.lastContextWindowTokens =
+                    nonNegativeTokenCount(update.size) ?? sessionCtx.lastContextWindowTokens;
+                  const usage = makeOmpTokenUsageSnapshot({
+                    contextUsedTokens: sessionCtx.lastContextUsedTokens,
+                    contextWindowTokens: sessionCtx.lastContextWindowTokens,
+                  });
+                  if (!usage) {
+                    return;
+                  }
+                  yield* acp.drainEvents;
+                  yield* emitTokenUsage(sessionCtx, usage, {
+                    method: "session/update",
+                    payload: notification,
+                  });
+                  return;
+                }
+                if (update.sessionUpdate === "plan" && update.entries.length === 0) {
+                  yield* logNative(sessionCtx.threadId, "session/update", notification);
+                  yield* acp.drainEvents;
+                  yield* emitPlanUpdate(sessionCtx, { plan: [] }, notification);
+                }
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EffectAcpErrors.AcpTransportError({
+                      detail: "Failed to process Oh My Pi ACP session update.",
+                      cause,
+                    }),
+                ),
+              ),
+            );
             return yield* acp.start();
           }).pipe(
             Effect.mapError((error) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
+          rootSessionId = started.sessionId;
 
           const startConfiguration = yield* applyRequestedSessionConfiguration({
             runtime: acp,
@@ -1081,6 +1233,8 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             turns: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
+            lastContextUsedTokens: undefined,
+            lastContextWindowTokens: undefined,
             promptsInFlight: 0,
             dispatchLock,
             stopped: false,
@@ -1444,6 +1598,22 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             ...(effectiveModel ? { model: effectiveModel } : {}),
           };
 
+          // The prompt response's per-turn split lands before the turn
+          // settles so the meter never shows a finished turn with stale
+          // numbers. Context occupancy still comes from the last
+          // `usage_update`; omp reports no window on this response.
+          const promptUsage = makeOmpTokenUsageSnapshot({
+            contextUsedTokens: ctx.lastContextUsedTokens,
+            contextWindowTokens: ctx.lastContextWindowTokens,
+            turnUsage: result.usage,
+          });
+          if (promptUsage && !ctx.stopped) {
+            yield* emitTokenUsage(ctx, promptUsage, {
+              method: "session/prompt",
+              payload: result,
+            });
+          }
+
           // Only the last remaining prompt settles the turn — a steer-
           // superseded prompt resolving (usually cancelled) while another is
           // in flight or pending must leave the merged turn running.
@@ -1647,6 +1817,11 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
       // capability as unsupported instead of reporting a rollback the live
       // session does not reflect.
       capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
+      // omp exposes compaction as its own `/compact` command, not as an ACP
+      // method, so ProviderService dispatches it as an ordinary turn (same
+      // shape as Cursor's `/compress`) and settles on that turn's
+      // turn.completed.
+      compaction: { type: "slash-command", command: "/compact" },
       startSession,
       sendTurn,
       interruptTurn,

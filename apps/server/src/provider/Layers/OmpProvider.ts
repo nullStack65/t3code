@@ -3,8 +3,10 @@ import type {
   ModelCapabilities,
   ProviderOptionSelection,
   ServerProvider,
+  ServerProviderAuth,
   ServerProviderModel,
   ServerProviderState,
+  ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
@@ -39,11 +41,14 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
-
+import { probeOmpUsage } from "../Drivers/OmpUsage.ts";
 const OMP_PRESENTATION = {
   displayName: "Oh My Pi",
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
+  // The adapter streams ACP `usage_update` token ticks, so a started thread
+  // has a live context meter once its activities load.
+  reportsContextWindow: true,
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -578,6 +583,8 @@ export function buildOmpProviderSnapshot(input: {
   readonly message?: string;
   readonly discoveredModels?: ReadonlyArray<ServerProviderModel>;
   readonly discoveryWarning?: string;
+  readonly auth?: ServerProviderAuth;
+  readonly usageLimits?: ServerProviderUsageLimits;
 }): ServerProviderDraft {
   const status = input.status ?? "ready";
   const message = joinProviderMessages(input.message, input.discoveryWarning);
@@ -594,8 +601,9 @@ export function buildOmpProviderSnapshot(input: {
       installed: true,
       version: input.version,
       status: input.discoveryWarning && status === "ready" ? "warning" : status,
-      auth: { status: "unknown" },
+      auth: input.auth ?? { status: "unknown" },
       ...(message ? { message } : {}),
+      ...(input.usageLimits ? { usageLimits: input.usageLimits } : {}),
     },
   });
 }
@@ -712,10 +720,19 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
 
   let discoveredModels = Option.none<ReadonlyArray<ServerProviderModel>>();
   let discoveryWarning: string | undefined;
-  const discoveryExit = yield* Effect.exit(
-    discoverOmpModelsViaAcp(ompSettings, environment).pipe(
-      Effect.timeoutOption(OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
-    ),
+  // The usage probe is read-only and bounded by its own timeout, so it rides
+  // alongside ACP discovery instead of stretching the health check. It never
+  // fails: every failure mode degrades to unknown auth with no limits.
+  const [discoveryExit, usageProbe] = yield* Effect.all(
+    [
+      Effect.exit(
+        discoverOmpModelsViaAcp(ompSettings, environment).pipe(
+          Effect.timeoutOption(OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
+        ),
+      ),
+      probeOmpUsage(ompSettings, checkedAt, environment),
+    ],
+    { concurrency: 2 },
   );
   if (Exit.isFailure(discoveryExit)) {
     yield* Effect.logWarning("Oh My Pi ACP model discovery failed", {
@@ -747,6 +764,8 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
         }
       : {}),
     ...(discoveryWarning ? { discoveryWarning } : {}),
+    auth: usageProbe.auth,
+    ...(usageProbe.usageLimits ? { usageLimits: usageProbe.usageLimits } : {}),
   });
 });
 

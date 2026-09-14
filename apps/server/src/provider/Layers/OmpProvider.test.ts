@@ -90,6 +90,130 @@ const makeMockAgentWithVersionWrapper = Effect.fn("makeMockAgentWithVersionWrapp
   });
 });
 
+const ompUsageFixturePayload = JSON.stringify({
+  generatedAt: "2030-01-01T00:00:00.000Z",
+  reports: [
+    {
+      provider: "anthropic",
+      fetchedAt: "2030-01-01T00:00:00.000Z",
+      limits: [
+        {
+          id: "5h",
+          label: "5-hour",
+          scope: { provider: "anthropic", windowId: "5h", shared: false },
+          window: {
+            id: "5h",
+            label: "5-hour",
+            durationMs: 18_000_000,
+            resetsAt: "2030-01-01T05:00:00.000Z",
+          },
+          amount: {
+            used: 42,
+            limit: 100,
+            remaining: 58,
+            usedFraction: 0.42,
+            remainingFraction: 0.58,
+            unit: "percent",
+          },
+          status: "ok",
+        },
+        {
+          id: "7d",
+          label: "7-day",
+          scope: { provider: "anthropic", windowId: "7d", shared: false },
+          window: {
+            id: "7d",
+            label: "7-day",
+            durationMs: 604_800_000,
+            resetsAt: "2030-01-08T00:00:00.000Z",
+          },
+          amount: {
+            used: 15,
+            limit: 100,
+            remaining: 85,
+            usedFraction: 0.15,
+            remainingFraction: 0.85,
+            unit: "percent",
+          },
+          status: "ok",
+        },
+      ],
+    },
+    {
+      provider: "openai",
+      fetchedAt: "2030-01-01T00:00:00.000Z",
+      limits: [
+        {
+          id: "5h",
+          label: "5-hour",
+          scope: { provider: "openai", windowId: "5h", shared: false },
+          window: {
+            id: "5h",
+            label: "5-hour",
+            durationMs: 18_000_000,
+            resetsAt: "2030-01-01T05:00:00.000Z",
+          },
+          amount: {
+            used: 71,
+            limit: 100,
+            remaining: 29,
+            usedFraction: 0.71,
+            remainingFraction: 0.29,
+            unit: "percent",
+          },
+          status: "ok",
+        },
+        {
+          id: "7d",
+          label: "7-day",
+          scope: { provider: "openai", windowId: "7d", shared: false },
+          window: {
+            id: "7d",
+            label: "7-day",
+            durationMs: 604_800_000,
+            resetsAt: "2030-01-08T00:00:00.000Z",
+          },
+          amount: {
+            used: 20,
+            limit: 100,
+            remaining: 80,
+            usedFraction: 0.2,
+            remainingFraction: 0.8,
+            unit: "percent",
+          },
+          status: "ok",
+        },
+      ],
+    },
+  ],
+});
+
+const makeMockAgentWithUsageWrapper = Effect.fn("makeMockAgentWithUsageWrapper")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const mockAgentPath = yield* resolveMockAgentPath();
+  const dir = yield* fileSystem.makeTempDirectory({
+    directory: NodeOS.tmpdir(),
+    prefix: "omp-provider-usage-mock-",
+  });
+  return writeFakeCli({
+    directory: dir,
+    name: "fake-omp",
+    env: { T3_ACP_OMP_SHAPES: "1" },
+    source: [
+      'if (process.argv[2] === "--version") {',
+      '  process.stdout.write("omp/18.0.6\\n");',
+      "  process.exit(0);",
+      "}",
+      'if (process.argv[2] === "usage" && process.argv[3] === "--json") {',
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fake child-process stdout.
+      `  process.stdout.write(${JSON.stringify(ompUsageFixturePayload)});`,
+      "  process.exit(0);",
+      "}",
+      execScriptSource({ scriptPath: mockAgentPath }),
+    ].join("\n"),
+  });
+});
+
 const waitForFileContent = Effect.fn("waitForFileContent")(function* (
   filePath: string,
   attempts = 40,
@@ -240,6 +364,38 @@ describe("buildOmpProviderSnapshot", () => {
       ],
     });
   });
+
+  it("publishes the context-window flag with auth and usage limits", () => {
+    expect(
+      buildOmpProviderSnapshot({
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        ompSettings: baseOmpSettings,
+        version: "18.0.6",
+        auth: { status: "authenticated", type: "agent", label: "anthropic" },
+        usageLimits: {
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          windows: [{ id: "anthropic:5h", kind: "session", label: "5-hour", usedPercent: 42 }],
+        },
+      }),
+    ).toMatchObject({
+      reportsContextWindow: true,
+      auth: { status: "authenticated", label: "anthropic" },
+      usageLimits: {
+        windows: [{ id: "anthropic:5h", usedPercent: 42 }],
+      },
+    });
+  });
+
+  it("defaults to unknown auth with no usage limits when the probe degraded", () => {
+    const snapshot = buildOmpProviderSnapshot({
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      ompSettings: baseOmpSettings,
+      version: "18.0.6",
+    });
+    expect(snapshot.reportsContextWindow).toBe(true);
+    expect(snapshot.auth).toEqual({ status: "unknown" });
+    expect(snapshot.usageLimits).toBeUndefined();
+  });
 });
 
 describe("buildOmpCapabilitiesFromConfigOptions", () => {
@@ -355,6 +511,40 @@ describe("checkOmpProviderStatus", () => {
         const requestLog = yield* node(waitForFileContent(requestLogPath));
         expect(requestLog).toContain("initialize");
       }),
+  );
+  effectIt.live("reports authenticated usage limits from omp usage --json", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* node(makeMockAgentWithUsageWrapper());
+
+      const provider = yield* node(
+        checkOmpProviderStatus({
+          enabled: true,
+          binaryPath: wrapperPath,
+          customModels: [],
+        }),
+      );
+
+      expect(provider).toMatchObject({
+        installed: true,
+        version: "18.0.6",
+        status: "ready",
+        reportsContextWindow: true,
+        auth: {
+          status: "authenticated",
+          type: "agent",
+          label: "2 providers: anthropic, openai",
+        },
+      });
+      expect(provider.usageLimits?.windows.map((window) => window.id)).toEqual([
+        "anthropic:5h",
+        "openai:5h",
+        "anthropic:7d",
+        "openai:7d",
+      ]);
+      expect(provider.usageLimits?.windows.map((window) => window.usedPercent)).toEqual([
+        42, 71, 15, 20,
+      ]);
+    }),
   );
 });
 
