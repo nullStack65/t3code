@@ -38,6 +38,9 @@ directories omp ran in, with their conversations.
 | `/compact`                      | **Compact** button, which runs omp's compaction                              |
 | Usage limits                    | Quota banner from `omp usage`                                                |
 | Sessions started in a terminal  | Imported as threads and resumed in place                                     |
+| `/rename`                       | Renames the thread too — omp's session title is the thread title             |
+| `/fresh`                        | Starts omp's new provider session; the thread keeps running on it            |
+| `/review`, `/security`, plugins | Their pickers arrive as in-thread questions, answered in the composer        |
 
 Commands that only make sense in a terminal have a T3 Code equivalent instead:
 the fullscreen git UI becomes the git panel and commit composer, `omp shell` and
@@ -56,3 +59,11 @@ picker.
 - **Approval behavior is chosen when omp starts.** omp takes it from launch
   flags, so a thread's permission mode applies from the next turn onward rather
   than to work already in flight.
+- **Some commands only draw in omp's terminal.** `/instinct-*` and friends
+  answer nothing over ACP. The turn then carries a note naming the command
+  that stayed silent, instead of looking like nothing happened.
+- **`/wt` and `/move` move omp, not the thread.** They change the directory omp
+  works in; T3 Code keeps showing the project and branch the thread was opened
+  with. Open a thread in the worktree instead.
+- **`/pin` pins in omp.** It affects omp's own resume list, not the sidebar;
+  pin the thread in T3 Code separately.
