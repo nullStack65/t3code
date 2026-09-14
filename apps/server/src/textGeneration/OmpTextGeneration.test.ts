@@ -5,12 +5,11 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -21,14 +20,13 @@ import { OmpSettings, ProviderInstanceId } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeOmpTextGeneration } from "./OmpTextGeneration.ts";
+import { execScriptSource, writeFakeCli } from "../testUtils/fakeCli.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+
 const decodeOmpSettings = Schema.decodeSync(OmpSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../scripts/acp-mock-agent.ts");
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
 
 const OmpTextGenerationTestLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-omp-text-generation-test-",
@@ -39,27 +37,16 @@ function makeAcpAgentWrapper(
   env: Record<string, string>,
   argvLogPath?: string,
 ): string {
-  const binDir = NodePath.join(dir, "bin");
-  const agentPath = NodePath.join(binDir, "omp");
-  NodeFS.mkdirSync(binDir, { recursive: true });
-  NodeFS.writeFileSync(
-    agentPath,
-    [
-      "#!/bin/sh",
-      "export T3_ACP_OMP_SHAPES=1",
-      ...Object.entries(env).map(([key, value]) => `export ${key}=${shellSingleQuote(value)}`),
-      ...(argvLogPath ? [`printf '%s\\n' "$*" >> ${shellSingleQuote(argvLogPath)}`] : []),
-      'if [ "$1" != "acp" ]; then',
-      '  printf "%s\\n" "unexpected args: $*" >&2',
-      "  exit 11",
-      "fi",
-      `exec node ${JSON.stringify(mockAgentPath)} "$@"`,
-      "",
-    ].join("\n"),
-    "utf8",
-  );
-  NodeFS.chmodSync(agentPath, 0o755);
-  return agentPath;
+  return writeFakeCli({
+    directory: NodePath.join(dir, "bin"),
+    name: "omp",
+    env: { T3_ACP_OMP_SHAPES: "1", ...env },
+    source: execScriptSource({
+      scriptPath: mockAgentPath,
+      expectedArgs: ["acp"],
+      ...(argvLogPath === undefined ? {} : { argvLogPath }),
+    }),
+  });
 }
 
 function withFakeAcpAgent<A, E, R>(
@@ -81,22 +68,18 @@ function withFakeAcpAgent<A, E, R>(
   }).pipe(Effect.scoped);
 }
 
-function waitForFileContent(path: string): Effect.Effect<string> {
-  return Effect.gen(function* () {
-    const deadline = (yield* Clock.currentTimeMillis) + 5_000;
-    for (;;) {
-      const result = yield* Effect.exit(Effect.sync(() => NodeFS.readFileSync(path, "utf8")));
-      if (Exit.isSuccess(result)) {
-        return result.value;
+async function waitForFileContent(filePath: string, attempts = 400): Promise<string> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const raw = await NodeFSP.readFile(filePath, "utf8");
+      if (raw.trim().length > 0) {
+        return raw;
       }
-      {
-        if ((yield* Clock.currentTimeMillis) >= deadline) {
-          return yield* Effect.die(result.cause);
-        }
-      }
-      yield* Effect.sleep(25);
-    }
-  });
+    } catch {}
+    // Each attempt awaits real fs I/O, which yields to the event loop and
+    // lets the exiting child flush its log — no wall-clock timer needed.
+  }
+  throw new Error(`Timed out waiting for file content at ${filePath}`);
 }
 
 it.layer(OmpTextGenerationTestLayer)("OmpTextGeneration", (it) => {
@@ -135,8 +118,11 @@ it.layer(OmpTextGenerationTestLayer)("OmpTextGeneration", (it) => {
 
           // Unattended generation must never hit an approval prompt: the
           // child is spawned with --auto-approve.
-          const argvLog = NodeFS.readFileSync(argvLogPath, "utf8").trim().split("\n");
-          expect(argvLog).toEqual(["acp --auto-approve"]);
+          const argvLog = NodeFS.readFileSync(argvLogPath, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => line.split("\t"));
+          expect(argvLog).toEqual([["acp", "--auto-approve"]]);
 
           const requests = NodeFS.readFileSync(requestLogPath, "utf8")
             .trim()
@@ -212,41 +198,46 @@ it.layer(OmpTextGenerationTestLayer)("OmpTextGeneration", (it) => {
     ),
   );
 
-  it.effect("closes the ACP child process after text generation completes", () => {
-    const exitLogDir = NodeFS.mkdtempSync(
-      NodePath.join(NodeOS.tmpdir(), "t3code-omp-text-exit-log-"),
-    );
-    const exitLogPath = NodePath.join(exitLogDir, "exit.log");
+  // Windows terminates the child instead of signalling it, so the mock
+  // agent never reaches its exit handler and writes no exit log.
+  it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+    "closes the ACP child process after text generation completes",
+    () => {
+      const exitLogDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3code-omp-text-exit-log-"),
+      );
+      const exitLogPath = NodePath.join(exitLogDir, "exit.log");
 
-    return withFakeAcpAgent(
-      {
-        T3_ACP_EXIT_LOG_PATH: exitLogPath,
-        T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
-          subject: "Close runtime after generation",
-          body: "",
-        }),
-      },
-      (textGeneration) =>
-        Effect.gen(function* () {
-          const generated = yield* textGeneration.generateCommitMessage({
-            cwd: process.cwd(),
-            branch: "feature/omp-runtime-close",
-            stagedSummary: "M apps/server/src/textGeneration/OmpTextGeneration.ts",
-            stagedPatch:
-              "diff --git a/apps/server/src/textGeneration/OmpTextGeneration.ts b/apps/server/src/textGeneration/OmpTextGeneration.ts",
-            modelSelection: {
-              instanceId: ProviderInstanceId.make("omp"),
-              model: "openai/gpt-5.4",
-            },
-          });
+      return withFakeAcpAgent(
+        {
+          T3_ACP_EXIT_LOG_PATH: exitLogPath,
+          T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+            subject: "Close runtime after generation",
+            body: "",
+          }),
+        },
+        (textGeneration) =>
+          Effect.gen(function* () {
+            const generated = yield* textGeneration.generateCommitMessage({
+              cwd: process.cwd(),
+              branch: "feature/omp-runtime-close",
+              stagedSummary: "M apps/server/src/textGeneration/OmpTextGeneration.ts",
+              stagedPatch:
+                "diff --git a/apps/server/src/textGeneration/OmpTextGeneration.ts b/apps/server/src/textGeneration/OmpTextGeneration.ts",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("omp"),
+                model: "openai/gpt-5.4",
+              },
+            });
 
-          expect(generated.subject).toBe("Close runtime after generation");
+            expect(generated.subject).toBe("Close runtime after generation");
 
-          const exitLog = yield* waitForFileContent(exitLogPath);
-          expect(exitLog).toContain("exit:0");
+            const exitLog = yield* Effect.promise(() => waitForFileContent(exitLogPath));
+            expect(exitLog).toContain("exit:0");
 
-          NodeFS.rmSync(exitLogDir, { recursive: true, force: true });
-        }),
-    );
-  });
+            NodeFS.rmSync(exitLogDir, { recursive: true, force: true });
+          }),
+      );
+    },
+  );
 });

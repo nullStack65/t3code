@@ -20,6 +20,8 @@ import {
   getOmpFallbackModels,
   resolveOmpAcpConfigUpdates,
 } from "./OmpProvider.ts";
+import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const node = <A, E>(
   effect: Effect.Effect<
@@ -54,47 +56,38 @@ const makeMockAgentWrapper = Effect.fn("makeMockAgentWrapper")(function* (
   extraEnv?: Record<string, string>,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
   const mockAgentPath = yield* resolveMockAgentPath();
   const dir = yield* fileSystem.makeTempDirectory({
     directory: NodeOS.tmpdir(),
     prefix: "omp-provider-mock-",
   });
-  const wrapperPath = path.join(dir, "fake-omp.sh");
-  const mockAgentCommand = ["node", mockAgentPath].map((arg) => JSON.stringify(arg)).join(" ");
-  const envExports = Object.entries({ T3_ACP_OMP_SHAPES: "1", ...extraEnv })
-    .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
-    .join("\n");
-  const script = `#!/bin/sh
-${envExports}
-exec ${mockAgentCommand} "$@"
-`;
-  yield* fileSystem.writeFileString(wrapperPath, script);
-  yield* fileSystem.chmod(wrapperPath, 0o755);
-  return wrapperPath;
+  return writeFakeCli({
+    directory: dir,
+    name: "fake-omp",
+    env: { T3_ACP_OMP_SHAPES: "1", ...extraEnv },
+    source: execScriptSource({ scriptPath: mockAgentPath }),
+  });
 });
 
 const makeMockAgentWithVersionWrapper = Effect.fn("makeMockAgentWithVersionWrapper")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
   const mockAgentPath = yield* resolveMockAgentPath();
   const dir = yield* fileSystem.makeTempDirectory({
     directory: NodeOS.tmpdir(),
     prefix: "omp-provider-version-mock-",
   });
-  const wrapperPath = path.join(dir, "fake-omp.sh");
-  const mockAgentCommand = ["node", mockAgentPath].map((arg) => JSON.stringify(arg)).join(" ");
-  const script = `#!/bin/sh
-export T3_ACP_OMP_SHAPES=1
-if [ "$1" = "--version" ]; then
-  printf 'omp/18.0.6\\n'
-  exit 0
-fi
-exec ${mockAgentCommand} "$@"
-`;
-  yield* fileSystem.writeFileString(wrapperPath, script);
-  yield* fileSystem.chmod(wrapperPath, 0o755);
-  return wrapperPath;
+  return writeFakeCli({
+    directory: dir,
+    name: "fake-omp",
+    env: { T3_ACP_OMP_SHAPES: "1" },
+    source: [
+      'if (process.argv[2] === "--version") {',
+      '  process.stdout.write("omp/18.0.6\\n");',
+      "  process.exit(0);",
+      "}",
+      execScriptSource({ scriptPath: mockAgentPath }),
+    ].join("\n"),
+  });
 });
 
 const waitForFileContent = Effect.fn("waitForFileContent")(function* (
@@ -391,23 +384,27 @@ describe("discoverOmpModelsViaAcp", () => {
     }),
   );
 
-  effectIt.live("closes the ACP probe runtime after discovery completes", () =>
-    Effect.gen(function* () {
-      const { exitLogPath, wrapperPath } = yield* node(
-        makeExitLogFixture("omp-provider-exit-log-"),
-      );
+  // Stopping the probe kills the agent with SIGTERM; Windows terminates the
+  // process instead, so the mock never sees a signal to log.
+  effectIt.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+    "closes the ACP probe runtime after discovery completes",
+    () =>
+      Effect.gen(function* () {
+        const { exitLogPath, wrapperPath } = yield* node(
+          makeExitLogFixture("omp-provider-exit-log-"),
+        );
 
-      yield* node(
-        discoverOmpModelsViaAcp({
-          enabled: true,
-          binaryPath: wrapperPath,
-          customModels: [],
-        }),
-      );
+        yield* node(
+          discoverOmpModelsViaAcp({
+            enabled: true,
+            binaryPath: wrapperPath,
+            customModels: [],
+          }),
+        );
 
-      const exitLog = yield* node(waitForFileContent(exitLogPath));
-      expect(exitLog).toContain("SIGTERM");
-    }),
+        const exitLog = yield* node(waitForFileContent(exitLogPath));
+        expect(exitLog).toContain("SIGTERM");
+      }),
   );
 });
 

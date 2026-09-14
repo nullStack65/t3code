@@ -1032,7 +1032,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             ),
           );
 
-          yield* applyRequestedSessionConfiguration({
+          const startConfiguration = yield* applyRequestedSessionConfiguration({
             runtime: acp,
             runtimeMode: input.runtimeMode,
             interactionMode: undefined,
@@ -1048,7 +1048,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             status: "ready",
             runtimeMode: input.runtimeMode,
             cwd,
-            model: ompModelSelection?.model,
+            model: startConfiguration.model ?? resolveOmpAcpBaseModelId(ompModelSelection?.model),
             threadId: input.threadId,
             resumeCursor: {
               schemaVersion: OMP_RESUME_VERSION,

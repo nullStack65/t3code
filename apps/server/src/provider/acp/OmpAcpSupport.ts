@@ -202,6 +202,6 @@ export function resolveOmpAcpBaseModelId(model: string | null | undefined): stri
   if (!trimmed) {
     return undefined;
   }
-  const base = trimmed.includes("[") ? trimmed.slice(0, trimmed.indexOf("[")) : trimmed;
+  const base = trimmed.includes("[") ? trimmed.slice(0, trimmed.indexOf("[")).trim() : trimmed;
   return base.length > 0 ? base : undefined;
 }
