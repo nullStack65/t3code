@@ -101,6 +101,9 @@ export const makeOmpAcpRuntime = (
         // omp/18.0.6 advertises exactly one auth method ("Use existing local
         // credentials"); credentials live under ~/.omp.
         authMethodId: "agent",
+        // `/fresh` starts a new provider session on the same connection and
+        // publishes every later update under its new id.
+        adoptAgentSessionIdChanges: true,
         // omp routes its second approval layer (extension wrapper, anything
         // short of yolo) through session/elicitation, and only when the
         // client declares form elicitation — undeclared reads as Deny.

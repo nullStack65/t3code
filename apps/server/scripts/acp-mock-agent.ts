@@ -77,6 +77,10 @@ const emitUsageUpdate = process.env.T3_ACP_EMIT_USAGE_UPDATE === "1";
 const usageUpdateSize = Number(process.env.T3_ACP_USAGE_UPDATE_SIZE ?? "1000000");
 const usageUpdateUsed = Number(process.env.T3_ACP_USAGE_UPDATE_USED ?? "39451");
 const emitPromptResponseUsage = process.env.T3_ACP_EMIT_PROMPT_RESPONSE_USAGE === "1";
+// omp renames its session (`/rename`, auto-titling) with session_info_update.
+const sessionInfoTitle = process.env.T3_ACP_SESSION_INFO_TITLE?.trim() || undefined;
+// omp's `/fresh` replaces the provider session: later updates carry a new id.
+const rotateSessionIdOnPrompt = process.env.T3_ACP_ROTATE_SESSION_ID?.trim() || undefined;
 // omp's todo_auto_clear maps to a `plan` update with zero entries.
 const emitEmptyPlanAfterPlan = process.env.T3_ACP_EMIT_EMPTY_PLAN_AFTER_PLAN === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
@@ -1722,8 +1726,19 @@ const program = Effect.gen(function* () {
         });
       }
 
+      if (sessionInfoTitle !== undefined) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "session_info_update",
+            title: sessionInfoTitle,
+            updatedAt: "2026-02-03T04:05:06.000Z",
+          },
+        });
+      }
+
       yield* agent.client.sessionUpdate({
-        sessionId: requestedSessionId,
+        sessionId: rotateSessionIdOnPrompt ?? requestedSessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: promptResponseText ?? "hello from mock" },

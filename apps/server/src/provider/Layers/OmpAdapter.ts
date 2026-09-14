@@ -176,6 +176,8 @@ interface OmpSessionContext {
   /** Strips omp's terminal escapes out of streamed message text. */
   readonly ansiFilter: AnsiFilter;
   activeTurnId: TurnId | undefined;
+  /** Whether the active turn has streamed any assistant text yet. */
+  turnProducedText: boolean;
   /** Context occupancy last reported by omp's `usage_update`. The
    * `session/prompt` response only carries per-turn tokens, so the context
    * meter keeps reading these until omp reports a new occupancy. */
@@ -528,6 +530,19 @@ export function ompElicitationContentFromAnswers(
 function truncateTaskText(text: string, maxChars: number): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
   return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars - 1)}…` : collapsed;
+}
+
+/**
+ * Name the slash command whose turn produced no assistant text, or
+ * `undefined` when the prompt was not a bare command or text did arrive.
+ * Only a prompt that is *only* a command counts: a sentence that happens to
+ * start with a path (`/tmp/x is broken`) answers with text anyway, and a
+ * command with a follow-up prompt attached is an ordinary turn.
+ */
+export function ompSilentCommandName(prompt: string, producedText: boolean): string | undefined {
+  if (producedText) return undefined;
+  const match = /^\/([A-Za-z][\w.:-]*)(?:\s+\S+)*\s*$/.exec(prompt.trim());
+  return match?.[1];
 }
 
 function optionalTrimmedString(value: unknown): string | undefined {
@@ -1175,8 +1190,11 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           let ctx!: OmpSessionContext;
           // Bound after `acp.start()`; the side-channel session/update
           // handler below is registered before the session exists and must
-          // ignore notifications until the root session id is known.
-          let rootSessionId: string | undefined;
+          // ignore notifications until a session id is known. `/fresh`
+          // swaps omp's provider session mid-thread, so later ids join the
+          // set rather than replacing it: omp still answers prompts on the
+          // id the session was created with.
+          const liveSessionIds = new Set<string>();
 
           const resumeSessionId = parseOmpResume(input.resumeCursor)?.sessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
@@ -1208,6 +1226,19 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             runtimeMode: input.runtimeMode,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
+            // `/fresh` swaps omp's provider session; the thread keeps running
+            // on the same connection, so track the new id for update routing
+            // and for the cursor a later resume replays.
+            onAgentSessionIdChanged: (sessionId) => {
+              liveSessionIds.add(sessionId);
+              const sessionCtx = sessions.get(input.threadId);
+              if (sessionCtx !== undefined) {
+                sessionCtx.session = {
+                  ...sessionCtx.session,
+                  resumeCursor: { schemaVersion: OMP_RESUME_VERSION, sessionId },
+                };
+              }
+            },
             ...(mcpSession
               ? {
                   mcpServers: [
@@ -1401,7 +1432,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               Effect.gen(function* () {
                 const sessionCtx = sessions.get(input.threadId);
                 const update = notification.update;
-                if (rootSessionId === undefined || notification.sessionId !== rootSessionId) {
+                if (!liveSessionIds.has(notification.sessionId)) {
                   return;
                 }
                 // The command catalog is session state, not turn content:
@@ -1461,6 +1492,25 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                   });
                   return;
                 }
+                // `/rename` (and omp's own auto-titling) renames the session
+                // omp shows in `--resume`. The thread title is the same name
+                // in this client, so it follows omp's rather than keeping a
+                // stale one.
+                if (update.sessionUpdate === "session_info_update") {
+                  const title = typeof update.title === "string" ? update.title.trim() : undefined;
+                  if (title === undefined || title.length === 0) {
+                    return;
+                  }
+                  yield* logNative(sessionCtx.threadId, "session/update", notification);
+                  yield* offerRuntimeEvent({
+                    type: "thread.metadata.updated",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: sessionCtx.threadId,
+                    payload: { name: title, nameIsExplicit: true },
+                  });
+                  return;
+                }
                 if (update.sessionUpdate === "plan" && update.entries.length === 0) {
                   yield* logNative(sessionCtx.threadId, "session/update", notification);
                   yield* acp.drainEvents;
@@ -1482,7 +1532,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
-          rootSessionId = started.sessionId;
+          liveSessionIds.add(started.sessionId);
 
           const startConfiguration = yield* applyRequestedSessionConfiguration({
             runtime: acp,
@@ -1526,6 +1576,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             lastPlanFingerprint: undefined,
             ansiFilter: makeAnsiFilter(),
             activeTurnId: undefined,
+            turnProducedText: false,
             modelWarningTurnId: undefined,
             lastContextUsedTokens: undefined,
             lastContextWindowTokens: undefined,
@@ -1610,6 +1661,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                     // draws colored bars), and the escapes would render as
                     // literal `[38;2;…m` noise.
                     const text = ctx.ansiFilter.push(event.text);
+                    if (event._tag === "ContentDelta") {
+                      ctx.turnProducedText = true;
+                    }
                     if (text.length === 0) {
                       return;
                     }
@@ -1693,6 +1747,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
         // previous one.
         ctx.promptsInFlight += 1;
         ctx.activeTurnId = turnId;
+        if (steeringTurnId === undefined) {
+          ctx.turnProducedText = false;
+        }
 
         // interruptTurn cannot reach a turn whose prompt has not been sent
         // yet (acp.cancel is a no-op pre-prompt), so cancelled turn ids are
@@ -1965,6 +2022,24 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
           // superseded prompt resolving (usually cancelled) while another is
           // in flight or pending must leave the merged turn running.
           if (ctx.promptsInFlight === 1 && !ctx.stopped) {
+            // Some omp commands only draw into its own terminal UI
+            // (`/instinct-status` and friends): over ACP the turn completes
+            // with no text at all, which reads as "nothing happened". Name
+            // the command that stayed silent instead.
+            const silentCommand = ompSilentCommandName(input.input ?? "", ctx.turnProducedText);
+            if (silentCommand !== undefined) {
+              yield* offerRuntimeEvent({
+                type: "runtime.warning",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: {
+                  message: `Oh My Pi ran /${silentCommand} without returning any output — that command only renders in its own terminal UI.`,
+                  detail: { command: silentCommand },
+                },
+              });
+            }
             ctx.cancelledTurnIds.delete(turnId);
             yield* offerRuntimeEvent({
               type: "turn.completed",

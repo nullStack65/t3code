@@ -39,6 +39,7 @@ import {
   ompElicitationContentFromAnswers,
   ompElicitationQuestionsFromForm,
   parseOmpSubagentSpawns,
+  ompSilentCommandName,
   selectOmpPermissionOptionId,
 } from "./OmpAdapter.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
@@ -368,6 +369,23 @@ describe("selectOmpPermissionOptionId", () => {
   plainIt("returns undefined when nothing usable was offered", () => {
     const req = request([{ kind: "allow_once", optionId: "ok" }]);
     expect(selectOmpPermissionOptionId(req, "decline")).toBeUndefined();
+  });
+});
+
+describe("ompSilentCommandName", () => {
+  plainIt("names a bare command whose turn produced nothing", () => {
+    expect(ompSilentCommandName("/instinct-status", false)).toBe("instinct-status");
+    expect(ompSilentCommandName("  /usage show  ", false)).toBe("usage");
+    expect(ompSilentCommandName("/agent-skills:plan", false)).toBe("agent-skills:plan");
+  });
+
+  plainIt("stays silent when the turn answered with text", () => {
+    expect(ompSilentCommandName("/instinct-status", true)).toBeUndefined();
+  });
+
+  plainIt("ignores prompts that merely start with a path", () => {
+    expect(ompSilentCommandName("/tmp/x is broken, fix it", false)).toBeUndefined();
+    expect(ompSilentCommandName("no command here", false)).toBeUndefined();
   });
 });
 
@@ -2722,6 +2740,95 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
           event.type === "turn.plan.updated" ? event.payload.plan.length : -1,
         ),
         [2, 0],
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  // `/rename` names the session omp lists under `--resume`; the thread has to
+  // take that name, and take it even over a title this client generated.
+  it.effect("renames the thread from omp's session title", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-rename-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_SESSION_INFO_TITLE: "Statusbar cache indicator" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const metadataFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) => event.threadId === threadId && event.type === "thread.metadata.updated",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "/rename", attachments: [] });
+
+      const metadata = Array.from(yield* Fiber.join(metadataFiber))[0];
+      assert.equal(metadata?.type, "thread.metadata.updated");
+      if (metadata?.type === "thread.metadata.updated") {
+        assert.equal(metadata.payload.name, "Statusbar cache indicator");
+        assert.equal(metadata.payload.nameIsExplicit, true);
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  // `/fresh` starts a new omp provider session on the same connection: every
+  // later update carries the new id, and treating those as a foreign session
+  // left the thread silent for the rest of its life.
+  it.effect("keeps streaming after omp swaps its session id", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-fresh-session-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_ROTATE_SESSION_ID: "mock-session-after-fresh" }),
+      );
+      yield* settings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      const contentFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "content.delta"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      assert.deepStrictEqual(session.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+      yield* adapter.sendTurn({ threadId, input: "/fresh", attachments: [] });
+
+      const delta = Array.from(yield* Fiber.join(contentFiber))[0];
+      assert.equal(delta?.type, "content.delta");
+
+      // The cursor follows the live session, so a later resume replays the
+      // session omp actually kept writing to.
+      const sessions = yield* adapter.listSessions();
+      assert.deepStrictEqual(
+        sessions.find((candidate) => candidate.threadId === threadId)?.resumeCursor,
+        { schemaVersion: 1, sessionId: "mock-session-after-fresh" },
       );
 
       yield* adapter.stopSession(threadId);
