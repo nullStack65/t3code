@@ -606,7 +606,7 @@ function PairingForm({
 
 // ── Step 3: agents ───────────────────────────────────────────
 
-const PRIMARY_AGENT_DRIVERS = ["claudeAgent", "codex"] as const;
+const PRIMARY_AGENT_DRIVERS = ["claudeAgent", "codex", "omp"] as const;
 type OnboardingAgentDriver = (typeof PRIMARY_AGENT_DRIVERS)[number];
 
 /** Setup values stay fixed while provider probes refresh the surrounding cards. */
@@ -1164,7 +1164,7 @@ function ImportStep({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6">
           <Spinner className="size-5 text-muted-foreground" />
           <p className="text-center text-sm text-muted-foreground">
-            Looking for projects from Claude Code and Codex…
+            Looking for projects from Claude Code, Codex and Oh My Pi…
           </p>
         </div>
         <div className="flex justify-end">
@@ -1244,7 +1244,7 @@ function ImportStep({
                   </div>
                 ) : scanCandidates.length === 0 ? (
                   <p className="py-2 text-sm text-muted-foreground">
-                    No existing Claude Code or Codex projects found.
+                    No existing Claude Code, Codex or Oh My Pi projects found.
                   </p>
                 ) : null}
                 {scan.data?.truncated ? (
