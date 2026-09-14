@@ -26,6 +26,7 @@ const realisticPayload = JSON.stringify({
     {
       provider: "anthropic",
       fetchedAt: "2026-09-14T00:00:00.000Z",
+      metadata: { accountId: "acct-1", email: "dev@example.com" },
       limits: [
         {
           id: "5h",
@@ -251,7 +252,17 @@ describe("ompUsageToAuth", () => {
     expect(ompUsageToAuth(decodeOmpUsageOutput(realisticPayload))).toEqual({
       status: "authenticated",
       type: "agent",
+      email: "dev@example.com",
       label: "2 providers: anthropic, openai",
+    });
+  });
+
+  it("omits the account address when omp reports none", () => {
+    const redacted = JSON.stringify({ reports: [{ provider: "anthropic", limits: [] }] });
+    expect(ompUsageToAuth(decodeOmpUsageOutput(redacted))).toEqual({
+      status: "authenticated",
+      type: "agent",
+      label: "anthropic",
     });
   });
 
@@ -300,6 +311,7 @@ describe("probeOmpUsage", () => {
       expect(result.auth).toEqual({
         status: "authenticated",
         type: "agent",
+        email: "dev@example.com",
         label: "2 providers: anthropic, openai",
       });
       expect(result.usageLimits?.windows.map((window) => window.id)).toEqual([

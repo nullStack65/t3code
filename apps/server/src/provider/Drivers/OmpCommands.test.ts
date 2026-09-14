@@ -1,6 +1,18 @@
+import * as NodeOS from "node:os";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { it as effectIt } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { describe, expect, it } from "vite-plus/test";
 
-import { catalogFromCommandEntries, decodeOmpCommandCatalog } from "./OmpCommands.ts";
+import {
+  catalogFromCommandEntries,
+  decodeOmpCommandCatalog,
+  discoverOmpCommandCatalog,
+} from "./OmpCommands.ts";
+import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
 const frame = (commands: ReadonlyArray<unknown>) =>
   // @effect-diagnostics-next-line preferSchemaOverJson:off - building a raw RPC frame.
@@ -163,4 +175,69 @@ describe("catalogFromCommandEntries", () => {
     ];
     expect(catalogFromCommandEntries(entries)).toEqual(decodeOmpCommandCatalog(frame(entries)));
   });
+});
+
+/**
+ * Fake omp answering `--mode rpc`: it emits the startup command frame, then
+ * replies to whatever request arrives on stdin, and records each spawn so the
+ * test can prove one process served both catalogs.
+ */
+const fakeRpcOmpSource = (spawnLogPath: string) =>
+  [
+    'import { appendFileSync } from "node:fs";',
+    `appendFileSync(${JSON.stringify(spawnLogPath)}, "spawn\\n");`,
+    `process.stdout.write(${JSON.stringify(
+      `${frame([
+        { name: "compact", description: "Compact the context" },
+        { name: "skill:deploy", description: "Deploy the app" },
+      ])}\n`,
+    )});`,
+    "const chunks = [];",
+    "for await (const chunk of process.stdin) chunks.push(chunk);",
+    'const request = JSON.parse(Buffer.concat(chunks).toString("utf8").trim());',
+    'if (request.type === "get_available_models") {',
+    "  process.stdout.write(",
+    "    JSON.stringify({",
+    "      id: request.id,",
+    '      type: "response",',
+    '      command: "get_available_models",',
+    "      data: {",
+    "        models: [",
+    '          { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic", reasoning: true, contextWindow: 1000000, thinking: { mode: "anthropic-adaptive", efforts: ["low", "high"] } },',
+    "        ],",
+    "      },",
+    '    }) + "\\n",',
+    "  );",
+    "}",
+    "process.exit(0);",
+    "",
+  ].join("\n");
+
+describe("discoverOmpCommandCatalog", () => {
+  effectIt.live("answers both catalogs from a single omp process", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectory({
+        directory: NodeOS.tmpdir(),
+        prefix: "omp-rpc-catalog-",
+      });
+      const spawnLogPath = path.join(directory, "spawns.log");
+      const binaryPath = writeFakeCli({
+        directory,
+        name: "fake-omp",
+        source: fakeRpcOmpSource(spawnLogPath),
+      });
+
+      const catalog = yield* discoverOmpCommandCatalog({ binaryPath });
+
+      expect(catalog.slashCommands.map((command) => command.name)).toEqual(["compact"]);
+      expect(catalog.skills.map((skill) => skill.name)).toEqual(["deploy"]);
+      expect(catalog.models.metadataBySlug.get("anthropic/claude-sonnet-5")?.contextWindow).toBe(
+        1_000_000,
+      );
+      const spawnLog = yield* fileSystem.readFileString(spawnLogPath);
+      expect(spawnLog.trim().split("\n")).toHaveLength(1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

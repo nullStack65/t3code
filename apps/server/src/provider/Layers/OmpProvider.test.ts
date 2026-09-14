@@ -52,14 +52,17 @@ function selectDescriptor(
   };
 }
 
-function booleanDescriptor(id: string, label: string, currentValue?: boolean) {
-  return {
-    id,
-    label,
-    type: "boolean" as const,
-    ...(typeof currentValue === "boolean" ? { currentValue } : {}),
-  };
-}
+/**
+ * These fixtures are ACP-only fakes: `--mode rpc` exits without a catalog, so
+ * `checkOmpProviderStatus` has to reach its ACP fallback to build a model
+ * list — which is exactly the degraded path the tests below cover.
+ */
+const RPC_UNSUPPORTED_SOURCE = [
+  'if (process.argv[2] === "--mode") {',
+  "  process.exit(0);",
+  "}",
+].join("\n");
+
 const makeMockAgentWrapper = Effect.fn("makeMockAgentWrapper")(function* (
   extraEnv?: Record<string, string>,
 ) {
@@ -89,6 +92,7 @@ const makeMockAgentWithVersionWrapper = Effect.fn("makeMockAgentWithVersionWrapp
     name: "fake-omp",
     env: { T3_ACP_OMP_SHAPES: "1" },
     source: [
+      RPC_UNSUPPORTED_SOURCE,
       'if (process.argv[2] === "--version") {',
       '  process.stdout.write("omp/18.0.6\\n");',
       "  process.exit(0);",
@@ -208,6 +212,7 @@ const makeMockAgentWithUsageWrapper = Effect.fn("makeMockAgentWithUsageWrapper")
     name: "fake-omp",
     env: { T3_ACP_OMP_SHAPES: "1" },
     source: [
+      RPC_UNSUPPORTED_SOURCE,
       'if (process.argv[2] === "--version") {',
       '  process.stdout.write("omp/18.0.6\\n");',
       "  process.exit(0);",
@@ -218,6 +223,84 @@ const makeMockAgentWithUsageWrapper = Effect.fn("makeMockAgentWithUsageWrapper")
       "  process.exit(0);",
       "}",
       execScriptSource({ scriptPath: mockAgentPath }),
+    ].join("\n"),
+  });
+});
+
+/**
+ * Fake omp with a real RPC catalog: the startup command frame plus a
+ * `get_available_models` response holding a 1,000,000-token reasoning model
+ * and a 200,000-token non-reasoning one, shaped like omp/18.1.18.
+ */
+const makeRpcCatalogOmpWrapper = Effect.fn("makeRpcCatalogOmpWrapper")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const dir = yield* fileSystem.makeTempDirectory({
+    directory: NodeOS.tmpdir(),
+    prefix: "omp-provider-rpc-mock-",
+  });
+  // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frame for a fake CLI.
+  const commandFrame = JSON.stringify({
+    type: "available_commands_update",
+    commands: [
+      { name: "compact", description: "Compact the context" },
+      { name: "model", description: "Show current model selection" },
+      { name: "skill:deploy", description: "Deploy the app" },
+    ],
+  });
+  // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frame for a fake CLI.
+  const modelsResponse = JSON.stringify({
+    type: "response",
+    command: "get_available_models",
+    data: {
+      models: [
+        {
+          id: "claude-sonnet-5",
+          name: "Claude Sonnet 5",
+          provider: "anthropic",
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: 1_000_000,
+          maxTokens: 128_000,
+          thinking: {
+            mode: "anthropic-adaptive",
+            efforts: ["low", "medium", "high", "xhigh", "max"],
+          },
+        },
+        {
+          id: "claude-sonnet-3-5",
+          name: "Claude Sonnet 3.5",
+          provider: "anthropic",
+          reasoning: false,
+          input: ["text", "image"],
+          contextWindow: 200_000,
+          maxTokens: 8192,
+        },
+      ],
+    },
+  });
+  return writeFakeCli({
+    directory: dir,
+    name: "fake-omp",
+    source: [
+      'if (process.argv[2] === "--version") {',
+      '  process.stdout.write("omp/18.0.6\\n");',
+      "  process.exit(0);",
+      "}",
+      'if (process.argv[2] === "--mode") {',
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fake child-process stdout.
+      `  process.stdout.write(${JSON.stringify(`${commandFrame}\n`)});`,
+      "  const chunks = [];",
+      "  for await (const chunk of process.stdin) chunks.push(chunk);",
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fake child-process stdout.
+      `  if (Buffer.concat(chunks).toString("utf8").includes("get_available_models")) {`,
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fake child-process stdout.
+      `    process.stdout.write(${JSON.stringify(`${modelsResponse}\n`)});`,
+      "  }",
+      "  process.exit(0);",
+      "}",
+      '  process.stderr.write("unsupported\\n");',
+      "process.exit(11);",
+      "",
     ].join("\n"),
   });
 });
@@ -591,7 +674,11 @@ describe("buildOmpCapabilitiesFromConfigOptions", () => {
     );
   });
 
-  it("maps the context_size select onto a contextWindow descriptor", () => {
+  it("emits no descriptor for options omp never advertised", () => {
+    // omp/18.1.18 `session/new` advertises exactly mode, model and thinking:
+    // a `context_size` select or a `fast` toggle would be a control the
+    // picker offers and omp rejects. Both shapes must stay unmapped even if
+    // some other agent advertises them.
     expect(
       buildOmpCapabilitiesFromConfigOptions([
         {
@@ -605,22 +692,6 @@ describe("buildOmpCapabilitiesFromConfigOptions", () => {
           id: "context_size",
           name: "Context",
         },
-      ]),
-    ).toEqual(
-      createModelCapabilities({
-        optionDescriptors: [
-          selectDescriptor("contextWindow", "Context", [
-            { id: "272k", label: "272K" },
-            { id: "1m", label: "1M", isDefault: true },
-          ]),
-        ],
-      }),
-    );
-  });
-
-  it("maps the boolean fast toggle onto a fastMode descriptor", () => {
-    expect(
-      buildOmpCapabilitiesFromConfigOptions([
         {
           type: "boolean",
           currentValue: true,
@@ -629,30 +700,25 @@ describe("buildOmpCapabilitiesFromConfigOptions", () => {
           name: "Fast",
         },
       ]),
-    ).toEqual(
-      createModelCapabilities({
-        optionDescriptors: [booleanDescriptor("fastMode", "Fast", true)],
-      }),
-    );
+    ).toEqual(createModelCapabilities({ optionDescriptors: [] }));
     expect(
-      buildOmpCapabilitiesFromConfigOptions([
-        {
-          type: "select",
-          currentValue: "true",
-          options: [
-            { name: "Off", value: "false" },
-            { name: "Fast", value: "true" },
-          ],
-          category: "model_config",
-          id: "fast",
-          name: "Fast",
-        },
-      ]),
-    ).toEqual(
-      createModelCapabilities({
-        optionDescriptors: [booleanDescriptor("fastMode", "Fast", true)],
-      }),
-    );
+      resolveOmpAcpConfigUpdates(
+        [
+          {
+            type: "select",
+            currentValue: "1m",
+            options: [{ name: "1M", value: "1m" }],
+            category: "model_config",
+            id: "context_size",
+            name: "Context",
+          },
+        ],
+        [
+          { id: "contextWindow", value: "1m" },
+          { id: "fastMode", value: true },
+        ],
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -676,45 +742,43 @@ describe("checkOmpProviderStatus", () => {
     }),
   );
 
-  effectIt.live(
-    "discovers the meta-provider catalog through ACP with the injected environment",
-    () =>
-      Effect.gen(function* () {
-        const { requestLogPath, wrapperPath } = yield* node(makeProviderStatusEnvFixture());
+  effectIt.live("falls back to the ACP catalog when the RPC probe answers no models", () =>
+    Effect.gen(function* () {
+      const { requestLogPath, wrapperPath } = yield* node(makeProviderStatusEnvFixture());
 
-        const provider = yield* node(
-          checkOmpProviderStatus(
-            {
-              enabled: true,
-              binaryPath: wrapperPath,
-              customModels: [],
-            },
-            {
-              ...process.env,
-              T3_ACP_REQUEST_LOG_PATH: requestLogPath,
-            },
-          ),
-        );
+      const provider = yield* node(
+        checkOmpProviderStatus(
+          {
+            enabled: true,
+            binaryPath: wrapperPath,
+            customModels: [],
+          },
+          {
+            ...process.env,
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          },
+        ),
+      );
 
-        expect(provider).toMatchObject({
-          installed: true,
-          version: "18.0.6",
-          status: "ready",
-          message: "3 upstream providers configured through Oh My Pi.",
-        });
-        expect(provider.models.map((model) => model.slug)).toEqual([
-          "anthropic/claude-opus-4-6",
-          "zhipu-coding-plan/glm-5.3",
-          "openai/gpt-5.4",
-        ]);
-        expect(provider.models.map((model) => model.subProvider)).toEqual([
-          "Anthropic",
-          "Zhipu Coding Plan",
-          "Openai",
-        ]);
-        const requestLog = yield* node(waitForFileContent(requestLogPath));
-        expect(requestLog).toContain("initialize");
-      }),
+      expect(provider).toMatchObject({
+        installed: true,
+        version: "18.0.6",
+        status: "ready",
+        message: "3 upstream providers configured through Oh My Pi.",
+      });
+      expect(provider.models.map((model) => model.slug)).toEqual([
+        "anthropic/claude-opus-4-6",
+        "zhipu-coding-plan/glm-5.3",
+        "openai/gpt-5.4",
+      ]);
+      expect(provider.models.map((model) => model.subProvider)).toEqual([
+        "Anthropic",
+        "Zhipu Coding Plan",
+        "Openai",
+      ]);
+      const requestLog = yield* node(waitForFileContent(requestLogPath));
+      expect(requestLog).toContain("initialize");
+    }),
   );
   effectIt.live("reports authenticated usage limits from omp usage --json", () =>
     Effect.gen(function* () {
@@ -748,6 +812,74 @@ describe("checkOmpProviderStatus", () => {
       expect(provider.usageLimits?.windows.map((window) => window.usedPercent)).toEqual([
         42, 71, 15, 20,
       ]);
+    }),
+  );
+
+  effectIt.live("sources each model's own context window and ladder from omp", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* node(makeRpcCatalogOmpWrapper());
+
+      const provider = yield* node(
+        checkOmpProviderStatus({
+          enabled: true,
+          binaryPath: wrapperPath,
+          // The duplicate is what a user carries from before omp advertised
+          // the slug; it must not produce a second picker entry.
+          customModels: ["anthropic/claude-sonnet-5", "ghost/model"],
+        }),
+      );
+
+      expect(provider.models.map((model) => model.slug)).toEqual([
+        "anthropic/claude-sonnet-3-5",
+        "anthropic/claude-sonnet-5",
+        "ghost/model",
+      ]);
+      expect(provider.models.filter((model) => model.slug === "anthropic/claude-sonnet-5")).toEqual(
+        [
+          {
+            slug: "anthropic/claude-sonnet-5",
+            name: "Claude Sonnet 5",
+            subProvider: "Anthropic",
+            isCustom: false,
+            capabilities: createModelCapabilities({
+              optionDescriptors: [
+                selectDescriptor("reasoning", "Thinking", [
+                  { id: "off", label: "Off" },
+                  { id: "auto", label: "Auto" },
+                  { id: "low", label: "Low" },
+                  { id: "medium", label: "Medium" },
+                  { id: "high", label: "High" },
+                  { id: "xhigh", label: "Extra High" },
+                  { id: "max", label: "Max" },
+                ]),
+              ],
+            }),
+          },
+        ],
+      );
+      // The 200,000-window sibling is non-reasoning: no ladder, and its own
+      // window is the one the meter must divide by, not the 1,000,000 above.
+      expect(
+        provider.models.find((model) => model.slug === "anthropic/claude-sonnet-3-5")?.capabilities,
+      ).toEqual(createModelCapabilities({ optionDescriptors: [] }));
+    }),
+  );
+
+  effectIt.live("publishes omp's own commands and skills at machine level", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* node(makeRpcCatalogOmpWrapper());
+
+      const provider = yield* node(
+        checkOmpProviderStatus({
+          enabled: true,
+          binaryPath: wrapperPath,
+          customModels: [],
+        }),
+      );
+
+      // The Compact affordance reads the base snapshot, not a workspace one.
+      expect(provider.slashCommands.map((command) => command.name)).toEqual(["compact", "model"]);
+      expect(provider.skills.map((skill) => skill.name)).toEqual(["deploy"]);
     }),
   );
 });

@@ -12,14 +12,15 @@
  * `sessionId`, `configOptions` and `modes`, verified against omp/18.1.18), but
  * RPC mode emits an `available_commands_update` frame at startup carrying
  * every command: one `skill:<name>` per discovered skill plus the regular
- * commands. The probe therefore spawns `omp --mode rpc`, closes stdin
- * immediately, and reads that frame: on stdin close RPC drains accepted
- * commands, disposes the session and exits 0, so no request has to be written
- * and no model is ever called.
+ * commands. The same process also answers `get_available_models` with omp's
+ * full model metadata, so one spawn serves both catalogs: the probe writes
+ * that single request, closes stdin, and reads the transcript. On stdin close
+ * RPC drains accepted commands, disposes the session and exits 0, and no
+ * model is ever called.
  *
- * Both kinds reach omp as ordinary prompt text — `/tools` and `/skill:<name>`
- * were both verified to run over an ACP `session/prompt` — so discovery is
- * only about offering them in the menus.
+ * Both command kinds reach omp as ordinary prompt text — `/tools` and
+ * `/skill:<name>` were both verified to run over an ACP `session/prompt` — so
+ * command discovery is only about offering them in the menus.
  *
  * @module provider/Drivers/OmpCommands
  */
@@ -36,6 +37,11 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import { collectStreamAsString } from "../providerSnapshot.ts";
+import {
+  decodeOmpModelCatalog,
+  OMP_AVAILABLE_MODELS_REQUEST_ID,
+  type OmpModelCatalog,
+} from "./OmpModelCatalog.ts";
 
 /**
  * Startup covers config load, skill discovery, extension load and MCP
@@ -48,6 +54,15 @@ const SKILL_COMMAND_PREFIX = "skill:";
 export interface OmpCommandCatalog {
   readonly skills: ReadonlyArray<ServerProviderSkill>;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+}
+
+/**
+ * What one RPC probe returns. `OmpCommandCatalog` stays the shape the live
+ * session path produces (`available_commands_update` frames carry no model
+ * metadata), so command consumers are unaffected by the model catalog.
+ */
+export interface OmpRpcCatalog extends OmpCommandCatalog {
+  readonly models: OmpModelCatalog;
 }
 
 export class OmpCommandsProbeError extends Schema.TaggedError<OmpCommandsProbeError>()(
@@ -155,22 +170,23 @@ export function decodeOmpCommandCatalog(stdout: string): OmpCommandCatalog {
 }
 
 /**
- * Spawn `omp --mode rpc` in `cwd` and map its startup catalog onto provider
- * skills and slash commands. Project-scoped skills and commands live under the
- * workspace, so the cwd decides the result and every workspace needs its own
- * probe.
+ * Spawn `omp --mode rpc` in `cwd` once and map its transcript onto provider
+ * skills, slash commands and omp's model catalog. Project-scoped skills and
+ * commands live under the workspace, so the cwd decides the command result and
+ * every workspace needs its own probe; the model catalog is workspace-scoped
+ * too, because a project `models.yml` overlay can add entries.
  */
 export const discoverOmpCommandCatalog = Effect.fn("discoverOmpCommandCatalog")(function* (
   ompSettings: Pick<OmpSettings, "binaryPath">,
   environment: NodeJS.ProcessEnv = process.env,
   cwd?: string,
-) {
+): Effect.fn.Return<OmpRpcCatalog, OmpCommandsProbeError, ChildProcessSpawner.ChildProcessSpawner> {
   const command = ompSettings.binaryPath || "omp";
   const probe = yield* Effect.gen(function* () {
     const spawnCommand = yield* resolveSpawnCommand(
       command,
-      // No session file, no language servers: the probe only needs the command
-      // catalog, and both would cost startup time and leave state behind.
+      // No session file, no language servers: the probe only needs the two
+      // catalogs, and both would cost startup time and leave state behind.
       ["--mode", "rpc", "--no-session", "--no-lsp"],
       { env: environment },
     );
@@ -182,12 +198,29 @@ export const discoverOmpCommandCatalog = Effect.fn("discoverOmpCommandCatalog")(
         shell: spawnCommand.shell,
       }),
     );
-    // Closing stdin is the exit signal: RPC mode keeps reading commands until
-    // stdin ends, so without this the process outlives the probe.
+    // One request, then stdin closes: commands arrive unprompted at startup,
+    // the model catalog has to be asked for, and closing stdin is the exit
+    // signal — RPC mode keeps reading commands until stdin ends, so without it
+    // the process outlives the probe. omp answers the queued request before it
+    // drains, so the response lands in the same transcript.
     const [stdout, , exitCode] = yield* Effect.all(
       [
         collectStreamAsString(child.stdout),
-        Stream.run(Stream.empty, child.stdin),
+        // Best-effort: a probe that already exited (or an omp build that
+        // closed stdin first) must not fail the whole catalog — stdout and the
+        // exit code decide the outcome below.
+        Stream.run(
+          Stream.encodeText(
+            Stream.make(
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - JSONL transport frame.
+              `${JSON.stringify({
+                id: OMP_AVAILABLE_MODELS_REQUEST_ID,
+                type: "get_available_models",
+              })}\n`,
+            ),
+          ),
+          child.stdin,
+        ).pipe(Effect.ignore),
         child.exitCode.pipe(Effect.map(Number)),
       ],
       { concurrency: "unbounded" },
@@ -213,9 +246,11 @@ export const discoverOmpCommandCatalog = Effect.fn("discoverOmpCommandCatalog")(
     });
   }
   const catalog = decodeOmpCommandCatalog(probe.value.stdout);
+  const models = decodeOmpModelCatalog(probe.value.stdout);
   if (
     catalog.skills.length === 0 &&
     catalog.slashCommands.length === 0 &&
+    models.models.length === 0 &&
     probe.value.exitCode !== 0
   ) {
     return yield* new OmpCommandsProbeError({
@@ -224,5 +259,5 @@ export const discoverOmpCommandCatalog = Effect.fn("discoverOmpCommandCatalog")(
       exitCode: probe.value.exitCode,
     });
   }
-  return catalog;
+  return { ...catalog, models };
 });

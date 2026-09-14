@@ -5,6 +5,8 @@ import type {
   ServerProvider,
   ServerProviderAuth,
   ServerProviderModel,
+  ServerProviderSkill,
+  ServerProviderSlashCommand,
   ServerProviderState,
   ServerProviderUsageLimits,
 } from "@t3tools/contracts";
@@ -21,14 +23,12 @@ import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
-  getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
   readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import {
-  buildBooleanOptionDescriptor,
   buildSelectOptionDescriptor,
   buildServerProvider,
   isCommandMissingCause,
@@ -43,6 +43,9 @@ import {
 } from "../providerMaintenance.ts";
 import * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import { probeOmpUsage } from "../Drivers/OmpUsage.ts";
+import { discoverOmpCommandCatalog, type OmpRpcCatalog } from "../Drivers/OmpCommands.ts";
+import { normalizeOmpReasoningValue, titleCaseSlug } from "../Drivers/OmpModelCatalog.ts";
+
 const OMP_PRESENTATION = {
   displayName: "Oh My Pi",
   badgeLabel: "Early Access",
@@ -57,6 +60,10 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+// omp's RPC startup covers config, skills, extensions and MCP, so it is
+// slower than a version probe but still has to fail rather than hang: the
+// health check waits on it before the ACP fallback gets its own budget.
+const OMP_RPC_CATALOG_TIMEOUT_MS = 20_000;
 const OMP_CLI_DOCS_URL = "https://github.com/can1357/oh-my-pi";
 const OMP_ACP_MODEL_DISCOVERY_FAILED_MESSAGE = [
   "Oh My Pi ACP model discovery failed.",
@@ -133,33 +140,6 @@ export function flattenSessionConfigSelectOptions(
   );
 }
 
-function normalizeOmpReasoningValue(value: string | null | undefined): string | undefined {
-  const normalized = value?.trim().toLowerCase();
-  switch (normalized) {
-    case "off":
-    case "none":
-      return "off";
-    // omp's own ladder is off|minimal|low|medium|high|xhigh|max|auto; the ACP
-    // thought_level select advertises a model-dependent subset (e.g. only
-    // {off, auto} on auto models). Aliases normalize so the picker round-trips
-    // through resolveOmpAcpConfigUpdates back to the raw advertised value.
-    case "auto":
-      return "auto";
-    case "minimal":
-    case "low":
-    case "medium":
-    case "high":
-    case "max":
-      return normalized;
-    case "xhigh":
-    case "extra-high":
-    case "extra high":
-      return "xhigh";
-    default:
-      return undefined;
-  }
-}
-
 function getOmpConfigOptionCategory(option: EffectAcpSchema.SessionConfigOption): string {
   return option.category?.trim().toLowerCase() ?? "";
 }
@@ -195,53 +175,6 @@ function findOmpEffortConfigOption(
   );
 }
 
-function isOmpContextConfigOption(option: EffectAcpSchema.SessionConfigOption): boolean {
-  const id = option.id.trim().toLowerCase();
-  const name = option.name.trim().toLowerCase();
-  return id === "context" || id === "context_size" || name.includes("context");
-}
-
-function isOmpFastConfigOption(option: EffectAcpSchema.SessionConfigOption): boolean {
-  const id = option.id.trim().toLowerCase();
-  const name = option.name.trim().toLowerCase();
-  return id === "fast" || name === "fast" || name.includes("fast mode");
-}
-
-function isBooleanLikeConfigOption(option: EffectAcpSchema.SessionConfigOption): boolean {
-  if (option.type === "boolean") {
-    return true;
-  }
-  if (option.type !== "select") {
-    return false;
-  }
-  const values = new Set(
-    flattenSessionConfigSelectOptions(option).map((entry) => entry.value.trim().toLowerCase()),
-  );
-  return values.has("true") && values.has("false");
-}
-
-function getBooleanCurrentValue(
-  option: EffectAcpSchema.SessionConfigOption | undefined,
-): boolean | undefined {
-  if (!option) {
-    return undefined;
-  }
-  if (option.type === "boolean") {
-    return option.currentValue;
-  }
-  if (option.type !== "select") {
-    return undefined;
-  }
-  const normalized = option.currentValue?.trim().toLowerCase();
-  if (normalized === "true") {
-    return true;
-  }
-  if (normalized === "false") {
-    return false;
-  }
-  return undefined;
-}
-
 export function buildOmpCapabilitiesFromConfigOptions(
   configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
 ): ModelCapabilities {
@@ -272,32 +205,12 @@ export function buildOmpCapabilitiesFromConfigOptions(
         })
       : [];
 
-  const contextOption = configOptions.find(
-    (option) => option.category === "model_config" && isOmpContextConfigOption(option),
-  );
-  const contextWindowOptions =
-    contextOption?.type === "select"
-      ? flattenSessionConfigSelectOptions(contextOption).map((entry) => {
-          if (contextOption.currentValue?.trim() === entry.value) {
-            return {
-              value: entry.value,
-              label: entry.name,
-              isDefault: true,
-            };
-          }
-          return {
-            value: entry.value,
-            label: entry.name,
-          };
-        })
-      : [];
-
-  const fastOption = configOptions.find(
-    (option) => option.category === "model_config" && isOmpFastConfigOption(option),
-  );
-  const fastCurrentValue = getBooleanCurrentValue(fastOption);
-  const optionDescriptors = [
-    ...(reasoningEffortLevels.length > 0
+  // omp's `session/new` advertises exactly `mode`, `model` and `thinking`
+  // (verified on omp/18.1.18 for an adaptive, a `requiresEffort` and a
+  // non-reasoning model), so there is nothing else to map: a `context_size`
+  // or `fast` descriptor would offer the picker a control omp rejects.
+  const optionDescriptors =
+    reasoningEffortLevels.length > 0
       ? [
           buildSelectOptionDescriptor({
             id: "reasoning",
@@ -305,31 +218,7 @@ export function buildOmpCapabilitiesFromConfigOptions(
             options: reasoningEffortLevels,
           }),
         ]
-      : []),
-    ...(contextWindowOptions.length > 0
-      ? [
-          buildSelectOptionDescriptor({
-            id: "contextWindow",
-            label: contextOption?.name?.trim() || "Context Window",
-            options: contextWindowOptions,
-          }),
-        ]
-      : []),
-    ...(fastOption && isBooleanLikeConfigOption(fastOption)
-      ? [
-          typeof fastCurrentValue === "boolean"
-            ? buildBooleanOptionDescriptor({
-                id: "fastMode",
-                label: fastOption.name?.trim() || "Fast Mode",
-                currentValue: fastCurrentValue,
-              })
-            : buildBooleanOptionDescriptor({
-                id: "fastMode",
-                label: fastOption.name?.trim() || "Fast Mode",
-              }),
-        ]
-      : []),
-  ];
+      : [];
 
   return createModelCapabilities({
     optionDescriptors,
@@ -361,16 +250,6 @@ export function findOmpModelConfigOption(
       (option) => option.type === "select" && option.id.trim().toLowerCase() === "model",
     )
   );
-}
-
-function titleCaseSlug(value: string): string {
-  const segments: Array<string> = [];
-  for (const segment of value.split(/[-_/]+/)) {
-    if (segment.length > 0) {
-      segments.push(segment.charAt(0).toUpperCase() + segment.slice(1));
-    }
-  }
-  return segments.join(" ");
 }
 
 /**
@@ -529,36 +408,11 @@ export function getOmpFallbackModels(
   );
 }
 
-function normalizeOmpConfigOptionToken(value: string | null | undefined): string {
-  return (
-    value
-      ?.trim()
-      .toLowerCase()
-      .replace(/[\s_-]+/g, "-") ?? ""
-  );
-}
-
 function findOmpSelectOptionValue(
   configOption: EffectAcpSchema.SessionConfigOption | undefined,
   matcher: (option: OmpSessionSelectOption) => boolean,
 ): string | undefined {
   return flattenSessionConfigSelectOptions(configOption).find(matcher)?.value;
-}
-
-function findOmpBooleanConfigValue(
-  configOption: EffectAcpSchema.SessionConfigOption | undefined,
-  requested: boolean,
-): string | boolean | undefined {
-  if (!configOption) {
-    return undefined;
-  }
-  if (configOption.type === "boolean") {
-    return requested;
-  }
-  return findOmpSelectOptionValue(
-    configOption,
-    (option) => normalizeOmpConfigOptionToken(option.value) === String(requested),
-  );
 }
 
 export function resolveOmpAcpConfigUpdates(
@@ -592,35 +446,6 @@ export function resolveOmpAcpConfigUpdates(
     }
   }
 
-  const contextOption = configOptions.find(
-    (option) => option.category === "model_config" && isOmpContextConfigOption(option),
-  );
-  const requestedContextWindow = getProviderOptionStringSelectionValue(selections, "contextWindow");
-  if (contextOption && requestedContextWindow) {
-    const value = findOmpSelectOptionValue(
-      contextOption,
-      (option) =>
-        normalizeOmpConfigOptionToken(option.value) ===
-          normalizeOmpConfigOptionToken(requestedContextWindow) ||
-        normalizeOmpConfigOptionToken(option.name) ===
-          normalizeOmpConfigOptionToken(requestedContextWindow),
-    );
-    if (value) {
-      updates.push({ configId: contextOption.id, value });
-    }
-  }
-
-  const fastOption = configOptions.find(
-    (option) => option.category === "model_config" && isOmpFastConfigOption(option),
-  );
-  const requestedFastMode = getProviderOptionBooleanSelectionValue(selections, "fastMode");
-  if (fastOption && typeof requestedFastMode === "boolean") {
-    const value = findOmpBooleanConfigValue(fastOption, requestedFastMode);
-    if (value !== undefined) {
-      updates.push({ configId: fastOption.id, value });
-    }
-  }
-
   return updates;
 }
 
@@ -651,6 +476,15 @@ export function buildOmpProviderSnapshot(input: {
   readonly message?: string;
   readonly discoveredModels?: ReadonlyArray<ServerProviderModel>;
   readonly discoveryWarning?: string;
+  /**
+   * The machine-level catalogs. Per-workspace snapshots stay the
+   * project-scoped truth (a project can add skills and commands), but the
+   * base snapshot is what `providerSupportsManualCompaction` reads to decide
+   * whether to offer Compact, so it must carry omp's own `/compact` rather
+   * than an empty list.
+   */
+  readonly skills?: ReadonlyArray<ServerProviderSkill>;
+  readonly slashCommands?: ReadonlyArray<ServerProviderSlashCommand>;
   readonly auth?: ServerProviderAuth;
   readonly usageLimits?: ServerProviderUsageLimits;
 }): ServerProviderDraft {
@@ -673,6 +507,8 @@ export function buildOmpProviderSnapshot(input: {
       ),
       input.ompSettings.customModels,
     ),
+    ...(input.skills ? { skills: input.skills } : {}),
+    ...(input.slashCommands ? { slashCommands: input.slashCommands } : {}),
     probe: {
       installed: true,
       version: input.version,
@@ -794,46 +630,73 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
     });
   }
 
-  let discoveredModels = Option.none<ReadonlyArray<ServerProviderModel>>();
-  let discoveryWarning: string | undefined;
-  // The usage probe is read-only and bounded by its own timeout, so it rides
-  // alongside ACP discovery instead of stretching the health check. It never
-  // fails: every failure mode degrades to unknown auth with no limits.
-  const [discoveryExit, usageProbe] = yield* Effect.all(
+  // One RPC probe answers both catalogs: omp's own model metadata (real
+  // context windows and per-model reasoning ladders, which an ACP `model`
+  // select cannot express) and the command/skill catalog the composer needs
+  // at machine level. The ACP session stays the fallback. The usage probe is
+  // read-only and bounded by its own timeout, so it rides alongside instead
+  // of stretching the health check; it never fails: every failure mode
+  // degrades to unknown auth with no limits.
+  const [rpcExit, usageProbe] = yield* Effect.all(
     [
       Effect.exit(
-        discoverOmpModelsViaAcp(ompSettings, environment).pipe(
-          Effect.timeoutOption(OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
+        discoverOmpCommandCatalog(ompSettings, environment ?? process.env).pipe(
+          Effect.timeoutOption(OMP_RPC_CATALOG_TIMEOUT_MS),
         ),
       ),
       probeOmpUsage(ompSettings, checkedAt, environment),
     ],
     { concurrency: 2 },
   );
-  if (Exit.isFailure(discoveryExit)) {
-    yield* Effect.logWarning("Oh My Pi ACP model discovery failed", {
-      errorTag: causeErrorTag(discoveryExit.cause),
+  let rpcCatalog: OmpRpcCatalog | undefined;
+  if (Exit.isFailure(rpcExit)) {
+    yield* Effect.logWarning("Oh My Pi RPC catalog probe failed", {
+      errorTag: causeErrorTag(rpcExit.cause),
     });
-    discoveryWarning = OMP_ACP_MODEL_DISCOVERY_FAILED_MESSAGE;
-  } else if (Option.isNone(discoveryExit.value)) {
-    discoveryWarning = `Oh My Pi ACP model discovery timed out after ${OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`;
-  } else if (discoveryExit.value.value.length === 0) {
-    discoveryWarning = "Oh My Pi ACP model discovery returned no built-in models.";
+  } else if (Option.isNone(rpcExit.value)) {
+    yield* Effect.logWarning("Oh My Pi RPC catalog probe timed out", {
+      timeoutMs: OMP_RPC_CATALOG_TIMEOUT_MS,
+    });
   } else {
-    discoveredModels = discoveryExit.value;
+    rpcCatalog = rpcExit.value.value;
   }
-  const resolvedModels = Option.getOrElse(
-    Option.filter(discoveredModels, (models) => models.length > 0),
-    () => [] as const,
-  );
+
+  let discoveredModels = rpcCatalog?.models.models ?? [];
+  let discoveryWarning: string | undefined;
+  if (discoveredModels.length === 0) {
+    // No metadata catalog: fall back to the ACP `model` select. Those entries
+    // carry no context window and only the probe session's model reports
+    // capabilities, so this is a degraded catalog, not an equivalent one.
+    const discoveryExit = yield* Effect.exit(
+      discoverOmpModelsViaAcp(ompSettings, environment).pipe(
+        Effect.timeoutOption(OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
+      ),
+    );
+    if (Exit.isFailure(discoveryExit)) {
+      yield* Effect.logWarning("Oh My Pi ACP model discovery failed", {
+        errorTag: causeErrorTag(discoveryExit.cause),
+      });
+      discoveryWarning = OMP_ACP_MODEL_DISCOVERY_FAILED_MESSAGE;
+    } else if (Option.isNone(discoveryExit.value)) {
+      discoveryWarning = `Oh My Pi ACP model discovery timed out after ${OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`;
+    } else if (discoveryExit.value.value.length === 0) {
+      discoveryWarning = "Oh My Pi ACP model discovery returned no built-in models.";
+    } else {
+      discoveredModels = discoveryExit.value.value;
+    }
+  }
   // Meta-provider reporting (mirrors OpenCode): tell the user how many
   // upstream providers the discovered `provider/model` catalog routes to.
-  const upstreamCount = countOmpUpstreamProviders(resolvedModels);
+  const upstreamCount = countOmpUpstreamProviders(discoveredModels);
   return buildOmpProviderSnapshot({
     checkedAt,
     ompSettings,
     version,
-    discoveredModels: resolvedModels,
+    discoveredModels,
+    ...(rpcCatalog && rpcCatalog.skills.length > 0 ? { skills: rpcCatalog.skills } : {}),
+    ...(rpcCatalog && rpcCatalog.slashCommands.length > 0
+      ? { slashCommands: rpcCatalog.slashCommands }
+      : {}),
     ...(upstreamCount > 0
       ? {
           message: `${upstreamCount} upstream provider${upstreamCount === 1 ? "" : "s"} configured through Oh My Pi.`,
@@ -850,8 +713,8 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
  *
  * Used by `OmpDriver` as the `makeManagedServerProvider.enrichSnapshot`
  * hook: republishes update/version advisory metadata without performing any
- * model or capability discovery. Oh My Pi model data comes exclusively from
- * the probe ACP session during provider status checks.
+ * model or capability discovery. Oh My Pi model data comes from the RPC
+ * catalog probe (or its ACP fallback) during provider status checks.
  */
 export const enrichOmpSnapshot = (input: {
   readonly settings: OmpSettings;

@@ -84,7 +84,12 @@ function fakeOmpSource(input: {
     "}",
     'if (args[0] === "--mode") {',
     ...(input.probeLogPath
-      ? [`  appendFileSync(${JSON.stringify(input.probeLogPath)}, "probe\\n");`]
+      ? [
+          // The machine-level status probe runs from the server's own cwd on an
+          // interval nobody here controls, so each spawn records its cwd and the
+          // assertions count only the workspace they asked for.
+          `  appendFileSync(${JSON.stringify(input.probeLogPath)}, process.cwd() + "\\n");`,
+        ]
       : []),
     `  process.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "available_commands_update", commands: catalogCommands })}\n`)});`,
     "  process.exit(0);",
@@ -148,13 +153,20 @@ interface CapturedOmpAdapterOptions {
 const lastAdapterOptions = (): CapturedOmpAdapterOptions | undefined =>
   capturedAdapterOptions.at(-1) as CapturedOmpAdapterOptions | undefined;
 
-const readProbeCount = (probeLogPath: string) =>
+const readProbeCount = (probeLogPath: string, cwd?: string) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const text = yield* fileSystem
       .readFileString(probeLogPath)
       .pipe(Effect.orElseSucceed(() => ""));
-    return text.split("\n").filter((line) => line.length > 0).length;
+    const lines = text.split("\n").filter((line) => line.trim().length > 0);
+    if (cwd === undefined) return lines.length;
+    const expected = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd));
+    return lines.filter((line) => {
+      const normalized = path.normalize(line.trim());
+      return normalized === path.normalize(expected) || normalized === path.normalize(cwd);
+    }).length;
   });
 
 it.layer(testLayer)("OmpDriver", (it) => {
@@ -329,11 +341,12 @@ it.layer(testLayer)("OmpDriver", (it) => {
       const second = yield* snapshotForCwd(workspace);
       expect(second.skills).toEqual(first.skills);
       expect(second.slashCommands).toEqual(first.slashCommands);
-      expect(yield* readProbeCount(probeLogPath)).toBe(1);
+      expect(yield* readProbeCount(probeLogPath, workspace)).toBe(1);
 
       const other = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-cache-other-" });
       yield* snapshotForCwd(other);
-      expect(yield* readProbeCount(probeLogPath)).toBe(2);
+      expect(yield* readProbeCount(probeLogPath, other)).toBe(1);
+      expect(yield* readProbeCount(probeLogPath, workspace)).toBe(1);
     }).pipe(Effect.scoped),
   );
 
@@ -358,7 +371,7 @@ it.layer(testLayer)("OmpDriver", (it) => {
       const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-omp-live-ws-" });
       const first = yield* snapshotForCwd(workspace);
       expect(first.skills.map((skill) => skill.name)).toEqual(["deploy"]);
-      expect(yield* readProbeCount(probeLogPath)).toBe(1);
+      expect(yield* readProbeCount(probeLogPath, workspace)).toBe(1);
 
       const options = lastAdapterOptions();
       const onSessionCommands = options?.onSessionCommands;
@@ -382,7 +395,7 @@ it.layer(testLayer)("OmpDriver", (it) => {
           ?.skills.map((skill) => skill.name),
       ).toEqual(["fresh"]);
       // The live payload replaced the cached probe instead of re-spawning it.
-      expect(yield* readProbeCount(probeLogPath)).toBe(1);
+      expect(yield* readProbeCount(probeLogPath, workspace)).toBe(1);
     }).pipe(Effect.scoped),
   );
 

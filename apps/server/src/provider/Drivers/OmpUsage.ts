@@ -77,9 +77,18 @@ const OmpUsageLimitSchema = Schema.Struct({
   status: Schema.optional(Schema.String),
 });
 
+const OmpUsageAccountMetadataSchema = Schema.Struct({
+  accountId: Schema.optional(Schema.String),
+  email: Schema.optional(Schema.String),
+  orgName: Schema.optional(Schema.String),
+});
+
 const OmpUsageReportSchema = Schema.Struct({
   provider: Schema.optional(Schema.String),
   fetchedAt: Schema.optional(Schema.String),
+  // The authenticated account behind this report; omp redacts it only when
+  // asked, so the plain probe carries the address the card shows.
+  metadata: Schema.optional(OmpUsageAccountMetadataSchema),
   // Decoded entry-by-entry below so one malformed limit cannot sink the rest.
   limits: Schema.optional(Schema.Array(Schema.Unknown)),
 });
@@ -150,14 +159,21 @@ export function ompUsageProviders(payload: OmpUsagePayload): ReadonlyArray<strin
  * `unknown` — the probe cannot distinguish logged-out from broken.
  */
 export function ompUsageToAuth(payload: OmpUsagePayload | undefined): ServerProviderAuth {
+  const reports = payload ? decodeReports(payload) : [];
   const providers = payload ? ompUsageProviders(payload) : [];
   if (providers.length === 0) {
     return { status: "unknown" };
   }
+  // The card only names an account when it has an address; without one an
+  // authenticated provider reads as a bare status line.
+  const email = reports
+    .map((report) => report.metadata?.email?.trim())
+    .find((candidate) => candidate !== undefined && candidate.length > 0);
   return {
     status: "authenticated",
     // The single ACP `agent` method backed by local credentials.
     type: "agent",
+    ...(email ? { email } : {}),
     label:
       providers.length === 1
         ? providers[0]!
