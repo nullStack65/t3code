@@ -32,6 +32,7 @@ import {
   checkOmpProviderStatus,
   enrichOmpSnapshot,
 } from "../Layers/OmpProvider.ts";
+import { discoverOmpSkills } from "./OmpSkills.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -112,10 +113,15 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
       });
       const effectiveConfig = { ...config, enabled } satisfies OmpSettings;
 
+      // Skills discovered per workspace. The adapter reads names from here to
+      // rewrite `$name` mentions, so a turn never spawns its own probe.
+      const skillNamesByCwd = new Map<string, ReadonlySet<string>>();
+
       const adapter = yield* makeOmpAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
+        resolveSkillNames: (cwd) => skillNamesByCwd.get(cwd) ?? new Set<string>(),
       });
       const textGeneration = yield* makeOmpTextGeneration(effectiveConfig, processEnv);
 
@@ -157,6 +163,31 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
             }),
         ),
       );
+      const snapshotForCwd = (workspaceCwd: string) =>
+        !effectiveConfig.enabled
+          ? snapshot.getSnapshot
+          : Effect.all([
+              snapshot.getSnapshot,
+              discoverOmpSkills(effectiveConfig, processEnv, workspaceCwd).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderDriverError({
+                      driver: DRIVER_KIND,
+                      instanceId,
+                      detail: `Failed to discover Oh My Pi skills for '${workspaceCwd}'`,
+                      cause,
+                    }),
+                ),
+              ),
+            ]).pipe(
+              Effect.tap(([, skills]) =>
+                Effect.sync(() => {
+                  skillNamesByCwd.set(workspaceCwd, new Set(skills.map((skill) => skill.name)));
+                }),
+              ),
+              Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
+            );
 
       return {
         instanceId,
@@ -167,6 +198,7 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
         enabled,
         snapshot,
         adapter,
+        snapshotForCwd,
         textGeneration,
       } satisfies ProviderInstance;
     }),

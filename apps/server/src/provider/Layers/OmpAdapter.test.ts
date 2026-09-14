@@ -169,6 +169,7 @@ const makeOmpAdapterTestLayer = (instanceId?: ProviderInstanceId) =>
       return yield* makeOmpAdapter(ompConfig, {
         ...(instanceId ? { instanceId } : {}),
         resolveSettings,
+        resolveSkillNames: () => new Set(["tdd"]),
       });
     }),
   ).pipe(
@@ -688,6 +689,45 @@ ompAdapterTestLayer("OmpAdapterLive", (it) => {
         ),
         "plan",
       );
+    }),
+  );
+
+  it.effect("rewrites a $skill mention as omp's /skill: command on the wire", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OmpAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("omp-skill-mention-probe");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "omp-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* serverSettings.updateSettings({ providers: { omp: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("omp"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        // `$unknown` names no discovered skill, so it must stay prose.
+        input: "run $tdd on $unknown",
+        attachments: [],
+      });
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptRequest = requests.find((entry) => entry.method === "session/prompt");
+      assert.isDefined(promptRequest);
+      const blocks = (promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined)
+        ?.prompt;
+      assert.deepStrictEqual(blocks, [{ type: "text", text: "run /skill:tdd on $unknown" }]);
     }),
   );
 

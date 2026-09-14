@@ -75,6 +75,7 @@ import {
   resolveOmpAcpBaseModelId,
 } from "../acp/OmpAcpSupport.ts";
 import { type OmpAdapterShape } from "../Services/OmpAdapter.ts";
+import { rewriteOmpSkillMentions } from "../Drivers/OmpSkillDispatch.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
@@ -109,6 +110,14 @@ export interface OmpAdapterLiveOptions {
    * the latest snapshot so the closure isn't stale.
    */
   readonly resolveSettings?: Effect.Effect<OmpSettings>;
+  /**
+   * Names of the skills discovered for a workspace, used to rewrite the
+   * composer's `$name` mentions into omp's `/skill:<name>` commands. The
+   * driver serves this from the catalog its workspace snapshot already
+   * probed, so a turn never spawns a discovery process. Unknown names and an
+   * empty set leave the prompt untouched.
+   */
+  readonly resolveSkillNames?: (cwd: string) => ReadonlySet<string>;
 }
 
 interface PendingApproval {
@@ -1265,7 +1274,13 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
 
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
           if (input.input?.trim()) {
-            promptParts.push({ type: "text", text: input.input.trim() });
+            const promptText = input.input.trim();
+            const sessionCwd = ctx.session.cwd;
+            const dispatchedPrompt =
+              options?.resolveSkillNames && sessionCwd
+                ? rewriteOmpSkillMentions(promptText, options.resolveSkillNames(sessionCwd))
+                : undefined;
+            promptParts.push({ type: "text", text: dispatchedPrompt ?? promptText });
           }
           if (input.attachments && input.attachments.length > 0) {
             for (const attachment of input.attachments) {
