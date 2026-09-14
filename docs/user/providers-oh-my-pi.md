@@ -17,6 +17,11 @@ set **Binary path** on the card.
 When omp is behind its latest release, the card offers **Update now**, which runs
 omp's own updater (`omp update`). No other installer is involved.
 
+**Setup** (the first-run wizard) lists Oh My Pi next to Claude Code and Codex,
+with the same inline terminal: **Install** pre-types omp's own installer, and
+**Sign in** pre-types `omp setup`. Its **Projects** step also offers the
+directories omp ran in, with their conversations.
+
 ## What carries over from the terminal
 
 | Terminal feature                | In T3 Code                                                                   |
