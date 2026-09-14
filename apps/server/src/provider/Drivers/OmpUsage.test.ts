@@ -247,6 +247,50 @@ describe("selectOmpBannerWindow", () => {
   });
 });
 
+describe("epoch-millis timestamps", () => {
+  // omp 18.1.18 emits `generatedAt`, `fetchedAt` and `resetsAt` as epoch
+  // milliseconds. Decoding them as strings failed the whole payload and
+  // reported unknown auth with no limits against a real install.
+  const epochPayload = JSON.stringify({
+    generatedAt: 1_789_401_597_111,
+    reports: [
+      {
+        provider: "anthropic",
+        fetchedAt: 1_789_401_435_347,
+        metadata: { accountId: "acct-1", email: "dev@example.com" },
+        limits: [
+          {
+            id: "anthropic:5h",
+            label: "Claude 5 Hour",
+            scope: { provider: "anthropic", windowId: "5h", shared: true },
+            window: {
+              id: "5h",
+              label: "5 Hour",
+              durationMs: 18_000_000,
+              resetsAt: 4_102_444_800_000,
+            },
+            amount: { used: 29, limit: 100, usedFraction: 0.29, unit: "percent" },
+            status: "ok",
+          },
+        ],
+      },
+    ],
+  });
+
+  it("decodes numeric timestamps into auth and live windows", () => {
+    const payload = decodeOmpUsageOutput(epochPayload);
+    expect(ompUsageToAuth(payload)).toEqual({
+      status: "authenticated",
+      type: "agent",
+      email: "dev@example.com",
+      label: "anthropic",
+    });
+    const limits = ompUsageToLimits({ payload, checkedAt });
+    expect(limits?.windows.map((window) => window.id)).toEqual(["anthropic:5h"]);
+    expect(limits?.windows[0]?.resetsAt).toBe("2100-01-01T00:00:00.000Z");
+  });
+});
+
 describe("ompUsageToAuth", () => {
   it("reports authenticated with the provider list when accounts exist", () => {
     expect(ompUsageToAuth(decodeOmpUsageOutput(realisticPayload))).toEqual({

@@ -55,11 +55,17 @@ const OmpUsageAmountSchema = Schema.Struct({
   unit: Schema.optional(Schema.String),
 });
 
+// omp emits timestamps as epoch milliseconds (`"generatedAt": 1789401597111`),
+// not ISO strings, and a single wrong type would fail the whole payload decode
+// and silently report unauthenticated-but-unknown. Both shapes are accepted
+// and normalized where they are read.
+const OmpUsageTimestampSchema = Schema.Union([Schema.String, Schema.Number]);
+
 const OmpUsageWindowSchema = Schema.Struct({
   id: Schema.optional(Schema.String),
   label: Schema.optional(Schema.String),
   durationMs: Schema.optional(Schema.Number),
-  resetsAt: Schema.optional(Schema.String),
+  resetsAt: Schema.optional(OmpUsageTimestampSchema),
 });
 
 const OmpUsageScopeSchema = Schema.Struct({
@@ -85,7 +91,7 @@ const OmpUsageAccountMetadataSchema = Schema.Struct({
 
 const OmpUsageReportSchema = Schema.Struct({
   provider: Schema.optional(Schema.String),
-  fetchedAt: Schema.optional(Schema.String),
+  fetchedAt: Schema.optional(OmpUsageTimestampSchema),
   // The authenticated account behind this report; omp redacts it only when
   // asked, so the plain probe carries the address the card shows.
   metadata: Schema.optional(OmpUsageAccountMetadataSchema),
@@ -94,7 +100,7 @@ const OmpUsageReportSchema = Schema.Struct({
 });
 
 const OmpUsagePayloadSchema = Schema.Struct({
-  generatedAt: Schema.optional(Schema.String),
+  generatedAt: Schema.optional(OmpUsageTimestampSchema),
   // Same per-entry tolerance as limits: a bad report is skipped, not fatal.
   reports: Schema.optional(Schema.Array(Schema.Unknown)),
 });
@@ -253,6 +259,14 @@ function parseIsoDate(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/** omp timestamps arrive as epoch milliseconds or, in older builds, ISO text. */
+function ompTimestampToMillis(value: string | number | undefined): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  return parseIsoDate(value?.trim());
+}
+
 // Effect represents dates through `DateTime`; this mirrors the Codex usage
 // mapping, which builds its reset timestamps the same way.
 function isoFromMillis(value: number): string | undefined {
@@ -276,7 +290,7 @@ function ompUsageLimitToWindow(input: {
   if (usedPercent === undefined) {
     return undefined;
   }
-  const resetsAtMs = parseIsoDate(limit.window?.resetsAt?.trim());
+  const resetsAtMs = ompTimestampToMillis(limit.window?.resetsAt);
   if (resetsAtMs !== undefined && checkedAtMs !== undefined && resetsAtMs <= checkedAtMs) {
     return undefined;
   }
