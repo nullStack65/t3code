@@ -9,7 +9,7 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -209,7 +209,7 @@ const ompProviderInstances = (
  * uses backslashes, which is what a migrating terminal user actually has.
  */
 const ompSessionCwd = (cwd: string) =>
-  NodeOS.platform() === "win32" ? cwd.replaceAll("/", "\\") : cwd;
+  HostProcessPlatform.defaultValue() === "win32" ? cwd.replaceAll("/", "\\") : cwd;
 
 const ompSessionLine = (input: { readonly cwd: string; readonly sessionId: string }) =>
   `${encodeTranscriptRecord({
