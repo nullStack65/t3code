@@ -15,13 +15,11 @@ import {
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
 const frame = (commands: ReadonlyArray<unknown>) =>
-  // @effect-diagnostics-next-line preferSchemaOverJson:off - building a raw RPC frame.
   JSON.stringify({ type: "available_commands_update", commands });
 
 describe("decodeOmpCommandCatalog", () => {
   it("splits skills from slash commands, each sorted by name", () => {
     const stdout = [
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frame.
       JSON.stringify({ type: "ready", protocolVersion: 1 }),
       frame([
         { name: "skill:tdd", description: "Test-driven development." },
@@ -79,14 +77,12 @@ describe("decodeOmpCommandCatalog", () => {
   });
 
   it("reads the response payload of an explicit command request", () => {
-    const stdout =
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frame.
-      JSON.stringify({
-        type: "response",
-        command: "get_available_commands",
-        success: true,
-        data: { commands: [{ name: "skill:deploy" }, { name: "share" }] },
-      });
+    const stdout = JSON.stringify({
+      type: "response",
+      command: "get_available_commands",
+      success: true,
+      data: { commands: [{ name: "skill:deploy" }, { name: "share" }] },
+    });
 
     const catalog = decodeOmpCommandCatalog(stdout);
     expect(catalog.skills).toEqual([
@@ -134,7 +130,6 @@ describe("decodeOmpCommandCatalog", () => {
   });
 
   it("returns empty catalogs when the output carries no command frame", () => {
-    // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frame.
     expect(decodeOmpCommandCatalog(JSON.stringify({ type: "ready" }))).toEqual({
       skills: [],
       slashCommands: [],

@@ -49,15 +49,12 @@ const ompModelEntries = [
 ] as const;
 
 const rpcTranscript = [
-  // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frames.
   JSON.stringify({ type: "ready" }),
-  // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frames.
   JSON.stringify({
     type: "available_commands_update",
     commands: [{ name: "compact", description: "Compact the context" }],
   }),
   "not json",
-  // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frames.
   JSON.stringify({
     type: "response",
     command: "get_available_models",
@@ -194,7 +191,6 @@ describe("decodeOmpModelCatalog", () => {
   });
 
   it("returns an empty catalog when omp answered no model response", () => {
-    // @effect-diagnostics-next-line preferSchemaOverJson:off - raw RPC frame.
     const catalog = decodeOmpModelCatalog(JSON.stringify({ type: "ready" }));
 
     expect(catalog.models).toEqual([]);

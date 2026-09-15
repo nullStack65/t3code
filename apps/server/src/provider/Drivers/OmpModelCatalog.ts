@@ -298,7 +298,6 @@ export function decodeOmpModelCatalog(stdout: string): OmpModelCatalog {
     if (trimmedLine.length === 0) continue;
     let frame: unknown;
     try {
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - JSONL transport frame.
       frame = JSON.parse(trimmedLine);
     } catch {
       continue;

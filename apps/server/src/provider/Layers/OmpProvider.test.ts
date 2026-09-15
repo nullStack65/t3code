@@ -291,7 +291,6 @@ const makeRpcCatalogOmpWrapper = Effect.fn("makeRpcCatalogOmpWrapper")(function*
       `  process.stdout.write(${JSON.stringify(`${commandFrame}\n`)});`,
       "  const chunks = [];",
       "  for await (const chunk of process.stdin) chunks.push(chunk);",
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - fake child-process stdout.
       `  if (Buffer.concat(chunks).toString("utf8").includes("get_available_models")) {`,
       // @effect-diagnostics-next-line preferSchemaOverJson:off - fake child-process stdout.
       `    process.stdout.write(${JSON.stringify(`${modelsResponse}\n`)});`,
