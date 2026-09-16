@@ -40,8 +40,15 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { spawnAndCollect } from "../providerSnapshot.ts";
 import { clampPercent, makeUsageLimits } from "../providerUsageLimits.ts";
 
-/** Bound for the read-only `omp usage --json` probe (mirrors Codex's rate-limits probe). */
-export const OMP_USAGE_PROBE_TIMEOUT_MS = 3_000;
+/**
+ * Bound for the read-only `omp usage --json` probe (mirrors Codex's
+ * rate-limits probe). This probe refreshes provider quota over the network:
+ * warm runs measure 0.5-1.3s, and the first refresh after an omp update
+ * measured 4.8s, so a 3s bound degraded a healthy account's limits under an
+ * ordinary cold refresh. 10s matches omp's own `update --check` bound and
+ * still fails rather than hanging a snapshot refresh.
+ */
+export const OMP_USAGE_PROBE_TIMEOUT_MS = 10_000;
 
 // Schema Structs ignore unknown keys by default, so forward-compatible CLI
 // additions decode fine; every field below stays optional so one missing key
