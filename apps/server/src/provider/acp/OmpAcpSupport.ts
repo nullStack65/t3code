@@ -36,6 +36,12 @@ export interface OmpAcpRuntimeInput extends Omit<
    * answers.
    */
   readonly enableElicitation?: boolean;
+  /**
+   * Whether to spawn omp with `--no-tools` (default false), removing every
+   * built-in tool from the session. Unattended text generation passes true:
+   * the model gets no tool surface to attempt, on top of the approval mode.
+   */
+  readonly disableTools?: boolean;
 }
 
 export interface OmpAcpModelSelectionErrorContext {
@@ -52,18 +58,24 @@ export interface OmpAcpModelSelectionErrorContext {
  * `tools.approvalMode` config, which may be `yolo` — Supervised must not
  * silently inherit it.
  */
-export function ompAcpSpawnArgs(runtimeMode?: RuntimeMode): ReadonlyArray<string> {
-  switch (runtimeMode) {
-    case "auto-accept-edits":
-      return ["acp", "--approval-mode=write"];
-    case "auto":
-      return ["acp", "--auto-approve"];
-    case "full-access":
-      return ["acp", "--approval-mode=yolo"];
-    case "approval-required":
-    default:
-      return ["acp", "--approval-mode=always-ask"];
-  }
+export function ompAcpSpawnArgs(
+  runtimeMode?: RuntimeMode,
+  options?: { readonly disableTools?: boolean },
+): ReadonlyArray<string> {
+  const args = (() => {
+    switch (runtimeMode) {
+      case "auto-accept-edits":
+        return ["acp", "--approval-mode=write"];
+      case "auto":
+        return ["acp", "--auto-approve"];
+      case "full-access":
+        return ["acp", "--approval-mode=yolo"];
+      case "approval-required":
+      default:
+        return ["acp", "--approval-mode=always-ask"];
+    }
+  })();
+  return options?.disableTools === true ? [...args, "--no-tools"] : args;
 }
 
 export function buildOmpAcpSpawnInput(
@@ -71,10 +83,11 @@ export function buildOmpAcpSpawnInput(
   cwd: string,
   environment?: NodeJS.ProcessEnv,
   runtimeMode?: RuntimeMode,
+  options?: { readonly disableTools?: boolean },
 ): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: ompSettings?.binaryPath || "omp",
-    args: [...ompAcpSpawnArgs(runtimeMode)],
+    args: [...ompAcpSpawnArgs(runtimeMode, options)],
     cwd,
     ...(environment ? { env: environment } : {}),
   };
@@ -96,6 +109,7 @@ export const makeOmpAcpRuntime = (
           input.cwd,
           input.environment,
           input.runtimeMode,
+          input.disableTools === true ? { disableTools: true } : undefined,
         ),
         // omp/18.0.6 advertises exactly one auth method ("Use existing local
         // credentials"); credentials live under ~/.omp.

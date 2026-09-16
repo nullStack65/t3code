@@ -58,6 +58,23 @@ describe("ompAcpSpawnArgs", () => {
     expect(ompAcpSpawnArgs("auto")).toEqual(["acp", "--auto-approve"]);
     expect(ompAcpSpawnArgs("full-access")).toEqual(["acp", "--approval-mode=yolo"]);
   });
+
+  it("appends --no-tools only when tools are explicitly disabled", () => {
+    expect(ompAcpSpawnArgs("approval-required", { disableTools: true })).toEqual([
+      "acp",
+      "--approval-mode=always-ask",
+      "--no-tools",
+    ]);
+    expect(ompAcpSpawnArgs("approval-required", { disableTools: false })).toEqual([
+      "acp",
+      "--approval-mode=always-ask",
+    ]);
+    expect(ompAcpSpawnArgs("full-access", { disableTools: true })).toEqual([
+      "acp",
+      "--approval-mode=yolo",
+      "--no-tools",
+    ]);
+  });
 });
 
 describe("buildOmpAcpSpawnInput", () => {
@@ -91,6 +108,18 @@ describe("buildOmpAcpSpawnInput", () => {
       args: ["acp", "--approval-mode=always-ask"],
       cwd: "/tmp/project",
       env: environment,
+    });
+  });
+
+  it("forwards the disableTools option into the spawn args", () => {
+    expect(
+      buildOmpAcpSpawnInput(undefined, "/tmp/project", undefined, "approval-required", {
+        disableTools: true,
+      }),
+    ).toEqual({
+      command: "omp",
+      args: ["acp", "--approval-mode=always-ask", "--no-tools"],
+      cwd: "/tmp/project",
     });
   });
 });

@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as EffectAcpErrors from "effect-acp/errors";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { type OmpSettings, type ModelSelection } from "@t3tools/contracts";
@@ -64,17 +65,36 @@ export const makeOmpTextGeneration = Effect.fn("makeOmpTextGeneration")(function
         environment: resolvedEnvironment,
         childProcessSpawner: commandSpawner,
         cwd,
-        // Background text generation is unattended: nobody can answer an
-        // approval prompt, and this path registers no permission/elicitation
-        // handlers. `--auto-approve` keeps omp's wrapper layer and permission
-        // gate from ever pausing the one-shot generation.
-        runtimeMode: "auto",
+        // Unattended generation must not be able to mutate anything. The
+        // prompt is self-contained (no tool work is needed), so the session
+        // spawns with every built-in tool disabled, and anything that still
+        // asks for approval is answered with a refusal instead of pausing on
+        // UI that does not exist. Repository-derived text can steer the
+        // model, and that must not turn into a write merely because metadata
+        // generation is running.
+        runtimeMode: "approval-required",
+        disableTools: true,
         // Without the elicitation capability omp's non-approval select()
         // resolves immediately with undefined (fast, clear failure) instead
         // of queueing onto a channel nobody answers until the 180s timeout.
         enableElicitation: false,
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
       }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+
+      // Defense in depth for approval layers that do not consult the spawn
+      // flags: a tool permission request is denied and an elicitation is
+      // declined, so neither can wait for a user who is not there.
+      yield* runtime.handleRequestPermission(() =>
+        Effect.succeed({ outcome: { outcome: "cancelled" as const } }),
+      );
+      yield* runtime.handleElicitation(() =>
+        Effect.succeed({ action: { action: "decline" as const } }),
+      );
+      yield* runtime.handleUnknownExtRequest((method) =>
+        method === "elicitation/create"
+          ? Effect.succeed({ action: "decline" as const })
+          : Effect.fail(EffectAcpErrors.AcpRequestError.methodNotFound(method)),
+      );
 
       yield* runtime.handleSessionUpdate((notification) => {
         const update = notification.update;

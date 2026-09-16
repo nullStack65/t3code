@@ -11,11 +11,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { createModelSelection } from "@t3tools/shared/model";
 import { expect } from "vite-plus/test";
 
-import { OmpSettings, ProviderInstanceId } from "@t3tools/contracts";
+import { OmpSettings, ProviderInstanceId, TextGenerationError } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
@@ -83,7 +84,7 @@ async function waitForFileContent(filePath: string, attempts = 400): Promise<str
 }
 
 it.layer(OmpTextGenerationTestLayer)("OmpTextGeneration", (it) => {
-  it.effect("spawns omp acp with --auto-approve for unattended background generation", () => {
+  it.effect("spawns omp acp with tools and auto-approval disabled", () => {
     const requestLogDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-omp-text-log-"),
     );
@@ -116,13 +117,14 @@ it.layer(OmpTextGenerationTestLayer)("OmpTextGeneration", (it) => {
           expect(generated.subject).toBe("Add generated commit message");
           expect(generated.body).toBe("- verify omp acp text generation");
 
-          // Unattended generation must never hit an approval prompt: the
-          // child is spawned with --auto-approve.
+          // Unattended generation must run without a tool surface and without
+          // auto-approval: repository-derived text can steer the model, so
+          // `--no-tools` plus always-ask keeps it from mutating anything.
           const argvLog = NodeFS.readFileSync(argvLogPath, "utf8")
             .trim()
             .split("\n")
             .map((line) => line.split("\t"));
-          expect(argvLog).toEqual([["acp", "--auto-approve"]]);
+          expect(argvLog).toEqual([["acp", "--approval-mode=always-ask", "--no-tools"]]);
 
           const requests = NodeFS.readFileSync(requestLogPath, "utf8")
             .trim()
@@ -194,6 +196,70 @@ it.layer(OmpTextGenerationTestLayer)("OmpTextGeneration", (it) => {
           });
 
           expect(generated.title).toBe("Trim reconnect spinner status after resume.");
+        }),
+    ),
+  );
+
+  it.effect("denies tool permission requests instead of approving them", () =>
+    withFakeAcpAgent(
+      {
+        // The mock asks to run a terminal command before answering. With a
+        // permission handler that denies, the turn is cancelled instead of
+        // executing anything; without one this path must still fail fast.
+        T3_ACP_EMIT_TOOL_CALLS: "1",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration
+            .generateCommitMessage({
+              cwd: process.cwd(),
+              branch: "feature/omp-permission-deny",
+              stagedSummary: "M apps/server/src/textGeneration/OmpTextGeneration.ts",
+              stagedPatch:
+                "diff --git a/apps/server/src/textGeneration/OmpTextGeneration.ts b/apps/server/src/textGeneration/OmpTextGeneration.ts",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("omp"),
+                model: "openai/gpt-5.4",
+              },
+            })
+            .pipe(Effect.result);
+
+          expect(Result.isFailure(result)).toBe(true);
+          if (Result.isFailure(result)) {
+            expect(result.failure).toBeInstanceOf(TextGenerationError);
+            expect(result.failure.detail).toContain("cancelled");
+            expect(result.failure.detail).not.toContain("timed out");
+          }
+        }),
+    ),
+  );
+
+  it.effect("declines elicitation so it cannot block unattended generation", () =>
+    withFakeAcpAgent(
+      {
+        // The mock asks for user input before answering. The decline must
+        // come back immediately; generation can then fail on the mock's
+        // non-JSON reply, but it must not wait on a user who is not there.
+        T3_ACP_EMIT_ELICITATION: "1",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration
+            .generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Write a title without asking for input.",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("omp"),
+                model: "zhipu-coding-plan/glm-5.3",
+              },
+            })
+            .pipe(Effect.result);
+
+          expect(Result.isFailure(result)).toBe(true);
+          if (Result.isFailure(result)) {
+            expect(result.failure).toBeInstanceOf(TextGenerationError);
+            expect(result.failure.detail).not.toContain("timed out");
+          }
         }),
     ),
   );
