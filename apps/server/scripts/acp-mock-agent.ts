@@ -46,6 +46,19 @@ const emitActiveToolThenHang = process.env.T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG ===
 const emitGrokMonitorPostTurnPoll = process.env.T3_ACP_EMIT_GROK_MONITOR_POST_TURN_POLL === "1";
 const emitGrokBackgroundTaskStarted = process.env.T3_ACP_EMIT_GROK_BACKGROUND_TASK_STARTED === "1";
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
+// Root-session replacement: emit the first chunk under the requested session id
+// and then publish every later update (including completion) under a fresh id,
+// mirroring an agent-side `/fresh` provider session swap. The fresh id is not
+// addressable: prompts and cancellation keep targeting the requested id.
+const emitRootSessionReplacement = process.env.T3_ACP_ROOT_SESSION_REPLACEMENT === "1";
+const emitStaleRootAfterReplacement = process.env.T3_ACP_STALE_ROOT_AFTER_REPLACEMENT === "1";
+const emitIdleForeignSession = process.env.T3_ACP_IDLE_FOREIGN_SESSION === "1";
+const hangRootSessionReplacement = process.env.T3_ACP_ROOT_SESSION_REPLACEMENT_HANG === "1";
+// Completes the prompt on the requested session id while content published
+// under the replacement id. Lets a strict-mode client settle the turn without
+// the replacement completion.
+const completeDurableAfterRootReplacement =
+  process.env.T3_ACP_ROOT_SESSION_REPLACEMENT_COMPLETE_DURABLE === "1";
 const waitForResumeRelease = process.env.T3_ACP_WAIT_FOR_RESUME_RELEASE === "1";
 const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
 const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
@@ -122,6 +135,8 @@ let currentFast = false;
 let authenticated = !requiresAuthentication;
 let promptCount = 0;
 let overlappingFirstPromptId: string | undefined;
+let liveReplacementSessionId: string | undefined;
+let previousReplacementSessionId: string | undefined;
 const cancelledSessions = new Set<string>();
 let configuredProvider: AcpSchema.ProviderCurrentConfig | null = null;
 
@@ -979,6 +994,67 @@ const program = Effect.gen(function* () {
           yield* agent.client.sessionUpdate({ sessionId: requestedSessionId, update });
         }
         return yield* finishPrompt(requestedSessionId, "end_turn");
+      }
+
+      if (emitRootSessionReplacement) {
+        previousReplacementSessionId = liveReplacementSessionId;
+        liveReplacementSessionId = `mock-session-fresh-${promptCount}`;
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            messageId: "mock-agent-message",
+            content: { type: "text", text: "root before fresh" },
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: liveReplacementSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            messageId: "mock-agent-message",
+            content: { type: "text", text: "replaced live root" },
+          },
+        });
+        if (emitStaleRootAfterReplacement) {
+          // Stragglers from replaced identities: the durable id stays accepted
+          // as root; a previously adopted live id is stale.
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "mock-agent-message",
+              content: { type: "text", text: "durable root straggler" },
+            },
+          });
+          if (previousReplacementSessionId !== undefined) {
+            yield* agent.client.sessionUpdate({
+              sessionId: previousReplacementSessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                messageId: "mock-agent-message",
+                content: { type: "text", text: "stale replaced root" },
+              },
+            });
+          }
+        }
+        if (hangRootSessionReplacement) {
+          return yield* Effect.never;
+        }
+        yield* finishPrompt(
+          completeDurableAfterRootReplacement ? requestedSessionId : liveReplacementSessionId,
+          "end_turn",
+        );
+        if (emitIdleForeignSession) {
+          yield* agent.client.sessionUpdate({
+            sessionId: "mock-session-idle-foreign",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "mock-agent-message",
+              content: { type: "text", text: "foreign while idle" },
+            },
+          });
+        }
+        return {};
       }
 
       if (residualCallbackTriggerPath !== undefined) {

@@ -128,6 +128,24 @@ export interface AcpSessionRuntimeOptions {
   readonly transformSessionUpdate?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => EffectAcpSchema.SessionNotification;
+  /**
+   * Adopts a new live root session id when an agent replaces the root session
+   * behind the same connection — for example an agent-side command that starts a
+   * fresh provider session while the original id stays the one `session/load`
+   * replays. Adopted notifications are projected back onto the durable setup id,
+   * so prompts, cancellation, session loading, and item identity keep one root
+   * identity. Only a new id first seen while a root prompt is in flight can
+   * replace the live root, at most once per prompt; foreign ids seen while idle
+   * stay rejected. Defaults to `false`. Enable only for agents whose connection
+   * publishes a single live root session id and never child/subagent session
+   * ids; child traffic must be normalized before it reaches the runtime.
+   */
+  readonly adoptRootSessionReplacement?: boolean;
+  /** Observes an adopted root session replacement for diagnostics. */
+  readonly onRootSessionReplaced?: (change: {
+    readonly previousSessionId: string;
+    readonly sessionId: string;
+  }) => void;
   /** Receives bounded stderr chunks. Redact secrets before logging. A failure closes the runtime. */
   readonly onStderr?: (text: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   /** Disable only for non-interactive discovery that must surface auth-required immediately. */
@@ -1367,6 +1385,77 @@ interface AcpActivePrompt {
   readonly completed: Deferred.Deferred<void>;
 }
 
+interface AcpRootSessionReplacement {
+  readonly reset: (sessionId: string) => void;
+  readonly project: (
+    notification: EffectAcpSchema.SessionNotification,
+  ) => EffectAcpSchema.SessionNotification;
+  readonly beginPrompt: () => void;
+  readonly endPrompt: () => void;
+}
+
+/**
+ * Root-session replacement keeps one durable ACP session id while an agent
+ * publishes live updates under a replacement id on the same connection (see
+ * {@link AcpSessionRuntimeOptions.adoptRootSessionReplacement}). State is a
+ * plain object because the projection runs synchronously inside the client's
+ * notification decode path, before either the runtime or the adapter sees the
+ * notification.
+ */
+function makeAcpRootSessionReplacement(
+  options: Pick<AcpSessionRuntimeOptions, "adoptRootSessionReplacement" | "onRootSessionReplaced">,
+): AcpRootSessionReplacement | undefined {
+  if (options.adoptRootSessionReplacement !== true) {
+    return undefined;
+  }
+  let durableSessionId: string | undefined;
+  let liveSessionId: string | undefined;
+  let promptInFlight = false;
+  let adoptedDuringPrompt = false;
+  const adoptedSessionIds = new Set<string>();
+  const reset = (sessionId: string): void => {
+    durableSessionId = sessionId;
+    liveSessionId = sessionId;
+    adoptedDuringPrompt = false;
+    adoptedSessionIds.clear();
+  };
+  const project = (
+    notification: EffectAcpSchema.SessionNotification,
+  ): EffectAcpSchema.SessionNotification => {
+    if (durableSessionId === undefined || notification.sessionId === durableSessionId) {
+      return notification;
+    }
+    // A replaced root keeps streaming under its adopted id; project it back so
+    // downstream session id checks cannot reject the live root.
+    if (notification.sessionId === liveSessionId) {
+      return { ...notification, sessionId: durableSessionId };
+    }
+    // Unrelated foreign sessions (child/subagent traffic, stale ids) must never
+    // be flattened into the root: only a new id first seen while a root prompt
+    // is in flight replaces the live root, and only once per prompt.
+    if (!promptInFlight || adoptedDuringPrompt || adoptedSessionIds.has(notification.sessionId)) {
+      return notification;
+    }
+    const previousSessionId = liveSessionId ?? durableSessionId;
+    liveSessionId = notification.sessionId;
+    adoptedDuringPrompt = true;
+    adoptedSessionIds.add(notification.sessionId);
+    options.onRootSessionReplaced?.({ previousSessionId, sessionId: notification.sessionId });
+    return { ...notification, sessionId: durableSessionId };
+  };
+  return {
+    reset,
+    project,
+    beginPrompt: () => {
+      promptInFlight = true;
+      adoptedDuringPrompt = false;
+    },
+    endPrompt: () => {
+      promptInFlight = false;
+    },
+  };
+}
+
 export const make = (
   options: AcpSessionRuntimeOptions,
 ): Effect.Effect<
@@ -1410,6 +1499,14 @@ export const make = (
     const activePromptRef = yield* Ref.make<Option.Option<AcpActivePrompt>>(Option.none());
     const assistantUpdatesOpenRef = yield* Ref.make(true);
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const rootSessionReplacement = makeAcpRootSessionReplacement(options);
+    const transformSessionUpdate =
+      options.transformSessionUpdate === undefined && rootSessionReplacement === undefined
+        ? undefined
+        : (notification: EffectAcpSchema.SessionNotification) => {
+            const normalized = options.transformSessionUpdate?.(notification) ?? notification;
+            return rootSessionReplacement?.project(normalized) ?? normalized;
+          };
 
     const ensureConnected = Effect.gen(function* () {
       const error = yield* Ref.get(terminationErrorRef);
@@ -1729,9 +1826,7 @@ export const make = (
     const acpContext = yield* Layer.build(
       EffectAcpClient.layerChildProcess(child, {
         ...(options.transformStdout ? { transformStdout: options.transformStdout } : {}),
-        ...(options.transformSessionUpdate
-          ? { transformSessionUpdate: options.transformSessionUpdate }
-          : {}),
+        ...(transformSessionUpdate === undefined ? {} : { transformSessionUpdate }),
         ...(options.protocolLogging?.logIncoming !== undefined
           ? { logIncoming: options.protocolLogging.logIncoming }
           : {}),
@@ -1987,6 +2082,7 @@ export const make = (
         yield* Ref.set(toolCallsRef, new Map());
         yield* Ref.set(assistantSegmentRef, { nextSegmentIndex: 0 });
         yield* Ref.set(startStateRef, { _tag: "Started", result: nextState });
+        rootSessionReplacement?.reset(sessionId);
         return nextState;
       });
 
@@ -2332,6 +2428,7 @@ export const make = (
                         return yield* error.value;
                       }
                       yield* Ref.set(startStateRef, { _tag: "Started", result });
+                      rootSessionReplacement?.reset(result.sessionId);
                       const metadata = yield* Ref.getAndSet(startupMetadataRef, []);
                       for (const notification of metadata) {
                         if (notification.sessionId === result.sessionId) {
@@ -2637,6 +2734,10 @@ export const make = (
                   ...payload,
                 } satisfies EffectAcpSchema.PromptRequest;
                 const completed = yield* Deferred.make<void>();
+                // A root replacement can only arrive while its prompt turn is
+                // running; see makeAcpRootSessionReplacement. Mark the turn
+                // before the request can reach the agent.
+                rootSessionReplacement?.beginPrompt();
                 const fiber = yield* runLoggedRequest(
                   "session/prompt",
                   requestPayload,
@@ -2665,6 +2766,7 @@ export const make = (
               ),
             (activePrompt, result) =>
               Effect.gen(function* () {
+                rootSessionReplacement?.endPrompt();
                 if (
                   options.cancelBehavior === "wait-for-prompt" &&
                   Exit.isFailure(result) &&
