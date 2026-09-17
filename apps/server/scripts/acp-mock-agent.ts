@@ -950,7 +950,7 @@ const program = Effect.gen(function* () {
           sessionId: requestedSessionId,
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "hello from " },
+            content: { type: "text", text: "hello from" },
           },
         });
 
@@ -992,13 +992,15 @@ const program = Effect.gen(function* () {
           });
         }
 
-        writeJsonRpcNotification("session/update", {
-          sessionId: requestedSessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "mock" },
-          },
-        });
+        for (const text of [" ", "mo", "ck"]) {
+          writeJsonRpcNotification("session/update", {
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text },
+            },
+          });
+        }
 
         return yield* Effect.never;
       }
