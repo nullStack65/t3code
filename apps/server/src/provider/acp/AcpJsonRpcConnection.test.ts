@@ -940,6 +940,276 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  describe("root session replacement", () => {
+    const contentDeltaText = (events: ReadonlyArray<AcpSessionRuntime.AcpSessionRuntimeEvent>) =>
+      events
+        .filter((event) => event._tag === "ContentDelta")
+        .map((event) => event.text)
+        .join("");
+
+    const collectEvents = (runtime: AcpSessionRuntime.AcpSessionRuntime["Service"]) =>
+      Effect.gen(function* () {
+        const events: Array<AcpSessionRuntime.AcpSessionRuntimeEvent> = [];
+        yield* runtime.getEvents().pipe(
+          Stream.runForEach((event) => {
+            if (event._tag === "EventStreamBarrier") {
+              return Deferred.succeed(event.acknowledge, undefined);
+            }
+            events.push(event);
+            return Effect.void;
+          }),
+          Effect.forkChild,
+        );
+        return events;
+      });
+
+    const replacementLayer = (input?: {
+      readonly env?: Readonly<Record<string, string>>;
+      readonly options?: Partial<AcpSessionRuntime.AcpSessionRuntimeOptions>;
+    }) =>
+      AcpSessionRuntime.layer({
+        spawn: {
+          command: mockAgentCommand,
+          args: mockAgentArgs,
+          env: { T3_ACP_ROOT_SESSION_REPLACEMENT: "1", ...input?.env },
+        },
+        cwd: process.cwd(),
+        clientInfo: { name: "t3-test", version: "0.0.0" },
+        authMethodId: "test",
+        ...input?.options,
+      });
+
+    it.effect("keeps a replaced root session rejected without the opt-in", () =>
+      Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        yield* runtime.start();
+        const events = yield* collectEvents(runtime);
+
+        const promptResult = yield* runtime.prompt({
+          prompt: [{ type: "text", text: "hi" }],
+        });
+        yield* runtime.drainEvents;
+
+        expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+        expect(contentDeltaText(events)).toBe("root before fresh");
+      }).pipe(
+        Effect.provide(
+          replacementLayer({
+            env: { T3_ACP_ROOT_SESSION_REPLACEMENT_COMPLETE_DURABLE: "1" },
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      ),
+    );
+
+    it.effect("adopts a replacement first seen during a root prompt", () => {
+      const replacements: Array<{ previousSessionId: string; sessionId: string }> = [];
+      return Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        yield* runtime.start();
+        const events = yield* collectEvents(runtime);
+
+        const promptResult = yield* runtime.prompt({
+          prompt: [{ type: "text", text: "hi" }],
+        });
+        yield* runtime.drainEvents;
+
+        expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+        expect(contentDeltaText(events)).toBe("root before freshreplaced live root");
+        expect(replacements).toEqual([
+          { previousSessionId: "mock-session-1", sessionId: "mock-session-fresh-1" },
+        ]);
+        // Adopted updates project onto the durable identity, so assistant item
+        // ids keep one root session namespace.
+        const started = events.find((event) => event._tag === "AssistantItemStarted");
+        expect(started?._tag === "AssistantItemStarted" ? started.itemId : "").toContain(
+          "assistant:mock-session-1:",
+        );
+      }).pipe(
+        Effect.provide(
+          replacementLayer({
+            options: {
+              adoptRootSessionReplacement: true,
+              onRootSessionReplaced: (change) => {
+                replacements.push(change);
+              },
+            },
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      );
+    });
+
+    it.effect("adopts successive replacements deterministically", () => {
+      const replacements: Array<{ previousSessionId: string; sessionId: string }> = [];
+      return Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        yield* runtime.start();
+        const events = yield* collectEvents(runtime);
+
+        yield* runtime.prompt({ prompt: [{ type: "text", text: "first" }] });
+        yield* runtime.drainEvents;
+        yield* runtime.prompt({ prompt: [{ type: "text", text: "second" }] });
+        yield* runtime.drainEvents;
+
+        expect(replacements).toEqual([
+          { previousSessionId: "mock-session-1", sessionId: "mock-session-fresh-1" },
+          { previousSessionId: "mock-session-fresh-1", sessionId: "mock-session-fresh-2" },
+        ]);
+        expect(contentDeltaText(events)).toBe(
+          "root before freshreplaced live rootroot before freshreplaced live root",
+        );
+      }).pipe(
+        Effect.provide(
+          replacementLayer({
+            options: {
+              adoptRootSessionReplacement: true,
+              onRootSessionReplaced: (change) => {
+                replacements.push(change);
+              },
+            },
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      );
+    });
+
+    it.effect("keeps prompt and cancel requests on the durable session id", () => {
+      const promptSessionIds: Array<string> = [];
+      const protocolEvents: Array<EffectAcpProtocol.AcpProtocolLogEvent> = [];
+      return Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        yield* runtime.start();
+
+        const replacedDelta = yield* runtime.getEvents().pipe(
+          Stream.filter(
+            (event) => event._tag === "ContentDelta" && event.text === "replaced live root",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const hangingPrompt = yield* runtime
+          .prompt({ prompt: [{ type: "text", text: "hi" }] })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Fiber.join(replacedDelta);
+        yield* runtime.cancel;
+        const promptResult = yield* Fiber.join(hangingPrompt);
+
+        expect(promptResult).toMatchObject({ stopReason: "cancelled" });
+        expect([...new Set(promptSessionIds)]).toEqual(["mock-session-1"]);
+        expect(
+          protocolEvents.some(
+            (event) =>
+              event.direction === "outgoing" &&
+              event.stage === "raw" &&
+              typeof event.payload === "string" &&
+              event.payload.includes('"method":"session/cancel"') &&
+              event.payload.includes('"sessionId":"mock-session-1"'),
+          ),
+        ).toBe(true);
+        expect(
+          protocolEvents.some(
+            (event) =>
+              typeof event.payload === "string" &&
+              event.payload.includes('"method":"session/cancel"') &&
+              event.payload.includes("mock-session-fresh-1"),
+          ),
+        ).toBe(false);
+      }).pipe(
+        Effect.provide(
+          replacementLayer({
+            env: { T3_ACP_ROOT_SESSION_REPLACEMENT_HANG: "1" },
+            options: {
+              adoptRootSessionReplacement: true,
+              requestLogger: (event) => {
+                if (event.method === "session/prompt") {
+                  const payload = event.payload as { sessionId?: string };
+                  if (typeof payload.sessionId === "string") {
+                    promptSessionIds.push(payload.sessionId);
+                  }
+                }
+                return Effect.void;
+              },
+              protocolLogging: {
+                logOutgoing: true,
+                logger: (event) =>
+                  Effect.sync(() => {
+                    protocolEvents.push(event);
+                  }),
+              },
+            },
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      );
+    });
+
+    it.effect("keeps durable stragglers and drops stale replaced-live ids", () =>
+      Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        yield* runtime.start();
+        const events = yield* collectEvents(runtime);
+
+        yield* runtime.prompt({ prompt: [{ type: "text", text: "first" }] });
+        yield* runtime.drainEvents;
+        yield* runtime.prompt({ prompt: [{ type: "text", text: "second" }] });
+        yield* runtime.drainEvents;
+
+        const text = contentDeltaText(events);
+        expect(text).toBe(
+          "root before freshreplaced live root" +
+            "durable root straggler" +
+            "root before freshreplaced live root" +
+            "durable root straggler",
+        );
+        expect(text).not.toContain("stale replaced root");
+      }).pipe(
+        Effect.provide(
+          replacementLayer({
+            env: { T3_ACP_STALE_ROOT_AFTER_REPLACEMENT: "1" },
+            options: { adoptRootSessionReplacement: true },
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      ),
+    );
+
+    it.effect("never adopts a foreign session while no root prompt is in flight", () => {
+      const replacements: Array<{ previousSessionId: string; sessionId: string }> = [];
+      return Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        yield* runtime.start();
+        const events = yield* collectEvents(runtime);
+
+        yield* runtime.prompt({ prompt: [{ type: "text", text: "hi" }] });
+        yield* runtime.drainEvents;
+
+        expect(replacements).toHaveLength(1);
+        expect(contentDeltaText(events)).not.toContain("foreign while idle");
+      }).pipe(
+        Effect.provide(
+          replacementLayer({
+            env: { T3_ACP_IDLE_FOREIGN_SESSION: "1" },
+            options: {
+              adoptRootSessionReplacement: true,
+              onRootSessionReplaced: (change) => {
+                replacements.push(change);
+              },
+            },
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      );
+    });
+  });
+
   it.effect("supports successive standard ACP prompts", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;

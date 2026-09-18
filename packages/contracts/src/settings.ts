@@ -885,9 +885,18 @@ export const AcpRegistrySettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    rootSessionReplacement: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Root session replacement",
+        description:
+          "Follow a new live session id when the agent replaces its root session on the same connection, such as after a /fresh-style command. Leave this off for agents that publish child or subagent session ids.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
   },
   {
-    order: ["agentId", "commandPath", "authMethodId"],
+    order: ["agentId", "commandPath", "authMethodId", "rootSessionReplacement"],
   },
 );
 export type AcpRegistrySettings = typeof AcpRegistrySettings.Type;
