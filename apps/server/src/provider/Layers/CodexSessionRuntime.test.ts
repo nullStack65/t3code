@@ -1039,4 +1039,158 @@ describe("openCodexThread", () => {
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
     }),
   );
+
+  it.effect("starts a fresh thread when no resume is requested", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const started = makeThreadOpenResponse("fresh-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          raw: {
+            request: () => Effect.die("No resume must not call thread/resume"),
+          },
+          request: (method) => {
+            calls.push(method);
+            return Effect.succeed(started);
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+      });
+
+      NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.deepStrictEqual(calls, ["thread/start"]);
+    }),
+  );
+
+  it.effect("fail-closed refuses a fresh start after a recoverable resume failure", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const client = {
+        raw: {
+          request: (method: "thread/resume") => {
+            calls.push(method);
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32603,
+                errorMessage: "thread not found",
+              }),
+            );
+          },
+        },
+        request: () => Effect.die("fail-closed must not start a fresh thread"),
+      };
+
+      const error = yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "stale-thread",
+        resumeFailurePolicy: "fail-closed",
+      }).pipe(Effect.flip);
+
+      NodeAssert.ok(isCodexAppServerRequestError(error));
+      NodeAssert.equal(error.errorMessage, "thread not found");
+      NodeAssert.deepStrictEqual(calls, ["thread/resume"]);
+    }),
+  );
+
+  it.effect("fail-closed still resumes a valid thread without starting a fresh one", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const opened = yield* openCodexThread({
+        client: {
+          request: () => Effect.die("A valid resumed thread must not start fresh"),
+          raw: {
+            request: (method: "thread/resume") => {
+              calls.push(method);
+              return Effect.succeed(makeThreadOpenResponse("saved-thread"));
+            },
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "auto",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "saved-thread",
+        resumeFailurePolicy: "fail-closed",
+      });
+
+      NodeAssert.equal(opened.thread.id, "saved-thread");
+      NodeAssert.deepStrictEqual(calls, ["thread/resume"]);
+    }),
+  );
+
+  it.effect("fail-closed still starts a fresh thread when no resume is requested", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const started = makeThreadOpenResponse("fresh-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          raw: {
+            request: () => Effect.die("No resume must not call thread/resume"),
+          },
+          request: (method) => {
+            calls.push(method);
+            return Effect.succeed(started);
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        resumeFailurePolicy: "fail-closed",
+      });
+
+      NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.deepStrictEqual(calls, ["thread/start"]);
+    }),
+  );
+
+  it.effect("explicit fallback-to-new-thread matches the stock default", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const started = makeThreadOpenResponse("fresh-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          raw: {
+            request: (method: "thread/resume") => {
+              calls.push(method);
+              return Effect.fail(
+                new CodexErrors.CodexAppServerRequestError({
+                  code: -32603,
+                  errorMessage: "thread not found",
+                }),
+              );
+            },
+          },
+          request: (method) => {
+            calls.push(method);
+            return Effect.succeed(started);
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "stale-thread",
+        resumeFailurePolicy: "fallback-to-new-thread",
+      });
+
+      NodeAssert.notEqual(opened.thread.id, "stale-thread");
+      NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.deepStrictEqual(calls, ["thread/resume", "thread/start"]);
+    }),
+  );
 });
