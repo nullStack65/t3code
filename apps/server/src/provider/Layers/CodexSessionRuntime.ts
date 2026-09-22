@@ -65,6 +65,16 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "no rollout found",
 ];
 
+/**
+ * What to do when a requested provider thread cannot be resumed.
+ *
+ * `fallback-to-new-thread` is the stock behavior: a recoverable resume failure
+ * silently starts a fresh provider thread. `fail-closed` propagates the resume
+ * failure instead, so a caller that requires continuity can never accept a
+ * replacement thread as the resumed one.
+ */
+export type CodexThreadResumeFailurePolicy = "fallback-to-new-thread" | "fail-closed";
+
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
@@ -178,6 +188,7 @@ export interface CodexSessionRuntimeOptions {
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  readonly resumeFailurePolicy?: CodexThreadResumeFailurePolicy;
   readonly appServerArgs?: ReadonlyArray<string>;
   /** Capabilities the session's `t3-code` MCP credential grants; drives the prompt blocks. */
   readonly mcpCapabilities?: ReadonlySet<string>;
@@ -728,8 +739,10 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly resumeFailurePolicy?: CodexThreadResumeFailurePolicy;
 }): Effect.Effect<typeof CodexThreadResumeMetadata.Type, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
+  const resumeFailurePolicy = input.resumeFailurePolicy ?? "fallback-to-new-thread";
   const startParams = buildThreadStartParams({
     cwd: input.cwd,
     runtimeMode: input.runtimeMode,
@@ -763,13 +776,24 @@ export const openCodexThread = (input: {
         ),
       ),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+        resumeFailurePolicy === "fail-closed"
+          ? Effect.logError(
+              "codex app-server thread resume failed; fail-closed policy refuses a fresh start",
+              {
+                threadId: input.threadId,
+                requestedRuntimeMode: input.runtimeMode,
+                resumeThreadId,
+                recoverable: true,
+                cause: error,
+              },
+            ).pipe(Effect.andThen(Effect.fail(error)))
+          : Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+              threadId: input.threadId,
+              requestedRuntimeMode: input.runtimeMode,
+              resumeThreadId,
+              recoverable: true,
+              cause: error,
+            }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
       ),
     );
 };
@@ -2444,6 +2468,9 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.resumeFailurePolicy !== undefined
+          ? { resumeFailurePolicy: options.resumeFailurePolicy }
+          : {}),
       });
 
       const providerThreadId = opened.thread.id;

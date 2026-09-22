@@ -610,6 +610,15 @@ export const CodexSettings = makeProviderSettingsSchema(
         description: "Additional CLI arguments passed to codex app-server on session start.",
       }),
     ),
+    resumeFailurePolicy: Schema.Literals(["fallback-to-new-thread", "fail-closed"]).pipe(
+      Schema.withDecodingDefault(Effect.succeed("fallback-to-new-thread")),
+      Schema.annotateKey({
+        title: "Thread resume failure policy",
+        description:
+          "What to do when a requested provider thread cannot be resumed. 'fail-closed' refuses to start a replacement thread so a failed resume is never reported as continuity.",
+        providerSettingsForm: { hidden: true },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -1388,6 +1397,9 @@ const CodexSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
   launchArgs: Schema.optionalKey(TrimmedString),
+  resumeFailurePolicy: Schema.optionalKey(
+    Schema.Literals(["fallback-to-new-thread", "fail-closed"]),
+  ),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 

@@ -2283,6 +2283,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
+          ...(codexConfig.resumeFailurePolicy === "fail-closed"
+            ? { resumeFailurePolicy: codexConfig.resumeFailurePolicy }
+            : {}),
           runtimeMode: input.runtimeMode,
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
