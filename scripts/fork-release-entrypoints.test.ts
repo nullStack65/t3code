@@ -180,31 +180,8 @@ it("per-target verification passes with only that platform's bytes (real process
       NodePath.join(linuxOnly, `t3-${VERSION}-linux-x64.tar.gz`),
       Buffer.from("linux"),
     );
-    const observed = NodeChildProcess.execFileSync(
-      nodeBin,
-      [
-        "-e",
-        "const c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(require('node:fs').readFileSync(process.argv[1])).digest('hex'))",
-        NodePath.join(linuxOnly, `t3-${VERSION}-linux-x64.tar.gz`),
-      ],
-      { encoding: "utf8" },
-    ).trim();
-    NodeFS.writeFileSync(
-      NodePath.join(linuxOnly, "fork-release-manifest.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        repository: "nullStack65/t3code",
-        version: VERSION,
-        sourceSha: SHA,
-        workflowRevision: "local",
-        workflowRunId: "local",
-        workflowRunAttempt: "1",
-        channel: "stable",
-        createdAt: new Date().toISOString(),
-        assets: [{ name: `t3-${VERSION}-linux-x64.tar.gz`, sha256: observed, size: 5 }],
-        nativeReceipts: [],
-      }),
-    );
+    // Deliberately no fork-release-manifest.json: per-target verification must
+    // not require the aggregate manifest that only exists after the freeze.
     const result = runNode([
       "scripts/verify-fork-candidate.ts",
       "--candidate-dir",
@@ -220,6 +197,26 @@ it("per-target verification passes with only that platform's bytes (real process
       "--skip-provenance-inspection",
     ]);
     assert.equal(result.status, 0, result.stderr);
+    assert.include(result.stdout, "Per-target verification passed");
+
+    // A wrong-target asset must be rejected: a Windows-target check needs the
+    // Windows installer and CLI ZIP, which are absent here.
+    const wrongTarget = runNode([
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      linuxOnly,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--targets",
+      "win",
+      "--skip-provenance-inspection",
+    ]);
+    assert.equal(wrongTarget.status, 1);
+    assert.include(wrongTarget.stderr, "missing");
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }

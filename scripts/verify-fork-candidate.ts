@@ -29,6 +29,7 @@ import {
   compareStableVersions,
   renderChecksums,
   requiredReleaseAssetNames,
+  requiredReleaseAssetNamesForTargets,
   sha256Hex,
   verifyCandidate,
   verifyPromotion,
@@ -172,6 +173,64 @@ function highestStableVersion(list: string | undefined): string | undefined {
   );
 }
 
+/**
+ * Verifies one platform's own artifacts before the aggregate manifest exists.
+ * It requires that platform's exact asset names and checks the real embedded
+ * provenance; it never demands another platform's bytes.
+ */
+function verifyPerTargetProvenance(
+  args: Args,
+  observedAssets: ReadonlyArray<ReleaseAsset>,
+): { ok: boolean; failures: ReadonlyArray<string> } {
+  const problems: string[] = [];
+  const expectedNames = requiredReleaseAssetNamesForTargets(args.version, args.targets, {
+    includeMacosArm64: args.includeMacosArm64,
+  });
+  const observedNames = new Set(observedAssets.map((asset) => asset.name));
+  for (const name of expectedNames) {
+    if (!observedNames.has(name)) {
+      problems.push(`required ${args.targets} asset ${name} is missing`);
+    }
+    const asset = observedAssets.find((entry) => entry.name === name);
+    if (asset !== undefined && asset.size <= 0) {
+      problems.push(`${name} is empty`);
+    }
+  }
+  if (args.inspectProvenance) {
+    const provenance = inspectCandidateProvenance({
+      candidateDir: args.candidateDir,
+      version: args.version,
+      targets: args.targets,
+      includeMacosArm64: args.includeMacosArm64,
+    });
+    const records: Array<
+      [string, { readonly sourceSha: string; readonly version: string } | null | undefined]
+    > =
+      args.targets === "linux"
+        ? [["Linux runtime archive", provenance.linuxArchive]]
+        : args.targets === "win"
+          ? [
+              ["Windows CLI archive", provenance.windowsZip],
+              ["Windows installer", provenance.windowsInstaller],
+            ]
+          : [["Intel macOS DMG", provenance.macDmg]];
+    for (const [label, record] of records) {
+      if (record === undefined) continue;
+      if (record === null) {
+        problems.push(`${label} has no readable packaged provenance`);
+        continue;
+      }
+      if (record.sourceSha !== args.sha) {
+        problems.push(`${label} provenance sourceSha is ${record.sourceSha}, expected ${args.sha}`);
+      }
+      if (record.version !== args.version) {
+        problems.push(`${label} provenance version is ${record.version}, expected ${args.version}`);
+      }
+    }
+  }
+  return problems.length === 0 ? { ok: true, failures: [] } : { ok: false, failures: problems };
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   const observedAssets = observeAssets(args.candidateDir);
@@ -201,6 +260,18 @@ function main(): void {
       renderChecksums(observedAssets),
     );
     console.log(`Wrote ${SHA256SUMS_FILE_NAME} from ${observedAssets.length} assets.`);
+  }
+
+  // Per-target verification runs before the aggregate manifest is frozen: it
+  // checks only this platform's own assets and their embedded provenance. The
+  // aggregate step (targets: all) is the one that requires the manifest.
+  if (!NodeFS.existsSync(manifestPath) && args.targets !== "all") {
+    const result = verifyPerTargetProvenance(args, observedAssets);
+    if (!result.ok) fail(result.failures);
+    console.log(
+      `Per-target verification passed: ${observedAssets.length} ${args.targets} asset(s) for ${args.repository} v${args.version} @ ${args.sha}.`,
+    );
+    return;
   }
 
   if (!NodeFS.existsSync(manifestPath)) {
