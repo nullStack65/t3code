@@ -211,9 +211,10 @@ export interface AttributionThreadBinding {
   /**
    * Where the binding came from. `runtimeCursor` is the single current cursor
    * on `provider_session_runtime`; `importedTranscript` is the accumulated
-   * imported-file metadata. Nothing else preserves a historical native id.
+   * imported-file metadata; `sessionHistory` is the append-only
+   * `provider_session_history` row that survives a cursor overwrite.
    */
-  readonly origin: "runtimeCursor" | "importedTranscript";
+  readonly origin: "runtimeCursor" | "importedTranscript" | "sessionHistory";
 }
 
 /** An existing thread → pull-request link, already canonicalized by the caller. */
@@ -1199,7 +1200,12 @@ function limitationsFor(
   }
   if (input.bindings.some((binding) => binding.origin === "runtimeCursor")) {
     limitations.push(
-      "Only the newest native session id per thread is durable. Additive retention must land before historical re-attribution is possible.",
+      "Only the newest native session id per thread is durable on `provider_session_runtime`; earlier ids survive only when the caller also supplies append-only `provider_session_history` bindings.",
+    );
+  }
+  if (!input.bindings.some((binding) => binding.origin === "sessionHistory")) {
+    limitations.push(
+      "No durable session-history bindings were supplied. A resume, fork, or restart that overwrote the cursor leaves earlier usage unattributed to the thread.",
     );
   }
   return limitations;

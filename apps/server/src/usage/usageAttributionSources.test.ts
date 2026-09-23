@@ -2,11 +2,17 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   extractAttributionBindings,
+  extractAttributionHistory,
   extractAttributionLinks,
+  extractAttributionRouteEvents,
   extractAttributionSnapshot,
   type PersistedProviderSessionRuntimeRow,
   type PersistedThreadPullRequestRow,
 } from "./usageAttributionSources.ts";
+import type {
+  PersistedProviderSessionHistoryRow,
+  PersistedRouteEventRow,
+} from "./routeMetadata.ts";
 
 function runtimeRow(
   overrides: Partial<PersistedProviderSessionRuntimeRow> = {},
@@ -201,6 +207,153 @@ describe("extractAttributionBindings", () => {
   });
 });
 
+describe("extractAttributionHistory", () => {
+  function historyRow(
+    overrides: Partial<PersistedProviderSessionHistoryRow> = {},
+  ): PersistedProviderSessionHistoryRow {
+    return {
+      threadId: "thread-1",
+      providerName: "codex",
+      providerInstanceId: "codex-default",
+      adapterKey: "codex",
+      nativeSessionId: "session-a",
+      parentNativeSessionId: null,
+      origin: "runtimeCursor",
+      firstSeenAt: "2026-09-23T09:00:00.000Z",
+      lastSeenAt: "2026-09-23T09:10:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("keeps every session a thread used, not just the current cursor", () => {
+    const { history, bindings, diagnostics } = extractAttributionHistory([
+      historyRow({ nativeSessionId: "session-a" }),
+      historyRow({
+        nativeSessionId: "session-b",
+        firstSeenAt: "2026-09-23T09:30:00.000Z",
+        lastSeenAt: "2026-09-23T09:40:00.000Z",
+      }),
+    ]);
+
+    expect(history.map((entry) => entry.nativeSessionId)).toEqual(["session-a", "session-b"]);
+    expect(bindings).toEqual([
+      {
+        threadId: "thread-1",
+        provider: "codex",
+        providerInstanceId: "codex-default",
+        nativeSessionId: "session-a",
+        origin: "sessionHistory",
+      },
+      {
+        threadId: "thread-1",
+        provider: "codex",
+        providerInstanceId: "codex-default",
+        nativeSessionId: "session-b",
+        origin: "sessionHistory",
+      },
+    ]);
+    expect(diagnostics).toMatchObject({ rows: 2, sessions: 2, bindings: 2, withParent: 0 });
+  });
+
+  it("keeps an unmeasured provider identity without inventing a usage provider", () => {
+    const { history, bindings, diagnostics } = extractAttributionHistory([
+      historyRow({
+        providerName: "opencode",
+        adapterKey: "opencode",
+        nativeSessionId: "ses_child",
+        parentNativeSessionId: "ses_parent",
+      }),
+    ]);
+
+    expect(bindings).toEqual([]);
+    expect(history[0]).toMatchObject({
+      nativeSessionId: "ses_child",
+      parentNativeSessionId: "ses_parent",
+      usageProvider: null,
+    });
+    expect(diagnostics.unsupportedProviderBindings).toBe(1);
+    expect(diagnostics.withParent).toBe(1);
+  });
+
+  it("counts malformed rows", () => {
+    const { diagnostics } = extractAttributionHistory([
+      historyRow(),
+      historyRow({ threadId: "" }),
+      historyRow({ nativeSessionId: "" }),
+    ]);
+
+    expect(diagnostics.sessions).toBe(1);
+    expect(diagnostics.malformed).toBe(2);
+  });
+});
+
+describe("extractAttributionRouteEvents", () => {
+  function routeEventRow(overrides: Partial<PersistedRouteEventRow> = {}): PersistedRouteEventRow {
+    return {
+      eventId: "evt-1",
+      threadId: "thread-1",
+      nativeSessionId: "session-a",
+      routeEventKind: "canary",
+      taskStratum: "implementation",
+      experimentId: "canary-2026-09",
+      managerId: "ROUTE6-1",
+      agentId: "T3",
+      requestedProvider: "openai",
+      requestedModel: "gpt-6-luna",
+      requestedEffort: "high",
+      escalationReason: null,
+      recordedAt: "2026-09-23T09:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("reads a declared event with its requested selection and stratum", () => {
+    const { events, diagnostics } = extractAttributionRouteEvents([routeEventRow()]);
+
+    expect(events).toEqual([
+      {
+        eventId: "evt-1",
+        threadId: "thread-1",
+        nativeSessionId: "session-a",
+        kind: "canary",
+        taskStratum: "implementation",
+        experimentId: "canary-2026-09",
+        managerId: "ROUTE6-1",
+        agentId: "T3",
+        requested: { provider: "openai", model: "gpt-6-luna", effort: "high" },
+        reason: null,
+        recordedAt: "2026-09-23T09:00:00.000Z",
+      },
+    ]);
+    expect(diagnostics).toMatchObject({ events: 1, declared: 1, requests: 0, malformed: 0 });
+  });
+
+  it("separates an unclassified request record from a declared event", () => {
+    const { events, diagnostics } = extractAttributionRouteEvents([
+      routeEventRow({ eventId: "req-1", routeEventKind: null, taskStratum: "", managerId: null }),
+    ]);
+
+    expect(events[0]).toMatchObject({ kind: null, taskStratum: "unknown" });
+    expect(events[0]!.requested).toEqual({
+      provider: "openai",
+      model: "gpt-6-luna",
+      effort: "high",
+    });
+    expect(diagnostics).toMatchObject({ declared: 0, requests: 1 });
+  });
+
+  it("rejects an unknown kind and a blank event id", () => {
+    const { events, diagnostics } = extractAttributionRouteEvents([
+      routeEventRow({ routeEventKind: "made-up-kind" }),
+      routeEventRow({ eventId: "" }),
+      routeEventRow({ eventId: "ok" }),
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(diagnostics.malformed).toBe(2);
+  });
+});
+
 describe("extractAttributionLinks", () => {
   it("reads allowlisted fields from a persisted projection row", () => {
     const { links, diagnostics } = extractAttributionLinks([linkRow()]);
@@ -303,6 +456,11 @@ describe("extractAttributionSnapshot", () => {
    *   canonical `provider` (never the adapter key) and `origin`.
    * - `nativeSessions[]` — every native identity, including OpenCode with
    *   `usageProvider: null`; a label, never a join key.
+   * - `history[]` — append-only identity from `provider_session_history` that
+   *   survives a cursor overwrite. Empty here because this fixture supplies no
+   *   history rows; the durable-history test below populates it.
+   * - `routeEvents[]` — content-free pre-execution route/experiment metadata.
+   *   Empty here because this fixture supplies no route-event rows.
    * - `links[]` — canonical thread -> PR links; `stack-dismissed` tombstones are
    *   preserved for the projection to filter.
    * - `diagnostics` — what could not be read, never dropped silently.
@@ -436,6 +594,8 @@ describe("extractAttributionSnapshot", () => {
           url: "https://github.com/acme/repo/pull/12",
         },
       ],
+      history: [],
+      routeEvents: [],
       diagnostics: {
         bindings: {
           runtimeRows: 3,
@@ -449,8 +609,68 @@ describe("extractAttributionSnapshot", () => {
           overwrittenThreads: 1,
           ambiguousSessionIds: 0,
         },
+        history: {
+          rows: 0,
+          sessions: 0,
+          bindings: 0,
+          withParent: 0,
+          unsupportedProviderBindings: 0,
+          malformed: 0,
+        },
+        routeEvents: {
+          rows: 0,
+          events: 0,
+          declared: 0,
+          requests: 0,
+          malformed: 0,
+        },
         links: { rows: 3, links: 3, dismissed: 0, malformed: 0 },
       },
     });
+  });
+
+  it("merges durable history and route events into one snapshot", () => {
+    const snapshot = extractAttributionSnapshot({
+      cutoffMs: 1_786_100_000_000,
+      runtimeRows: [],
+      historyRows: [
+        {
+          threadId: "thread-1",
+          providerName: "opencode",
+          providerInstanceId: "opencode-default",
+          adapterKey: "opencode",
+          nativeSessionId: "ses_child",
+          parentNativeSessionId: "ses_parent",
+          origin: "runtimeCursor",
+          firstSeenAt: "2026-09-23T09:00:00.000Z",
+          lastSeenAt: "2026-09-23T09:10:00.000Z",
+        },
+      ],
+      routeEventRows: [
+        {
+          eventId: "evt-1",
+          threadId: "thread-1",
+          nativeSessionId: "ses_child",
+          routeEventKind: "canary",
+          taskStratum: "implementation",
+          experimentId: "canary-2026-09",
+          managerId: "ROUTE6-1",
+          agentId: "T3",
+          requestedProvider: "openai",
+          requestedModel: "gpt-6-luna",
+          requestedEffort: "high",
+          escalationReason: null,
+          recordedAt: "2026-09-23T09:00:00.000Z",
+        },
+      ],
+      linkRows: [],
+    });
+
+    // OpenCode is unmeasured, so it is history only, never a usage binding.
+    expect(snapshot.bindings).toEqual([]);
+    expect(snapshot.history).toHaveLength(1);
+    expect(snapshot.routeEvents).toHaveLength(1);
+    expect(snapshot.diagnostics.history.sessions).toBe(1);
+    expect(snapshot.diagnostics.routeEvents.declared).toBe(1);
   });
 });

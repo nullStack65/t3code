@@ -19,6 +19,12 @@ import {
 } from "@t3tools/contracts";
 
 import {
+  normalizeTaskStratum,
+  type RouteEventInput,
+  type RouteSelectionMetadata,
+} from "../usage/routeMetadata.ts";
+
+import {
   PersistenceDecodeError,
   type PersistenceErrorCorrelation,
   PersistenceSqlError,
@@ -67,6 +73,21 @@ export type RecordImportedTranscriptInput = typeof RecordImportedTranscriptInput
 
 export interface ProviderSessionRuntimeUpsertOptions {
   readonly onConflict?: "update" | "ignore";
+  /**
+   * Additive attribution metadata. Never changes the runtime row itself; it
+   * only appends to `provider_session_history` (identity) and
+   * `thread_route_events` (pre-execution route/experiment metadata).
+   */
+  readonly attribution?: ProviderSessionRuntimeAttributionOptions;
+}
+
+export interface ProviderSessionRuntimeAttributionOptions {
+  /** True sub-agent parent native session id, when the caller knows it. */
+  readonly parentNativeSessionId?: string | null;
+  /** What this session was asked to run. Recorded, never treated as observed. */
+  readonly requestedRoute?: RouteSelectionMetadata | null;
+  /** Full declared route/experiment event, when the route authority supplies it. */
+  readonly routeEvent?: RouteEventInput | null;
 }
 
 /**
@@ -268,6 +289,212 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  /**
+   * The three cursor shapes adapters write: `{ resume }` (Claude),
+   * `{ threadId }` (Codex), `{ sessionId }` (Grok, OpenCode, Antigravity).
+   * The value arrives here JSON-encoded, so it is parsed defensively.
+   */
+  const nativeSessionIdOf = (cursor: unknown): string | null => {
+    let parsed: unknown = cursor;
+    if (typeof cursor === "string") {
+      if (cursor.length === 0) return null;
+      try {
+        parsed = JSON.parse(cursor);
+      } catch {
+        return null;
+      }
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    for (const field of ["resume", "threadId", "sessionId"] as const) {
+      const value = record[field];
+      if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    }
+    return null;
+  };
+
+  const recordSessionHistoryRow = SqlSchema.void({
+    Request: Schema.Struct({
+      threadId: Schema.String,
+      providerName: Schema.String,
+      providerInstanceId: Schema.NullOr(Schema.String),
+      adapterKey: Schema.String,
+      nativeSessionId: Schema.String,
+      parentNativeSessionId: Schema.NullOr(Schema.String),
+      seenAt: Schema.String,
+    }),
+    execute: (entry) =>
+      sql`
+        INSERT INTO provider_session_history (
+          thread_id,
+          provider_name,
+          provider_instance_id,
+          adapter_key,
+          native_session_id,
+          parent_native_session_id,
+          origin,
+          first_seen_at,
+          last_seen_at
+        )
+        VALUES (
+          ${entry.threadId},
+          ${entry.providerName},
+          ${entry.providerInstanceId},
+          ${entry.adapterKey},
+          ${entry.nativeSessionId},
+          ${entry.parentNativeSessionId},
+          'runtimeCursor',
+          ${entry.seenAt},
+          ${entry.seenAt}
+        )
+        ON CONFLICT (thread_id, provider_name, native_session_id)
+        DO UPDATE SET
+          adapter_key = excluded.adapter_key,
+          provider_instance_id = COALESCE(
+            excluded.provider_instance_id,
+            provider_session_history.provider_instance_id
+          ),
+          last_seen_at = CASE
+            WHEN excluded.last_seen_at > provider_session_history.last_seen_at
+            THEN excluded.last_seen_at
+            ELSE provider_session_history.last_seen_at
+          END,
+          parent_native_session_id = COALESCE(
+            provider_session_history.parent_native_session_id,
+            excluded.parent_native_session_id
+          )
+      `,
+  });
+
+  const recordRouteEventRow = SqlSchema.void({
+    Request: Schema.Struct({
+      eventId: Schema.String,
+      threadId: Schema.String,
+      nativeSessionId: Schema.NullOr(Schema.String),
+      routeEventKind: Schema.NullOr(Schema.String),
+      taskStratum: Schema.String,
+      experimentId: Schema.NullOr(Schema.String),
+      managerId: Schema.NullOr(Schema.String),
+      agentId: Schema.NullOr(Schema.String),
+      requestedProvider: Schema.NullOr(Schema.String),
+      requestedModel: Schema.NullOr(Schema.String),
+      requestedEffort: Schema.NullOr(Schema.String),
+      escalationReason: Schema.NullOr(Schema.String),
+      recordedAt: Schema.String,
+    }),
+    execute: (event) =>
+      sql`
+        INSERT OR IGNORE INTO thread_route_events (
+          event_id,
+          thread_id,
+          native_session_id,
+          route_event_kind,
+          task_stratum,
+          experiment_id,
+          manager_id,
+          agent_id,
+          requested_provider,
+          requested_model,
+          requested_effort,
+          escalation_reason,
+          recorded_at
+        )
+        VALUES (
+          ${event.eventId},
+          ${event.threadId},
+          ${event.nativeSessionId},
+          ${event.routeEventKind},
+          ${event.taskStratum},
+          ${event.experimentId},
+          ${event.managerId},
+          ${event.agentId},
+          ${event.requestedProvider},
+          ${event.requestedModel},
+          ${event.requestedEffort},
+          ${event.escalationReason},
+          ${event.recordedAt}
+        )
+      `,
+  });
+
+  /**
+   * Builds the route events a single upsert implies. At most two: an automatic
+   * request record (what T3 was asked to run) and, when supplied, one declared
+   * experiment/fallback/escalation event. Ids are deterministic so repeated
+   * status writes collapse instead of accumulating duplicates.
+   */
+  const routeEventsFor = (
+    runtime: {
+      readonly threadId: string;
+      readonly providerName: string;
+      readonly providerInstanceId: string | null;
+      readonly adapterKey: string;
+      readonly lastSeenAt: string;
+      readonly resumeCursor: unknown;
+    },
+    attribution: ProviderSessionRuntimeAttributionOptions | undefined,
+    nativeSessionId: string | null,
+  ): ReadonlyArray<{
+    readonly eventId: string;
+    readonly threadId: string;
+    readonly nativeSessionId: string | null;
+    readonly routeEventKind: string | null;
+    readonly taskStratum: string;
+    readonly experimentId: string | null;
+    readonly managerId: string | null;
+    readonly agentId: string | null;
+    readonly requestedProvider: string | null;
+    readonly requestedModel: string | null;
+    readonly requestedEffort: string | null;
+    readonly escalationReason: string | null;
+    readonly recordedAt: string;
+  }> => {
+    const events = [];
+    const requested = attribution?.requestedRoute ?? null;
+    if (
+      requested !== null &&
+      (requested.provider ?? requested.model ?? requested.effort) !== null
+    ) {
+      events.push({
+        eventId: `${runtime.threadId}::request::${nativeSessionId ?? "unbound"}`,
+        threadId: runtime.threadId,
+        nativeSessionId,
+        routeEventKind: null,
+        taskStratum: "unknown",
+        experimentId: null,
+        managerId: null,
+        agentId: null,
+        requestedProvider: requested.provider,
+        requestedModel: requested.model,
+        requestedEffort: requested.effort,
+        escalationReason: null,
+        recordedAt: runtime.lastSeenAt,
+      });
+    }
+    const declared = attribution?.routeEvent;
+    if (declared !== undefined && declared !== null) {
+      const kind = declared.kind ?? null;
+      events.push({
+        eventId:
+          declared.eventId?.trim() ||
+          `${runtime.threadId}::declared::${kind ?? "unclassified"}::${nativeSessionId ?? "thread"}`,
+        threadId: runtime.threadId,
+        nativeSessionId: declared.nativeSessionId ?? nativeSessionId,
+        routeEventKind: kind,
+        taskStratum: normalizeTaskStratum(declared.taskStratum),
+        experimentId: declared.experimentId ?? null,
+        managerId: declared.managerId ?? null,
+        agentId: declared.agentId ?? null,
+        requestedProvider: declared.requested?.provider ?? null,
+        requestedModel: declared.requested?.model ?? null,
+        requestedEffort: declared.requested?.effort ?? null,
+        escalationReason: declared.reason ?? null,
+        recordedAt: runtime.lastSeenAt,
+      });
+    }
+    return events;
+  };
+
   const recordImportedTranscriptRow = SqlSchema.void({
     Request: RecordImportedTranscriptRequestSchema,
     execute: ({ threadId, source }) =>
@@ -365,7 +592,31 @@ export const make = Effect.gen(function* () {
   });
 
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
-    (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
+    Effect.gen(function* () {
+      if (options?.onConflict === "ignore") {
+        // A conflicting write is a stale caller; it must not append history for
+        // a cursor that was never applied.
+        yield* insertRuntimeRow(runtime);
+        return;
+      }
+      yield* upsertRuntimeRow(runtime);
+      const attribution = options?.attribution;
+      const nativeSessionId = nativeSessionIdOf(runtime.resumeCursor);
+      if (nativeSessionId !== null) {
+        yield* recordSessionHistoryRow({
+          threadId: runtime.threadId,
+          providerName: runtime.providerName,
+          providerInstanceId: runtime.providerInstanceId,
+          adapterKey: runtime.adapterKey,
+          nativeSessionId,
+          parentNativeSessionId: attribution?.parentNativeSessionId ?? null,
+          seenAt: runtime.lastSeenAt,
+        });
+      }
+      for (const event of routeEventsFor(runtime, attribution, nativeSessionId)) {
+        yield* recordRouteEventRow(event);
+      }
+    }).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProviderSessionRuntimeRepository.upsert:query",
