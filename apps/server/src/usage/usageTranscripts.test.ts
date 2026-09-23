@@ -81,6 +81,50 @@ describe("parseClaudeLine", () => {
     expect(record?.providerRequestId).toBe("req_9");
     expect(record?.providerMessageId).toBe("msg_9");
     expect(record?.promptId).toBeNull();
+    expect(record?.measurement).toBe("observed");
+  });
+
+  it("marks an empty usage container as empty, not a measured zero", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-07T04:05:13.944Z",
+      sessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+      message: { id: "msg_empty", model: "claude-fable-5", usage: {} },
+    });
+
+    const record = parseClaudeLine(line);
+
+    expect(record).not.toBeNull();
+    expect(record?.measurement).toBe("empty");
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    });
+  });
+
+  it("treats an explicit zero as an observed measurement", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-07T04:05:13.944Z",
+      sessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+      message: {
+        id: "msg_zero",
+        model: "claude-fable-5",
+        usage: {
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          output_tokens: 0,
+        },
+      },
+    });
+
+    const record = parseClaudeLine(line);
+
+    expect(record?.measurement).toBe("observed");
   });
 });
 

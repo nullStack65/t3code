@@ -8,6 +8,31 @@
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
+/**
+ * Whether the source actually measured tokens, as opposed to handing us a
+ * container we normalised to zeros.
+ *
+ * - `observed` — at least one recognised token field was present. An explicit
+ *   `0` is a real measured zero and stays `observed`.
+ * - `empty` — a usage container existed but carried no recognised token field
+ *   (for example Claude's `usage: {}`). Numeric totals are zero, but that is a
+ *   missing measurement, not a measured zero.
+ * - `unavailable` — the presence information was erased before we saw the
+ *   record (a legacy cache row). The zeros may be real or may be missing; we
+ *   must not classify them either way.
+ */
+export type UsageMeasurement = "observed" | "empty" | "unavailable";
+
+/**
+ * How a record relates to other records for the same identity.
+ *
+ * - `delta` — an additive increment (the default for every parser here).
+ * - `snapshot` — a cumulative observation that *replaces* an earlier value for
+ *   the same identity rather than adding to it. A source that defines updates
+ *   sets this; the projection then keeps the newest instead of summing.
+ */
+export type UsageObservationScope = "delta" | "snapshot";
+
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
@@ -39,6 +64,37 @@ export interface UsageRecord {
    * `turn_completed.prompt_id` identifies the user prompt a turn answers.
    */
   readonly promptId?: string | null;
+  /**
+   * Whether the source actually measured this record. Absent means the parser
+   * observed recognised fields; a legacy cache row sets `unavailable`
+   * explicitly. See {@link UsageMeasurement}.
+   */
+  readonly measurement?: UsageMeasurement;
+  /** Additive increment or replaceable snapshot. Absent means `delta`. */
+  readonly scope?: UsageObservationScope;
+}
+
+/**
+ * The occurrence-aware identity seam.
+ *
+ * Two records with the same value here are the same *event shape* in the same
+ * session. Callers append a per-delivery occurrence index to distinguish
+ * repeated equal events from a re-delivery of one event: a copy of a rollout
+ * restarts its occurrence counter, so the copy lands on the same composite key
+ * and is de-duplicated, while two genuine equal events in one file land on
+ * different keys and are both kept. This is the identity the scan cache stamps
+ * onto otherwise-keyless records (see `UsageService`); it is deliberately
+ * separate from the native request/message/prompt ids, which are reporting
+ * values and not delivery identity.
+ */
+export function usageEventOccurrenceBaseKey(record: UsageRecord): string {
+  return JSON.stringify([
+    record.provider,
+    record.sessionId,
+    record.timestampMs,
+    record.model,
+    record.totals,
+  ]);
 }
 
 const EMPTY_TOTALS: UsageTokenTotals = {
@@ -107,6 +163,14 @@ function grokCostTicksToUsd(ticks: unknown): number | null {
 /* Claude Code                                                                */
 /* -------------------------------------------------------------------------- */
 
+/** Token fields that make a Claude `usage` object an actual measurement. */
+const CLAUDE_USAGE_FIELDS = [
+  "input_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+  "output_tokens",
+] as const;
+
 /**
  * Parses one line of a Claude Code transcript.
  *
@@ -150,6 +214,15 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 
   const cost = record["costUSD"];
 
+  // `usage: {}` normalises to zeros but is not a measured zero. Only a
+  // recognised token field makes this an observed measurement; an explicit
+  // `input_tokens: 0` still counts as observed.
+  const measurement: UsageMeasurement = CLAUDE_USAGE_FIELDS.some((field) =>
+    Object.hasOwn(usageRecord, field),
+  )
+    ? "observed"
+    : "empty";
+
   return {
     provider: "claude",
     timestampMs,
@@ -171,6 +244,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     providerRequestId: requestId,
     providerMessageId: messageId,
     promptId: null,
+    measurement,
   };
 }
 
@@ -337,6 +411,8 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     providerRequestId: null,
     providerMessageId: null,
     promptId: null,
+    // Only emitted when at least one token was measured, so this is observed.
+    measurement: "observed",
   };
 }
 
@@ -469,6 +545,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
         providerRequestId: null,
         providerMessageId: null,
         promptId,
+        measurement: "observed",
       },
     ];
   }
@@ -518,6 +595,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
       providerRequestId: null,
       providerMessageId: null,
       promptId,
+      measurement: "observed",
     });
   }
   return results;

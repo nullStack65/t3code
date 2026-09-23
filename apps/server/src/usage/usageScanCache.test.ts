@@ -25,6 +25,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     },
     reportedCostUsd: null,
     dedupeKey: "msg_1:",
+    measurement: "observed",
     ...overrides,
   };
 }
@@ -49,6 +50,7 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
       records,
       tailRecords: [],
       position: position(),
+      identity: "declared",
     });
   }
   return cache;
@@ -69,6 +71,7 @@ describe("scan cache round trip", () => {
       ],
       tailRecords: [record({ provider: "grok", model: "grok-4.5-build", dedupeKey: null })],
       position: position({ resumeOffset: 30, guardLength: 30, guardHash: 123 }),
+      identity: "declared",
     });
     original.set("/codex.jsonl", {
       size: 80,
@@ -86,6 +89,7 @@ describe("scan cache round trip", () => {
           forkCopyAnchorMs: 0,
         },
       }),
+      identity: "declared",
     });
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
@@ -147,7 +151,7 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("rejects a document from the previous cache version", () => {
+  it("rejects a v1/v2 document that predates the parse position", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
     const previous = { ...encoded, version: 2 };
 
@@ -209,6 +213,81 @@ describe("scan cache round trip", () => {
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(poisoned)));
     expect(restored.has("/a.jsonl")).toBe(false);
+  });
+});
+
+describe("legacy v3 cache history", () => {
+  const TS = 1_786_000_000_000;
+
+  /** One deleted transcript (unrecoverable) and one extant transcript. */
+  function v3Document(): unknown {
+    return {
+      version: 3,
+      models: ["claude-fable-5"],
+      sessions: ["deleted-session", "live-session"],
+      files: {
+        "/deleted.jsonl": {
+          s: 100,
+          m: 500,
+          p: "claude",
+          r: [[TS, 0, 0, 2, 1000, 10, 50, 0, "msg_d:", null]],
+          t: [],
+          o: 90,
+          gl: 64,
+          gh: 11,
+          cs: null,
+        },
+        "/live.jsonl": {
+          s: 40,
+          m: 9000,
+          p: "claude",
+          r: [[TS, 0, 1, 0, 0, 0, 0, 0, null, null]],
+          t: [],
+          o: 30,
+          gl: 30,
+          gh: 22,
+          cs: null,
+        },
+      },
+    };
+  }
+
+  it("reads a v3 entry instead of discarding the retained history", () => {
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(v3Document())));
+
+    expect([...decoded.keys()].toSorted()).toEqual(["/deleted.jsonl", "/live.jsonl"]);
+    const deleted = decoded.get("/deleted.jsonl")!;
+    expect(deleted.identity).toBe("unavailable");
+    expect(deleted.records[0]?.totals.outputTokens).toBe(50);
+    // Native ids are unavailable, not asserted as absent.
+    expect(deleted.records[0]?.providerRequestId).toBeUndefined();
+    // A nonzero v3 row is still a known measurement.
+    expect(deleted.records[0]?.measurement).toBe("observed");
+  });
+
+  it("keeps an all-zero v3 row explicitly unavailable, not a measured zero", () => {
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(v3Document())));
+
+    const live = decoded.get("/live.jsonl")!;
+    expect(live.identity).toBe("unavailable");
+    expect(live.records[0]?.measurement).toBe("unavailable");
+  });
+
+  it("persists the legacy marker so deleted history stays unavailable across restarts", () => {
+    const once = decodeScanCache(JSON.parse(JSON.stringify(v3Document())));
+    const again = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(once))));
+
+    expect(again.get("/deleted.jsonl")?.identity).toBe("unavailable");
+    expect(again.get("/deleted.jsonl")?.records[0]?.totals.outputTokens).toBe(50);
+  });
+
+  it("marks a freshly re-parsed entry declared so it can resume and enrich", () => {
+    const encoded = encodeScanCache(
+      cacheWith([["/live.jsonl", 9000, [record({ sessionId: "live-session" })]]]),
+    );
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
+
+    expect(decoded.get("/live.jsonl")?.identity).toBe("declared");
   });
 });
 

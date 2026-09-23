@@ -17,7 +17,12 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
+import type {
+  CodexScanState,
+  UsageMeasurement,
+  UsageObservationScope,
+  UsageRecord,
+} from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
@@ -26,7 +31,22 @@ import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 // v4: records carry native request/message/prompt ids. Without the bump, warm
 // v3 entries would silently report those levels as unsupported until the file
 // next changed.
+//
+// v3 documents are still *read*: the scan retains measured records from
+// transcripts that have since been deleted, and those cannot be re-parsed, so
+// discarding a v3 cache would destroy 90 days of history. A v3 row decodes with
+// its native ids and measurement presence explicitly `unavailable`, and an
+// extant file is cold re-parsed so those fields get filled in. Only v1/v2 (no
+// parse position, different fork semantics) are rejected.
 const USAGE_SCAN_CACHE_VERSION = 4 as const;
+const LEGACY_USAGE_SCAN_CACHE_VERSION = 3 as const;
+
+/**
+ * Whether a cache entry's rows still carry their native ids and measurement
+ * presence. A `v3` entry erased both; the projection must report them as
+ * unavailable rather than as a measured zero or an absent id.
+ */
+export type ScanCacheIdentity = "declared" | "unavailable";
 
 export interface CachedFile {
   readonly size: number;
@@ -41,6 +61,11 @@ export interface CachedFile {
    */
   readonly tailRecords: readonly UsageRecord[];
   readonly position: TranscriptParsePosition;
+  /**
+   * `unavailable` for a legacy row whose ids/presence were erased. Callers must
+   * not resume such an entry: a cold re-parse is the only way to enrich it.
+   */
+  readonly identity: ScanCacheIdentity;
 }
 
 export type ScanCache = Map<string, CachedFile>;
@@ -64,7 +89,22 @@ type SerializedRecord = readonly [
   providerRequestId: string | null,
   providerMessageId: string | null,
   promptId: string | null,
+  measurementCode: number,
+  scopeCode: number,
 ];
+
+const MEASUREMENT_CODES: readonly UsageMeasurement[] = ["observed", "empty", "unavailable"];
+const SCOPE_CODES: readonly UsageObservationScope[] = ["delta", "snapshot"];
+
+function encodeMeasurement(measurement: UsageMeasurement | undefined): number {
+  const index = MEASUREMENT_CODES.indexOf(measurement ?? "observed");
+  return index < 0 ? 0 : index;
+}
+
+function encodeScope(scope: UsageObservationScope | undefined): number {
+  const index = SCOPE_CODES.indexOf(scope ?? "delta");
+  return index < 0 ? 0 : index;
+}
 
 interface SerializedFile {
   readonly s: number;
@@ -79,6 +119,12 @@ interface SerializedFile {
   readonly gh: number;
   /** Codex reducer state at `o`; `null` for stateless providers. */
   readonly cs: CodexScanState | null;
+  /**
+   * `1` when this entry's rows predate native ids / measurement presence. Kept
+   * on the file so an erased-history entry stays `unavailable` across restarts
+   * until an extant file is cold re-parsed. Absent on a fresh entry.
+   */
+  readonly li?: number;
 }
 
 interface SerializedCache {
@@ -118,6 +164,8 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.providerRequestId ?? null,
     record.providerMessageId ?? null,
     record.promptId ?? null,
+    encodeMeasurement(record.measurement),
+    encodeScope(record.scope),
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -132,6 +180,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
       gl: entry.position.guardLength,
       gh: entry.position.guardHash,
       cs: entry.position.codexState,
+      ...(entry.identity === "unavailable" ? { li: 1 } : {}),
     };
   }
 
@@ -153,7 +202,15 @@ export function decodeScanCache(document: unknown): ScanCache {
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
-  if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
+  if (
+    root.version !== USAGE_SCAN_CACHE_VERSION &&
+    root.version !== LEGACY_USAGE_SCAN_CACHE_VERSION
+  ) {
+    return cache;
+  }
+  // A v3 document has no native ids or measurement presence anywhere; every
+  // entry it holds is erased-history. A v4 entry carries its own marker.
+  const legacyDocument = root.version === LEGACY_USAGE_SCAN_CACHE_VERSION;
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
@@ -171,6 +228,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   const decodeRecords = (
     rows: readonly unknown[],
     provider: UsageProviderKind,
+    legacy: boolean,
   ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
@@ -192,6 +250,11 @@ export function decodeScanCache(document: unknown): ScanCache {
       const providerRequestId = row[10];
       const providerMessageId = row[11];
       const promptId = row[12];
+      // Appended after v4. A v3 or early-v4 row has no presence information, so
+      // a nonzero total proves a measurement while an all-zero row stays
+      // explicitly `unavailable` rather than being read as a measured zero.
+      const measurementCode = row[13];
+      const scopeCode = row[14];
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       if (
@@ -207,6 +270,21 @@ export function decodeScanCache(document: unknown): ScanCache {
         return null;
       }
 
+      const measurement: UsageMeasurement =
+        typeof measurementCode === "number" &&
+        Number.isSafeInteger(measurementCode) &&
+        MEASUREMENT_CODES[measurementCode] !== undefined
+          ? MEASUREMENT_CODES[measurementCode]!
+          : uncached + cached + cacheCreation + output > 0
+            ? "observed"
+            : "unavailable";
+      const scope: UsageObservationScope =
+        typeof scopeCode === "number" &&
+        Number.isSafeInteger(scopeCode) &&
+        SCOPE_CODES[scopeCode] !== undefined
+          ? SCOPE_CODES[scopeCode]!
+          : "delta";
+
       records.push({
         provider,
         timestampMs,
@@ -221,11 +299,16 @@ export function decodeScanCache(document: unknown): ScanCache {
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
-        // Omitted when absent so a record round-trips identically to one the
-        // parser produced without the field.
-        ...(typeof providerRequestId === "string" ? { providerRequestId } : {}),
-        ...(typeof providerMessageId === "string" ? { providerMessageId } : {}),
-        ...(typeof promptId === "string" ? { promptId } : {}),
+        // A v3 row cannot carry native ids; they are unavailable, not absent.
+        ...(legacy
+          ? {}
+          : {
+              ...(typeof providerRequestId === "string" ? { providerRequestId } : {}),
+              ...(typeof providerMessageId === "string" ? { providerMessageId } : {}),
+              ...(typeof promptId === "string" ? { promptId } : {}),
+            }),
+        measurement,
+        ...(scope === "delta" ? {} : { scope }),
       });
     }
     return records;
@@ -259,8 +342,9 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (codexState === undefined) continue;
 
     const provider: UsageProviderKind = entry.p;
-    const records = decodeRecords(entry.r, provider);
-    const tailRecords = decodeRecords(entry.t, provider);
+    const legacy = legacyDocument || entry.li === 1;
+    const records = decodeRecords(entry.r, provider, legacy);
+    const tailRecords = decodeRecords(entry.t, provider, legacy);
     if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
@@ -275,6 +359,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         guardHash: entry.gh,
         codexState,
       },
+      identity: legacy ? "unavailable" : "declared",
     });
   }
 

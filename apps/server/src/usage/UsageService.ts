@@ -61,7 +61,7 @@ import {
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
+import { usageEventOccurrenceBaseKey, type UsageRecord } from "./usageTranscripts.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -101,7 +101,6 @@ const encodeRatesCache = Schema.encodeEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
-const encodeUsageRecordKey = Schema.encodeSync(ScanCacheJson);
 const CachedSource = Schema.Struct({ dir: Schema.String, volumeId: Schema.String });
 const decodeCachedSources = Schema.decodeUnknownOption(
   Schema.Struct({ sources: Schema.Record(Schema.String, CachedSource) }),
@@ -406,9 +405,14 @@ export const make = Effect.gen(function* () {
       }
 
       // Only a strictly grown file may resume. Same size with a new mtime, or
-      // a shrunken file, means rewritten content; re-parse it whole.
+      // a shrunken file, means rewritten content; re-parse it whole. A legacy
+      // entry (ids/presence erased) is also re-parsed whole: resuming would
+      // keep serving id-less records and the enrichment would never happen.
       const resumeFrom =
-        cached !== undefined && cached.provider === provider && size > cached.size
+        cached !== undefined &&
+        cached.provider === provider &&
+        cached.identity === "declared" &&
+        size > cached.size
           ? cached.position
           : undefined;
 
@@ -436,6 +440,7 @@ export const make = Effect.gen(function* () {
         records,
         tailRecords,
         position: parsed.position,
+        identity: "declared",
       });
       cacheDirty = true;
       return tailRecords.length === 0 ? records : [...records, ...tailRecords];
@@ -572,6 +577,10 @@ export const make = Effect.gen(function* () {
       }
       let scannedFiles = 0;
       let skippedFiles = 0;
+      // A usage container with no recognised token field (Claude `usage: {}`)
+      // parses to a record but measured nothing; surface it rather than letting
+      // it read as a measured zero.
+      let malformedRecords = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
@@ -584,17 +593,12 @@ export const make = Effect.gen(function* () {
         scannedFiles += 1;
         const codexEventOccurrences = new Map<string, number>();
         for (const record of file.records) {
+          if (record.measurement === "empty") malformedRecords += 1;
           let usageRecord = record;
           if (record.provider === "codex" && record.sessionId.length > 0) {
             // Match moved rollout copies without collapsing repeated equal events
             // within one rollout (timestamps can have only second precision).
-            const key = encodeUsageRecordKey([
-              record.provider,
-              record.sessionId,
-              record.timestampMs,
-              record.model,
-              record.totals,
-            ]);
+            const key = usageEventOccurrenceBaseKey(record);
             const occurrence = (codexEventOccurrences.get(key) ?? 0) + 1;
             codexEventOccurrences.set(key, occurrence);
             usageRecord = { ...record, dedupeKey: key + ":" + occurrence };
@@ -613,7 +617,7 @@ export const make = Effect.gen(function* () {
         status: files === null && scannedFiles === 0 ? "missing" : "ok",
         scannedFiles,
         skippedFiles,
-        malformedRecords: 0,
+        malformedRecords,
         distinctSessions: sessionIds.size,
         message: files === null ? "No transcript directory on this environment." : null,
       });
