@@ -45,6 +45,11 @@ import {
 } from "@t3tools/shared/threadPullRequests";
 
 import { EMPTY_TOTALS, addTotals, totalTokens as countTokens } from "./usageTranscripts.ts";
+import type {
+  DedupeKeyScope,
+  UsageMeasurement,
+  UsageMeasurementCompleteness,
+} from "./usageTranscripts.ts";
 
 export const USAGE_ATTRIBUTION_VERSION = 2 as const;
 
@@ -160,6 +165,12 @@ export interface AttributionUsageRecord {
   readonly costUsd: number;
   /** Scan/delivery identity, or `null` when the record is unkeyed. */
   readonly dedupeKey: string | null;
+  /**
+   * How far `dedupeKey` can be trusted on its own. `global` (the default) means
+   * the key is a globally qualified native observation id; `source-local` means
+   * it must be qualified by the native session. See `usageTranscripts`.
+   */
+  readonly dedupeKeyScope?: DedupeKeyScope;
   readonly providerRequestId?: string | null;
   readonly providerMessageId?: string | null;
   readonly promptId?: string | null;
@@ -170,7 +181,17 @@ export interface AttributionUsageRecord {
    * any total is nonzero and `unavailable` when all are zero, so a legacy row
    * whose presence was erased is never read as a measured zero.
    */
-  readonly measurement?: "observed" | "empty" | "unavailable";
+  readonly measurement?: UsageMeasurement;
+  /** Whether an `observed` measurement covered every required field. */
+  readonly measurementCompleteness?: UsageMeasurementCompleteness;
+  /** Present-but-invalid recognised token fields; distinguishes invalid from absent. */
+  readonly invalidTokenFields?: number;
+  /**
+   * `false` when the source erased native identity before we saw it (a legacy
+   * cache row). Kept apart from numeric quality so an absent native id is
+   * reported `unavailable`, never recovered from token magnitude.
+   */
+  readonly identityAvailable?: boolean;
   /** Additive increment or replaceable snapshot. Absent means `delta`. */
   readonly scope?: "delta" | "snapshot";
   /** Cost provenance, preserved per record so a view can carry it. */
@@ -456,17 +477,47 @@ function anyTotal(record: AttributionUsageRecord): number {
 }
 
 /** Presence of a measurement, with the legacy-erased case made explicit. */
-function effectiveMeasurement(
-  record: AttributionUsageRecord,
-): "observed" | "empty" | "unavailable" {
+function effectiveMeasurement(record: AttributionUsageRecord): UsageMeasurement {
   if (record.measurement !== undefined) return record.measurement;
   return anyTotal(record) > 0 ? "observed" : "unavailable";
 }
 
 /**
+ * The identity a record is de-duplicated under.
+ *
+ * A `global` key is namespaced by provider only; a `source-local` key is
+ * qualified by the canonical native session, never by a physical path, so a
+ * copy of the same session at another location still collapses while two
+ * sessions that happen to reuse a local key stay distinct.
+ */
+function dedupeIdentity(record: AttributionUsageRecord): string {
+  return (record.dedupeKeyScope ?? "global") === "source-local"
+    ? `${record.provider}\u0000local\u0000${record.sessionId}\u0000${record.dedupeKey}`
+    : `${record.provider}\u0000${record.dedupeKey}`;
+}
+
+/** Per-record numeric quality, keeping completeness and validity separate. */
+type RecordQuality = "measured" | "partial" | "empty" | "invalid" | "unavailable";
+
+function recordQuality(record: AttributionUsageRecord): RecordQuality {
+  const measurement = record.measurement;
+  if (measurement === undefined) {
+    // No declared measurement: a nonzero total proves some tokens were
+    // measured, but never that the measurement was complete.
+    return anyTotal(record) > 0 ? "partial" : "unavailable";
+  }
+  if (measurement === "observed") {
+    return record.measurementCompleteness === "partial" ? "partial" : "measured";
+  }
+  return measurement;
+}
+
+/**
  * Content of a measured observation, used to tell a repeated delivery from a
  * conflicting version of the same identity. Deliberately excludes
- * `sourceFingerprint`: a copy at another path is the same observation.
+ * `sourceFingerprint`: a copy at another path is the same observation. Cost and
+ * its provenance are included, so a record whose cost changed is a conflicting
+ * version of one observation rather than a silent duplicate.
  */
 function observationContent(record: AttributionUsageRecord): string {
   return [
@@ -480,6 +531,8 @@ function observationContent(record: AttributionUsageRecord): string {
     record.providerRequestId ?? "",
     record.providerMessageId ?? "",
     record.promptId ?? "",
+    record.costUsd,
+    record.costSource ?? "",
     effectiveMeasurement(record),
   ].join("\u0000");
 }
@@ -561,13 +614,16 @@ interface MutableCoverage {
 export function buildUsageAttribution(input: UsageAttributionInput): UsageAttribution {
   // 1. Identity and de-duplication.
   //
-  //    A declared key is the scan/delivery identity and is namespaced by
-  //    provider so equal local ids from two providers cannot collide. A
-  //    repeated delivery (same key, same content) is dropped; a snapshot
-  //    replaces the earlier value; a differing delta for the same key is a
-  //    conflict and is exposed rather than silently discarded. A record with no
-  //    key at all is unkeyed: it is kept and counted, never merged by content
-  //    equality, and the session is marked uncertain.
+  //    A declared key is the scan/delivery identity. Its scope is explicit: a
+  //    `global` key is a globally qualified native observation id and is
+  //    namespaced by provider alone; a `source-local` key is qualified by the
+  //    native session, because the same local key in two sessions is two
+  //    observations, not one. A repeated delivery (same identity, same content)
+  //    is dropped; a snapshot replaces the earlier value; a differing delta for
+  //    the same identity is a conflict and is exposed rather than silently
+  //    discarded. A record with no key at all is unkeyed: it is kept and
+  //    counted, never merged by content equality, and the session is marked
+  //    uncertain.
   const kept: AttributionUsageRecord[] = [];
   const keptIndexByIdentity = new Map<string, number>();
   const conflictSessions = new Set<string>();
@@ -582,7 +638,7 @@ export function buildUsageAttribution(input: UsageAttributionInput): UsageAttrib
       kept.push(record);
       continue;
     }
-    const identity = `${record.provider}\u0000${record.dedupeKey}`;
+    const identity = dedupeIdentity(record);
     const existingIndex = keptIndexByIdentity.get(identity);
     if (existingIndex === undefined) {
       keptIndexByIdentity.set(identity, kept.length);
@@ -590,6 +646,17 @@ export function buildUsageAttribution(input: UsageAttributionInput): UsageAttrib
       continue;
     }
     const existing = kept[existingIndex]!;
+    // A global key that shows up under a second native session is incompatible
+    // ownership, not a copy: one native observation cannot belong to two
+    // sessions. Surface it instead of silently dropping a version. A
+    // source-local key cannot reach here across sessions, because the session
+    // is part of its identity.
+    if (existing.sessionId !== record.sessionId) {
+      conflicts += 1;
+      conflictSessions.add(sessionKey(existing.provider, existing.sessionId));
+      conflictSessions.add(sessionKey(record.provider, record.sessionId));
+      continue;
+    }
     if (observationContent(existing) === observationContent(record)) {
       duplicatesDropped += 1;
       continue;
@@ -784,20 +851,30 @@ export function buildUsageAttribution(input: UsageAttributionInput): UsageAttrib
           ? "invalid"
           : "valid";
 
-    const measurements = accumulator.records.map(effectiveMeasurement);
-    const observedCount = measurements.filter((value) => value === "observed").length;
-    const emptyCount = measurements.filter((value) => value === "empty").length;
-    const unavailableCount = measurements.filter((value) => value === "unavailable").length;
+    const qualities = accumulator.records.map(recordQuality);
+    const hasValidMeasurement = qualities.some(
+      (quality) => quality === "measured" || quality === "partial",
+    );
     const measurementQuality: AttributionQuality =
       accumulator.records.length === 0
         ? "missing"
-        : observedCount === accumulator.records.length
+        : qualities.every((quality) => quality === "measured")
           ? "measured"
-          : observedCount === 0 && emptyCount > 0 && unavailableCount === 0
-            ? "invalid"
-            : observedCount === 0 && unavailableCount > 0
-              ? "unavailable"
-              : "partial";
+          : qualities.every((quality) => quality === "unavailable")
+            ? "unavailable"
+            : hasValidMeasurement
+              ? "partial"
+              : qualities.some((quality) => quality === "invalid")
+                ? "invalid"
+                : qualities.every((quality) => quality === "empty")
+                  ? "invalid"
+                  : "unavailable";
+
+    // A legacy row erased native identity entirely; an absent id there is
+    // `unavailable`, never `missing`, and never recovered from a nonzero total.
+    const identityErased =
+      accumulator.records.length > 0 &&
+      accumulator.records.every((record) => record.identityAvailable === false);
 
     const identityLevelQuality = (
       level: "prompt" | "request",
@@ -805,10 +882,10 @@ export function buildUsageAttribution(input: UsageAttributionInput): UsageAttrib
     ): AttributionQuality => {
       if (capability[level] === "unsupported") return "unsupported";
       if (accumulator.records.length === 0) return "missing";
-      if (unavailableCount > 0 && recordsWithId === 0) return "unavailable";
+      if (identityErased) return "unavailable";
       if (recordsWithId === 0) return "missing";
       if (recordsWithId < accumulator.records.length) return "partial";
-      if (observedCount === accumulator.records.length) return "measured";
+      if (qualities.every((quality) => quality === "measured")) return "measured";
       return "partial";
     };
 

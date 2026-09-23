@@ -244,6 +244,31 @@ describe("extractAttributionLinks", () => {
 });
 
 describe("extractAttributionSnapshot", () => {
+  it("reads a Claude imported cursor that carries both threadId and resume", () => {
+    // Claude writes `{ threadId, resume }` together for an imported session; the
+    // native session id is `resume`, not the T3 thread id in `threadId`.
+    const { bindings, nativeSessions } = extractAttributionBindings([
+      runtimeRow({
+        threadId: "import:claude-original:original-session",
+        providerName: "claudeAgent",
+        adapterKey: "claudeAgent",
+        resumeCursor: {
+          threadId: "import:claude-original:original-session",
+          resume: "5a128faa-8253-489e-b935-6c08e8e670c0",
+        },
+      }),
+    ]);
+
+    expect(nativeSessions[0]).toMatchObject({
+      nativeSessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+      origin: "runtimeCursor",
+      usageProvider: "claude",
+    });
+    expect(bindings[0]).toMatchObject({
+      nativeSessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+    });
+  });
+
   it("labels the cutoff and never leaks the runtime payload", () => {
     const snapshot = extractAttributionSnapshot({
       cutoffMs: 1_786_100_000_000,
@@ -266,5 +291,166 @@ describe("extractAttributionSnapshot", () => {
     expect(snapshot.links).toHaveLength(1);
     expect(JSON.stringify(snapshot)).not.toContain("do-not-leak");
     expect(JSON.stringify(snapshot)).not.toContain("/secret/path");
+  });
+
+  /**
+   * The deterministic interchange fixture M1C consumes. It is produced by the
+   * real extractor from persisted-row shapes only, so it can be regenerated
+   * exactly. Field semantics:
+   *
+   * - `cutoffMs` — associations are read as of this instant.
+   * - `bindings[]` — usage-provider native session -> T3 thread, with the
+   *   canonical `provider` (never the adapter key) and `origin`.
+   * - `nativeSessions[]` — every native identity, including OpenCode with
+   *   `usageProvider: null`; a label, never a join key.
+   * - `links[]` — canonical thread -> PR links; `stack-dismissed` tombstones are
+   *   preserved for the projection to filter.
+   * - `diagnostics` — what could not be read, never dropped silently.
+   */
+  it("produces a stable fixture for the M1C interchange", () => {
+    const snapshot = extractAttributionSnapshot({
+      cutoffMs: 1_786_100_000_000,
+      runtimeRows: [
+        runtimeRow({
+          threadId: "thread-opencode",
+          providerName: "opencode",
+          adapterKey: "opencode",
+          providerInstanceId: "opencode-default",
+          resumeCursor: { sessionId: "ses_opencode_1" },
+        }),
+        runtimeRow({
+          threadId: "import:claude-original:original-session",
+          providerName: "claudeAgent",
+          adapterKey: "claudeAgent",
+          providerInstanceId: "claude-default",
+          resumeCursor: {
+            threadId: "import:claude-original:original-session",
+            resume: "5a128faa-8253-489e-b935-6c08e8e670c0",
+          },
+          runtimePayload: { importedTranscripts: [importedSource()] },
+        }),
+        runtimeRow({
+          threadId: "thread-codex",
+          providerName: "codex",
+          adapterKey: "codex",
+          providerInstanceId: "codex-default",
+          resumeCursor: { threadId: "019fbbc1-b12c-7360-a685-28c181f0025f" },
+        }),
+      ],
+      linkRows: [
+        linkRow({ threadId: "thread-opencode", number: 12 }),
+        linkRow({ threadId: "thread-codex", number: 12, source: "agent" }),
+        linkRow({ threadId: "thread-codex", number: 13, source: "stack" }),
+      ],
+    });
+
+    expect(snapshot).toEqual({
+      cutoffMs: 1_786_100_000_000,
+      bindings: [
+        {
+          threadId: "import:claude-original:original-session",
+          provider: "claude",
+          providerInstanceId: "claude-default",
+          nativeSessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+          origin: "runtimeCursor",
+        },
+        {
+          threadId: "import:claude-original:original-session",
+          provider: "claude",
+          providerInstanceId: "claude-original",
+          nativeSessionId: "original-session",
+          origin: "importedTranscript",
+        },
+        {
+          threadId: "thread-codex",
+          provider: "codex",
+          providerInstanceId: "codex-default",
+          nativeSessionId: "019fbbc1-b12c-7360-a685-28c181f0025f",
+          origin: "runtimeCursor",
+        },
+      ],
+      nativeSessions: [
+        {
+          threadId: "thread-opencode",
+          providerName: "opencode",
+          adapterKey: "opencode",
+          providerInstanceId: "opencode-default",
+          nativeSessionId: "ses_opencode_1",
+          origin: "runtimeCursor",
+          usageProvider: null,
+        },
+        {
+          threadId: "import:claude-original:original-session",
+          providerName: "claudeAgent",
+          adapterKey: "claudeAgent",
+          providerInstanceId: "claude-default",
+          nativeSessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+          origin: "runtimeCursor",
+          usageProvider: "claude",
+        },
+        {
+          threadId: "import:claude-original:original-session",
+          providerName: "claudeAgent",
+          adapterKey: "claudeAgent",
+          providerInstanceId: "claude-original",
+          nativeSessionId: "original-session",
+          origin: "importedTranscript",
+          usageProvider: "claude",
+        },
+        {
+          threadId: "thread-codex",
+          providerName: "codex",
+          adapterKey: "codex",
+          providerInstanceId: "codex-default",
+          nativeSessionId: "019fbbc1-b12c-7360-a685-28c181f0025f",
+          origin: "runtimeCursor",
+          usageProvider: "codex",
+        },
+      ],
+      links: [
+        {
+          threadId: "thread-opencode",
+          host: "github.com",
+          repository: "acme/repo",
+          number: 12,
+          source: "manual",
+          linkedAt: "2026-09-01T00:00:00.000Z",
+          url: "https://github.com/acme/repo/pull/12",
+        },
+        {
+          threadId: "thread-codex",
+          host: "github.com",
+          repository: "acme/repo",
+          number: 12,
+          source: "agent",
+          linkedAt: "2026-09-01T00:00:00.000Z",
+          url: "https://github.com/acme/repo/pull/12",
+        },
+        {
+          threadId: "thread-codex",
+          host: "github.com",
+          repository: "acme/repo",
+          number: 13,
+          source: "stack",
+          linkedAt: "2026-09-01T00:00:00.000Z",
+          url: "https://github.com/acme/repo/pull/12",
+        },
+      ],
+      diagnostics: {
+        bindings: {
+          runtimeRows: 3,
+          runtimeCursorBindings: 3,
+          importedTranscriptBindings: 1,
+          absentIdentityRows: 0,
+          malformedResumeCursors: 0,
+          malformedRuntimePayloads: 0,
+          skippedImportedTranscripts: 0,
+          unsupportedProviderBindings: 1,
+          overwrittenThreads: 1,
+          ambiguousSessionIds: 0,
+        },
+        links: { rows: 3, links: 3, dismissed: 0, malformed: 0 },
+      },
+    });
   });
 });

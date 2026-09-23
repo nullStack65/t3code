@@ -19,7 +19,9 @@ import type { UsageProviderKind } from "@t3tools/contracts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 import type {
   CodexScanState,
+  DedupeKeyScope,
   UsageMeasurement,
+  UsageMeasurementCompleteness,
   UsageObservationScope,
   UsageRecord,
 } from "./usageTranscripts.ts";
@@ -91,10 +93,25 @@ type SerializedRecord = readonly [
   promptId: string | null,
   measurementCode: number,
   scopeCode: number,
+  /** Appended after the first v4 rows; absent means `complete` when observed. */
+  completenessCode: number,
+  /** Appended after the first v4 rows; count of present-but-invalid fields. */
+  invalidTokenFields: number,
+  /** Appended after the first v4 rows; absent means `global`. */
+  dedupeKeyScopeCode: number,
 ];
 
-const MEASUREMENT_CODES: readonly UsageMeasurement[] = ["observed", "empty", "unavailable"];
+// `invalid` is appended last so the existing observed/empty/unavailable codes
+// keep their values and older v4 rows keep decoding.
+const MEASUREMENT_CODES: readonly UsageMeasurement[] = [
+  "observed",
+  "empty",
+  "unavailable",
+  "invalid",
+];
 const SCOPE_CODES: readonly UsageObservationScope[] = ["delta", "snapshot"];
+const COMPLETENESS_CODES: readonly UsageMeasurementCompleteness[] = ["complete", "partial"];
+const DEDUPE_KEY_SCOPE_CODES: readonly DedupeKeyScope[] = ["global", "source-local"];
 
 function encodeMeasurement(measurement: UsageMeasurement | undefined): number {
   const index = MEASUREMENT_CODES.indexOf(measurement ?? "observed");
@@ -104,6 +121,23 @@ function encodeMeasurement(measurement: UsageMeasurement | undefined): number {
 function encodeScope(scope: UsageObservationScope | undefined): number {
   const index = SCOPE_CODES.indexOf(scope ?? "delta");
   return index < 0 ? 0 : index;
+}
+
+function encodeCompleteness(completeness: UsageMeasurementCompleteness | undefined): number {
+  const index = COMPLETENESS_CODES.indexOf(completeness ?? "complete");
+  return index < 0 ? 0 : index;
+}
+
+function encodeDedupeKeyScope(scope: DedupeKeyScope | undefined): number {
+  const index = DEDUPE_KEY_SCOPE_CODES.indexOf(scope ?? "global");
+  return index < 0 ? 0 : index;
+}
+
+function decodeCode<Value extends string>(
+  value: unknown,
+  codes: readonly Value[],
+): Value | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? codes[value] : undefined;
 }
 
 interface SerializedFile {
@@ -166,6 +200,9 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.promptId ?? null,
     encodeMeasurement(record.measurement),
     encodeScope(record.scope),
+    encodeCompleteness(record.measurementCompleteness),
+    record.invalidTokenFields ?? 0,
+    encodeDedupeKeyScope(record.dedupeKeyScope),
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -255,6 +292,11 @@ export function decodeScanCache(document: unknown): ScanCache {
       // explicitly `unavailable` rather than being read as a measured zero.
       const measurementCode = row[13];
       const scopeCode = row[14];
+      // Appended after the first v4 rows: validity/completeness metadata. Absent
+      // on an older row, which is treated as a complete observation.
+      const completenessCode = row[15];
+      const invalidTokenFieldsRaw = row[16];
+      const dedupeKeyScopeCode = row[17];
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       if (
@@ -271,19 +313,25 @@ export function decodeScanCache(document: unknown): ScanCache {
       }
 
       const measurement: UsageMeasurement =
-        typeof measurementCode === "number" &&
-        Number.isSafeInteger(measurementCode) &&
-        MEASUREMENT_CODES[measurementCode] !== undefined
-          ? MEASUREMENT_CODES[measurementCode]!
-          : uncached + cached + cacheCreation + output > 0
-            ? "observed"
-            : "unavailable";
-      const scope: UsageObservationScope =
-        typeof scopeCode === "number" &&
-        Number.isSafeInteger(scopeCode) &&
-        SCOPE_CODES[scopeCode] !== undefined
-          ? SCOPE_CODES[scopeCode]!
-          : "delta";
+        decodeCode(measurementCode, MEASUREMENT_CODES) ??
+        (uncached + cached + cacheCreation + output > 0 ? "observed" : "unavailable");
+      const scope: UsageObservationScope = decodeCode(scopeCode, SCOPE_CODES) ?? "delta";
+      // A legacy row erased field presence, so a nonzero observation is only
+      // known-partial: we cannot prove every required field was present.
+      const completeness: UsageMeasurementCompleteness | undefined =
+        measurement === "observed"
+          ? (decodeCode(completenessCode, COMPLETENESS_CODES) ?? (legacy ? "partial" : "complete"))
+          : undefined;
+      const invalidTokenFields =
+        typeof invalidTokenFieldsRaw === "number" &&
+        Number.isFinite(invalidTokenFieldsRaw) &&
+        invalidTokenFieldsRaw > 0
+          ? Math.trunc(invalidTokenFieldsRaw)
+          : 0;
+      const dedupeKeyScope: DedupeKeyScope | undefined = decodeCode(
+        dedupeKeyScopeCode,
+        DEDUPE_KEY_SCOPE_CODES,
+      );
 
       records.push({
         provider,
@@ -308,6 +356,12 @@ export function decodeScanCache(document: unknown): ScanCache {
               ...(typeof promptId === "string" ? { promptId } : {}),
             }),
         measurement,
+        ...(completeness === undefined ? {} : { measurementCompleteness: completeness }),
+        ...(invalidTokenFields === 0 ? {} : { invalidTokenFields }),
+        // Legacy rows erased identity; keep that visible so the projection does
+        // not read an absent native id as a missing one.
+        ...(legacy ? { identityAvailable: false } : {}),
+        ...(dedupeKeyScope === undefined ? {} : { dedupeKeyScope }),
         ...(scope === "delta" ? {} : { scope }),
       });
     }

@@ -44,12 +44,17 @@ because collapsing them is how a zero-cost success gets invented:
 - **identity validity** (`identityQuality`: `valid | missing | invalid`) — is the
   native session id present and well-formed? A malformed Claude id is `invalid`.
 - **measurement completeness** (`measurementQuality`: `measured | partial | missing |
-invalid | unavailable`) — were tokens actually measured? An explicit zero is
-  `measured`; Claude's `usage: {}` is `invalid`; an all-zero legacy row whose presence
-  was erased is `unavailable`, never `missing` and never a measured zero.
+invalid | unavailable`) — were tokens actually measured, and were the provider's
+  required fields present and valid? An explicit zero is `measured`; a valid known
+  subset (Claude `input_tokens` with no `output_tokens`) is `partial`; a field that is
+  present but holds `null`, a string, or a negative number makes the record `invalid`;
+  Claude's `usage: {}` is `invalid`; an all-zero legacy row whose presence was erased
+  is `unavailable`, never `missing` and never a measured zero. A nonzero total never
+  implies a complete measurement.
 - **level support** (`promptQuality` / `requestQuality`) — can the source establish
   this level, and did the records carry its id? `unsupported` is a structural limit,
-  not a zero.
+  not a zero. A legacy row whose native id was erased reports `unavailable`, never
+  `missing`, and identity availability is kept apart from token magnitude.
 - **allocation certainty** (`allocation`: `attributed | shared | unallocated |
 ambiguous | missing | orphan`).
 
@@ -65,8 +70,16 @@ ids (`providerRequestId`, `providerMessageId`, `promptId`), which are reporting 
 The projection resolves identity in three ways:
 
 - **declared** — a `dedupeKey` present on the record, namespaced by provider so equal
-  local ids from two providers cannot collide. Two deliveries of the same key with the
-  same content are one observation (a repeated scan or a copied/moved rollout).
+  local ids from two providers cannot collide. Its **scope** is explicit:
+  `dedupeKeyScope: "global"` is a globally qualified native observation id (Claude's
+  `message.id:requestId`, Grok's `sessionId:promptId:model`), so the same key at
+  another path is the same event; `"source-local"` is qualified by the canonical
+  native session (the scan's Codex occurrence key), so equal local keys in two
+  sessions are two observations, never one. A physical path is never used as scope.
+  A global key that appears under a second native session is incompatible ownership,
+  not a copy: it is surfaced as a conflict rather than silently dropped. Cost and its
+  provenance are part of the observation, so a repriced record is a conflict, not a
+  silent duplicate.
 - **occurrence** — for a keyless source such as Codex `token_count`, the scan stamps an
   occurrence-aware key from `usageEventOccurrenceBaseKey` plus a per-delivery occurrence
   index. A copied rollout restarts its counter, so the copy lands on the same key and is
@@ -124,9 +137,12 @@ discarded. The scan retains measured records from transcripts that have since be
 deleted for 90 days, and those cannot be re-parsed, so discarding a v3 cache would
 destroy that history. A v3 row decodes with its native ids and measurement presence
 explicitly `unavailable` (an all-zero row stays unknown, not a measured zero; a nonzero
-row is still a known measurement), and the entry is flagged so it is never resumed
-incrementally. An extant file is cold re-parsed on the next scan, which enriches it with
-ids and presence without double counting because the re-parse replaces the entry.
+row is a known but only-partial measurement), and the entry is flagged so it is never
+resumed incrementally. Warm-cache acceptance requires the current identity/measurement
+format: an unchanged extant legacy file is cold re-parsed once to enrich it with ids and
+presence without double counting because the re-parse replaces the entry. A read failure
+during that re-parse keeps the retained fallback rows, and a deleted file is never
+re-parsed at all, so its history survives.
 
 ## What still needs architecture approval
 

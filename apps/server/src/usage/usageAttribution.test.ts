@@ -13,6 +13,8 @@ import {
   type UsageAttributionInput,
 } from "./usageAttribution.ts";
 import { totalTokens } from "./usageTranscripts.ts";
+import { parseClaudeLine, type UsageRecord } from "./usageTranscripts.ts";
+import { decodeScanCache, encodeScanCache, type ScanCache } from "./usageScanCache.ts";
 
 const CLAUDE_SESSION = "5a128faa-8253-489e-b935-6c08e8e670c0";
 const OTHER_CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555";
@@ -398,6 +400,111 @@ describe("identity: repeated deliveries, occurrences, copies, conflicts", () => 
   });
 });
 
+describe("identity scope and cost provenance", () => {
+  it("keeps two source-local keys from different sessions as separate records", () => {
+    const first = record({
+      sessionId: CLAUDE_SESSION,
+      dedupeKey: "1",
+      dedupeKeyScope: "source-local",
+      totals: totals({ outputTokens: 10 }),
+    });
+    const second = record({
+      sessionId: OTHER_CLAUDE_SESSION,
+      dedupeKey: "1",
+      dedupeKeyScope: "source-local",
+      totals: totals({ outputTokens: 20 }),
+    });
+    const projection = buildUsageAttribution(
+      input({
+        records: [first, second],
+        bindings: [
+          binding({ threadId: "thread-1", nativeSessionId: CLAUDE_SESSION }),
+          binding({ threadId: "thread-2", nativeSessionId: OTHER_CLAUDE_SESSION }),
+        ],
+      }),
+    );
+
+    expect(projection.sessions).toHaveLength(2);
+    expect(projection.identity.duplicatesDropped).toBe(0);
+    expect(projection.identity.conflicts).toBe(0);
+    expect(projection.measured.tokens.outputTokens).toBe(30);
+  });
+
+  it("surfaces a global key reused under a second session as a conflict", () => {
+    const first = record({
+      sessionId: CLAUDE_SESSION,
+      dedupeKey: "1",
+      dedupeKeyScope: "global",
+    });
+    const reused = record({
+      sessionId: OTHER_CLAUDE_SESSION,
+      dedupeKey: "1",
+      dedupeKeyScope: "global",
+    });
+    const projection = buildUsageAttribution(
+      input({
+        records: [first, reused],
+        bindings: [
+          binding({ threadId: "thread-1", nativeSessionId: CLAUDE_SESSION }),
+          binding({ threadId: "thread-2", nativeSessionId: OTHER_CLAUDE_SESSION }),
+        ],
+      }),
+    );
+
+    // Incompatible ownership is not silently dropped as a duplicate.
+    expect(projection.identity.conflicts).toBe(1);
+    expect(projection.identity.duplicatesDropped).toBe(0);
+    expect(projection.measured.records).toBe(1);
+    const flagged = projection.sessions.filter((session) => session.conflict);
+    expect(flagged).toHaveLength(2);
+  });
+
+  it("still collapses a copy of a global key at another physical path", () => {
+    const original = record({
+      dedupeKey: "m1:r1",
+      dedupeKeyScope: "global",
+      sourceFingerprint: CLAUDE_FINGERPRINT,
+    });
+    const copy = record({
+      dedupeKey: "m1:r1",
+      dedupeKeyScope: "global",
+      sourceFingerprint: OTHER_FINGERPRINT,
+    });
+    const projection = buildUsageAttribution(
+      input({ records: [original, copy], bindings: [binding()] }),
+    );
+
+    expect(projection.identity.duplicatesDropped).toBe(1);
+    expect(projection.identity.conflicts).toBe(0);
+    expect(projection.measured.records).toBe(1);
+  });
+
+  it("surfaces a cost-only change as a conflict, not a duplicate", () => {
+    const first = record({ dedupeKey: "m1:r1", costUsd: 0.1 });
+    const repriced = record({ dedupeKey: "m1:r1", costUsd: 99 });
+    const projection = buildUsageAttribution(
+      input({ records: [first, repriced], bindings: [binding()] }),
+    );
+
+    expect(projection.identity.conflicts).toBe(1);
+    expect(projection.identity.duplicatesDropped).toBe(0);
+    // Kept-first, with the conflict surfaced rather than the change applied.
+    expect(projection.sessions[0]?.totals?.costUsd).toBe(0.1);
+    expect(projection.sessions[0]?.conflict).toBe(true);
+  });
+
+  it("treats a differing cost provenance as a conflict", () => {
+    const first = record({ dedupeKey: "m1:r1", costSource: "modelPriced" });
+    const reported = record({ dedupeKey: "m1:r1", costSource: "providerReported" });
+    const projection = buildUsageAttribution(
+      input({ records: [first, reported], bindings: [binding()] }),
+    );
+
+    expect(projection.identity.conflicts).toBe(1);
+    expect(projection.identity.duplicatesDropped).toBe(0);
+  });
+});
+
 describe("measurement quality", () => {
   it("treats a Claude usage:{} record as invalid, not a measured zero", () => {
     const empty = record({ dedupeKey: "m1:", measurement: "empty", totals: zeroTotals() });
@@ -448,6 +555,50 @@ describe("measurement quality", () => {
     );
 
     expect(projection.sessions[0]?.measurementQuality).toBe("partial");
+  });
+
+  it("keeps a partial measurement partial, not measured", () => {
+    const partial = record({
+      dedupeKey: "m1:",
+      measurement: "observed",
+      measurementCompleteness: "partial",
+      invalidTokenFields: 1,
+    });
+    const projection = buildUsageAttribution(input({ records: [partial], bindings: [binding()] }));
+
+    expect(projection.sessions[0]?.measurementQuality).toBe("partial");
+  });
+
+  it("keeps a present-but-invalid value invalid, not a measured zero", () => {
+    const invalid = record({
+      dedupeKey: "m1:",
+      measurement: "invalid",
+      totals: zeroTotals(),
+    });
+    const projection = buildUsageAttribution(input({ records: [invalid], bindings: [binding()] }));
+
+    expect(projection.sessions[0]?.measurementQuality).toBe("invalid");
+    expect(projection.coverage.find((entry) => entry.provider === "claude")?.invalidSessions).toBe(
+      1,
+    );
+  });
+
+  it("reports erased native identity as unavailable, not missing", () => {
+    // A legacy nonzero row: the tokens are a known measurement, but the native
+    // request id was erased, so the request level is unavailable.
+    const legacy = record({
+      dedupeKey: "legacy:1",
+      measurement: "observed",
+      measurementCompleteness: "partial",
+      identityAvailable: false,
+      totals: totals({ outputTokens: 40 }),
+    });
+    const projection = buildUsageAttribution(input({ records: [legacy], bindings: [binding()] }));
+    const session = projection.sessions[0]!;
+
+    expect(session.measurementQuality).toBe("partial");
+    expect(session.requestQuality).toBe("unavailable");
+    expect(session.requestCount).toBeNull();
   });
 
   it("surfaces a failed declared source instead of reading it as measured", () => {
@@ -752,6 +903,98 @@ describe("pull request association and attribution", () => {
 
     expect(projection.sessions[0]?.allocation).toBe("attributed");
     expect(projection.pullRequests[0]?.attributed.records).toBe(1);
+  });
+});
+
+describe("parser to projection", () => {
+  function claudeUsageLine(usage: Record<string, unknown>, requestId = "req_1"): string {
+    return JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-07T04:05:13.944Z",
+      sessionId: CLAUDE_SESSION,
+      requestId,
+      message: { id: "msg_1", model: "claude-fable-5", usage },
+    });
+  }
+
+  function fromParsed(record: UsageRecord): AttributionUsageRecord {
+    return {
+      provider: record.provider,
+      sessionId: record.sessionId,
+      model: record.model,
+      timestampMs: record.timestampMs,
+      totals: record.totals,
+      costUsd: 0,
+      dedupeKey: record.dedupeKey,
+      sourceFingerprint: CLAUDE_FINGERPRINT,
+      ...(record.dedupeKeyScope === undefined ? {} : { dedupeKeyScope: record.dedupeKeyScope }),
+      ...(record.providerRequestId === undefined
+        ? {}
+        : { providerRequestId: record.providerRequestId }),
+      ...(record.providerMessageId === undefined
+        ? {}
+        : { providerMessageId: record.providerMessageId }),
+      ...(record.promptId === undefined ? {} : { promptId: record.promptId }),
+      ...(record.measurement === undefined ? {} : { measurement: record.measurement }),
+      ...(record.measurementCompleteness === undefined
+        ? {}
+        : { measurementCompleteness: record.measurementCompleteness }),
+      ...(record.invalidTokenFields === undefined
+        ? {}
+        : { invalidTokenFields: record.invalidTokenFields }),
+      ...(record.identityAvailable === undefined
+        ? {}
+        : { identityAvailable: record.identityAvailable }),
+    };
+  }
+
+  it("carries a partial usage object through to a partial session", () => {
+    const parsed = parseClaudeLine(claudeUsageLine({ input_tokens: 10 }))!;
+    const projection = buildUsageAttribution(
+      input({ records: [fromParsed(parsed)], bindings: [binding()] }),
+    );
+    const session = projection.sessions[0]!;
+
+    expect(parsed.measurementCompleteness).toBe("partial");
+    expect(session.measurementQuality).toBe("partial");
+    expect(session.totals?.tokens.uncachedInputTokens).toBe(10);
+  });
+
+  it("carries an invalid usage value through to an invalid session", () => {
+    const parsed = parseClaudeLine(claudeUsageLine({ input_tokens: null }))!;
+    const projection = buildUsageAttribution(
+      input({ records: [fromParsed(parsed)], bindings: [binding()] }),
+    );
+
+    expect(parsed.measurement).toBe("invalid");
+    expect(projection.sessions[0]?.measurementQuality).toBe("invalid");
+  });
+
+  it("survives a cache round trip without promoting partial to complete", () => {
+    const parsed = parseClaudeLine(claudeUsageLine({ input_tokens: 10 }))!;
+    const cache: ScanCache = new Map([
+      [
+        "/a.jsonl",
+        {
+          size: 10,
+          mtimeMs: 1,
+          provider: "claude",
+          records: [parsed],
+          tailRecords: [],
+          position: { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null },
+          identity: "declared",
+        },
+      ],
+    ]);
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(cache))));
+    const roundTripped = restored.get("/a.jsonl")!.records[0]!;
+
+    expect(roundTripped.measurementCompleteness).toBe("partial");
+    expect(roundTripped.dedupeKeyScope).toBe("global");
+    const projection = buildUsageAttribution(
+      input({ records: [fromParsed(roundTripped)], bindings: [binding()] }),
+    );
+    expect(projection.sessions[0]?.measurementQuality).toBe("partial");
   });
 });
 

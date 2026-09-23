@@ -393,8 +393,12 @@ export const make = Effect.gen(function* () {
       const cached = fileCache.get(filePath);
       // Provider is part of the identity: if both providers were ever pointed
       // at one directory, a hit parsed by the other parser must not be reused.
+      // The cache format is part of it too: a legacy entry erased native ids and
+      // measurement presence, so an unchanged file must still cold re-parse once
+      // to enrich it instead of serving the erased row forever.
       if (
         cached &&
+        cached.identity === "declared" &&
         cached.size === size &&
         cached.mtimeMs === mtimeMs &&
         cached.provider === provider
@@ -578,8 +582,9 @@ export const make = Effect.gen(function* () {
       let scannedFiles = 0;
       let skippedFiles = 0;
       // A usage container with no recognised token field (Claude `usage: {}`)
-      // parses to a record but measured nothing; surface it rather than letting
-      // it read as a measured zero.
+      // or one whose fields are all present-but-invalid parses to a record but
+      // measured nothing; surface it rather than letting it read as a measured
+      // zero.
       let malformedRecords = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
@@ -593,7 +598,8 @@ export const make = Effect.gen(function* () {
         scannedFiles += 1;
         const codexEventOccurrences = new Map<string, number>();
         for (const record of file.records) {
-          if (record.measurement === "empty") malformedRecords += 1;
+          if (record.measurement === "empty" || record.measurement === "invalid")
+            malformedRecords += 1;
           let usageRecord = record;
           if (record.provider === "codex" && record.sessionId.length > 0) {
             // Match moved rollout copies without collapsing repeated equal events

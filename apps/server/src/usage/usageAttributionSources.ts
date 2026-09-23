@@ -149,9 +149,12 @@ type CursorRead =
   | { readonly kind: "id"; readonly id: string };
 
 /**
- * The three cursor shapes adapters actually write: `{ resume }` (Claude),
- * `{ threadId }` (Codex), `{ sessionId }` (Grok, OpenCode, Antigravity). Order
- * does not matter because a cursor carries exactly one of them.
+ * The cursor shapes adapters actually write. Claude writes `{ resume }` for a
+ * live session and `{ threadId, resume }` together for an imported one, so a
+ * cursor is not guaranteed to carry exactly one field. `resume` is the native
+ * session id and is preferred over `threadId` (the T3 thread id) when both are
+ * present; `{ threadId }` alone is Codex, `{ sessionId }` is Grok, OpenCode,
+ * and Antigravity. Order matters, so the preference is explicit.
  */
 function readResumeCursor(cursor: unknown): CursorRead {
   if (cursor === null || cursor === undefined) return { kind: "absent" };

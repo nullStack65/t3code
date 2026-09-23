@@ -32,6 +32,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 function claudeLine(id: number, outputTokens: number, model = "claude-fable-5"): string {
   return `${JSON.stringify({
@@ -496,6 +497,134 @@ describe("UsageService", () => {
               "claude-fable-5": { input_cost_per_token: 1e-5, output_cost_per_token: 5e-5 },
             },
           }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("counts empty and invalid usage containers as malformed, not zero", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const lines =
+        [
+          encodeUnknownJsonString({
+            type: "assistant",
+            timestamp: "2026-08-01T10:00:00Z",
+            sessionId: "session-1",
+            message: { id: "m_empty", model: "claude-fable-5", usage: {} },
+          }),
+          encodeUnknownJsonString({
+            type: "assistant",
+            timestamp: "2026-08-01T10:00:01Z",
+            sessionId: "session-1",
+            message: { id: "m_invalid", model: "claude-fable-5", usage: { input_tokens: null } },
+          }),
+          claudeLine(3, 9),
+        ].join("\n") + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, lines));
+
+      yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          summary.sources.find((source) => source.fingerprint.provider === "claude")
+            ?.malformedRecords,
+          2,
+        );
+        // Only the valid line contributes tokens.
+        assert.strictEqual(totalOutputTokens(summary), 9);
+      }).pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-malformed-test", home, settings })),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("enriches an unchanged legacy v3 entry once and keeps deleted history", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const content = claudeLine(1, 5);
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, content));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const liveDir = yield* Effect.promise(() => NodeFSP.realpath(NodePath.dirname(transcript)));
+        const livePath = NodePath.join(liveDir, NodePath.basename(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const deletedPath = NodePath.join(liveDir, "deleted.jsonl");
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A v3 document: the live entry's (size, mtime) match the file exactly so
+        // the pre-fix warm hit would have served the erased row forever, and the
+        // deleted entry exists only in the cache.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 3,
+              models: ["claude-fable-5"],
+              sessions: ["session-1", "deleted-session"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 0, 10, 0, 0, 5, 0, "msg_live:", null]],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+                [deletedPath]: {
+                  s: 100,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 1, 10, 0, 0, 7, 0, "msg_deleted:", null]],
+                  t: [],
+                  o: 90,
+                  gl: 64,
+                  gh: 11,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        // The deleted entry's 7 tokens are retained and the live file's 5 are
+        // counted once, whether read from the enriched cache or re-parsed.
+        assert.strictEqual(totalOutputTokens(first), 12);
+
+        const afterFirst = decodeUnknownJsonString(
+          yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+        ) as {
+          version: number;
+          files: Record<string, { li?: number; r: unknown[][] }>;
+        };
+        assert.strictEqual(afterFirst.version, 4);
+        const liveEntry = afterFirst.files[livePath]!;
+        assert.strictEqual(liveEntry.li, undefined);
+        // Enriched: the native request id the v3 row could not carry is present.
+        assert.strictEqual(liveEntry.r[0]?.[10], "req_1");
+        assert.strictEqual(afterFirst.files[deletedPath]?.li, 1);
+
+        // A second scan of the unchanged live file is a warm hit: no re-parse,
+        // no cache rewrite, and stable totals.
+        const beforeSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        const second = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(second), 12);
+        const afterSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        assert.strictEqual(afterSecond, beforeSecond);
+
+        // A restart reads the enriched cache and still keeps deleted history.
+        const restarted = yield* UsageService.make;
+        const third = yield* restarted.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(third), 12);
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-legacy-enrich-test", home, settings }),
         ),
       );
     }).pipe(Effect.scoped),

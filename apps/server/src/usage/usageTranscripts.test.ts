@@ -125,6 +125,71 @@ describe("parseClaudeLine", () => {
     const record = parseClaudeLine(line);
 
     expect(record?.measurement).toBe("observed");
+    expect(record?.measurementCompleteness).toBe("complete");
+  });
+
+  /** A Claude assistant line with an arbitrary raw `usage` object. */
+  function claudeUsage(usage: Record<string, unknown>): string {
+    return JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-07T04:05:13.944Z",
+      sessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+      message: { id: "msg_raw", model: "claude-fable-5", usage },
+    });
+  }
+
+  it("treats present-but-invalid values as invalid, not a measured zero", () => {
+    for (const usage of [
+      { input_tokens: null },
+      { input_tokens: "missing" },
+      { input_tokens: -99 },
+      { input_tokens: Number.NaN },
+      { input_tokens: Number.POSITIVE_INFINITY },
+    ]) {
+      const record = parseClaudeLine(claudeUsage(usage));
+      expect(record?.measurement).toBe("invalid");
+      expect(record?.measurementCompleteness).toBeUndefined();
+      expect(record?.totals).toEqual({
+        uncachedInputTokens: 0,
+        cachedInputTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+      });
+    }
+  });
+
+  it("preserves a valid known subset as partial instead of complete", () => {
+    // `output_tokens` is required, so input alone is a partial measurement.
+    const inputOnly = parseClaudeLine(claudeUsage({ input_tokens: 10 }));
+    expect(inputOnly?.measurement).toBe("observed");
+    expect(inputOnly?.measurementCompleteness).toBe("partial");
+    expect(inputOnly?.invalidTokenFields).toBeUndefined();
+    expect(inputOnly?.totals.uncachedInputTokens).toBe(10);
+
+    // An explicit valid zero in one required field is still partial when the
+    // other required field is absent.
+    const zeroInputOnly = parseClaudeLine(claudeUsage({ input_tokens: 0 }));
+    expect(zeroInputOnly?.measurementCompleteness).toBe("partial");
+  });
+
+  it("keeps a complete explicit zero complete", () => {
+    const record = parseClaudeLine(claudeUsage({ input_tokens: 0, output_tokens: 0 }));
+    expect(record?.measurement).toBe("observed");
+    expect(record?.measurementCompleteness).toBe("complete");
+    expect(record?.invalidTokenFields).toBeUndefined();
+  });
+
+  it("distinguishes an invalid value from an absent field on a partial record", () => {
+    const record = parseClaudeLine(claudeUsage({ input_tokens: 10, output_tokens: null }));
+    expect(record?.measurement).toBe("observed");
+    expect(record?.measurementCompleteness).toBe("partial");
+    expect(record?.invalidTokenFields).toBe(1);
+  });
+
+  it("scopes a Claude message/request key as global", () => {
+    const record = parseClaudeLine(claudeLine({ messageId: "msg_scope", contentType: "text" }));
+    expect(record?.dedupeKeyScope).toBe("global");
   });
 });
 
@@ -174,6 +239,9 @@ describe("parseCodexLine", () => {
     expect(record?.providerRequestId).toBeNull();
     expect(record?.providerMessageId).toBeNull();
     expect(record?.promptId).toBeNull();
+    // Its occurrence key is only meaningful within the session.
+    expect(record?.dedupeKeyScope).toBe("source-local");
+    expect(record?.measurementCompleteness).toBe("complete");
   });
 
   it("skips a repeated token_count so deltas are not double counted", () => {

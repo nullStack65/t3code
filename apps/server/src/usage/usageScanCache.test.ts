@@ -26,6 +26,8 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     reportedCostUsd: null,
     dedupeKey: "msg_1:",
     measurement: "observed",
+    measurementCompleteness: "complete",
+    dedupeKeyScope: "global",
     ...overrides,
   };
 }
@@ -123,6 +125,61 @@ describe("scan cache round trip", () => {
       providerMessageId: "m1",
       promptId: "p1",
     });
+  });
+
+  it("round-trips validity, completeness, and key-scope metadata", () => {
+    const original = cacheWith([
+      [
+        "/partial.jsonl",
+        100,
+        [
+          record({
+            measurementCompleteness: "partial",
+            invalidTokenFields: 1,
+            dedupeKeyScope: "source-local",
+          }),
+        ],
+      ],
+      ["/invalid.jsonl", 100, [record({ measurement: "invalid" })]],
+    ]);
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+
+    expect(restored.get("/partial.jsonl")?.records[0]).toMatchObject({
+      measurement: "observed",
+      measurementCompleteness: "partial",
+      invalidTokenFields: 1,
+      dedupeKeyScope: "source-local",
+    });
+    expect(restored.get("/invalid.jsonl")?.records[0]?.measurement).toBe("invalid");
+  });
+
+  it("preserves the legacy identity-unavailable marker across a round trip", () => {
+    // A decoded v3 entry carries identityAvailable: false; re-encoding must not
+    // promote it to a declared identity.
+    const v3 = {
+      version: 3,
+      models: ["claude-fable-5"],
+      sessions: ["deleted-session"],
+      files: {
+        "/deleted.jsonl": {
+          s: 100,
+          m: 500,
+          p: "claude",
+          r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, "msg_d:", null]],
+          t: [],
+          o: 90,
+          gl: 64,
+          gh: 11,
+          cs: null,
+        },
+      },
+    };
+    const once = decodeScanCache(JSON.parse(JSON.stringify(v3)));
+    const again = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(once))));
+
+    expect(again.get("/deleted.jsonl")?.records[0]?.identityAvailable).toBe(false);
+    expect(again.get("/deleted.jsonl")?.records[0]?.measurementCompleteness).toBe("partial");
   });
 
   it("drops an entry whose persisted parse state is corrupt", () => {
