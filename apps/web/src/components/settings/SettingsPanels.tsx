@@ -623,6 +623,9 @@ export function useSettingsRestore(onRestored?: () => void) {
         : []),
       ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? ["Quit shortcut"] : []),
       ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
+      ...(settings.generateThreadTitles !== DEFAULT_UNIFIED_SETTINGS.generateThreadTitles
+        ? ["AI thread titles"]
+        : []),
       ...getChangedBrowserSettingLabels(settings),
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
         ? ["Agent browser access"]
@@ -646,6 +649,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.confirmThreadUnpin,
+      settings.generateThreadTitles,
       settings.composerCollapseOnScroll,
       settings.composerRichTextEnabled,
       settings.sendShortcut,
@@ -788,6 +792,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
       confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit,
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+      generateThreadTitles: DEFAULT_UNIFIED_SETTINGS.generateThreadTitles,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
@@ -3185,6 +3190,35 @@ export function GeneralSettingsPanel() {
                 ) : null}
               </div>
             )
+          }
+        />
+
+        <SettingsRow
+          serverScoped
+          settingKeys={["generateThreadTitles"]}
+          {...searchableSetting("generate-thread-titles")}
+          description="When off, new threads use the first prompt as their title instead of asking a model to name them."
+          resetAction={
+            settings.generateThreadTitles !== DEFAULT_UNIFIED_SETTINGS.generateThreadTitles ? (
+              <SettingResetButton
+                label="AI thread titles"
+                onClick={() =>
+                  updateSettings({
+                    generateThreadTitles: DEFAULT_UNIFIED_SETTINGS.generateThreadTitles,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["generateThreadTitles"]}
+              checked={settings.generateThreadTitles}
+              onCheckedChange={(checked) =>
+                updateSettings({ generateThreadTitles: Boolean(checked) })
+              }
+              aria-label="Generate thread titles with AI"
+            />
           }
         />
       </SettingsSection>
