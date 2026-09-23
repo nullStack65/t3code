@@ -42,6 +42,14 @@ import {
 } from "./build-desktop-artifact.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import {
+  BUILD_INFO_FILE_NAME,
+  createBuildInfo,
+  readGitSourceProvenance,
+  resolveSourceRepository,
+  resolveSourceSha,
+  serializeBuildInfo,
+} from "./lib/source-provenance.ts";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64"]);
@@ -516,6 +524,22 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     arch: input.arch,
     version: input.version,
   });
+
+  // Provenance travels with the archive so an installer, a WSL extraction, or
+  // a human can read the exact repository, full source SHA, version, and
+  // architecture without trusting the file name.
+  const gitSource = yield* readGitSourceProvenance(repoRoot);
+  const buildInfo = createBuildInfo({
+    version: input.version,
+    platform: input.platform,
+    arch: input.arch,
+    repository: resolveSourceRepository(process.env),
+    sourceSha: resolveSourceSha(process.env, gitSource.sourceSha),
+  });
+  yield* fs.writeFileString(
+    path.join(contentDir, BUILD_INFO_FILE_NAME),
+    `${yield* serializeBuildInfo(buildInfo)}\n`,
+  );
 
   const executablePath = path.join(contentDir, executableName);
   if (input.platform === "mac") {

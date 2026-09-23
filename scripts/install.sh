@@ -11,13 +11,15 @@
 #   T3CODE_HOME              T3 home directory (default: ~/.t3)
 #   T3CODE_INSTALL_BIN_DIR   where the `t3` symlink goes (default: ~/.local/bin)
 #   T3CODE_RELEASE_BASE_URL  mirror for releases/download (default: GitHub)
+#   T3CODE_RELEASE_REPOSITORY  owner/repo to discover and download from
+#                            (default: this fork, nullStack65/t3code)
 #
 # The archive is unpacked into $T3CODE_HOME/runtime/versions/<version>, the
 # same layout `t3 service install` uses, so the service reuses this download
 # instead of fetching the release again.
 set -eu
 
-repo="pingdotgg/t3code"
+repo="${T3CODE_RELEASE_REPOSITORY:-nullStack65/t3code}"
 base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
