@@ -97,6 +97,30 @@ describe("scan cache round trip", () => {
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
   });
 
+  it("preserves native request, message, and prompt ids", () => {
+    const original = cacheWith([
+      [
+        "/a.jsonl",
+        100,
+        [
+          record({
+            providerRequestId: "r1",
+            providerMessageId: "m1",
+            promptId: "p1",
+          }),
+        ],
+      ],
+    ]);
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+
+    expect(restored.get("/a.jsonl")?.records[0]).toMatchObject({
+      providerRequestId: "r1",
+      providerMessageId: "m1",
+      promptId: "p1",
+    });
+  });
+
   it("drops an entry whose persisted parse state is corrupt", () => {
     // Resuming with a bad reducer state would attach appended usage to the
     // wrong model or replay fork-copied history; that entry must cold parse.

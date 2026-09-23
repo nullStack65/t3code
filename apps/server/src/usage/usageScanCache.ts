@@ -23,7 +23,10 @@ import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 // entries would keep serving double-counted records forever.
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
-const USAGE_SCAN_CACHE_VERSION = 3 as const;
+// v4: records carry native request/message/prompt ids. Without the bump, warm
+// v3 entries would silently report those levels as unsupported until the file
+// next changed.
+const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -58,6 +61,9 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  providerRequestId: string | null,
+  providerMessageId: string | null,
+  promptId: string | null,
 ];
 
 interface SerializedFile {
@@ -109,6 +115,9 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.totals.reasoningTokens,
     record.dedupeKey,
     record.reportedCostUsd,
+    record.providerRequestId ?? null,
+    record.providerMessageId ?? null,
+    record.promptId ?? null,
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -178,6 +187,11 @@ export function decodeScanCache(document: unknown): ScanCache {
         dedupeKey,
         reportedCostUsd,
       ] = row as SerializedRecord;
+      // Appended in v4. Absent on a hand-built or truncated row, in which case
+      // the identity is simply not asserted rather than defaulted to a value.
+      const providerRequestId = row[10];
+      const providerMessageId = row[11];
+      const promptId = row[12];
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       if (
@@ -207,6 +221,11 @@ export function decodeScanCache(document: unknown): ScanCache {
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
+        // Omitted when absent so a record round-trips identically to one the
+        // parser produced without the field.
+        ...(typeof providerRequestId === "string" ? { providerRequestId } : {}),
+        ...(typeof providerMessageId === "string" ? { providerMessageId } : {}),
+        ...(typeof promptId === "string" ? { promptId } : {}),
       });
     }
     return records;

@@ -20,6 +20,25 @@ export interface UsageRecord {
    * unique and needs no dedup.
    */
   readonly dedupeKey: string | null;
+  /**
+   * Native provider request id, when the source exposes one. Claude Code writes
+   * a `requestId` per API response. `undefined`/absent must never be read as a
+   * request count of one: the source either has the id or it does not.
+   *
+   * Deliberately separate from {@link dedupeKey}, which is a de-duplication
+   * composite and not a guaranteed provider request id.
+   */
+  readonly providerRequestId?: string | null;
+  /**
+   * Native provider message id, when the source exposes one. Claude Code's
+   * `message.id` identifies one assistant response; it is not a prompt id.
+   */
+  readonly providerMessageId?: string | null;
+  /**
+   * Native prompt id, when the source exposes one. Grok Build's
+   * `turn_completed.prompt_id` identifies the user prompt a turn answers.
+   */
+  readonly promptId?: string | null;
 }
 
 const EMPTY_TOTALS: UsageTokenTotals = {
@@ -146,6 +165,12 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     },
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     dedupeKey,
+    // Namespaced identity, kept apart from `dedupeKey`. A user prompt can span
+    // several assistant messages (tool continuation), so these count provider
+    // requests; no prompt id exists in this source.
+    providerRequestId: requestId,
+    providerMessageId: messageId,
+    promptId: null,
   };
 }
 
@@ -307,6 +332,11 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     // Events surviving the fork-copy suppression above are unique to this
     // rollout, so they need no global dedup.
     dedupeKey: null,
+    // A `token_count` delta is a turn-level increment with no request or prompt
+    // id. Request counts must never be inferred from it.
+    providerRequestId: null,
+    providerMessageId: null,
+    promptId: null,
   };
 }
 
@@ -435,6 +465,10 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
         reportedCostUsd: grokCostTicksToUsd(topLevel.costUsdTicks),
         // No prompt id means we cannot tell two same-second updates apart.
         dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:grok`,
+        // Grok identifies the prompt, not the API request.
+        providerRequestId: null,
+        providerMessageId: null,
+        promptId,
       },
     ];
   }
@@ -480,6 +514,10 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
       totals,
       reportedCostUsd,
       dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:${entry.model}`,
+      // Grok identifies the prompt, not the API request.
+      providerRequestId: null,
+      providerMessageId: null,
+      promptId,
     });
   }
   return results;

@@ -15,12 +15,14 @@ function claudeLine(overrides: {
   contentType: string;
   model?: string;
   outputTokens?: number;
+  requestId?: string;
 }): string {
   return JSON.stringify({
     type: "assistant",
     timestamp: "2026-08-07T04:05:13.944Z",
     sessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
     cwd: "/home/theo/project",
+    ...(overrides.requestId === undefined ? {} : { requestId: overrides.requestId }),
     message: {
       id: overrides.messageId,
       role: "assistant",
@@ -67,6 +69,19 @@ describe("parseClaudeLine", () => {
     expect(parseClaudeLine(JSON.stringify({ type: "user", message: {} }))).toBeNull();
     expect(parseClaudeLine("not json")).toBeNull();
   });
+
+  it("exposes the native request and message ids apart from the dedupe key", () => {
+    // The de-duplication key is a composite; a provider request id is a
+    // separately meaningful value and must not be recovered from it.
+    const record = parseClaudeLine(
+      claudeLine({ messageId: "msg_9", contentType: "text", requestId: "req_9" }),
+    );
+
+    expect(record?.dedupeKey).toBe("msg_9:req_9");
+    expect(record?.providerRequestId).toBe("req_9");
+    expect(record?.providerMessageId).toBe("msg_9");
+    expect(record?.promptId).toBeNull();
+  });
 });
 
 describe("parseCodexLine", () => {
@@ -111,6 +126,10 @@ describe("parseCodexLine", () => {
     expect(record?.totals.uncachedInputTokens).toBe(19239 - 11008);
     expect(record?.totals.cachedInputTokens).toBe(11008);
     expect(record?.totals.reasoningTokens).toBe(116);
+    // Turn-level usage carries no request or prompt identity.
+    expect(record?.providerRequestId).toBeNull();
+    expect(record?.providerMessageId).toBeNull();
+    expect(record?.promptId).toBeNull();
   });
 
   it("skips a repeated token_count so deltas are not double counted", () => {
@@ -496,6 +515,14 @@ describe("parseGrokLine", () => {
       (byModel["grok-4.5"]?.reportedCostUsd ?? 0) +
       (byModel["grok-composer-2.5-fast"]?.reportedCostUsd ?? 0);
     expect(sum).toBeCloseTo(1, 12);
+  });
+
+  it("exposes the native prompt id apart from the dedupe key", () => {
+    const [record] = parseGrokLine(turnCompleted({ promptId: "prompt-7" }));
+
+    expect(record?.dedupeKey).toBe("019fec1a-12f7-72f2-9b1f-7778a00aea3c:prompt-7:grok-4.5-build");
+    expect(record?.promptId).toBe("prompt-7");
+    expect(record?.providerRequestId).toBeNull();
   });
 
   it("does not invent a colliding dedupe key when prompt_id is missing", () => {
