@@ -12,12 +12,14 @@ import {
   type AttributionUsageRecord,
   type UsageAttributionInput,
 } from "./usageAttribution.ts";
+import { totalTokens } from "./usageTranscripts.ts";
 
 const CLAUDE_SESSION = "5a128faa-8253-489e-b935-6c08e8e670c0";
 const OTHER_CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555";
 const CODEX_SESSION = "019fbbc1-b12c-7360-a685-28c181f0025f";
 const GROK_SESSION = "019fec1a-12f7-72f2-9b1f-7778a00aea3c";
 const CLAUDE_FINGERPRINT = "host\u0000claude\u0000/home/u/.claude\u00000:1";
+const OTHER_FINGERPRINT = "host\u0000claude\u0000/home/u/.claude-copy\u00000:2";
 const CODEX_FINGERPRINT = "host\u0000codex\u0000/home/u/.codex\u00000:2";
 
 function totals(overrides: Partial<UsageTokenTotals> = {}): UsageTokenTotals {
@@ -31,6 +33,20 @@ function totals(overrides: Partial<UsageTokenTotals> = {}): UsageTokenTotals {
   };
 }
 
+function zeroTotals(): UsageTokenTotals {
+  return {
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+  };
+}
+
+function tokensOf(record: AttributionUsageRecord): number {
+  return totalTokens(record.totals);
+}
+
 function record(overrides: Partial<AttributionUsageRecord> = {}): AttributionUsageRecord {
   return {
     provider: "claude",
@@ -39,11 +55,12 @@ function record(overrides: Partial<AttributionUsageRecord> = {}): AttributionUsa
     timestampMs: 1_786_000_000_000,
     totals: totals(),
     costUsd: 0.01,
-    dedupeKey: null,
+    dedupeKey: "msg_1:req_1",
     providerRequestId: null,
     providerMessageId: null,
     promptId: null,
     sourceFingerprint: CLAUDE_FINGERPRINT,
+    measurement: "observed",
     ...overrides,
   };
 }
@@ -54,6 +71,7 @@ function codexRecord(overrides: Partial<AttributionUsageRecord> = {}): Attributi
     sessionId: CODEX_SESSION,
     model: "gpt-5.6-sol",
     sourceFingerprint: CODEX_FINGERPRINT,
+    dedupeKey: "codex-occurrence:1",
     ...overrides,
   });
 }
@@ -112,6 +130,7 @@ describe("prompt and request granularity", () => {
     expect(projection.requests).toHaveLength(3);
     expect(projection.prompts).toHaveLength(0);
     expect(session.totals?.records).toBe(3);
+    expect(projection.identity.duplicatesDropped).toBe(1);
   });
 
   it("groups grok usage by prompt across several models", () => {
@@ -160,6 +179,7 @@ describe("prompt and request granularity", () => {
     const prompt1 = projection.prompts.find((prompt) => prompt.promptId === "p1")!;
     expect(prompt1.models).toEqual(["grok-4.5", "grok-fast"]);
     expect(prompt1.totals.records).toBe(2);
+    expect(prompt1.modelContributions).toHaveLength(2);
   });
 
   it("never reports request or prompt counts for turn-only codex usage", () => {
@@ -218,7 +238,8 @@ describe("session binding and data quality", () => {
     const projection = buildUsageAttribution(input({ bindings: [binding()] }));
     const session = projection.sessions[0]!;
 
-    expect(session.quality).toBe("missing");
+    expect(session.identityQuality).toBe("valid");
+    expect(session.measurementQuality).toBe("missing");
     expect(session.totals).toBeNull();
     expect(session.allocation).toBe("missing");
     // An absent measurement is null, never a zero request count.
@@ -230,27 +251,17 @@ describe("session binding and data quality", () => {
     expect(projection.unallocated.records).toBe(0);
   });
 
-  it("marks a malformed claude session id invalid", () => {
+  it("marks a malformed claude session id invalid on the identity axis", () => {
     const projection = buildUsageAttribution(
       input({ records: [record({ sessionId: "not-a-uuid", dedupeKey: "a" })] }),
     );
 
-    expect(projection.sessions[0]?.quality).toBe("invalid");
+    const session = projection.sessions[0]!;
+    expect(session.identityQuality).toBe("invalid");
+    expect(session.measurementQuality).toBe("measured");
     expect(projection.coverage.find((entry) => entry.provider === "claude")?.invalidSessions).toBe(
       1,
     );
-  });
-
-  it("de-duplicates identical codex records from two scans of one source", () => {
-    const scanned = codexRecord({ dedupeKey: null });
-    const projection = buildUsageAttribution(
-      input({
-        records: [scanned, { ...scanned }],
-        bindings: [binding({ provider: "codex", nativeSessionId: CODEX_SESSION })],
-      }),
-    );
-
-    expect(projection.sessions[0]?.totals?.records).toBe(1);
   });
 
   it("notes duplicate source fingerprints without double counting", () => {
@@ -268,9 +279,288 @@ describe("session binding and data quality", () => {
     );
 
     expect(projection.sessions[0]?.totals?.records).toBe(1);
+    expect(projection.coverage.find((entry) => entry.provider === "claude")).toMatchObject({
+      declaredSources: 2,
+      distinctSourceFingerprints: 1,
+      sourceStatus: { ok: 2, missing: 0, partial: 0, failed: 0 },
+    });
     expect(
       projection.limitations.some((line) => line.includes("duplicate source fingerprint")),
     ).toBe(true);
+  });
+});
+
+describe("identity: repeated deliveries, occurrences, copies, conflicts", () => {
+  it("counts two equal keyless occurrences instead of collapsing them", () => {
+    const occurrence = codexRecord({ dedupeKey: null, timestampMs: 1_786_000_000_000 });
+    const projection = buildUsageAttribution(
+      input({
+        records: [occurrence, { ...occurrence }],
+        bindings: [binding({ provider: "codex", nativeSessionId: CODEX_SESSION })],
+      }),
+    );
+
+    const session = projection.sessions[0]!;
+    expect(session.totals?.records).toBe(2);
+    expect(session.recordIdentity).toBe("uncertain");
+    expect(projection.identity.unkeyedRecords).toBe(2);
+    expect(projection.coverage.find((entry) => entry.provider === "codex")?.unkeyedRecords).toBe(2);
+    expect(projection.limitations.some((line) => line.includes("no scan/delivery identity"))).toBe(
+      true,
+    );
+  });
+
+  it("collapses a repeated scan by its stamped delivery identity", () => {
+    const scanned = codexRecord({ dedupeKey: "occurrence-key:1" });
+    const projection = buildUsageAttribution(
+      input({
+        records: [scanned, { ...scanned }],
+        bindings: [binding({ provider: "codex", nativeSessionId: CODEX_SESSION })],
+      }),
+    );
+
+    expect(projection.sessions[0]?.totals?.records).toBe(1);
+    expect(projection.identity.duplicatesDropped).toBe(1);
+    expect(projection.sessions[0]?.recordIdentity).toBe("exact");
+  });
+
+  it("collapses copied history from another physical source without inflating", () => {
+    const original = record({ dedupeKey: "m1:r1", sourceFingerprint: CLAUDE_FINGERPRINT });
+    const copy = record({ dedupeKey: "m1:r1", sourceFingerprint: OTHER_FINGERPRINT });
+    const projection = buildUsageAttribution(
+      input({ records: [original, copy], bindings: [binding()] }),
+    );
+
+    expect(projection.sessions[0]?.totals?.records).toBe(1);
+    expect(projection.identity.duplicatesDropped).toBe(1);
+    // Both physical sources are still visible in coverage.
+    expect(
+      projection.coverage.find((entry) => entry.provider === "claude")?.distinctSourceFingerprints,
+    ).toBe(2);
+  });
+
+  it("namespaces a declared key by provider so equal local ids do not collide", () => {
+    const claudeRecord = record({ provider: "claude", dedupeKey: "1", sessionId: CLAUDE_SESSION });
+    const codexRecordValue = codexRecord({ dedupeKey: "1" });
+    const projection = buildUsageAttribution(
+      input({
+        records: [claudeRecord, codexRecordValue],
+        bindings: [
+          binding({ provider: "claude", nativeSessionId: CLAUDE_SESSION }),
+          binding({ provider: "codex", nativeSessionId: CODEX_SESSION }),
+        ],
+      }),
+    );
+
+    expect(projection.sessions).toHaveLength(2);
+    expect(projection.identity.duplicatesDropped).toBe(0);
+    expect(projection.identity.conflicts).toBe(0);
+  });
+
+  it("exposes conflicting versions of one observation instead of dropping one", () => {
+    const first = record({ dedupeKey: "m1:r1", totals: totals({ outputTokens: 10 }) });
+    const conflicting = record({ dedupeKey: "m1:r1", totals: totals({ outputTokens: 999 }) });
+    const projection = buildUsageAttribution(
+      input({ records: [first, conflicting], bindings: [binding()] }),
+    );
+
+    const session = projection.sessions[0]!;
+    expect(session.totals?.records).toBe(1);
+    expect(session.totals?.tokens.outputTokens).toBe(10);
+    expect(session.conflict).toBe(true);
+    expect(projection.identity.conflicts).toBe(1);
+    expect(
+      projection.coverage.find((entry) => entry.provider === "claude")?.conflictingRecords,
+    ).toBe(1);
+    expect(projection.limitations.some((line) => line.includes("identity conflict"))).toBe(true);
+  });
+
+  it("lets a snapshot observation replace an earlier value for the same identity", () => {
+    const delta = record({
+      dedupeKey: "snap:1",
+      scope: "delta",
+      totals: totals({ outputTokens: 10 }),
+    });
+    const snapshot = record({
+      dedupeKey: "snap:1",
+      scope: "snapshot",
+      totals: totals({ outputTokens: 99 }),
+    });
+    const projection = buildUsageAttribution(
+      input({ records: [delta, snapshot], bindings: [binding()] }),
+    );
+
+    const session = projection.sessions[0]!;
+    expect(projection.identity.snapshotsReplaced).toBe(1);
+    expect(projection.identity.conflicts).toBe(0);
+    expect(session.totals?.records).toBe(1);
+    expect(session.totals?.tokens.outputTokens).toBe(99);
+  });
+});
+
+describe("measurement quality", () => {
+  it("treats a Claude usage:{} record as invalid, not a measured zero", () => {
+    const empty = record({ dedupeKey: "m1:", measurement: "empty", totals: zeroTotals() });
+    const projection = buildUsageAttribution(input({ records: [empty], bindings: [binding()] }));
+
+    const session = projection.sessions[0]!;
+    expect(session.measurementQuality).toBe("invalid");
+    expect(session.totals?.totalTokens).toBe(0);
+    // A request id was present, so the request level is not "unsupported".
+    expect(session.requestQuality).not.toBe("unsupported");
+  });
+
+  it("keeps an explicit zero as measured", () => {
+    const explicitZero = record({
+      dedupeKey: "m1:",
+      measurement: "observed",
+      totals: zeroTotals(),
+    });
+    const projection = buildUsageAttribution(
+      input({ records: [explicitZero], bindings: [binding()] }),
+    );
+
+    expect(projection.sessions[0]?.measurementQuality).toBe("measured");
+  });
+
+  it("keeps a legacy all-zero row unavailable, not missing and not measured", () => {
+    const legacy = record({
+      dedupeKey: "legacy:1",
+      measurement: "unavailable",
+      totals: zeroTotals(),
+    });
+    const projection = buildUsageAttribution(input({ records: [legacy], bindings: [binding()] }));
+
+    const session = projection.sessions[0]!;
+    expect(session.measurementQuality).toBe("unavailable");
+    expect(session.totals?.records).toBe(1);
+  });
+
+  it("marks a mix of observed and empty records partial", () => {
+    const projection = buildUsageAttribution(
+      input({
+        records: [
+          record({ dedupeKey: "a" }),
+          record({ dedupeKey: "b", measurement: "empty", totals: zeroTotals() }),
+        ],
+        bindings: [binding()],
+      }),
+    );
+
+    expect(projection.sessions[0]?.measurementQuality).toBe("partial");
+  });
+
+  it("surfaces a failed declared source instead of reading it as measured", () => {
+    const source: AttributionSource = {
+      fingerprint: CLAUDE_FINGERPRINT,
+      provider: "claude",
+      status: "failed",
+      distinctSessions: 0,
+    };
+    const projection = buildUsageAttribution(input({ sources: [source] }));
+
+    const coverage = projection.coverage.find((entry) => entry.provider === "claude")!;
+    expect(coverage.declaredSources).toBe(1);
+    expect(coverage.sourceStatus.failed).toBe(1);
+    expect(coverage.measuredSessions).toBe(0);
+    expect(projection.limitations.some((line) => line.includes("missing or failed"))).toBe(true);
+  });
+});
+
+describe("orphan usage and reconciliation", () => {
+  it("preserves usage with no session id in an explicit orphan bucket", () => {
+    const orphanRecord = record({
+      sessionId: "",
+      dedupeKey: "orphan-1",
+      totals: totals({ outputTokens: 7 }),
+    });
+    const projection = buildUsageAttribution(input({ records: [orphanRecord] }));
+
+    expect(projection.orphan.records).toBe(1);
+    expect(projection.orphan.totalTokens).toBe(tokensOf(orphanRecord));
+    expect(projection.measured.totalTokens).toBe(projection.orphan.totalTokens);
+    expect(projection.unallocated.totalTokens).toBe(0);
+    expect(projection.sessions).toHaveLength(0);
+    expect(
+      projection.coverage.find((entry) => entry.provider === "claude")?.recordsWithoutSessionId,
+    ).toBe(1);
+    expect(projection.identity.orphanRecords).toBe(1);
+  });
+
+  it("reconciles attributed + shared + unallocated + orphan to the deduplicated input", () => {
+    const attributed = record({
+      sessionId: CLAUDE_SESSION,
+      dedupeKey: "a",
+      totals: totals({ outputTokens: 100 }),
+    });
+    const sharedRecord = codexRecord({ dedupeKey: "b", totals: totals({ outputTokens: 50 }) });
+    const unallocatedRecord = record({
+      provider: "grok",
+      sessionId: GROK_SESSION,
+      model: "grok-4.5",
+      promptId: "g1",
+      dedupeKey: "g1",
+      totals: totals({ outputTokens: 20 }),
+    });
+    const orphanRecord = record({
+      sessionId: "",
+      dedupeKey: "e",
+      totals: totals({ outputTokens: 5 }),
+    });
+    // A repeated delivery of `attributed` must not add to the expected total.
+    const duplicate = record({
+      sessionId: CLAUDE_SESSION,
+      dedupeKey: "a",
+      totals: totals({ outputTokens: 100 }),
+    });
+
+    const projection = buildUsageAttribution(
+      input({
+        records: [attributed, sharedRecord, unallocatedRecord, orphanRecord, duplicate],
+        bindings: [
+          binding({ threadId: "thread-1", provider: "claude", nativeSessionId: CLAUDE_SESSION }),
+          binding({ threadId: "thread-2", provider: "codex", nativeSessionId: CODEX_SESSION }),
+          binding({ threadId: "thread-3", provider: "grok", nativeSessionId: GROK_SESSION }),
+        ],
+        links: [
+          link({ threadId: "thread-1", number: 12 }),
+          link({ threadId: "thread-2", number: 13 }),
+          link({ threadId: "thread-2", number: 14 }),
+        ],
+      }),
+    );
+
+    // Independent known input truth: every distinct input record, including the
+    // orphan, and excluding the exact duplicate.
+    const expected =
+      tokensOf(attributed) +
+      tokensOf(sharedRecord) +
+      tokensOf(unallocatedRecord) +
+      tokensOf(orphanRecord);
+    const allocated = projection.pullRequests.reduce(
+      (sum, pr) => sum + pr.attributed.totalTokens,
+      0,
+    );
+
+    expect(projection.measured.totalTokens).toBe(expected);
+    expect(
+      allocated +
+        projection.shared.totalTokens +
+        projection.unallocated.totalTokens +
+        projection.orphan.totalTokens,
+    ).toBe(expected);
+    expect(projection.identity.duplicatesDropped).toBe(1);
+  });
+
+  it("does not mutate its inputs", () => {
+    const records = [record({ dedupeKey: "a" })];
+    const bindings = [binding()];
+    const links = [link()];
+    const before = JSON.stringify({ records, bindings, links });
+
+    buildUsageAttribution(input({ records, bindings, links }));
+
+    expect(JSON.stringify({ records, bindings, links })).toBe(before);
   });
 });
 
@@ -284,7 +574,7 @@ describe("pull request association and attribution", () => {
             dedupeKey: "a",
             totals: totals({ outputTokens: 100 }),
           }),
-          codexRecord({ dedupeKey: null, totals: totals({ outputTokens: 50 }) }),
+          codexRecord({ dedupeKey: "b", totals: totals({ outputTokens: 50 }) }),
         ],
         bindings: [
           binding({ threadId: "thread-1", provider: "claude", nativeSessionId: CLAUDE_SESSION }),
@@ -357,7 +647,7 @@ describe("pull request association and attribution", () => {
   it("pools unlinked and ambiguous sessions as unallocated", () => {
     const projection = buildUsageAttribution(
       input({
-        records: [record({ dedupeKey: "a" }), codexRecord({ dedupeKey: null })],
+        records: [record({ dedupeKey: "a" }), codexRecord({ dedupeKey: "b" })],
         bindings: [
           binding({ threadId: "thread-1", provider: "claude", nativeSessionId: CLAUDE_SESSION }),
           binding({ threadId: "thread-2", provider: "codex", nativeSessionId: CODEX_SESSION }),
@@ -377,68 +667,99 @@ describe("pull request association and attribution", () => {
       1,
     );
   });
-});
 
-describe("projection contract", () => {
-  it("reconciles allocated + shared + unallocated to the distinct measured total", () => {
+  it("preserves per-model contributions at the session and PR level", () => {
     const projection = buildUsageAttribution(
       input({
         records: [
           record({
-            sessionId: CLAUDE_SESSION,
+            model: "claude-opus-5",
             dedupeKey: "a",
-            totals: totals({ outputTokens: 100 }),
+            totals: totals({ outputTokens: 10 }),
+            costUsd: 0.1,
+            costSource: "modelPriced",
           }),
-          codexRecord({ dedupeKey: null }),
           record({
-            provider: "grok",
-            sessionId: GROK_SESSION,
-            model: "grok-4.5",
-            promptId: "g1",
-            dedupeKey: "g1",
+            model: "claude-fable-5",
+            dedupeKey: "b",
+            totals: totals({ outputTokens: 20 }),
+            costUsd: 0.2,
+            costSource: "providerReported",
           }),
         ],
-        bindings: [
-          binding({ threadId: "thread-1", provider: "claude", nativeSessionId: CLAUDE_SESSION }),
-          binding({ threadId: "thread-2", provider: "codex", nativeSessionId: CODEX_SESSION }),
-          binding({ threadId: "thread-3", provider: "grok", nativeSessionId: GROK_SESSION }),
-        ],
-        links: [
-          link({ threadId: "thread-1", number: 12 }),
-          link({ threadId: "thread-2", number: 13 }),
-          link({ threadId: "thread-2", number: 14 }),
-        ],
+        bindings: [binding({ threadId: "thread-1" })],
+        links: [link({ threadId: "thread-1", number: 12 })],
       }),
     );
 
-    const distinct = projection.sessions.reduce(
-      (sum, session) => sum + (session.totals?.totalTokens ?? 0),
-      0,
-    );
-    const allocated = projection.pullRequests.reduce(
-      (sum, pr) => sum + pr.attributed.totalTokens,
-      0,
-    );
-    expect(allocated + projection.shared.totalTokens + projection.unallocated.totalTokens).toBe(
-      distinct,
-    );
+    const session = projection.sessions[0]!;
+    expect(session.models).toEqual(["claude-fable-5", "claude-opus-5"]);
+    expect(session.modelContributions.map((entry) => entry.model)).toEqual([
+      "claude-fable-5",
+      "claude-opus-5",
+    ]);
+    expect(
+      session.modelContributions.find((entry) => entry.model === "claude-opus-5")?.costSource,
+    ).toBe("modelPriced");
+    const pr = projection.pullRequests[0]!;
+    expect(pr.attributedModelContributions).toHaveLength(2);
+    // 100 uncached + 10 cached + 20 output; reasoning is a subset of output.
+    expect(
+      pr.attributedModelContributions.find((entry) => entry.model === "claude-fable-5")
+        ?.totalTokens,
+    ).toBe(130);
   });
 
-  it("does not mutate its inputs", () => {
-    const records = [record({ dedupeKey: "a" })];
-    const bindings = [binding()];
-    const links = [link()];
-    const before = JSON.stringify({ records, bindings, links });
+  it("recomputes allocation from the links present at read time", () => {
+    const records = [record({ dedupeKey: "a", totals: totals({ outputTokens: 100 }) })];
+    const bindings = [binding({ threadId: "thread-1" })];
 
-    buildUsageAttribution(input({ records, bindings, links }));
+    const only12 = buildUsageAttribution(
+      input({ records, bindings, links: [link({ threadId: "thread-1", number: 12 })] }),
+    );
+    expect(only12.sessions[0]?.allocation).toBe("attributed");
+    expect(only12.association).toMatchObject({
+      basis: "links-at-read-time",
+      linkedAtGovernsAllocation: false,
+    });
 
-    expect(JSON.stringify({ records, bindings, links })).toBe(before);
+    const both = buildUsageAttribution(
+      input({
+        records,
+        bindings,
+        links: [
+          link({ threadId: "thread-1", number: 12 }),
+          link({ threadId: "thread-1", number: 13 }),
+        ],
+      }),
+    );
+    expect(both.sessions[0]?.allocation).toBe("shared");
+    expect(both.shared.records).toBe(1);
+    expect(both.limitations.some((line) => line.includes("does not gate allocation"))).toBe(true);
   });
 
+  it("associates pre-link implementation work with a later link", () => {
+    const workRanAtMs = 1_786_000_000_000;
+    const projection = buildUsageAttribution(
+      input({
+        generatedAtMs: workRanAtMs + 30 * 24 * 60 * 60 * 1000,
+        records: [record({ dedupeKey: "a", timestampMs: workRanAtMs })],
+        bindings: [binding({ threadId: "thread-1" })],
+        // Linked long after the work ran; allocation ignores `linkedAt`.
+        links: [link({ threadId: "thread-1", number: 12, linkedAt: "2026-09-20T00:00:00.000Z" })],
+      }),
+    );
+
+    expect(projection.sessions[0]?.allocation).toBe("attributed");
+    expect(projection.pullRequests[0]?.attributed.records).toBe(1);
+  });
+});
+
+describe("projection contract", () => {
   it("exposes the source capability matrix with live qualification falsy", () => {
     const projection = buildUsageAttribution(input({}));
-    expect(USAGE_ATTRIBUTION_VERSION).toBe(1);
-    expect(projection.contractVersion).toBe(1);
+    expect(USAGE_ATTRIBUTION_VERSION).toBe(2);
+    expect(projection.contractVersion).toBe(2);
     for (const entry of projection.coverage) {
       expect(entry.liveQualified).toBe(false);
     }
@@ -447,7 +768,7 @@ describe("projection contract", () => {
   it("renders a stable human-readable sample", () => {
     const projection = buildUsageAttribution(
       input({
-        records: [record({ dedupeKey: "a", providerRequestId: "r1", providerMessageId: "m1" })],
+        records: [record({ dedupeKey: "m1:r1", providerRequestId: "r1", providerMessageId: "m1" })],
         bindings: [binding({ threadId: "thread-1" })],
         links: [link({ threadId: "thread-1", number: 12 })],
       }),
@@ -457,13 +778,14 @@ describe("projection contract", () => {
     expect(text).toContain(`claude:${CLAUDE_SESSION}`);
     expect(text).toContain("requests=1");
     expect(text).toContain("github.com/acme/repo#12 attributed=");
+    expect(text).toContain("Orphan:");
   });
 
   it("returns every level for a machine-readable fixture", () => {
     const projection = buildUsageAttribution(
       input({
         records: [
-          record({ dedupeKey: "a", providerRequestId: "r1", providerMessageId: "m1" }),
+          record({ dedupeKey: "m1:r1", providerRequestId: "r1", providerMessageId: "m1" }),
           record({
             provider: "grok",
             sessionId: GROK_SESSION,
@@ -480,7 +802,7 @@ describe("projection contract", () => {
       }),
     );
 
-    expect(projection).toMatchObject({ contractVersion: 1, generatedAtMs: 1_786_100_000_000 });
+    expect(projection).toMatchObject({ contractVersion: 2, generatedAtMs: 1_786_100_000_000 });
     expect(projection.sessions).toHaveLength(2);
     expect(projection.prompts).toHaveLength(1);
     expect(projection.requests).toHaveLength(1);
