@@ -380,6 +380,50 @@ describe("pull request association and attribution", () => {
 });
 
 describe("projection contract", () => {
+  it("reconciles allocated + shared + unallocated to the distinct measured total", () => {
+    const projection = buildUsageAttribution(
+      input({
+        records: [
+          record({
+            sessionId: CLAUDE_SESSION,
+            dedupeKey: "a",
+            totals: totals({ outputTokens: 100 }),
+          }),
+          codexRecord({ dedupeKey: null }),
+          record({
+            provider: "grok",
+            sessionId: GROK_SESSION,
+            model: "grok-4.5",
+            promptId: "g1",
+            dedupeKey: "g1",
+          }),
+        ],
+        bindings: [
+          binding({ threadId: "thread-1", provider: "claude", nativeSessionId: CLAUDE_SESSION }),
+          binding({ threadId: "thread-2", provider: "codex", nativeSessionId: CODEX_SESSION }),
+          binding({ threadId: "thread-3", provider: "grok", nativeSessionId: GROK_SESSION }),
+        ],
+        links: [
+          link({ threadId: "thread-1", number: 12 }),
+          link({ threadId: "thread-2", number: 13 }),
+          link({ threadId: "thread-2", number: 14 }),
+        ],
+      }),
+    );
+
+    const distinct = projection.sessions.reduce(
+      (sum, session) => sum + (session.totals?.totalTokens ?? 0),
+      0,
+    );
+    const allocated = projection.pullRequests.reduce(
+      (sum, pr) => sum + pr.attributed.totalTokens,
+      0,
+    );
+    expect(allocated + projection.shared.totalTokens + projection.unallocated.totalTokens).toBe(
+      distinct,
+    );
+  });
+
   it("does not mutate its inputs", () => {
     const records = [record({ dedupeKey: "a" })];
     const bindings = [binding()];

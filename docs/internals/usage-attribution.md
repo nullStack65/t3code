@@ -51,11 +51,17 @@ unbound, and the projection reports it as `unallocated` rather than guessing an 
 A thread → PR link comes from `projection_thread_pull_requests`, canonicalized with
 `@t3tools/shared/threadPullRequests`; the projection does not resolve PRs itself.
 
+`projection_thread_sessions` also has `provider_session_id` and `provider_thread_id`
+columns, but the live upsert in `ProjectionThreadSessions.ts` never writes them, so
+they carry no current mapping and must not be used as a join.
+
 ## Association is not attribution
 
 A session linked to two pull requests is reported once in the `shared` pool, which is
 explicitly not additive, and is never cloned onto both PRs. Only sessions bound to
-exactly one strong link contribute to a PR's `attributed` total. A `stack` link is a
+exactly one strong link contribute to a PR's `attributed` total. The projection holds
+`sum(attributed PR totals) + shared + unallocated = the distinct measured total`, so a
+reader can reconcile every token exactly once. A `stack` link is a
 display association, not evidence of billed work, so it feeds
 `stackAssociationSessions` and never `attributed`; `stack-dismissed` tombstones are
 ignored, matching `visibleThreadPullRequests`. Link changes therefore do not rewrite
