@@ -309,7 +309,7 @@ it("rejects packaged provenance that does not match the source", () => {
         repository: "nullStack65/t3code",
         sourceSha: DISPATCH,
         version: VERSION,
-        platform: "win",
+        platform: "linux",
         arch: "x64",
       },
       linuxArchive: {
@@ -323,7 +323,10 @@ it("rejects packaged provenance that does not match the source", () => {
     },
   });
   assert.equal(result.ok, false);
-  assert.match(result.failures.join("\n"), /Windows installer provenance sourceSha/);
+  assert.match(
+    result.failures.join("\n"),
+    /Windows installer embedded WSL runtime provenance sourceSha/,
+  );
   assert.match(result.failures.join("\n"), /not byte-identical/);
 });
 

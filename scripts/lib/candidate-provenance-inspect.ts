@@ -130,6 +130,12 @@ function inspectEmbeddedWsl(
   const embeddedPath = findFile(extractRoot, WSL_RUNTIME_ARCHIVE_NAME);
   if (embeddedPath === undefined) return { embedded: undefined, equalsStandalone: undefined };
   const embedded = NodeFS.readFileSync(embeddedPath);
+  // The standalone Linux archive may not be in a Windows-only candidate
+  // directory; the aggregate step performs the byte-equality check when both
+  // are present. Read its provenance from the embedded copy either way.
+  if (!NodeFS.existsSync(standaloneArchive)) {
+    return { embedded, equalsStandalone: undefined };
+  }
   const standalone = NodeFS.readFileSync(standaloneArchive);
   return { embedded, equalsStandalone: embedded.equals(standalone) };
 }

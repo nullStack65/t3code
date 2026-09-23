@@ -450,8 +450,12 @@ export function verifyPackagedProvenance(input: {
 }): void {
   const { problems, provenance, expected, targets, includeMacosArm64 } = input;
   const wantsOptional = targets === "all" && includeMacosArm64;
+  // `windowsInstaller` holds the provenance of the WSL runtime embedded in the
+  // installer, which is a Linux runtime, not a Windows binary; the Windows
+  // desktop provenance lives in the packaged app and is covered by the target's
+  // own archive checks.
   const checks: Array<[string, PackagedProvenanceRecord | null | undefined, string, string]> = [
-    ["Windows installer", provenance.windowsInstaller, "win", "x64"],
+    ["Windows installer embedded WSL runtime", provenance.windowsInstaller, "linux", "x64"],
     ["Windows CLI archive", provenance.windowsZip, "win", "x64"],
     ["Linux runtime archive", provenance.linuxArchive, "linux", "x64"],
     ["Intel macOS DMG", provenance.macDmg, "darwin", "x64"],
