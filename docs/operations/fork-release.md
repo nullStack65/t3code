@@ -137,6 +137,18 @@ Recovery note: an older binary is not automatically a safe database rollback.
 If a release adds a database migration, restore a pre-upgrade snapshot rather
 than only reinstalling the older binary.
 
+### Windows package-manager identity
+
+The fork installer keeps the upstream `appId` (`com.t3tools.t3code`) and the
+Winget ARP entry `T3Tools.T3Code`, so an existing Winget install is upgraded in
+place and its user data is preserved. A normal Winget pin (`winget pin add --id
+T3Tools.T3Code`, pin type `Pinning`) does **not** block an explicit
+`winget upgrade T3Tools.T3Code`, and `--include-pinned` bypasses it entirely. To
+retain the upstream package identity while preventing package-manager
+replacement, use a blocking pin (`winget pin add --blocking --id
+T3Tools.T3Code`) or remove the Winget package. Document that removing the pin is
+deliberate, not accidental.
+
 ## Prerequisites
 
 For users (not build tooling):
