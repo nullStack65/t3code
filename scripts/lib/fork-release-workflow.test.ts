@@ -80,6 +80,70 @@ it.effect("no job silently defaults to a GitHub-hosted runner label", () =>
   }),
 );
 
+it.effect("authorization runs before any build job and uses owner variables, not inputs", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const authorize = jobBlock(text, "authorize");
+    assert.include(authorize, "T3CODE_AUTHORIZED_RUNNERS");
+    // Runner labels come from repository variables, never caller inputs.
+    assert.notInclude(text, "inputs.linux_runner");
+    assert.notInclude(text, "inputs.windows_runner");
+    assert.notInclude(text, "inputs.macos_x64_runner");
+    assert.notInclude(text, "inputs.macos_arm64_runner");
+    // Every build job transitively depends on authorization.
+    assert.include(jobBlock(text, "preflight"), "needs: [authorize]");
+    assert.include(jobBlock(text, "bundle"), "needs: [preflight]");
+  }),
+);
+
+it.effect(
+  "fresh jobs select source before installing dependencies, without workspace imports",
+  () =>
+    Effect.gen(function* () {
+      const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+      // The selector must run before `vp install` in preflight, bundle, qualify.
+      for (const job of ["preflight", "bundle", "cli_linux_x64", "qualify"]) {
+        const block = jobBlock(text, job);
+        const sourceIndex = block.indexOf("select-release-source.ts");
+        const installIndex = block.indexOf("run: vp install");
+        assert.notEqual(sourceIndex, -1, `${job} must select the source`);
+        if (installIndex !== -1) {
+          assert.isBelow(sourceIndex, installIndex, `${job} must select source before install`);
+        }
+      }
+    }),
+);
+
+it.effect("promotion consumes the frozen candidate identity and requires reviewer approval", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const publish = jobBlock(text, "publish");
+    assert.include(publish, "candidate-identity.json");
+    assert.include(publish, "manifestSha256");
+    assert.include(publish, "required_reviewers");
+    assert.include(publish, "actions: read");
+    assert.notInclude(publish, "build-cli-archive.ts");
+    assert.notInclude(publish, "build-desktop-artifact.ts");
+
+    // A real receipt import path exists and binds receipts to a candidate run.
+    const receipts = jobBlock(text, "receipts");
+    assert.include(receipts, "upload_receipts");
+    assert.include(receipts, "receipts_source_run_id");
+    assert.include(receipts, "fork-release-native-receipts");
+    assert.include(receipts, "upload-artifact");
+  }),
+);
+
+it.effect("preflight selects source before setup-vp install to keep the job dependency-free", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const preflight = jobBlock(text, "preflight");
+    // setup-vp must not eagerly install workspace packages in preflight.
+    assert.include(preflight, "run-install: false");
+    assert.include(preflight, "--mode public");
+  }),
+);
+
 it.effect("publication promotes a candidate by run id and never rebuilds", () =>
   Effect.gen(function* () {
     const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));

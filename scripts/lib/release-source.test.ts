@@ -147,7 +147,7 @@ it.layer(NodeServices.layer)("release-source", (it) => {
     }),
   );
 
-  it.effect("rejects a commit that is not an ancestor of main", () =>
+  it.effect("rejects a commit that is not an ancestor of main in public mode", () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(createFixture);
       try {
@@ -158,6 +158,47 @@ it.layer(NodeServices.layer)("release-source", (it) => {
           mainRef: "main",
         }).pipe(Effect.flip);
         assert.isTrue(isSourceNotOnMain(error));
+      } finally {
+        yield* Effect.promise(() => cleanup(fixture.root));
+      }
+    }),
+  );
+
+  it.effect("candidate mode accepts a fork PR SHA that is not on main", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(createFixture);
+      try {
+        const selected = yield* selectReleaseSource({
+          cwd: fixture.work,
+          repoUrl: fixture.origin,
+          sha: fixture.shaOffMain,
+          mainRef: "main",
+          mode: "candidate",
+        });
+        assert.equal(selected.sha, fixture.shaOffMain);
+        assert.equal(selected.headSha, fixture.shaOffMain);
+        assert.equal(selected.mode, "candidate");
+        assert.equal(selected.ancestry, "on-fork");
+        // The real checkout is the pre-merge PR head, not main's tip.
+        assert.equal(git(fixture.work, ["rev-parse", "HEAD"]), fixture.shaOffMain);
+      } finally {
+        yield* Effect.promise(() => cleanup(fixture.root));
+      }
+    }),
+  );
+
+  it.effect("candidate mode still reports on-main ancestry when the SHA is on main", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(createFixture);
+      try {
+        const selected = yield* selectReleaseSource({
+          cwd: fixture.work,
+          repoUrl: fixture.origin,
+          sha: fixture.shaA,
+          mainRef: "main",
+          mode: "candidate",
+        });
+        assert.equal(selected.ancestry, "on-main");
       } finally {
         yield* Effect.promise(() => cleanup(fixture.root));
       }

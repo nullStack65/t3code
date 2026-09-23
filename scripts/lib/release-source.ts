@@ -22,6 +22,29 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 export const FULL_SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/;
 export const DEFAULT_MAIN_REF = "main";
 
+/**
+ * Why a source SHA is allowed to be built.
+ *
+ * - `public`: the SHA must already be an ancestor of the fork's `main`. This is
+ *   the policy a *published* fork release requires, so a candidate built from a
+ *   PR branch can never be promoted under the public policy later without a
+ *   fresh, verified checkout of the approved main-line source.
+ * - `candidate`: the SHA only has to be a real commit on an explicitly resolved
+ *   fork remote. It exists so a pre-merge PR head (which is not on `main`) can
+ *   still be built and exercised locally. It never substitutes for the public
+ *   policy and never claims main ancestry the commit does not have.
+ */
+export type ReleaseSourceMode = "public" | "candidate";
+
+export class SourceNotOnForkError extends Schema.TaggedError<SourceNotOnForkError>()(
+  "SourceNotOnForkError",
+  { sha: Schema.String, forkRemote: Schema.String },
+) {
+  override get message(): string {
+    return `Candidate source ${this.sha} is not a commit on the writable fork remote '${this.forkRemote}'.`;
+  }
+}
+
 export class InvalidSourceShaError extends Schema.TaggedError<InvalidSourceShaError>()(
   "InvalidSourceShaError",
   { sha: Schema.String },
@@ -111,13 +134,26 @@ export interface ReleaseSourceSelection {
   readonly mainRef: string;
   readonly headSha: string;
   readonly repository: string;
+  readonly mode: ReleaseSourceMode;
+  /** The ancestry policy actually applied, for the receipt/log. */
+  readonly ancestry: "on-main" | "on-fork";
 }
 
 export interface SelectReleaseSourceInput {
   readonly cwd: string;
+  /**
+   * The writable fork remote URL to fetch the source from. It is resolved
+   * explicitly by the caller rather than assumed to be `origin`: the Windows
+   * checkout names upstream `origin` and the fork `fork`.
+   */
   readonly repoUrl: string;
   readonly sha: string;
   readonly mainRef?: string;
+  /**
+   * `public` (default) requires ancestry on `main`; `candidate` accepts any
+   * commit reachable on the fork remote so a pre-merge PR head can be built.
+   */
+  readonly mode?: ReleaseSourceMode;
   /** `owner/repo`, recorded for provenance output. Defaults to the URL's path. */
   readonly repository?: string;
 }
@@ -131,8 +167,12 @@ const repositoryFromUrl = (url: string): string =>
 
 /**
  * Fetches and checks out exactly `input.sha`, then asserts the checkout and the
- * ancestry. The explicit SHA is the only checkout target, so a later fetch of
- * `main` cannot change what was selected.
+ * ancestry policy for the requested mode. The explicit SHA is the only checkout
+ * target, so a later fetch of `main` cannot change what was selected.
+ *
+ * `public` mode additionally requires the SHA to be an ancestor of
+ * `origin/<main>`. `candidate` mode instead requires the SHA to be reachable on
+ * the fork remote; it never fabricates main ancestry.
  */
 export const selectReleaseSource = Effect.fn("selectReleaseSource")(function* (
   input: SelectReleaseSourceInput,
@@ -142,6 +182,7 @@ export const selectReleaseSource = Effect.fn("selectReleaseSource")(function* (
     return yield* new InvalidSourceShaError({ sha: input.sha });
   }
   const mainRef = input.mainRef?.trim() || DEFAULT_MAIN_REF;
+  const mode: ReleaseSourceMode = input.mode === "candidate" ? "candidate" : "public";
 
   yield* runGit(input.cwd, ["init", "."]);
   const add = yield* runGit(input.cwd, ["remote", "add", "origin", input.repoUrl]);
@@ -168,8 +209,30 @@ export const selectReleaseSource = Effect.fn("selectReleaseSource")(function* (
     sha,
     `origin/${mainRef}`,
   ]);
-  if (ancestor.exitCode !== 0) {
-    return yield* new SourceNotOnMainError({ sha, mainRef });
+  if (mode === "public") {
+    if (ancestor.exitCode !== 0) {
+      return yield* new SourceNotOnMainError({ sha, mainRef });
+    }
+    return {
+      sha,
+      mainRef,
+      headSha,
+      repository: input.repository?.trim() || repositoryFromUrl(input.repoUrl),
+      mode,
+      ancestry: "on-main",
+    } satisfies ReleaseSourceSelection;
+  }
+
+  // Candidate mode: the commit must at least exist on the fork remote, so a
+  // typo or a SHA from an unrelated repository is still rejected. Reachability,
+  // not main ancestry, is the check. It is deliberately not required to be on
+  // `main`; the reported ancestry records the truth either way.
+  const onMain = ancestor.exitCode === 0;
+  if (!onMain) {
+    const exists = yield* runGit(input.cwd, ["cat-file", "-e", `${sha}^{commit}`]);
+    if (exists.exitCode !== 0) {
+      return yield* new SourceNotOnForkError({ sha, forkRemote: "origin" });
+    }
   }
 
   return {
@@ -177,5 +240,7 @@ export const selectReleaseSource = Effect.fn("selectReleaseSource")(function* (
     mainRef,
     headSha,
     repository: input.repository?.trim() || repositoryFromUrl(input.repoUrl),
+    mode,
+    ancestry: onMain ? "on-main" : "on-fork",
   } satisfies ReleaseSourceSelection;
 });

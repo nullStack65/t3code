@@ -12,40 +12,78 @@ and `release-desktop.yml`.
 
 ## Runners
 
-Runner capacity is an explicit, authorized input. `fork-release.yml` has no
-default runner label: the operator must pass `linux_runner`, `windows_runner`,
-and `macos_x64_runner`, and every label must appear in the repository variable
-`T3CODE_AUTHORIZED_RUNNERS` or preflight fails closed. This prevents a workflow
-dispatch from silently landing on GitHub-hosted or paid capacity that was never
-authorized.
+Runner capacity is owner-configured, not caller-supplied. Runner labels come
+from repository variables (`vars.T3CODE_LINUX_RUNNER`,
+`vars.T3CODE_WINDOWS_RUNNER`, `vars.T3CODE_MACOS_X64_RUNNER`,
+`vars.T3CODE_MACOS_ARM64_RUNNER`) and every label must also appear in
+`vars.T3CODE_AUTHORIZED_RUNNERS`. A dispatch cannot name an arbitrary runner, so
+source is never scheduled on unauthorized capacity. The `authorize` job runs
+first, on the owner-configured Linux label, and every build job `needs`
+transitively through `preflight`, so authorization happens before any source
+executes.
 
 - No self-hosted label is guessed.
 - No personal machine is registered to run public-PR jobs.
 - No hosted/paid fallback is added silently.
 
-When no authorized CI runner is available, build the candidate on the already
-authorized Windows/WSL and Intel macOS machines with the same scripts:
+### Local candidate route (when CI capacity is unavailable)
+
+Build the candidate on the already authorized Windows/WSL and Intel macOS
+machines with the same scripts. The route is **two-phase**: build/stage/verify
+one platform, then aggregate. A Linux-only build succeeds before a macOS DMG or
+Windows installer exists.
 
 ```sh
-# Linux x64 runtime archive + resource monitor, inside the WSL distro:
-node scripts/build-fork-candidate.ts --target linux --version 0.0.43 --sha <full-sha>
+# 1. Per target. Run each on the matching machine, all with the same
+#    --output-dir so their outputs accumulate.
+#    Linux x64 runtime archive + resource monitor, inside the WSL distro:
+node scripts/build-fork-candidate.ts --target linux --version 0.0.43 \
+  --sha <full-sha> --mode candidate --output-dir "<shared candidate dir>"
 
-# Windows x64 installer (embeds the Linux archive), on Windows:
-node scripts/build-fork-candidate.ts --target win --version 0.0.43 --sha <full-sha> \
-  --linux-archive candidate/t3-0.0.43-linux-x64.tar.gz
+#    Windows x64 installer + CLI ZIP (embeds the Linux archive), on Windows:
+node scripts/build-fork-candidate.ts --target win --version 0.0.43 \
+  --sha <full-sha> --mode candidate --output-dir "<shared candidate dir>" \
+  --linux-archive "<shared candidate dir>/t3-0.0.43-linux-x64.tar.gz"
 
-# Intel macOS DMG, on the Intel Mac:
-node scripts/build-fork-candidate.ts --target mac --version 0.0.43 --sha <full-sha>
+#    Intel macOS DMG, on the Intel Mac:
+node scripts/build-fork-candidate.ts --target mac --version 0.0.43 \
+  --sha <full-sha> --mode candidate --output-dir "<shared candidate dir>"
+
+# 2. Aggregate once all three platforms are present.
+node scripts/build-fork-candidate.ts --phase aggregate --target linux \
+  --version 0.0.43 --sha <full-sha> --output-dir "<shared candidate dir>" --execute
 ```
 
 `build-fork-candidate.ts` prints the plan by default and runs it with
-`--execute`. It verifies the checked-out HEAD equals the requested source, runs
-the same `build-cli-archive.ts`/`build-desktop-artifact.ts`/`smoke-cli-archive.ts`
-steps, and freezes the candidate with the same `verify-fork-candidate.ts` the
-workflow uses. It never invents a native acceptance receipt.
+`--execute`. `--mode candidate` accepts a pre-merge PR SHA that is not on
+`main`; `--mode public` (the default) still requires the SHA to be an ancestor of
+the fork remote's `main`, which is what publication requires. It resolves the
+writable fork remote explicitly (`--fork-remote`, default `fork`) rather than
+assuming `origin` is the fork. It verifies the checked-out HEAD equals the
+requested source, runs the same
+`build-cli-archive.ts`/`build-desktop-artifact.ts`/`smoke-cli-archive.ts` steps,
+stages each target's artifacts into the shared directory, and freezes the
+complete candidate with the same `verify-fork-candidate.ts` the workflow uses. It
+never invents a native acceptance receipt.
+
+### Transfer and aggregation
+
+The three machines produce native outputs; gather them into one directory keyed
+by the same version and SHA:
+
+- Copy the Windows `T3-Code-<version>-x64.exe` and
+  `t3-<version>-win32-x64.zip`, the Intel Mac `T3-Code-<version>-x64.dmg`, and
+  the Linux `t3-<version>-linux-x64.tar.gz` into the shared candidate directory.
+- Stage each with `node scripts/stage-candidate-asset.ts --file <name>
+--output-dir "<shared candidate dir>"`, or let `build-fork-candidate.ts` do it.
+- Run the aggregate step. It rejects any mixed SHA/version: the manifest binds
+  the source and version, and the embedded provenance inspection reads each
+  archive's real `t3code-build-info.json`. Completed outputs from a working
+  platform are preserved even when another platform is unavailable.
 
 Apple Silicon macOS is built only when `include_macos_arm64` is set and an
-authorized `macos_arm64_runner` is supplied; it is reported untested.
+authorized `vars.T3CODE_MACOS_ARM64_RUNNER` is configured; it is reported
+untested.
 
 ## Versioning
 
@@ -74,12 +112,14 @@ Rules:
 ## Release procedure
 
 1. Pick the immutable source SHA on `main` and the upstream base version.
-2. Run **Fork release** (`workflow_dispatch`) with `sha`, `version`,
-   `upstream_base`, and the authorized runner labels. Leave `publish` off to
-   build a candidate.
-3. Preflight checks out that explicit SHA (never `FETCH_HEAD`), asserts
-   `HEAD == sha`, and asserts the SHA is an ancestor of `origin/main` with
-   `scripts/select-release-source.ts`.
+2. Run **Fork release** (`workflow_dispatch`) with `sha`, `version`, and
+   `upstream_base`. Runner labels are not inputs; they come from repository
+   variables. Leave `publish` off to build a candidate.
+3. `authorize` checks the owner-configured runner labels first. Preflight then
+   checks out that explicit SHA (never `FETCH_HEAD`), asserts `HEAD == sha`, and
+   applies the public ancestry policy (the SHA must be an ancestor of
+   `origin/main`) with `scripts/select-release-source.ts` — this runs before
+   dependencies are installed and imports no workspace packages.
 4. The workflow builds the JS bundle once, then packages:
    - `T3-Code-<version>-x64.exe` (NSIS) with the matching
      `t3-<version>-linux-x64.tar.gz` embedded as its WSL runtime;
@@ -92,14 +132,23 @@ Rules:
    standalone archive, and freezes `fork-release-candidate` with
    `fork-release-manifest.json` and `SHA256SUMS` written from the exact
    distributed bytes.
-6. Native acceptance on real Windows/WSL and Intel macOS hardware. The accepted
-   bytes are recorded as `fork-native-receipts.json` and uploaded as the
-   `fork-release-native-receipts` artifact on the same run. A changed/rebuilt
-   asset invalidates its previous receipt.
-7. Re-run with `publish: true` and `candidate_run_id` set to the qualifying
-   run. Promotion downloads that immutable artifact, verifies the manifest,
-   checksums, receipts, tag target, no-overwrite, version ordering, and the
-   authorization gate, then creates the release. It never rebuilds.
+6. Native acceptance on real Windows/WSL and Intel macOS hardware. Each target
+   binds to its own installer/runtime asset and its digest; a receipt for the
+   wrong artifact, or a conflicting FAIL beside a PASS, is rejected. Record the
+   accepted bytes as `fork-native-receipts.json` and import them by dispatching
+   the **Fork release** workflow with `upload_receipts: true` and
+   `receipts_source_run_id` = the candidate run id. That job downloads the
+   candidate identity, validates the receipts against it, and uploads the
+   `fork-release-native-receipts` artifact on the _import_ run. A changed or
+   rebuilt asset invalidates its previous receipt.
+7. Re-run with `publish: true`, `candidate_run_id` set to the qualifying run,
+   and `receipt_run_id` set to the import run (defaults to `candidate_run_id`).
+   Promotion downloads the frozen candidate, binds it to its recorded
+   `candidate-identity.json` digest, verifies the manifest, checksums, receipts,
+   tag target, no-overwrite, version ordering, and the environment's
+   _required-reviewer_ approval rule, then creates the release. It never
+   rebuilds. Cross-run downloads use the `actions: read` permission, and the
+   publish job holds `contents: write` only.
 
 Queued CI is not a passed release gate; a release is only qualified when the
 candidate artifact set exists and native smoke tests pass.

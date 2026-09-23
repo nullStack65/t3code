@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off - A self-contained CI verification utility over plain files.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off globalProcessRuntime:off - A self-contained CI verification utility over plain files.
 /**
  * Verifies (and optionally freezes) a fork release candidate.
  *
- * Two jobs share this tool so the candidate bytes are checked the same way in
- * both:
+ * Three jobs share this tool so the candidate bytes are checked the same way in
+ * all of them:
+ *   - per-target local builds verify only their own platform's artifacts
+ *     (`--targets linux`) so a Linux-only build can pass before macOS exists;
  *   - `qualify` freezes the candidate: write the manifest, write SHA256SUMS
- *     from the observed bytes, then verify everything agrees.
+ *     from the observed bytes, then verify the complete required set;
  *   - `publish` re-verifies the *downloaded* artifact and the promotion-level
  *     rules (tag target, no overwrite, version ordering, authorization gate)
  *     before creating a release.
@@ -17,6 +19,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { inspectCandidateProvenance } from "./lib/candidate-provenance-inspect.ts";
 import {
   CANDIDATE_MANIFEST_FILE_NAME,
   NATIVE_RECEIPTS_FILE_NAME,
@@ -29,6 +32,7 @@ import {
   sha256Hex,
   verifyCandidate,
   verifyPromotion,
+  type CandidateTargetSelection,
   type NativeReceipt,
   type ReleaseAsset,
   type ReleaseCandidateManifest,
@@ -40,6 +44,8 @@ interface Args {
   sha: string;
   repository: string;
   includeMacosArm64: boolean;
+  targets: CandidateTargetSelection;
+  inspectProvenance: boolean;
   requireNativeReceipts: boolean;
   writeManifest: boolean;
   writeChecksums: boolean;
@@ -81,12 +87,18 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
     }
     return value.trim();
   };
+  const targets = (values.get("targets")?.trim() || "all") as CandidateTargetSelection;
+  if (!["all", "linux", "win", "mac"].includes(targets)) {
+    throw new Error("--targets must be all, linux, win, or mac");
+  }
   return {
     candidateDir: required("candidate-dir"),
     version: required("version"),
     sha: required("sha").toLowerCase(),
     repository: required("repository"),
     includeMacosArm64: bool("include-macos-arm64"),
+    targets,
+    inspectProvenance: !bool("skip-provenance-inspection"),
     requireNativeReceipts: bool("require-native-receipts"),
     writeManifest: bool("write-manifest"),
     writeChecksums: bool("write-checksums"),
@@ -251,14 +263,24 @@ function main(): void {
         expected,
         observedAssets,
         includeMacosArm64: args.includeMacosArm64,
+        targets: args.targets,
         requireNativeReceipts: args.requireNativeReceipts,
+        packagedProvenance:
+          args.promote || !args.inspectProvenance
+            ? undefined
+            : inspectCandidateProvenance({
+                candidateDir: args.candidateDir,
+                version: args.version,
+                targets: args.targets,
+                includeMacosArm64: args.includeMacosArm64,
+              }),
       });
 
   if (!result.ok) {
     fail(result.failures);
   }
   console.log(
-    `Candidate verified: ${observedAssets.length} assets for ${args.repository} v${args.version} @ ${args.sha}.`,
+    `Candidate verified: ${observedAssets.length} assets for ${args.repository} v${args.version} @ ${args.sha} (targets: ${args.targets}).`,
   );
   if (args.promote) {
     console.log(

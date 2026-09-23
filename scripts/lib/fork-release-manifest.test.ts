@@ -139,6 +139,95 @@ it("rejects an extra unrecorded asset and a manifest entry with no file", () => 
   assert.match(absent.failures.join("\n"), /ghost\.zip .*not present/);
 });
 
+it("rejects a receipt that names the wrong target's artifact even when it passes", () => {
+  // Both W and M name the Linux tarball (the coordinator's reproduction): the
+  // receipts are wrong-target evidence, not acceptance of the installer/DMG.
+  const linuxTarball = `t3-${VERSION}-linux-x64.tar.gz`;
+  const linuxAsset = assets.find((asset) => asset.name === linuxTarball)!;
+  const crossed: NativeReceipt[] = [
+    {
+      schemaVersion: 1,
+      owner: "W",
+      target: "win32-x64",
+      sourceSha: SHA,
+      version: VERSION,
+      assetName: linuxTarball,
+      assetSha256: linuxAsset.sha256,
+      result: "pass",
+    },
+    {
+      schemaVersion: 1,
+      owner: "M",
+      target: "darwin-x64",
+      sourceSha: SHA,
+      version: VERSION,
+      assetName: linuxTarball,
+      assetSha256: linuxAsset.sha256,
+      result: "pass",
+    },
+  ];
+  const result = verifyCandidate({
+    manifest: { ...manifest, nativeReceipts: crossed },
+    expected,
+    observedAssets: assets,
+    requireNativeReceipts: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /win32-x64 .*must accept T3-Code-.*-x64\.exe/);
+  assert.match(result.failures.join("\n"), /darwin-x64 .*must accept T3-Code-.*-x64\.dmg/);
+});
+
+it("rejects conflicting receipts where a FAIL accompanies a PASS", () => {
+  const conflicting: NativeReceipt[] = [
+    ...receipts,
+    {
+      schemaVersion: 1,
+      owner: "W2",
+      target: "win32-x64",
+      sourceSha: SHA,
+      version: VERSION,
+      assetName: `T3-Code-${VERSION}-x64.exe`,
+      assetSha256: assets[0]!.sha256,
+      result: "fail",
+      notes: "installer crash on launch",
+    },
+  ];
+  const result = verifyCandidate({
+    manifest: { ...manifest, nativeReceipts: conflicting },
+    expected,
+    observedAssets: assets,
+    requireNativeReceipts: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /native acceptance for win32-x64 is conflicting/);
+});
+
+it("rejects ambiguous acceptance where passes name different artifacts", () => {
+  const ambiguous: NativeReceipt[] = [
+    receipts[0]!,
+    {
+      schemaVersion: 1,
+      owner: "W2",
+      target: "win32-x64",
+      sourceSha: SHA,
+      version: VERSION,
+      // A second, different artifact claimed for the same target.
+      assetName: `t3-${VERSION}-win32-x64.zip`,
+      assetSha256: assets.find((asset) => asset.name === `t3-${VERSION}-win32-x64.zip`)!.sha256,
+      result: "pass",
+    },
+    receipts[1]!,
+  ];
+  const result = verifyCandidate({
+    manifest: { ...manifest, nativeReceipts: ambiguous },
+    expected,
+    observedAssets: assets,
+    requireNativeReceipts: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /native acceptance for win32-x64 is ambiguous/);
+});
+
 it("rejects missing, wrong-source, and wrong-version native receipts", () => {
   const missing = verifyCandidate({
     manifest: { ...manifest, nativeReceipts: [] },
@@ -179,7 +268,63 @@ it("rejects missing, wrong-source, and wrong-version native receipts", () => {
     observedAssets: assets,
     requireNativeReceipts: true,
   });
-  assert.match(failed.failures.join("\n"), /no passing native acceptance receipt/);
+  // A target with only fail receipts is disqualified; the message names the
+  // conflicting/failing acceptance rather than silently reporting success.
+  assert.equal(failed.ok, false);
+  assert.match(
+    failed.failures.join("\n"),
+    /native acceptance for (win32-x64|darwin-x64) is conflicting|no passing native acceptance/,
+  );
+});
+
+it("per-target verification only requires that target's assets", () => {
+  const linuxOnly = assets.filter((asset) => asset.name === `t3-${VERSION}-linux-x64.tar.gz`);
+  const partial = verifyCandidate({
+    manifest: { ...manifest, assets: linuxOnly, nativeReceipts: [] },
+    expected,
+    observedAssets: linuxOnly,
+    targets: "linux",
+  });
+  assert.deepEqual(partial, { ok: true, failures: [] });
+
+  // The same partial directory must fail the complete (all-targets) check.
+  const complete = verifyCandidate({
+    manifest: { ...manifest, assets: linuxOnly, nativeReceipts: [] },
+    expected,
+    observedAssets: linuxOnly,
+    targets: "all",
+  });
+  assert.equal(complete.ok, false);
+  assert.match(complete.failures.join("\n"), /required asset .*x64\.exe is missing/);
+});
+
+it("rejects packaged provenance that does not match the source", () => {
+  const result = verifyCandidate({
+    manifest,
+    expected,
+    observedAssets: assets,
+    targets: "all",
+    packagedProvenance: {
+      windowsInstaller: {
+        repository: "nullStack65/t3code",
+        sourceSha: DISPATCH,
+        version: VERSION,
+        platform: "win",
+        arch: "x64",
+      },
+      linuxArchive: {
+        repository: "nullStack65/t3code",
+        sourceSha: SHA,
+        version: VERSION,
+        platform: "linux",
+        arch: "x64",
+      },
+      embeddedWslEqualsStandalone: false,
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /Windows installer provenance sourceSha/);
+  assert.match(result.failures.join("\n"), /not byte-identical/);
 });
 
 it("promotion refuses overwrite, older versions, and a missing authorization gate", () => {
