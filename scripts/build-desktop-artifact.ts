@@ -40,8 +40,8 @@ import {
   BUILD_INFO_FILE_NAME,
   createBuildInfo,
   readGitSourceProvenance,
+  resolveBuildSourceShaFromEnv,
   resolveSourceRepository,
-  resolveSourceSha,
   serializeBuildInfo,
 } from "./lib/source-provenance.ts";
 
@@ -831,9 +831,9 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   return { stdout, stderr, exitCode } as const;
 });
 
-const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRoot: string) {
+const resolveSourceProvenance = Effect.fn("resolveSourceProvenance")(function* (repoRoot: string) {
   const gitSource = yield* readGitSourceProvenance(repoRoot);
-  return resolveSourceSha(process.env, gitSource.sourceSha);
+  return yield* resolveBuildSourceShaFromEnv(process.env, gitSource.sourceSha);
 });
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
@@ -918,6 +918,7 @@ interface StagePackageJson {
   readonly t3codeCommitHash: string;
   readonly t3codeSourceRepository: string;
   readonly t3codeSourceSha: string;
+  readonly t3codeWorkflowRevision: string;
   readonly t3codeBuildVersion: string;
   readonly t3codeBuildArch: string;
   readonly private: true;
@@ -3397,14 +3398,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   const appVersion = options.version ?? serverPackageJson.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
-  const commitHash = yield* resolveGitCommitHash(repoRoot);
+  const source = yield* resolveSourceProvenance(repoRoot);
+  const commitHash = source.sourceSha;
   const sourceRepository = resolveSourceRepository(process.env);
   const buildInfo = createBuildInfo({
     version: appVersion,
     platform: options.platform,
     arch: options.arch,
     repository: sourceRepository,
-    sourceSha: commitHash,
+    sourceSha: source.sourceSha,
+    workflowRevision: source.workflowRevision,
   });
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
@@ -3649,6 +3652,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     t3codeCommitHash: commitHash,
     t3codeSourceRepository: buildInfo.repository,
     t3codeSourceSha: buildInfo.sourceSha,
+    t3codeWorkflowRevision: buildInfo.workflowRevision,
     t3codeBuildVersion: buildInfo.version,
     t3codeBuildArch: buildInfo.arch,
     private: true,

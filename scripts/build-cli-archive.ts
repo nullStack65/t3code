@@ -46,8 +46,8 @@ import {
   BUILD_INFO_FILE_NAME,
   createBuildInfo,
   readGitSourceProvenance,
+  resolveBuildSourceShaFromEnv,
   resolveSourceRepository,
-  resolveSourceSha,
   serializeBuildInfo,
 } from "./lib/source-provenance.ts";
 
@@ -529,12 +529,14 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   // a human can read the exact repository, full source SHA, version, and
   // architecture without trusting the file name.
   const gitSource = yield* readGitSourceProvenance(repoRoot);
+  const source = yield* resolveBuildSourceShaFromEnv(process.env, gitSource.sourceSha);
   const buildInfo = createBuildInfo({
     version: input.version,
     platform: input.platform,
     arch: input.arch,
     repository: resolveSourceRepository(process.env),
-    sourceSha: resolveSourceSha(process.env, gitSource.sourceSha),
+    sourceSha: source.sourceSha,
+    workflowRevision: source.workflowRevision,
   });
   yield* fs.writeFileString(
     path.join(contentDir, BUILD_INFO_FILE_NAME),

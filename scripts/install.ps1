@@ -178,13 +178,19 @@ if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
       }
       throw
     }
+
+    # The fork release publishes only linux-x64 and win32-x64 archives. Reject
+    # an unsupported target here, before downloading a file that is not attached.
+    $expected = (Get-Content (Join-Path $staging "SHA256SUMS") | Where-Object { $_ -match "\s\*?$([regex]::Escape($archive))$" } | Select-Object -First 1)
+    if (-not $expected) {
+      Fail "t3 $version has no fork release archive for win32-$arch; the fork publishes linux-x64 and win32-x64 self-contained archives"
+    }
+    $expected = ($expected -split "\s+")[0].ToLowerInvariant()
+
     Fetch "$baseUrl/v$version/$archive" (Join-Path $staging $archive) -progress
 
     Step "Verifying the download..."
 
-    $expected = (Get-Content (Join-Path $staging "SHA256SUMS") | Where-Object { $_ -match "\s\*?$([regex]::Escape($archive))$" } | Select-Object -First 1)
-    if (-not $expected) { Fail "$archive is not listed in SHA256SUMS" }
-    $expected = ($expected -split "\s+")[0].ToLowerInvariant()
     $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $staging $archive)).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { Fail "checksum mismatch for $archive" }
 

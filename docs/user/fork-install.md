@@ -15,6 +15,8 @@ compiler.
 2. For the WSL backend, install WSL 2 and a distro, then pick it in
    **Settings → Connections**. The installer already contains the matching
    Linux runtime, so no separate download is needed.
+3. The fork also publishes `t3-<version>-win32-x64.zip`, a self-contained
+   Windows CLI archive for `t3` outside the desktop app.
 
 ## Intel macOS
 
@@ -42,9 +44,15 @@ why; fork releases are plain stable versions. `T3CODE_RELEASE_REPOSITORY` and
 Download the newer artifact and install it over the existing one. Your settings,
 sign-in, pairings, projects, and databases are preserved.
 
-- Windows and Linux check for and download fork updates.
+- Fork releases do not enable automatic desktop updates yet; install the new
+  Windows or macOS artifact by hand.
+- On Linux, `t3 update` and the installer download the newer fork archive.
 - Intel macOS updates by downloading the new DMG; in-app macOS updates are not
   supported for unsigned fork builds.
+
+The fork publishes `linux-x64` and `win32-x64` CLI archives. Other
+platform/architecture combinations fail with a clear message instead of
+downloading a missing asset.
 
 If you are coming from a build that had no update feed, this first
 release-managed install is the migration: install it once by hand, and later
