@@ -14,6 +14,7 @@ import type {
   ProviderSessionDirectoryPersistenceError,
   ProviderValidationError,
 } from "../Errors.ts";
+import type { RouteEventInput, RouteSelectionMetadata } from "../../usage/routeMetadata.ts";
 
 export interface ProviderRuntimeBinding {
   readonly threadId: ThreadId;
@@ -29,6 +30,22 @@ export interface ProviderRuntimeBinding {
   readonly resumeCursor?: unknown | null;
   readonly runtimePayload?: unknown | null;
   readonly runtimeMode?: RuntimeMode;
+  /**
+   * True sub-agent parent native session id, when the caller knows it. Kept
+   * separate from the resume cursor so child sessions stay distinguishable
+   * instead of being flattened into the parent.
+   */
+  readonly parentNativeSessionId?: string | null;
+  /**
+   * What this session was asked to run. Persisted as a request record; it is
+   * never treated as the observed model.
+   */
+  readonly requestedRoute?: RouteSelectionMetadata | null;
+  /**
+   * A declared canary/fallback/review/escalation event. T3 only carries it;
+   * the route authority (agent-config policy / OMP Skill) decides it.
+   */
+  readonly routeEvent?: RouteEventInput | null;
 }
 
 export interface ProviderRuntimeBindingWithMetadata extends ProviderRuntimeBinding {
