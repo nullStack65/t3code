@@ -614,8 +614,16 @@ export function buildUsageAttribution(input: UsageAttributionInput): UsageAttrib
       quality: sessionQuality,
       promptQuality,
       requestQuality,
-      promptCount: capability.prompt === "supported" ? accumulator.promptIds.size : null,
-      requestCount: capability.request === "supported" ? accumulator.requestIds.size : null,
+      promptCount:
+        capability.prompt === "supported" &&
+        (promptQuality === "measured" || promptQuality === "partial")
+          ? accumulator.promptIds.size
+          : null,
+      requestCount:
+        capability.request === "supported" &&
+        (requestQuality === "measured" || requestQuality === "partial")
+          ? accumulator.requestIds.size
+          : null,
       boundThreadIds,
       providerInstanceIds: instanceIds,
       bindingOrigins: origins,

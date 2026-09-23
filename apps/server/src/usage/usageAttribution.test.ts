@@ -221,6 +221,9 @@ describe("session binding and data quality", () => {
     expect(session.quality).toBe("missing");
     expect(session.totals).toBeNull();
     expect(session.allocation).toBe("missing");
+    // An absent measurement is null, never a zero request count.
+    expect(session.requestCount).toBeNull();
+    expect(session.promptCount).toBeNull();
     expect(projection.coverage.find((entry) => entry.provider === "claude")?.missingSessions).toBe(
       1,
     );
