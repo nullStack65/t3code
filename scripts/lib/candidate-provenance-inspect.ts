@@ -107,32 +107,25 @@ function readZipProvenance(archive: string, scratch: string): PackagedProvenance
 }
 
 /**
- * Extracts the WSL archive from a Windows installer. On Windows it runs the
- * real NSIS installer into a throwaway directory; otherwise 7-Zip. Returns the
- * embedded archive bytes and the standalone comparison flag.
+ * Extracts the WSL archive from a Windows installer by unpacking the real NSIS
+ * app payload (`$PLUGINSDIR/app-64.7z`, the stream the installer's own
+ * `nsis7z.dll` unpacks). Executing the installer is avoided because it launches
+ * the Electron app. Returns the embedded bytes and the standalone comparison.
  */
 function inspectEmbeddedWsl(
   installer: string,
   standaloneArchive: string,
   scratch: string,
 ): { embedded: Uint8Array | undefined; equalsStandalone: boolean | undefined } {
-  let extractRoot: string;
-  // eslint-disable-next-line t3code/no-global-process-runtime -- a plain Node CLI helper, not Effect code
-  if (process.platform === "win32") {
-    const installDir = NodePath.join(scratch, "nsis-install");
-    NodeFS.mkdirSync(installDir, { recursive: true });
-    const status = NodeChildProcess.spawnSync(installer, ["/S", `/D=${installDir}`], {
-      stdio: "inherit",
-    }).status;
-    extractRoot = status === 0 ? installDir : "";
-  } else {
-    extractRoot = "";
-  }
-  if (extractRoot === "" || !NodeFS.existsSync(extractRoot)) {
-    const sevenZip = detectSevenZip();
-    if (sevenZip === undefined) return { embedded: undefined, equalsStandalone: undefined };
-    extractRoot = NodeFS.mkdtempSync(NodePath.join(scratch, "installer-"));
-    run(sevenZip, ["x", "-y", `-o${extractRoot}`, installer]);
+  const sevenZip = detectSevenZip();
+  if (sevenZip === undefined) return { embedded: undefined, equalsStandalone: undefined };
+  const wrapperDir = NodeFS.mkdtempSync(NodePath.join(scratch, "installer-"));
+  run(sevenZip, ["x", "-y", `-o${wrapperDir}`, installer]);
+  const appPayload = findFile(NodePath.join(wrapperDir, "$PLUGINSDIR"), "app-64.7z");
+  let extractRoot = wrapperDir;
+  if (appPayload !== undefined) {
+    extractRoot = NodeFS.mkdtempSync(NodePath.join(scratch, "payload-"));
+    run(sevenZip, ["x", "-y", `-o${extractRoot}`, appPayload]);
   }
   const embeddedPath = findFile(extractRoot, WSL_RUNTIME_ARCHIVE_NAME);
   if (embeddedPath === undefined) return { embedded: undefined, equalsStandalone: undefined };

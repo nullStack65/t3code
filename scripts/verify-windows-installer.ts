@@ -118,39 +118,35 @@ function readArchiveInfo(archive: string, scratch: string): EmbeddedBuildInfo | 
 }
 
 /**
- * Extracts the Windows installer through its real NSIS flow when possible.
+ * Extracts the Windows installer through its real NSIS payload layout.
  *
- * Windows: run the installer with `/S /D=<temp dir>` so NSIS performs the real
- * silent install into an isolated directory; the WSL archive then lives at
- * `resources/wsl-runtime.tar.gz` exactly as an end user's install does.
- * Otherwise: unpack with 7-Zip and locate the same relative path.
+ * electron-builder's NSIS installer is a wrapper whose app payload is the
+ * `$PLUGINSDIR/app-64.7z` stream that the installer's own `nsis7z.dll` unpacks
+ * at install time, producing `resources/wsl-runtime.tar.gz`. Unpacking that
+ * stream is the same layout a real install reaches; a silent install would also
+ * work but launches the Electron app, which must not touch a live machine. This
+ * therefore requires 7-Zip to reach the nested payload and fails closed when it
+ * is absent.
  */
 function extractInstaller(installer: string, scratch: string): string {
-  const installDir = NodePath.join(scratch, "nsis-install");
-  // eslint-disable-next-line t3code/no-global-process-runtime -- a plain Node CLI helper, not Effect code
-  if (process.platform === "win32") {
-    NodeFS.mkdirSync(installDir, { recursive: true });
-    // NSIS requires /D to be last and unquoted; a path with spaces is fine.
-    const status = NodeChildProcess.spawnSync(installer, ["/S", `/D=${installDir}`], {
-      stdio: "inherit",
-    }).status;
-    if (status === 0) {
-      const resources = NodePath.join(installDir, "resources");
-      if (NodeFS.existsSync(resources)) return resources;
-    } else {
-      console.warn(`warn: silent NSIS install exited ${status}; falling back to 7-Zip extraction.`);
-    }
-  }
   const sevenZip = detectSevenZip();
   if (sevenZip === undefined) {
-    throw new Error(
-      "neither a real NSIS install nor 7-Zip is available; install 7-Zip (p7zip/7zip) to extract the installer",
-    );
+    throw new Error("7-Zip is required to reach the NSIS app payload; install 7-Zip (7zip/p7zip)");
   }
-  const extractDir = NodePath.join(scratch, "installer");
-  NodeFS.mkdirSync(extractDir, { recursive: true });
-  run(sevenZip, ["x", "-y", `-o${extractDir}`, installer]);
-  return extractDir;
+  const wrapperDir = NodePath.join(scratch, "installer");
+  NodeFS.mkdirSync(wrapperDir, { recursive: true });
+  run(sevenZip, ["x", "-y", `-o${wrapperDir}`, installer]);
+
+  const appPayload = findFile(NodePath.join(wrapperDir, "$PLUGINSDIR"), "app-64.7z");
+  if (appPayload === undefined) {
+    // Some installers are not electron-builder's wrapper; fall back to the
+    // wrapper root so a plain NSIS installer still resolves resources/.
+    return wrapperDir;
+  }
+  const payloadDir = NodePath.join(scratch, "payload");
+  NodeFS.mkdirSync(payloadDir, { recursive: true });
+  run(sevenZip, ["x", "-y", `-o${payloadDir}`, appPayload]);
+  return payloadDir;
 }
 
 function main(): void {

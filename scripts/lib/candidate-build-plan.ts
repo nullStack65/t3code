@@ -205,6 +205,12 @@ export function planCandidateBuild(input: CandidatePlanInput): ReadonlyArray<Can
         phase: "build",
       },
       {
+        id: "sea",
+        description: "Build the Windows single-executable for the CLI ZIP",
+        command: ["node", "apps/server/scripts/cli.ts", "build-exe", "--verbose"],
+        phase: "build",
+      },
+      {
         id: "cli-archive",
         description: "Assemble the Windows x64 self-contained CLI ZIP",
         command: [
