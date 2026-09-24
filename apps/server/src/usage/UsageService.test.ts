@@ -630,6 +630,250 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("refreshes a predecessor v4 quality cache entry once and keeps deleted history", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const content =
+        encodeUnknownJsonString({
+          type: "assistant",
+          timestamp: "2026-08-01T10:00:00Z",
+          requestId: "req_live",
+          sessionId: "session-1",
+          message: { id: "msg_live", model: "claude-fable-5", usage: { input_tokens: 10 } },
+        }) + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, content));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const liveDir = yield* Effect.promise(() => NodeFSP.realpath(NodePath.dirname(transcript)));
+        const livePath = NodePath.join(liveDir, NodePath.basename(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const deletedPath = NodePath.join(liveDir, "deleted.jsonl");
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A predecessor v4 document: `identity` is declared (no legacy marker)
+        // but the rows are 15 fields with no completeness metadata, exactly as
+        // the predecessor writer emitted. Independently, a nonzero total used to
+        // decode as `complete`, silently promoting an unknown measurement.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 4,
+              models: ["claude-fable-5"],
+              sessions: ["session-1", "deleted-session"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 0, 10, 0, 0, 0, 0, "msg_live:", null, null, null, null, 0, 0]],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+                [deletedPath]: {
+                  s: 100,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 1, 7, 0, 0, 0, 0, "msg_deleted:", null, null, null, null, 0, 0]],
+                  t: [],
+                  o: 90,
+                  gl: 64,
+                  gh: 11,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        // Live file cold re-parsed once (10) plus retained deleted history (7).
+        assert.strictEqual(
+          first.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          17,
+        );
+
+        const afterFirst = decodeUnknownJsonString(
+          yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+        ) as { version: number; files: Record<string, { li?: number; r: unknown[][] }> };
+        assert.strictEqual(afterFirst.version, 4);
+        const liveRow = afterFirst.files[livePath]!.r[0]!;
+        // Enriched to the current 18-field row with the completeness code (1 =
+        // partial) the predecessor row could not carry.
+        assert.strictEqual(liveRow.length, 18);
+        assert.strictEqual(liveRow[15], 1);
+        assert.strictEqual(afterFirst.files[livePath]!.li, undefined);
+        // Deleted history retained conservatively; it cannot be re-parsed.
+        const deletedRow = afterFirst.files[deletedPath]!.r[0]!;
+        assert.strictEqual(deletedRow[3], 7);
+        assert.strictEqual(deletedRow[15], 1);
+
+        // A second scan of the unchanged live file is a warm hit: no re-parse,
+        // no cache rewrite, stable totals.
+        const beforeSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        const second = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          second.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          17,
+        );
+        const afterSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        assert.strictEqual(afterSecond, beforeSecond);
+
+        // A restart reads the enriched cache and keeps deleted history.
+        const restarted = yield* UsageService.make;
+        const third = yield* restarted.readSummary(WINDOW);
+        assert.strictEqual(
+          third.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          17,
+        );
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-predecessor-refresh-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("keeps retained fallback rows when an extant transcript cannot be read", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const content =
+        encodeUnknownJsonString({
+          type: "assistant",
+          timestamp: "2026-08-01T10:00:00Z",
+          sessionId: "session-1",
+          message: { id: "msg_unreadable", model: "claude-fable-5", usage: { input_tokens: 9 } },
+        }) + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, content));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const liveDir = yield* Effect.promise(() => NodeFSP.realpath(NodePath.dirname(transcript)));
+        const livePath = NodePath.join(liveDir, NodePath.basename(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A predecessor row matching the live file exactly. The warm guard must
+        // reject it and attempt a read; making the file unreadable then forces
+        // the fallback path rather than an empty transcript.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 4,
+              models: ["claude-fable-5"],
+              sessions: ["session-1"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 0, 9, 0, 0, 0, 0, "msg_unreadable:", null, null, null, null, 0, 0]],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+        yield* Effect.promise(() => NodeFSP.chmod(livePath, 0o000));
+
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        // The cached 9 tokens survive the failed read; nothing is zeroed out.
+        assert.strictEqual(
+          summary.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          9,
+        );
+      }).pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-failed-read-test", home, settings })),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("counts Codex and Grok invalid events as malformed while keeping valid tokens", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const codexDir = NodePath.join(home, "codex", "sessions");
+      const grokDir = NodePath.join(home, "grok", "sessions", "session");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(codexDir, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(codexDir, "rollout.jsonl"),
+          [
+            { type: "session_meta", payload: { id: "codex-invalid-session" } },
+            { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+            {
+              type: "event_msg",
+              timestamp: "2026-08-01T10:00:00Z",
+              payload: {
+                type: "token_count",
+                info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } },
+              },
+            },
+            {
+              type: "event_msg",
+              timestamp: "2026-08-01T10:00:01Z",
+              payload: {
+                type: "token_count",
+                info: { last_token_usage: { input_tokens: null, output_tokens: null } },
+              },
+            },
+          ]
+            .map((line) => encodeUnknownJsonString(line))
+            .join("\n") + "\n",
+        );
+        await NodeFSP.mkdir(grokDir, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(grokDir, "updates.jsonl"),
+          encodeUnknownJsonString({
+            timestamp: Date.parse("2026-08-01T10:00:00Z") / 1000,
+            method: "_x.ai/session/update",
+            params: {
+              sessionId: "grok-invalid-session",
+              update: {
+                sessionUpdate: "turn_completed",
+                prompt_id: "prompt-1",
+                usage: {
+                  inputTokens: 10,
+                  outputTokens: 13,
+                  modelUsage: {
+                    "model-invalid": { inputTokens: null, outputTokens: null },
+                    "model-valid": { inputTokens: 10, outputTokens: 13 },
+                  },
+                },
+              },
+            },
+          }) + "\n",
+        );
+      });
+
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-nonclaude-malformed-test", home, settings }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+
+      const codexSource = summary.sources.find((source) => source.fingerprint.provider === "codex");
+      const grokSource = summary.sources.find((source) => source.fingerprint.provider === "grok");
+      assert.strictEqual(codexSource?.malformedRecords, 1);
+      assert.strictEqual(grokSource?.malformedRecords, 1);
+      // 2 Codex output + 13 Grok output; the invalid events add no tokens.
+      assert.strictEqual(totalOutputTokens(summary), 15);
+      assert.strictEqual(codexSource?.distinctSessions, 1);
+      assert.strictEqual(grokSource?.distinctSessions, 1);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("does not share an in-flight scan after custom prices change", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;

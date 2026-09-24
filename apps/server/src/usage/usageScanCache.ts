@@ -32,16 +32,25 @@ import type {
 // re-parses only its appended bytes instead of starting over.
 // v4: records carry native request/message/prompt ids. Without the bump, warm
 // v3 entries would silently report those levels as unsupported until the file
-// next changed.
+// next changed. The v4 row later gained validity/completeness and dedupe-key
+// scope fields appended after the first v4 rows; the version deliberately
+// stayed 4 because those fields are additive.
 //
-// v3 documents are still *read*: the scan retains measured records from
-// transcripts that have since been deleted, and those cannot be re-parsed, so
-// discarding a v3 cache would destroy 90 days of history. A v3 row decodes with
-// its native ids and measurement presence explicitly `unavailable`, and an
-// extant file is cold re-parsed so those fields get filled in. Only v1/v2 (no
-// parse position, different fork semantics) are rejected.
+// Supported-format policy:
+// - v3 documents are still *read*. The scan retains measured records from
+//   transcripts that have since been deleted, and those cannot be re-parsed, so
+//   discarding a v3 cache would destroy 90 days of history. A v3 row decodes
+//   with its native ids and measurement presence explicitly `unavailable`.
+// - A v4 row written by the predecessor (15 fields, no quality metadata)
+//   decodes conservatively: completeness is `partial`, never `complete`, and
+//   the entry is `qualityMetadata: "predecessor"` so an extant file is cold
+//   re-parsed once. No row is discarded for the format change.
+// - Only v1/v2 (no parse position, different fork semantics) are rejected.
 const USAGE_SCAN_CACHE_VERSION = 4 as const;
 const LEGACY_USAGE_SCAN_CACHE_VERSION = 3 as const;
+
+/** Index of the first appended post-v4 field (completeness code) in a row. */
+const POST_V4_FIELD_INDEX = 15;
 
 /**
  * Whether a cache entry's rows still carry their native ids and measurement
@@ -49,6 +58,17 @@ const LEGACY_USAGE_SCAN_CACHE_VERSION = 3 as const;
  * unavailable rather than as a measured zero or an absent id.
  */
 export type ScanCacheIdentity = "declared" | "unavailable";
+
+/**
+ * Whether a cache entry's rows carry the current numeric quality metadata
+ * (validity/completeness and dedupe-key scope, appended after the first v4
+ * rows). Native-id availability alone does not prove that: a `15`-field v4 row
+ * written before that metadata existed has identity `declared` but no
+ * completeness, so reading it as complete would silently promote an unknown
+ * measurement. Such an entry is `predecessor`: its retained rows are treated as
+ * partial, and an extant file is cold re-parsed once to enrich it.
+ */
+export type ScanCacheQualityMetadata = "declared" | "predecessor";
 
 export interface CachedFile {
   readonly size: number;
@@ -68,6 +88,12 @@ export interface CachedFile {
    * not resume such an entry: a cold re-parse is the only way to enrich it.
    */
   readonly identity: ScanCacheIdentity;
+  /**
+   * `predecessor` for an entry whose rows omit the current quality metadata.
+   * Callers must not serve it warm or resume it: the numeric quality is
+   * unasserted, so a cold re-parse is the only way to establish completeness.
+   */
+  readonly qualityMetadata: ScanCacheQualityMetadata;
 }
 
 export type ScanCache = Map<string, CachedFile>;
@@ -266,10 +292,17 @@ export function decodeScanCache(document: unknown): ScanCache {
     rows: readonly unknown[],
     provider: UsageProviderKind,
     legacy: boolean,
-  ): UsageRecord[] | null => {
+  ): { records: UsageRecord[]; qualityDeclared: boolean } | null => {
     const records: UsageRecord[] = [];
+    // Every row must carry the appended post-v4 fields for the entry to be
+    // current. A 15-field row was written before completeness existed; the
+    // entry's numeric quality is then unasserted and must not be read as
+    // complete. Empty row lists are vacuously current: there is no measurement
+    // to promote.
+    let qualityDeclared = true;
     for (const row of rows) {
       if (!isRecordArray(row) || row.length < 10) return null;
+      if (row.length <= POST_V4_FIELD_INDEX) qualityDeclared = false;
       const [
         timestampMs,
         modelIndex,
@@ -293,7 +326,7 @@ export function decodeScanCache(document: unknown): ScanCache {
       const measurementCode = row[13];
       const scopeCode = row[14];
       // Appended after the first v4 rows: validity/completeness metadata. Absent
-      // on an older row, which is treated as a complete observation.
+      // on an older row, whose completeness is then unasserted (`partial`).
       const completenessCode = row[15];
       const invalidTokenFieldsRaw = row[16];
       const dedupeKeyScopeCode = row[17];
@@ -316,11 +349,15 @@ export function decodeScanCache(document: unknown): ScanCache {
         decodeCode(measurementCode, MEASUREMENT_CODES) ??
         (uncached + cached + cacheCreation + output > 0 ? "observed" : "unavailable");
       const scope: UsageObservationScope = decodeCode(scopeCode, SCOPE_CODES) ?? "delta";
-      // A legacy row erased field presence, so a nonzero observation is only
-      // known-partial: we cannot prove every required field was present.
+      // A row that omits the completeness code proves nothing about coverage,
+      // whether it is a legacy row (presence erased) or a predecessor v4 row
+      // (metadata predates the field). Default to `partial`, never `complete`:
+      // missing quality metadata must not be silently promoted to a measured
+      // complete observation. The current writer always emits the code, so this
+      // only applies to older rows.
       const completeness: UsageMeasurementCompleteness | undefined =
         measurement === "observed"
-          ? (decodeCode(completenessCode, COMPLETENESS_CODES) ?? (legacy ? "partial" : "complete"))
+          ? (decodeCode(completenessCode, COMPLETENESS_CODES) ?? "partial")
           : undefined;
       const invalidTokenFields =
         typeof invalidTokenFieldsRaw === "number" &&
@@ -365,7 +402,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         ...(scope === "delta" ? {} : { scope }),
       });
     }
-    return records;
+    return { records, qualityDeclared };
   };
 
   for (const [path, raw] of Object.entries(root.files)) {
@@ -397,16 +434,16 @@ export function decodeScanCache(document: unknown): ScanCache {
 
     const provider: UsageProviderKind = entry.p;
     const legacy = legacyDocument || entry.li === 1;
-    const records = decodeRecords(entry.r, provider, legacy);
-    const tailRecords = decodeRecords(entry.t, provider, legacy);
-    if (records === null || tailRecords === null) continue;
+    const decodedRecords = decodeRecords(entry.r, provider, legacy);
+    const decodedTail = decodeRecords(entry.t, provider, legacy);
+    if (decodedRecords === null || decodedTail === null) continue;
 
     cache.set(path, {
       size: entry.s,
       mtimeMs: entry.m,
       provider,
-      records,
-      tailRecords,
+      records: decodedRecords.records,
+      tailRecords: decodedTail.records,
       position: {
         resumeOffset: entry.o,
         guardLength: entry.gl,
@@ -414,6 +451,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         codexState,
       },
       identity: legacy ? "unavailable" : "declared",
+      qualityMetadata:
+        decodedRecords.qualityDeclared && decodedTail.qualityDeclared ? "declared" : "predecessor",
     });
   }
 

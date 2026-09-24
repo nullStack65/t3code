@@ -51,6 +51,15 @@ invalid | unavailable`) — were tokens actually measured, and were the provider
   Claude's `usage: {}` is `invalid`; an all-zero legacy row whose presence was erased
   is `unavailable`, never `missing` and never a measured zero. A nonzero total never
   implies a complete measurement.
+  A **zero subtotal is not a reason to drop a record**: every provider now retains an
+  eligible event whose total is zero — a complete measured zero, a known-zero subset,
+  or an all-invalid payload — so the classification reaches the projection instead of
+  disappearing at a parser gate. Only a usage container with no recognised token field
+  (`usage: {}`, `last_token_usage: {}`, or an absent container) is treated as
+  no-usage and not emitted. The parser never fabricates tokens to keep such a record,
+  and Codex and Grok are held to the same rule as Claude. The scan's diagnostic
+  `malformedRecords` count and each session's `measurementQuality` are derived from
+  these retained records, so the two agree and nothing is double counted.
 - **level support** (`promptQuality` / `requestQuality`) — can the source establish
   this level, and did the records carry its id? `unsupported` is a structural limit,
   not a zero. A legacy row whose native id was erased reports `unavailable`, never
@@ -132,17 +141,29 @@ historical allocation as of a past instant is unavailable without temporal evide
 
 ## Cache upgrades retain existing history
 
-The scan cache version is still `4`, but a `v3` document is now **read** rather than
-discarded. The scan retains measured records from transcripts that have since been
-deleted for 90 days, and those cannot be re-parsed, so discarding a v3 cache would
-destroy that history. A v3 row decodes with its native ids and measurement presence
-explicitly `unavailable` (an all-zero row stays unknown, not a measured zero; a nonzero
-row is a known but only-partial measurement), and the entry is flagged so it is never
-resumed incrementally. Warm-cache acceptance requires the current identity/measurement
-format: an unchanged extant legacy file is cold re-parsed once to enrich it with ids and
-presence without double counting because the re-parse replaces the entry. A read failure
-during that re-parse keeps the retained fallback rows, and a deleted file is never
-re-parsed at all, so its history survives.
+The scan cache version is still `4`. Supported-format policy:
+
+- A `v3` document is **read** rather than discarded. The scan retains measured records
+  from transcripts that have since been deleted for 90 days, and those cannot be
+  re-parsed, so discarding a v3 cache would destroy that history. A v3 row decodes with
+  its native ids and measurement presence explicitly `unavailable` (an all-zero row
+  stays unknown, not a measured zero; a nonzero row is a known but only-partial
+  measurement).
+- A `v4` row written by the predecessor (15 fields, before the
+  validity/completeness/key-scope fields were appended) is **read conservatively**:
+  its completeness is `partial`, never `complete`, because the writer never asserted
+  coverage. Missing quality metadata is never silently promoted. The entry is marked
+  `qualityMetadata: "predecessor"`, so an extant file is cold re-parsed once and then
+  accepted warm. No row is discarded for the format change.
+- Only `v1`/`v2` (no parse position, different fork semantics) are rejected.
+
+Warm-cache acceptance therefore requires both `identity: "declared"` (native ids and
+measurement presence) and `qualityMetadata: "declared"` (the current numeric quality
+fields). Either being stale forces one cold re-parse that replaces the entry, so
+enrichment never double counts. A read failure during that re-parse keeps the retained
+fallback rows, and a deleted file is never re-parsed at all, so its history survives
+with conservative `partial` quality. Native-id availability alone does **not**
+establish numeric metadata freshness; the two are separate axes.
 
 ## What still needs architecture approval
 

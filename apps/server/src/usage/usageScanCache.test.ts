@@ -53,6 +53,7 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
       tailRecords: [],
       position: position(),
       identity: "declared",
+      qualityMetadata: "declared",
     });
   }
   return cache;
@@ -74,6 +75,7 @@ describe("scan cache round trip", () => {
       tailRecords: [record({ provider: "grok", model: "grok-4.5-build", dedupeKey: null })],
       position: position({ resumeOffset: 30, guardLength: 30, guardHash: 123 }),
       identity: "declared",
+      qualityMetadata: "declared",
     });
     original.set("/codex.jsonl", {
       size: 80,
@@ -92,6 +94,7 @@ describe("scan cache round trip", () => {
         },
       }),
       identity: "declared",
+      qualityMetadata: "declared",
     });
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
@@ -345,6 +348,167 @@ describe("legacy v3 cache history", () => {
     const decoded = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
 
     expect(decoded.get("/live.jsonl")?.identity).toBe("declared");
+  });
+});
+
+describe("predecessor v4 format policy", () => {
+  /**
+   * Generated verbatim by the ACTUAL predecessor writer (its own
+   * `parseClaudeLine` + `encodeScanCache`) at pin
+   * `e4f36af5ef279246bcb0f8463adeee8a09b7bde1`, which emitted 15-field v4 rows
+   * with no completeness/validity/key-scope metadata. Rows: `{input_tokens:10}`
+   * (partial under the current parser), `{input_tokens:null}` (invalid), and
+   * `{input_tokens:4, output_tokens:6}` (complete). Generation receipt: a
+   * one-off test in a worktree at that pin parsed those three Claude lines and
+   * encoded one entry, then printed the document below unchanged.
+   */
+  const PINNED_PREDECESSOR_DOCUMENT = {
+    version: 4,
+    models: ["claude-fable-5"],
+    sessions: ["session-pred"],
+    files: {
+      "/pred/live.jsonl": {
+        s: 120,
+        m: 500,
+        p: "claude",
+        r: [
+          [
+            1785578400000,
+            0,
+            0,
+            10,
+            0,
+            0,
+            0,
+            0,
+            "msg_partial:req_msg_partial",
+            null,
+            "req_msg_partial",
+            "msg_partial",
+            null,
+            0,
+            0,
+          ],
+          [
+            1785578400000,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "msg_invalid:req_msg_invalid",
+            null,
+            "req_msg_invalid",
+            "msg_invalid",
+            null,
+            0,
+            0,
+          ],
+          [
+            1785578400000,
+            0,
+            0,
+            4,
+            0,
+            0,
+            6,
+            0,
+            "msg_valid:req_msg_valid",
+            null,
+            "req_msg_valid",
+            "msg_valid",
+            null,
+            0,
+            0,
+          ],
+        ],
+        t: [],
+        o: 120,
+        gl: 64,
+        gh: 12345,
+        cs: null,
+      },
+    },
+  };
+
+  it("decodes a predecessor row as partial, never as a silent complete", () => {
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(PINNED_PREDECESSOR_DOCUMENT)));
+    const entry = decoded.get("/pred/live.jsonl")!;
+
+    // Identity is asserted, so only the numeric-quality axis marks the entry as
+    // stale. Reading the missing completeness as `complete` would promote an
+    // unknown measurement; `partial` is the conservative floor.
+    expect(entry.identity).toBe("declared");
+    expect(entry.qualityMetadata).toBe("predecessor");
+    expect(entry.records.map((row) => row.measurement)).toEqual([
+      "observed",
+      "observed",
+      "observed",
+    ]);
+    expect(entry.records.map((row) => row.measurementCompleteness)).toEqual([
+      "partial",
+      "partial",
+      "partial",
+    ]);
+    // Totals are retained, not discarded for the format change.
+    expect(entry.records[0]?.totals.uncachedInputTokens).toBe(10);
+  });
+
+  it("marks a current-format entry qualityMetadata declared", () => {
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
+
+    expect(decoded.get("/a.jsonl")?.qualityMetadata).toBe("declared");
+  });
+
+  it("treats a row with no appended fields as predecessor", () => {
+    // A hand-built or truncated row that stops after the scope code is exactly
+    // the predecessor shape and must be treated the same way.
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
+    const truncated = {
+      ...encoded,
+      files: {
+        "/a.jsonl": {
+          ...encoded.files["/a.jsonl"]!,
+          r: [encoded.files["/a.jsonl"]!.r[0]!.slice(0, 15)],
+        },
+      },
+    };
+
+    const entry = decodeScanCache(JSON.parse(JSON.stringify(truncated))).get("/a.jsonl")!;
+
+    expect(entry.qualityMetadata).toBe("predecessor");
+    expect(entry.records[0]?.measurementCompleteness).toBe("partial");
+  });
+
+  it("marks a legacy v3 entry predecessor as well as identity-unavailable", () => {
+    const decoded = decodeScanCache(
+      JSON.parse(
+        JSON.stringify({
+          version: 3,
+          models: ["claude-fable-5"],
+          sessions: ["deleted-session"],
+          files: {
+            "/deleted.jsonl": {
+              s: 100,
+              m: 500,
+              p: "claude",
+              r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, "msg_d:", null]],
+              t: [],
+              o: 90,
+              gl: 64,
+              gh: 11,
+              cs: null,
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(decoded.get("/deleted.jsonl")?.identity).toBe("unavailable");
+    expect(decoded.get("/deleted.jsonl")?.qualityMetadata).toBe("predecessor");
   });
 });
 

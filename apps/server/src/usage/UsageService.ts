@@ -394,11 +394,13 @@ export const make = Effect.gen(function* () {
       // Provider is part of the identity: if both providers were ever pointed
       // at one directory, a hit parsed by the other parser must not be reused.
       // The cache format is part of it too: a legacy entry erased native ids and
-      // measurement presence, so an unchanged file must still cold re-parse once
-      // to enrich it instead of serving the erased row forever.
+      // measurement presence, and a predecessor v4 entry never asserted numeric
+      // completeness. An unchanged file must still cold re-parse once to enrich
+      // either, instead of serving the erased or unasserted row forever.
       if (
         cached &&
         cached.identity === "declared" &&
+        cached.qualityMetadata === "declared" &&
         cached.size === size &&
         cached.mtimeMs === mtimeMs &&
         cached.provider === provider
@@ -410,12 +412,14 @@ export const make = Effect.gen(function* () {
 
       // Only a strictly grown file may resume. Same size with a new mtime, or
       // a shrunken file, means rewritten content; re-parse it whole. A legacy
-      // entry (ids/presence erased) is also re-parsed whole: resuming would
-      // keep serving id-less records and the enrichment would never happen.
+      // or predecessor entry is also re-parsed whole: resuming would keep
+      // serving id-less or completeness-less records and the enrichment would
+      // never happen.
       const resumeFrom =
         cached !== undefined &&
         cached.provider === provider &&
         cached.identity === "declared" &&
+        cached.qualityMetadata === "declared" &&
         size > cached.size
           ? cached.position
           : undefined;
@@ -445,6 +449,7 @@ export const make = Effect.gen(function* () {
         tailRecords,
         position: parsed.position,
         identity: "declared",
+        qualityMetadata: "declared",
       });
       cacheDirty = true;
       return tailRecords.length === 0 ? records : [...records, ...tailRecords];

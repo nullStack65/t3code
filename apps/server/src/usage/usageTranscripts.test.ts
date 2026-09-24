@@ -586,14 +586,16 @@ describe("parseGrokLine", () => {
       }),
     );
 
-    expect(records).toHaveLength(2);
-    expect(records.every((record) => record.model !== "empty-sibling")).toBe(true);
+    // The all-explicit-zero sibling is a measured zero, not no-usage, so it is
+    // retained with its own (zero) cost and must not take a pro-rated share.
+    expect(records).toHaveLength(3);
     const byModel = Object.fromEntries(records.map((record) => [record.model, record]));
+    expect(byModel["empty-sibling"]?.measurement).toBe("observed");
+    expect(byModel["empty-sibling"]?.measurementCompleteness).toBe("complete");
+    expect(byModel["empty-sibling"]?.reportedCostUsd).toBe(0);
     expect(byModel["grok-4.5"]?.reportedCostUsd).toBeCloseTo(0.75, 12);
     expect(byModel["grok-composer-2.5-fast"]?.reportedCostUsd).toBeCloseTo(0.25, 12);
-    const sum =
-      (byModel["grok-4.5"]?.reportedCostUsd ?? 0) +
-      (byModel["grok-composer-2.5-fast"]?.reportedCostUsd ?? 0);
+    const sum = records.reduce((total, record) => total + (record.reportedCostUsd ?? 0), 0);
     expect(sum).toBeCloseTo(1, 12);
   });
 
@@ -629,6 +631,30 @@ describe("parseGrokLine", () => {
     expect(sum).toBeCloseTo(1, 12);
   });
 
+  it("does not lose aggregate cost to a row with no recognised token field", () => {
+    const records = parseGrokLine(
+      turnCompleted({
+        modelUsage: {
+          "grok-4.5": {
+            inputTokens: 100,
+            outputTokens: 0,
+            cachedReadTokens: 0,
+            reasoningTokens: 0,
+          },
+          "cost-only": { costUsdTicks: 0.3 * GROK_COST_USD_TICKS_PER_DOLLAR },
+        },
+        usage: { costUsdTicks: GROK_COST_USD_TICKS_PER_DOLLAR },
+      }),
+    );
+
+    // The cost-only row carries no recognised token field, so it is no-usage and
+    // not emitted. Its explicit ticks must stay in the aggregate for the emitted
+    // sibling instead of being silently dropped with the row.
+    expect(records).toHaveLength(1);
+    expect(records[0]?.model).toBe("grok-4.5");
+    expect(records[0]?.reportedCostUsd).toBeCloseTo(1, 12);
+  });
+
   it("exposes the native prompt id apart from the dedupe key", () => {
     const [record] = parseGrokLine(turnCompleted({ promptId: "prompt-7" }));
 
@@ -659,24 +685,33 @@ describe("parseGrokLine", () => {
     expect(parseGrokLine(line)[0]?.dedupeKey).toBeNull();
   });
 
-  it("ignores non-turn lines and empty usage", () => {
+  it("ignores non-turn lines", () => {
     expect(parseGrokLine(JSON.stringify({ method: "session/update", params: {} }))).toEqual([]);
     expect(parseGrokLine("not json")).toEqual([]);
-    expect(
-      parseGrokLine(
-        turnCompleted({
-          modelUsage: {
-            "grok-4.5-build": {
-              inputTokens: 0,
-              outputTokens: 0,
-              cachedReadTokens: 0,
-              reasoningTokens: 0,
-              costUsdTicks: 0,
-            },
+  });
+
+  it("retains a complete explicit-zero per-model row instead of erasing it", () => {
+    const records = parseGrokLine(
+      turnCompleted({
+        modelUsage: {
+          "grok-4.5-build": {
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedReadTokens: 0,
+            reasoningTokens: 0,
+            costUsdTicks: 0,
           },
-        }),
-      ),
-    ).toEqual([]);
+        },
+      }),
+    );
+
+    // Explicit zeros are a measured zero, not missing usage: keeping the record
+    // lets the projection label the session measured rather than absent.
+    expect(records).toHaveLength(1);
+    expect(records[0]?.model).toBe("grok-4.5-build");
+    expect(records[0]?.measurement).toBe("observed");
+    expect(records[0]?.measurementCompleteness).toBe("complete");
+    expect(totalTokens(records[0]!.totals)).toBe(0);
   });
 
   it("falls back to the outer unix-seconds timestamp when agent meta is missing", () => {
@@ -701,5 +736,148 @@ describe("parseGrokLine", () => {
 
     const records = parseGrokLine(line);
     expect(records[0]?.timestampMs).toBe(1_786_372_566_000);
+  });
+});
+
+describe("zero-total quality preservation", () => {
+  /** A Codex rollout primed with its session meta and model. */
+  function primedCodexState() {
+    const state = initialCodexScanState();
+    parseCodexLine(
+      JSON.stringify({ type: "session_meta", payload: { id: "codex-session" } }),
+      state,
+    );
+    parseCodexLine(
+      JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.6-sol" } }),
+      state,
+    );
+    return state;
+  }
+
+  function codexTokenCount(
+    lastTokenUsage: Record<string, unknown>,
+    timestamp = "2026-08-01T05:17:49.919Z",
+  ): string {
+    return JSON.stringify({
+      type: "event_msg",
+      timestamp,
+      payload: { type: "token_count", info: { last_token_usage: lastTokenUsage } },
+    });
+  }
+
+  it("keeps a Codex all-invalid payload as invalid instead of dropping it", () => {
+    const record = parseCodexLine(
+      codexTokenCount({ input_tokens: null, output_tokens: null }),
+      primedCodexState(),
+    );
+
+    expect(record).not.toBeNull();
+    expect(record?.measurement).toBe("invalid");
+    expect(record?.measurementCompleteness).toBeUndefined();
+    expect(totalTokens(record!.totals)).toBe(0);
+  });
+
+  it("keeps a Codex complete explicit zero as a measured zero", () => {
+    const record = parseCodexLine(
+      codexTokenCount({ input_tokens: 0, output_tokens: 0 }),
+      primedCodexState(),
+    );
+
+    expect(record?.measurement).toBe("observed");
+    expect(record?.measurementCompleteness).toBe("complete");
+    expect(record?.invalidTokenFields).toBeUndefined();
+    expect(totalTokens(record!.totals)).toBe(0);
+  });
+
+  it("keeps a Codex known-zero subset as partial", () => {
+    const record = parseCodexLine(codexTokenCount({ input_tokens: 10 }), primedCodexState());
+
+    expect(record?.measurement).toBe("observed");
+    expect(record?.measurementCompleteness).toBe("partial");
+    expect(record?.totals.uncachedInputTokens).toBe(10);
+  });
+
+  it("keeps a Codex valid event and a separate invalid event distinct", () => {
+    const state = primedCodexState();
+    const valid = parseCodexLine(
+      codexTokenCount({ input_tokens: 10, output_tokens: 2 }, "2026-08-01T05:17:49.919Z"),
+      state,
+    );
+    const invalid = parseCodexLine(
+      codexTokenCount({ input_tokens: null, output_tokens: null }, "2026-08-01T05:18:00.000Z"),
+      state,
+    );
+
+    expect(valid).not.toBeNull();
+    expect(totalTokens(valid!.totals)).toBe(12);
+    expect(invalid).not.toBeNull();
+    expect(invalid?.measurement).toBe("invalid");
+  });
+
+  it("treats a Codex usage container with no recognised field as no-usage", () => {
+    expect(parseCodexLine(codexTokenCount({}), primedCodexState())).toBeNull();
+  });
+
+  function grokTurn(usage: Record<string, unknown>): string {
+    return JSON.stringify({
+      timestamp: 1_786_372_566,
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: "grook-session",
+        update: { sessionUpdate: "turn_completed", prompt_id: "p1", usage },
+        _meta: { agentTimestampMs: 1_786_372_566_485 },
+      },
+    });
+  }
+
+  it("keeps a Grok aggregate all-invalid payload as invalid", () => {
+    const records = parseGrokLine(grokTurn({ inputTokens: null, outputTokens: null }));
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.measurement).toBe("invalid");
+    expect(records[0]?.measurementCompleteness).toBeUndefined();
+    expect(totalTokens(records[0]!.totals)).toBe(0);
+  });
+
+  it("keeps a Grok aggregate complete explicit zero", () => {
+    const records = parseGrokLine(grokTurn({ inputTokens: 0, outputTokens: 0 }));
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.measurement).toBe("observed");
+    expect(records[0]?.measurementCompleteness).toBe("complete");
+    expect(totalTokens(records[0]!.totals)).toBe(0);
+  });
+
+  it("keeps a Grok aggregate partial known-zero subset", () => {
+    const records = parseGrokLine(grokTurn({ inputTokens: 0 }));
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.measurement).toBe("observed");
+    expect(records[0]?.measurementCompleteness).toBe("partial");
+  });
+
+  it("treats a Grok aggregate container with no recognised field as no-usage", () => {
+    expect(parseGrokLine(grokTurn({}))).toEqual([]);
+  });
+
+  it("keeps Grok per-model invalid and zero rows instead of skipping them", () => {
+    const records = parseGrokLine(
+      grokTurn({
+        inputTokens: null,
+        outputTokens: null,
+        modelUsage: {
+          "model-invalid": { inputTokens: null, outputTokens: null },
+          "model-zero": { inputTokens: 0, outputTokens: 0 },
+          "model-valid": { inputTokens: 5, outputTokens: 5 },
+        },
+      }),
+    );
+
+    expect(records).toHaveLength(3);
+    const byModel = Object.fromEntries(records.map((record) => [record.model, record]));
+    expect(byModel["model-invalid"]?.measurement).toBe("invalid");
+    expect(byModel["model-zero"]?.measurement).toBe("observed");
+    expect(byModel["model-zero"]?.measurementCompleteness).toBe("complete");
+    expect(totalTokens(byModel["model-valid"]!.totals)).toBe(10);
   });
 });

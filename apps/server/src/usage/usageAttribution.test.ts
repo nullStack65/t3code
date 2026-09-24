@@ -13,7 +13,14 @@ import {
   type UsageAttributionInput,
 } from "./usageAttribution.ts";
 import { totalTokens } from "./usageTranscripts.ts";
-import { parseClaudeLine, type UsageRecord } from "./usageTranscripts.ts";
+import {
+  initialCodexScanState,
+  parseClaudeLine,
+  parseCodexLine,
+  parseGrokLine,
+  type CodexScanState,
+  type UsageRecord,
+} from "./usageTranscripts.ts";
 import { decodeScanCache, encodeScanCache, type ScanCache } from "./usageScanCache.ts";
 
 const CLAUDE_SESSION = "5a128faa-8253-489e-b935-6c08e8e670c0";
@@ -983,6 +990,7 @@ describe("parser to projection", () => {
           tailRecords: [],
           position: { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null },
           identity: "declared",
+          qualityMetadata: "declared",
         },
       ],
     ]);
@@ -995,6 +1003,90 @@ describe("parser to projection", () => {
       input({ records: [fromParsed(roundTripped)], bindings: [binding()] }),
     );
     expect(projection.sessions[0]?.measurementQuality).toBe("partial");
+  });
+
+  /** A Codex rollout primed with its session meta and model. */
+  function primedCodexState(): CodexScanState {
+    const state = initialCodexScanState();
+    parseCodexLine(JSON.stringify({ type: "session_meta", payload: { id: CODEX_SESSION } }), state);
+    parseCodexLine(
+      JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.6-sol" } }),
+      state,
+    );
+    return state;
+  }
+
+  function codexTokenCount(lastTokenUsage: Record<string, unknown>, timestamp: string): string {
+    return JSON.stringify({
+      type: "event_msg",
+      timestamp,
+      payload: { type: "token_count", info: { last_token_usage: lastTokenUsage } },
+    });
+  }
+
+  it("carries a Codex valid and a distinct invalid event to one partial session", () => {
+    const state = primedCodexState();
+    const valid = parseCodexLine(
+      codexTokenCount({ input_tokens: 10, output_tokens: 2 }, "2026-08-01T05:17:49.919Z"),
+      state,
+    )!;
+    const invalid = parseCodexLine(
+      codexTokenCount({ input_tokens: null, output_tokens: null }, "2026-08-01T05:18:00.000Z"),
+      state,
+    )!;
+    const projection = buildUsageAttribution(
+      input({ records: [fromParsed(valid), fromParsed(invalid)] }),
+    );
+    const session = projection.sessions[0]!;
+
+    // The invalid event reaches the session as evidence instead of vanishing at
+    // the parser's zero-total gate; tokens come only from the valid event.
+    expect(session.totals?.records).toBe(2);
+    expect(session.totals?.tokens.uncachedInputTokens).toBe(10);
+    expect(session.measurementQuality).toBe("partial");
+  });
+
+  it("carries a Codex complete explicit zero to a measured session", () => {
+    const zero = parseCodexLine(
+      codexTokenCount({ input_tokens: 0, output_tokens: 0 }, "2026-08-01T05:17:49.919Z"),
+      primedCodexState(),
+    )!;
+    const projection = buildUsageAttribution(input({ records: [fromParsed(zero)] }));
+
+    expect(projection.sessions[0]?.measurementQuality).toBe("measured");
+    expect(projection.sessions[0]?.totals?.tokens.outputTokens).toBe(0);
+  });
+
+  it("carries Grok per-model invalid and zero rows into the session", () => {
+    const line = JSON.stringify({
+      timestamp: 1_786_372_566,
+      method: "_x.ai/session/update",
+      params: {
+        sessionId: GROK_SESSION,
+        update: {
+          sessionUpdate: "turn_completed",
+          prompt_id: "prompt-1",
+          usage: {
+            inputTokens: null,
+            outputTokens: null,
+            modelUsage: {
+              "model-invalid": { inputTokens: null, outputTokens: null },
+              "model-zero": { inputTokens: 0, outputTokens: 0 },
+              "model-valid": { inputTokens: 5, outputTokens: 5 },
+            },
+          },
+        },
+        _meta: { agentTimestampMs: 1_786_372_566_485 },
+      },
+    });
+    const records = parseGrokLine(line).map(fromParsed);
+    const projection = buildUsageAttribution(input({ records }));
+    const session = projection.sessions[0]!;
+
+    expect(session.totals?.records).toBe(3);
+    expect(session.totals?.tokens.uncachedInputTokens).toBe(5);
+    expect(session.measurementQuality).toBe("partial");
+    expect(session.models).toEqual(["model-invalid", "model-valid", "model-zero"]);
   });
 });
 

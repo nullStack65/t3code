@@ -500,6 +500,17 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     state.suppressingForkCopies = false;
   }
 
+  // Classify before deciding to emit. A measured zero or an all-invalid payload
+  // is still evidence about the session, so a zero subtotal must not drop it
+  // before the projection can label it. Only a container with no recognised
+  // token field at all is no-usage and is not emitted.
+  const classification = classifyTokenFields(
+    lastRecord,
+    ["input_tokens", "output_tokens"],
+    ["cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"],
+  );
+  if (classification.measurement === "empty") return null;
+
   const inputTokens = int(lastRecord["input_tokens"]);
   const cachedInputTokens = int(lastRecord["cached_input_tokens"]);
   const cacheCreationTokens = int(lastRecord["cache_write_input_tokens"]);
@@ -514,14 +525,6 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     // Reported inside output_tokens, surfaced separately for the token mix.
     reasoningTokens: Math.min(outputTokens, int(lastRecord["reasoning_output_tokens"])),
   };
-
-  if (totalTokens(totals) === 0) return null;
-
-  const classification = classifyTokenFields(
-    lastRecord,
-    ["input_tokens", "output_tokens"],
-    ["cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"],
-  );
 
   return {
     provider: "codex",
@@ -539,8 +542,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     providerRequestId: null,
     providerMessageId: null,
     promptId: null,
-    // Only emitted when at least one token was measured, so this is observed.
-    measurement: "observed",
+    measurement: classification.measurement,
     ...(classification.completeness === undefined
       ? {}
       : { measurementCompleteness: classification.completeness }),
@@ -673,7 +675,10 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
   }
 
   if (modelEntries.length === 0) {
-    if (totalTokens(grokTotalsToUsage(topLevel)) === 0) return [];
+    // Only a usage container with no recognised token field is no-usage. A
+    // measured zero or an all-invalid payload is retained so its quality
+    // reaches the projection instead of vanishing at a zero subtotal.
+    if (topLevel.classification.measurement === "empty") return [];
     return [
       {
         provider: "grok",
@@ -709,26 +714,35 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
   //    by token share among the unticked models only.
   // 3. When no model has per-model ticks, remaining equals the full
   //    aggregate and every emitted model gets a token-share slice.
-  // Zero-token rows are never emitted and never count toward used ticks.
+  // An explicit per-model cost reduces the aggregate no matter its token total,
+  // for any row that is actually emitted; skipping an emitted zero-token ticked
+  // row would let the same ticks be pro-rated onto its siblings. A row that is
+  // not emitted (no recognised token field) does not reduce the aggregate, so
+  // its ticks stay available to the emitted rows. A zero-token unticked row has
+  // no share to receive.
   const topLevelCostUsd = grokCostTicksToUsd(topLevel.costUsdTicks);
   let usedTickedCostUsd = 0;
   let untickedTokenDenominator = 0;
   for (const entry of modelEntries) {
+    const emitted = entry.totals.classification.measurement !== "empty";
+    if (emitted && entry.totals.costUsdTicks !== null) {
+      usedTickedCostUsd += grokCostTicksToUsd(entry.totals.costUsdTicks) ?? 0;
+      continue;
+    }
     const tokens = totalTokens(grokTotalsToUsage(entry.totals));
     if (tokens === 0) continue;
-    if (entry.totals.costUsdTicks !== null) {
-      usedTickedCostUsd += grokCostTicksToUsd(entry.totals.costUsdTicks) ?? 0;
-    } else {
-      untickedTokenDenominator += tokens;
-    }
+    untickedTokenDenominator += tokens;
   }
   const remainingCostUsd =
     topLevelCostUsd === null ? null : Math.max(0, topLevelCostUsd - usedTickedCostUsd);
 
   const results: UsageRecord[] = [];
   for (const entry of modelEntries) {
+    // Same rule as the aggregate path: retain a measured zero or an invalid
+    // per-model observation; only a container with no recognised field is
+    // no-usage.
+    if (entry.totals.classification.measurement === "empty") continue;
     const totals = grokTotalsToUsage(entry.totals);
-    if (totalTokens(totals) === 0) continue;
 
     let reportedCostUsd = grokCostTicksToUsd(entry.totals.costUsdTicks);
     if (reportedCostUsd === null && remainingCostUsd !== null && untickedTokenDenominator > 0) {
