@@ -36,6 +36,14 @@ import {
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import {
+  BUILD_INFO_FILE_NAME,
+  createBuildInfo,
+  readGitSourceProvenance,
+  resolveBuildSourceShaFromEnv,
+  resolveSourceRepository,
+  serializeBuildInfo,
+} from "./lib/source-provenance.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -823,27 +831,9 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   return { stdout, stderr, exitCode } as const;
 });
 
-const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRoot: string) {
-  const result = yield* spawnAndCollectOutput(
-    ChildProcess.make("git", ["rev-parse", "--short=12", "HEAD"], {
-      cwd: repoRoot,
-    }),
-  ).pipe(
-    Effect.orElseSucceed(() => ({
-      stdout: "",
-      stderr: "",
-      exitCode: 1,
-    })),
-  );
-
-  if (result.exitCode !== 0) {
-    return "unknown";
-  }
-  const hash = result.stdout.trim();
-  if (!/^[0-9a-f]{7,40}$/i.test(hash)) {
-    return "unknown";
-  }
-  return hash.toLowerCase();
+const resolveSourceProvenance = Effect.fn("resolveSourceProvenance")(function* (repoRoot: string) {
+  const gitSource = yield* readGitSourceProvenance(repoRoot);
+  return yield* resolveBuildSourceShaFromEnv(process.env, gitSource.sourceSha);
 });
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
@@ -926,6 +916,11 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  readonly t3codeSourceRepository: string;
+  readonly t3codeSourceSha: string;
+  readonly t3codeWorkflowRevision: string;
+  readonly t3codeBuildVersion: string;
+  readonly t3codeBuildArch: string;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -2668,7 +2663,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  if (!isDesktopPreviewVersion(version)) {
+  // An unsigned macOS build cannot complete a Squirrel.Mac update: the new
+  // bundle must carry the same signature as the running one, so an unsigned
+  // build polls for an update it can never apply. Ship it without a feed
+  // instead. Windows updates verify the downloaded bytes against the manifest
+  // hash rather than a signature, so an unsigned Windows build keeps its feed.
+  const supportsUpdateFeed = platform !== "mac" || signed;
+  if (!isDesktopPreviewVersion(version) && supportsUpdateFeed) {
     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
       buildConfig.publish = [publishConfig];
@@ -3397,7 +3398,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   const appVersion = options.version ?? serverPackageJson.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
-  const commitHash = yield* resolveGitCommitHash(repoRoot);
+  const source = yield* resolveSourceProvenance(repoRoot);
+  const commitHash = source.sourceSha;
+  const sourceRepository = resolveSourceRepository(process.env);
+  const buildInfo = createBuildInfo({
+    version: appVersion,
+    platform: options.platform,
+    arch: options.arch,
+    repository: sourceRepository,
+    sourceSha: source.sourceSha,
+    workflowRevision: source.workflowRevision,
+  });
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,
@@ -3639,6 +3650,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
+    t3codeSourceRepository: buildInfo.repository,
+    t3codeSourceSha: buildInfo.sourceSha,
+    t3codeWorkflowRevision: buildInfo.workflowRevision,
+    t3codeBuildVersion: buildInfo.version,
+    t3codeBuildArch: buildInfo.arch,
     private: true,
     packageManager: rootPackageJson.packageManager,
     description: "T3 Code desktop build",
@@ -3668,6 +3684,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
   yield* fs.writeFileString(path.join(stageAppDir, "package.json"), `${stagePackageJsonString}\n`);
+  // The same provenance as a standalone readable file, so the app package.json
+  // fields are not the only place a verifier can read repository/SHA/version/arch.
+  yield* fs.writeFileString(
+    path.join(stageAppDir, BUILD_INFO_FILE_NAME),
+    `${yield* serializeBuildInfo(buildInfo)}\n`,
+  );
   const stageWorkspaceConfig = createStageWorkspaceConfig({
     platform: options.platform,
     arch: options.arch,
