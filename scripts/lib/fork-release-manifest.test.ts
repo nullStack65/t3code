@@ -8,7 +8,9 @@ import {
   requiredReleaseAssetNames,
   verifyCandidate,
   verifyPromotion,
+  verifyTargetPackagedProvenance,
   type NativeReceipt,
+  type PackagedProvenance,
   type ReleaseAsset,
   type ReleaseCandidateManifest,
 } from "./fork-release-manifest.ts";
@@ -305,7 +307,7 @@ it("rejects packaged provenance that does not match the source", () => {
     observedAssets: assets,
     targets: "all",
     packagedProvenance: {
-      windowsInstaller: {
+      embeddedWsl: {
         repository: "nullStack65/t3code",
         sourceSha: DISPATCH,
         version: VERSION,
@@ -330,6 +332,145 @@ it("rejects packaged provenance that does not match the source", () => {
   assert.match(result.failures.join("\n"), /not byte-identical/);
 });
 
+const record = (platform: string) => ({
+  repository: "nullStack65/t3code",
+  sourceSha: SHA,
+  version: VERSION,
+  platform,
+  arch: "x64",
+});
+
+const completeProvenance: PackagedProvenance = {
+  windowsDesktop: record("win"),
+  windowsServerBundle: { name: "t3code-server", version: VERSION },
+  embeddedWsl: record("linux"),
+  linuxArchive: record("linux"),
+  windowsZip: record("win"),
+  macDmg: record("mac"),
+  embeddedWslEqualsStandalone: true,
+};
+
+it("keeps Windows desktop provenance distinct from the WSL runtime it embeds", () => {
+  // The WSL payload is correct; only the desktop app's own build info is from
+  // another source. This must fail — the coordinator's exact defect.
+  const result = verifyTargetPackagedProvenance({
+    provenance: {
+      windowsDesktop: { ...record("win"), sourceSha: DISPATCH },
+      windowsServerBundle: { name: "t3code-server", version: VERSION },
+      embeddedWsl: record("linux"),
+      windowsZip: record("win"),
+    },
+    evidence: [],
+    observedAssets: assets,
+    expected,
+    targets: "win",
+    includeMacosArm64: false,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /Windows desktop application provenance sourceSha is/);
+  assert.notMatch(result.failures.join("\n"), /embedded WSL runtime provenance sourceSha/);
+
+  // A Windows target with the correct WSL record but no desktop record at all
+  // is a missing REQUIRED inspection, not a pass.
+  const missingDesktop = verifyTargetPackagedProvenance({
+    provenance: { embeddedWsl: record("linux"), windowsZip: record("win") },
+    evidence: [],
+    observedAssets: assets,
+    expected,
+    targets: "win",
+    includeMacosArm64: false,
+  });
+  assert.equal(missingDesktop.ok, false);
+  assert.match(
+    missingDesktop.failures.join("\n"),
+    /Windows desktop application provenance was required but was not inspected/,
+  );
+});
+
+it("maps the writer's packaging platform vocabulary deliberately", () => {
+  // The DMG writer records `mac`, not Node's runtime `darwin`.
+  const okResult = verifyTargetPackagedProvenance({
+    provenance: { macDmg: record("mac") },
+    evidence: [],
+    observedAssets: assets,
+    expected,
+    targets: "mac",
+    includeMacosArm64: false,
+  });
+  assert.deepEqual(okResult, { ok: true, failures: [] });
+
+  const guessedDarwin = verifyTargetPackagedProvenance({
+    provenance: { macDmg: { ...record("mac"), platform: "darwin" } },
+    evidence: [],
+    observedAssets: assets,
+    expected,
+    targets: "mac",
+    includeMacosArm64: false,
+  });
+  assert.equal(guessedDarwin.ok, false);
+  assert.match(
+    guessedDarwin.failures.join("\n"),
+    /Intel macOS DMG provenance platform is darwin, expected mac/,
+  );
+});
+
+it("requires digest-bound evidence for an inspection this host could not perform", () => {
+  const dmgName = `T3-Code-${VERSION}-x64.dmg`;
+  const dmgAsset = assets.find((asset) => asset.name === dmgName)!;
+
+  // The bytes changed after the native inspection: the evidence is bound to a
+  // different digest and must not qualify the new bytes.
+  const stale = verifyTargetPackagedProvenance({
+    provenance: {},
+    evidence: [
+      {
+        schemaVersion: 1,
+        host: "darwin-x64",
+        records: { macDmg: record("mac") },
+        digests: { macDmg: "f".repeat(64) },
+      },
+    ],
+    observedAssets: assets,
+    expected,
+    targets: "mac",
+    includeMacosArm64: false,
+  });
+  assert.equal(stale.ok, false);
+  assert.match(stale.failures.join("\n"), /inspection evidence is bound to digest/);
+  assert.match(stale.failures.join("\n"), /no digest-bound inspection evidence matched/);
+
+  // Bound to the exact digest, the evidence is usable.
+  const bound = verifyTargetPackagedProvenance({
+    provenance: {},
+    evidence: [
+      {
+        schemaVersion: 1,
+        host: "darwin-x64",
+        records: { macDmg: record("mac") },
+        digests: { macDmg: dmgAsset.sha256 },
+      },
+    ],
+    observedAssets: assets,
+    expected,
+    targets: "mac",
+    includeMacosArm64: false,
+  });
+  assert.deepEqual(bound, { ok: true, failures: [] });
+});
+
+it("fails a required inspection that was never performed", () => {
+  const result = verifyTargetPackagedProvenance({
+    provenance: {},
+    evidence: [],
+    observedAssets: assets,
+    expected,
+    targets: "mac",
+    includeMacosArm64: false,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failures.join("\n"), /provenance is required but was not inspected/);
+});
+
 it("promotion refuses overwrite, older versions, and a missing authorization gate", () => {
   const base = {
     manifest,
@@ -337,6 +478,8 @@ it("promotion refuses overwrite, older versions, and a missing authorization gat
     observedAssets: assets,
     requireNativeReceipts: true,
     tagTargetSha: SHA,
+    packagedProvenance: completeProvenance,
+    requirePackagedProvenance: true,
   };
 
   const good = verifyPromotion({
@@ -347,6 +490,18 @@ it("promotion refuses overwrite, older versions, and a missing authorization gat
     authorizationGateExists: true,
   });
   assert.deepEqual(good, { ok: true, failures: [] });
+
+  // Promotion must not qualify bytes that were never inspected.
+  const uninspected = verifyPromotion({
+    ...base,
+    packagedProvenance: undefined,
+    releaseExists: false,
+    tagExists: false,
+    latestExistingVersion: "0.0.42",
+    authorizationGateExists: true,
+  });
+  assert.equal(uninspected.ok, false);
+  assert.match(uninspected.failures.join("\n"), /inspection is required/);
 
   const overwrite = verifyPromotion({
     ...base,

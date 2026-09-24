@@ -11,6 +11,8 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { createPackage } from "@electron/asar";
+
 import { assert, it } from "@effect/vitest";
 
 const repoRoot = NodePath.resolve(import.meta.dirname, "..");
@@ -387,6 +389,224 @@ it("inspects real packaged provenance from a real Linux tar.gz (real process)", 
   }
 });
 
+function writeBuildInfoArchive(
+  archivePath: string,
+  stagingRoot: string,
+  info: Record<string, unknown>,
+): string {
+  const stem = `t3-${VERSION}-linux-x64`;
+  const staging = NodePath.join(stagingRoot, "build-info-staging");
+  NodeFS.mkdirSync(NodePath.join(staging, stem), { recursive: true });
+  NodeFS.writeFileSync(
+    NodePath.join(staging, stem, "t3code-build-info.json"),
+    JSON.stringify(info),
+  );
+  NodeChildProcess.execFileSync("tar", ["-czf", archivePath, "-C", staging, stem]);
+  return archivePath;
+}
+
+it("rejects arbitrary non-DMG bytes under the expected DMG filename (real process)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "bogus-dmg");
+    NodeFS.mkdirSync(dir);
+    NodeFS.writeFileSync(
+      NodePath.join(dir, `T3-Code-${VERSION}-x64.dmg`),
+      Buffer.from("not a dmg"),
+    );
+    const result = runNode([
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--targets",
+      "mac",
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /Intel macOS DMG has no readable packaged provenance|Intel macOS DMG provenance was required but was not inspected/,
+    );
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("rejects a real archive with no readable build-info (real process)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "no-info");
+    NodeFS.mkdirSync(dir);
+    const stem = `t3-${VERSION}-linux-x64`;
+    const staging = NodePath.join(root, "staging");
+    NodeFS.mkdirSync(NodePath.join(staging, stem), { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(staging, stem, "t3"), "binary\n");
+    NodeChildProcess.execFileSync("tar", [
+      "-czf",
+      NodePath.join(dir, `${stem}.tar.gz`),
+      "-C",
+      staging,
+      stem,
+    ]);
+    const result = runNode([
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--targets",
+      "linux",
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Linux runtime archive has no readable packaged provenance/);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("rejects wrong repo/SHA/version/platform/arch in a real archive (real process)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "wrong-fields");
+    NodeFS.mkdirSync(dir);
+    writeBuildInfoArchive(NodePath.join(dir, `t3-${VERSION}-linux-x64.tar.gz`), root, {
+      schemaVersion: 1,
+      repository: "someone/else",
+      sourceSha: "a".repeat(40),
+      workflowRevision: "local",
+      version: "9.9.9",
+      platform: "win",
+      arch: "arm64",
+      channel: "stable",
+    });
+    const result = runNode([
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--targets",
+      "linux",
+    ]);
+    assert.equal(result.status, 1);
+    const failures = result.stderr;
+    assert.match(failures, /Linux runtime archive provenance repository is someone\/else/);
+    assert.match(failures, /Linux runtime archive provenance sourceSha is a{40}/);
+    assert.match(failures, /Linux runtime archive provenance version is 9\.9\.9/);
+    assert.match(failures, /Linux runtime archive provenance platform is win, expected linux/);
+    assert.match(failures, /Linux runtime archive provenance arch is arm64, expected x64/);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("fails a required Windows desktop inspection that did not happen (real process)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "win-uninspected");
+    NodeFS.mkdirSync(dir);
+    // Arbitrary bytes for both the installer and the CLI ZIP: neither carries a
+    // readable build info, and on a host without 7-Zip the NSIS components are
+    // simply not inspectable. Either way this is BLOCKED, not verified.
+    NodeFS.writeFileSync(NodePath.join(dir, `T3-Code-${VERSION}-x64.exe`), Buffer.from("nope"));
+    NodeFS.writeFileSync(NodePath.join(dir, `t3-${VERSION}-win32-x64.zip`), Buffer.from("nope"));
+    const result = runNode([
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--targets",
+      "win",
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /Windows desktop application provenance was required but was not inspected|Windows desktop application has no readable packaged provenance/,
+    );
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// eslint-disable-next-line t3code/no-global-process-runtime -- selecting a host-specific integration test, not Effect code
+const itMac = it.skipIf(process.platform !== "darwin");
+
+itMac("inspects a real macOS DMG's app.asar provenance (real process)", async () => {
+  const root = scratch();
+  try {
+    const appSrc = NodePath.join(root, "appsrc");
+    const resources = NodePath.join(root, "stage", "T3 Code (Alpha).app", "Contents", "Resources");
+    NodeFS.mkdirSync(appSrc, { recursive: true });
+    NodeFS.mkdirSync(resources, { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(appSrc, "t3code-build-info.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        repository: "nullStack65/t3code",
+        sourceSha: SHA,
+        workflowRevision: "local",
+        version: VERSION,
+        platform: "mac",
+        arch: "x64",
+        channel: "stable",
+      }),
+    );
+    await createPackage(appSrc, NodePath.join(resources, "app.asar"));
+
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const dmg = NodePath.join(dir, `T3-Code-${VERSION}-x64.dmg`);
+    NodeChildProcess.execFileSync("hdiutil", [
+      "create",
+      "-volname",
+      "T3 Code",
+      "-srcfolder",
+      NodePath.join(root, "stage"),
+      "-ov",
+      "-format",
+      "UDZO",
+      dmg,
+    ]);
+
+    const accepted = runNode([
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--targets",
+      "mac",
+    ]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.include(accepted.stdout, "Per-target verification passed");
+    assert.include(accepted.stdout, '"platform": "mac"');
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("the source selector accepts a candidate-mode fork SHA (real process)", () => {
   const root = scratch();
   try {
@@ -400,7 +620,10 @@ it("the source selector accepts a candidate-mode fork SHA (real process)", () =>
         ["-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", ...args],
         { cwd, encoding: "utf8" },
       ).trim();
-    git(origin, ["init", "-b", "main"]);
+    git(origin, ["init"]);
+    git(origin, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+    // Older git refuses to serve an unadvertised object over the local transport.
+    git(origin, ["config", "uploadpack.allowAnySHA1InWant", "true"]);
     NodeFS.writeFileSync(NodePath.join(origin, "a.txt"), "a\n");
     git(origin, ["add", "."]);
     git(origin, ["commit", "-m", "A"]);

@@ -25,6 +25,7 @@ import * as NodeCrypto from "node:crypto";
 export const CANDIDATE_MANIFEST_FILE_NAME = "fork-release-manifest.json";
 export const NATIVE_RECEIPTS_FILE_NAME = "fork-native-receipts.json";
 export const SHA256SUMS_FILE_NAME = "SHA256SUMS";
+export const PACKAGED_INSPECTION_FILE_NAME = "fork-inspection-evidence.json";
 export const CANDIDATE_ARTIFACT_NAME = "fork-release-candidate";
 export const NATIVE_RECEIPTS_ARTIFACT_NAME = "fork-release-native-receipts";
 
@@ -153,24 +154,6 @@ const ok = (): VerificationResult => ({ ok: true, failures: [] });
 const failures = (list: ReadonlyArray<string>): VerificationResult =>
   list.length === 0 ? ok() : { ok: false, failures: list };
 
-/**
- * The provenance actually observed inside the distributed artifacts.
- *
- * `undefined` means "not inspected" (for example during promotion, where the
- * artifacts are re-downloaded but the packaged-provenance extraction happened
- * at qualify time). An explicit `null` means "inspected and absent", which is a
- * failure for a required artifact.
- */
-export interface PackagedProvenance {
-  readonly windowsInstaller?: PackagedProvenanceRecord | null;
-  readonly linuxArchive?: PackagedProvenanceRecord | null;
-  readonly windowsZip?: PackagedProvenanceRecord | null;
-  readonly macDmg?: PackagedProvenanceRecord | null;
-  readonly macArm64Dmg?: PackagedProvenanceRecord | null;
-  /** Byte-identity of the WSL archive embedded in the installer vs the Linux archive. */
-  readonly embeddedWslEqualsStandalone?: boolean;
-}
-
 export interface PackagedProvenanceRecord {
   readonly repository: string;
   readonly sourceSha: string;
@@ -179,32 +162,126 @@ export interface PackagedProvenanceRecord {
   readonly arch: string;
 }
 
-export interface InspectProvenanceInput {
+/** The metadata the Windows `server.asar` sidecar actually records. */
+export interface BundledServerRecord {
+  readonly name: string;
   readonly version: string;
-  readonly targets: CandidateTargetSelection;
-  readonly artifacts: {
-    readonly hasWindowsInstaller: boolean;
-    readonly hasMacDmg: boolean;
-    readonly hasLinuxArchive: boolean;
-    readonly hasWindowsZip: boolean;
-    readonly hasMacArm64Dmg: boolean;
-  };
 }
 
 /**
- * Pure decision table for which artifacts must carry inspected provenance for a
- * target selection. The impure extraction (unpacking tarballs/zip/NSIS) lives
- * in the caller; this function only says what must be verified.
+ * Every packaged component whose provenance is inspected independently. The
+ * Windows desktop application's own build info (`windowsDesktop`, read from
+ * `resources/app.asar`) is deliberately distinct from the WSL runtime embedded
+ * beside it (`embeddedWsl`, a Linux build) and from the bundled server sidecar
+ * (`windowsServerBundle`). Conflating desktop and WSL provenance is what let a
+ * wrong-source desktop pass on a correct WSL payload.
  */
-export function provenanceArtifactsForSelection(
-  input: InspectProvenanceInput,
-): ReadonlyArray<"windowsInstaller" | "linuxArchive" | "windowsZip" | "macDmg" | "macArm64Dmg"> {
-  const wanted: Array<
-    "windowsInstaller" | "linuxArchive" | "windowsZip" | "macDmg" | "macArm64Dmg"
-  > = [];
+export type PackagedProvenanceKey =
+  | "windowsDesktop"
+  | "windowsServerBundle"
+  | "embeddedWsl"
+  | "linuxArchive"
+  | "windowsZip"
+  | "macDmg"
+  | "macArm64Dmg";
+
+/**
+ * The provenance actually observed inside the distributed artifacts.
+ *
+ * `undefined` means "not inspected" (the host or its extraction tool could not
+ * read it), and an explicit `null` means "inspected and unreadable/absent".
+ * Both are failures for a required component; neither may silently pass.
+ */
+export interface PackagedProvenance {
+  readonly windowsDesktop?: PackagedProvenanceRecord | null | undefined;
+  readonly windowsServerBundle?: BundledServerRecord | null | undefined;
+  readonly embeddedWsl?: PackagedProvenanceRecord | null | undefined;
+  readonly linuxArchive?: PackagedProvenanceRecord | null | undefined;
+  readonly windowsZip?: PackagedProvenanceRecord | null | undefined;
+  readonly macDmg?: PackagedProvenanceRecord | null | undefined;
+  readonly macArm64Dmg?: PackagedProvenanceRecord | null | undefined;
+  /** Byte-identity of the WSL archive embedded in the installer vs the Linux archive. */
+  readonly embeddedWslEqualsStandalone?: boolean | undefined;
+}
+
+export const PACKAGED_PROVENANCE_LABELS: Record<PackagedProvenanceKey, string> = {
+  windowsDesktop: "Windows desktop application",
+  windowsServerBundle: "Windows bundled server",
+  embeddedWsl: "Windows installer embedded WSL runtime",
+  linuxArchive: "Linux runtime archive",
+  windowsZip: "Windows CLI archive",
+  macDmg: "Intel macOS DMG",
+  macArm64Dmg: "Apple Silicon DMG",
+};
+
+/**
+ * The `platform` string the writers actually record in `t3code-build-info.json`.
+ *
+ * This is the *packaging* vocabulary (`mac`/`win`/`linux`), not Node's runtime
+ * vocabulary (`darwin`/`win32`/`linux`). Mapping it deliberately, rather than
+ * guessing `darwin` for a DMG, is what makes the Intel DMG check meaningful.
+ */
+export const PACKAGED_PLATFORM: Partial<Record<PackagedProvenanceKey, string>> = {
+  windowsDesktop: "win",
+  embeddedWsl: "linux",
+  windowsZip: "win",
+  linuxArchive: "linux",
+  macDmg: "mac",
+  macArm64Dmg: "mac",
+};
+
+/** The architecture string the writers record per packaged component. */
+export const PACKAGED_ARCH: Partial<Record<PackagedProvenanceKey, string>> = {
+  windowsDesktop: "x64",
+  embeddedWsl: "x64",
+  windowsZip: "x64",
+  linuxArchive: "x64",
+  macDmg: "x64",
+  macArm64Dmg: "arm64",
+};
+
+export interface ProvenanceArtifactAvailability {
+  readonly hasWindowsInstaller: boolean;
+  readonly hasMacDmg: boolean;
+  readonly hasLinuxArchive: boolean;
+  readonly hasWindowsZip: boolean;
+  readonly hasMacArm64Dmg: boolean;
+}
+
+/** The release asset a packaged component's provenance is read from. */
+export function provenanceArtifactName(key: PackagedProvenanceKey, version: string): string {
+  switch (key) {
+    case "windowsDesktop":
+    case "windowsServerBundle":
+    case "embeddedWsl":
+      return `T3-Code-${version}-x64.exe`;
+    case "windowsZip":
+      return `t3-${version}-win32-x64.zip`;
+    case "linuxArchive":
+      return `t3-${version}-linux-x64.tar.gz`;
+    case "macDmg":
+      return `T3-Code-${version}-x64.dmg`;
+    case "macArm64Dmg":
+      return `T3-Code-${version}-arm64.dmg`;
+  }
+}
+
+/**
+ * Pure decision table for which packaged components MUST carry inspected
+ * provenance for a target selection, given which artifacts are actually present.
+ * A missing record for one of these keys is a failure, never a silent skip.
+ */
+export function requiredProvenanceKeysForSelection(input: {
+  readonly targets: CandidateTargetSelection;
+  readonly artifacts: ProvenanceArtifactAvailability;
+  readonly includeMacosArm64: boolean;
+}): ReadonlyArray<PackagedProvenanceKey> {
+  const wanted: PackagedProvenanceKey[] = [];
   const wantsAll = input.targets === "all";
   if ((wantsAll || input.targets === "win") && input.artifacts.hasWindowsInstaller) {
-    wanted.push("windowsInstaller");
+    wanted.push("windowsDesktop", "windowsServerBundle", "embeddedWsl");
+  }
+  if ((wantsAll || input.targets === "win") && input.artifacts.hasWindowsZip) {
     wanted.push("windowsZip");
   }
   if ((wantsAll || input.targets === "linux") && input.artifacts.hasLinuxArchive) {
@@ -213,21 +290,113 @@ export function provenanceArtifactsForSelection(
   if ((wantsAll || input.targets === "mac") && input.artifacts.hasMacDmg) {
     wanted.push("macDmg");
   }
-  if ((wantsAll || input.targets === "mac") && input.artifacts.hasMacArm64Dmg) {
+  if (
+    (wantsAll || input.targets === "mac") &&
+    input.includeMacosArm64 &&
+    input.artifacts.hasMacArm64Dmg
+  ) {
     wanted.push("macArm64Dmg");
   }
   return wanted;
 }
 
+/** Derives artifact availability from the assets actually observed on disk. */
+export function provenanceAvailabilityFromAssets(
+  version: string,
+  observedAssets: ReadonlyArray<ReleaseAsset>,
+): ProvenanceArtifactAvailability {
+  const names = new Set(observedAssets.map((asset) => asset.name));
+  return {
+    hasWindowsInstaller: names.has(`T3-Code-${version}-x64.exe`),
+    hasMacDmg: names.has(`T3-Code-${version}-x64.dmg`),
+    hasLinuxArchive: names.has(`t3-${version}-linux-x64.tar.gz`),
+    hasWindowsZip: names.has(`t3-${version}-win32-x64.zip`),
+    hasMacArm64Dmg: names.has(`T3-Code-${version}-arm64.dmg`),
+  };
+}
+
 /**
- * Thin wrapper the CLI uses: it does not extract bytes itself (that needs real
- * archives on disk), so it returns an empty inspection and lets the separate
- * `verify-windows-installer.ts` / archive extraction steps supply the records.
- * Kept for interface stability; the CLI merges real records in.
+ * A native inspection a different machine performed, bound to the exact
+ * artifact digest it read. This is the existing evidence mechanism the aggregate
+ * may consume instead of re-inspecting an artifact it cannot open; it is not a
+ * signing service, and a digest mismatch simply makes the record unusable.
  */
-export function inspectCandidateProvenance(input: InspectProvenanceInput): PackagedProvenance {
-  void input;
-  return {};
+export interface PackagedInspectionEvidence {
+  readonly schemaVersion: 1;
+  readonly host: string;
+  readonly records: Partial<Record<PackagedProvenanceKey, PackagedInspectionRecord>>;
+  readonly digests: Partial<Record<PackagedProvenanceKey, string>>;
+  readonly embeddedWslEqualsStandalone?: boolean;
+}
+
+/** A component record as read by an inspector: build info, server metadata, absent, or not inspected. */
+export type PackagedInspectionRecord =
+  | PackagedProvenanceRecord
+  | BundledServerRecord
+  | null
+  | undefined;
+
+export interface MergePackagedInspectionInput {
+  readonly provenance: PackagedProvenance;
+  readonly evidence: ReadonlyArray<PackagedInspectionEvidence | undefined>;
+  readonly observedAssets: ReadonlyArray<ReleaseAsset>;
+  readonly version: string;
+  readonly requiredKeys: ReadonlyArray<PackagedProvenanceKey>;
+}
+
+export interface MergePackagedInspectionResult {
+  readonly provenance: PackagedProvenance;
+  readonly problems: ReadonlyArray<string>;
+}
+
+/**
+ * Fills components the local host could not inspect from digest-bound evidence,
+ * and reports a problem when a required component is neither inspected locally
+ * nor covered by evidence for the artifact's exact bytes. This is what stops
+ * changed bytes after inspection from reusing an old passing inspection.
+ */
+export function mergePackagedInspection(
+  input: MergePackagedInspectionInput,
+): MergePackagedInspectionResult {
+  const merged: Record<string, unknown> = { ...input.provenance };
+  const problems: string[] = [];
+  const observed = new Map(input.observedAssets.map((asset) => [asset.name, asset]));
+
+  for (const key of input.requiredKeys) {
+    if (merged[key] !== undefined) continue; // Already inspected locally.
+    const label = PACKAGED_PROVENANCE_LABELS[key];
+    const artifactName = provenanceArtifactName(key, input.version);
+    const artifact = observed.get(artifactName);
+    if (artifact === undefined) {
+      problems.push(`${label} provenance was not inspected and ${artifactName} is absent`);
+      continue;
+    }
+    let found = false;
+    for (const evidence of input.evidence) {
+      if (evidence === undefined) continue;
+      const record = evidence.records[key];
+      if (record === undefined) continue;
+      const boundDigest = evidence.digests[key];
+      if (boundDigest?.toLowerCase() !== artifact.sha256.toLowerCase()) {
+        problems.push(
+          `${label} inspection evidence is bound to digest ${boundDigest ?? "none"}, but ${artifactName} is ${artifact.sha256}`,
+        );
+        continue;
+      }
+      merged[key] = record;
+      if (key === "embeddedWsl" && evidence.embeddedWslEqualsStandalone !== undefined) {
+        merged.embeddedWslEqualsStandalone = evidence.embeddedWslEqualsStandalone;
+      }
+      found = true;
+      break;
+    }
+    if (!found) {
+      problems.push(
+        `${label} provenance is required but was not inspected and no digest-bound inspection evidence matched ${artifactName}`,
+      );
+    }
+  }
+  return { provenance: merged as PackagedProvenance, problems };
 }
 
 export interface VerifyCandidateInput {
@@ -240,6 +409,18 @@ export interface VerifyCandidateInput {
   readonly requireNativeReceipts?: boolean;
   /** Provenance read from the actual packaged bytes, when it was inspected. */
   readonly packagedProvenance?: PackagedProvenance | undefined;
+  /**
+   * Digest-bound inspections performed on another machine, usable for a
+   * component this host could not open. Only consumed when it matches the
+   * observed artifact digest exactly.
+   */
+  readonly inspectionEvidence?: ReadonlyArray<PackagedInspectionEvidence | undefined>;
+  /**
+   * When true, every packaged component of the selected target(s) whose artifact
+   * is present must have a completed inspection (locally or via digest-bound
+   * evidence). A missing/unreadable/unperformed required inspection fails.
+   */
+  readonly requirePackagedProvenance?: boolean;
 }
 
 /**
@@ -316,13 +497,43 @@ export function verifyCandidate(input: VerifyCandidateInput): VerificationResult
     includeMacosArm64: input.includeMacosArm64 === true,
   });
 
-  if (input.packagedProvenance !== undefined) {
+  if (input.requirePackagedProvenance === true) {
+    const requiredKeys = requiredProvenanceKeysForSelection({
+      targets,
+      artifacts: provenanceAvailabilityFromAssets(expected.version, input.observedAssets),
+      includeMacosArm64: input.includeMacosArm64 === true,
+    });
+    const suppliedEvidence = input.inspectionEvidence ?? [];
+    if (input.packagedProvenance === undefined && suppliedEvidence.length === 0) {
+      problems.push(
+        "packaged provenance inspection is required but no inspection and no evidence were supplied",
+      );
+    } else {
+      const merged = mergePackagedInspection({
+        provenance: input.packagedProvenance ?? {},
+        evidence: suppliedEvidence,
+        observedAssets: input.observedAssets,
+        version: expected.version,
+        requiredKeys,
+      });
+      problems.push(...merged.problems);
+      verifyPackagedProvenance({
+        problems,
+        provenance: merged.provenance,
+        expected,
+        targets,
+        includeMacosArm64: input.includeMacosArm64 === true,
+        requiredKeys,
+      });
+    }
+  } else if (input.packagedProvenance !== undefined) {
     verifyPackagedProvenance({
       problems,
       provenance: input.packagedProvenance,
       expected,
       targets,
       includeMacosArm64: input.includeMacosArm64 === true,
+      requiredKeys: [],
     });
   }
 
@@ -440,48 +651,44 @@ export function verifyReceipts(input: {
   }
 }
 
-/** Requires inspected provenance to name the same repository/source/version/platform. */
+/**
+ * Requires inspected provenance to name the same repository/source/version/
+ * platform/architecture for every packaged component.
+ *
+ * A record of `undefined` for a `requiredKeys` entry is a failure: the
+ * inspection was required but did not happen (missing tool, unsupported host,
+ * or a skipped step). `null` is "inspected and unreadable". The platform string
+ * is mapped through `PACKAGED_PLATFORM` because the writers use the packaging
+ * vocabulary (`mac`), not Node's runtime vocabulary (`darwin`).
+ */
 export function verifyPackagedProvenance(input: {
   readonly problems: string[];
   readonly provenance: PackagedProvenance;
   readonly expected: CandidateExpectations;
   readonly targets: CandidateTargetSelection;
   readonly includeMacosArm64: boolean;
+  readonly requiredKeys: ReadonlyArray<PackagedProvenanceKey>;
 }): void {
-  const { problems, provenance, expected, targets, includeMacosArm64 } = input;
-  const wantsOptional = targets === "all" && includeMacosArm64;
-  // `windowsInstaller` holds the provenance of the WSL runtime embedded in the
-  // installer, which is a Linux runtime, not a Windows binary; the Windows
-  // desktop provenance lives in the packaged app and is covered by the target's
-  // own archive checks.
-  const checks: Array<[string, PackagedProvenanceRecord | null | undefined, string, string]> = [
-    ["Windows installer embedded WSL runtime", provenance.windowsInstaller, "linux", "x64"],
-    ["Windows CLI archive", provenance.windowsZip, "win", "x64"],
-    ["Linux runtime archive", provenance.linuxArchive, "linux", "x64"],
-    ["Intel macOS DMG", provenance.macDmg, "darwin", "x64"],
+  const { problems, provenance, expected, targets, requiredKeys } = input;
+  const required = new Set(requiredKeys);
+  const recordChecks: ReadonlyArray<
+    readonly [PackagedProvenanceKey, PackagedProvenanceRecord | null | undefined]
+  > = [
+    ["windowsDesktop", provenance.windowsDesktop],
+    ["embeddedWsl", provenance.embeddedWsl],
+    ["windowsZip", provenance.windowsZip],
+    ["linuxArchive", provenance.linuxArchive],
+    ["macDmg", provenance.macDmg],
+    ["macArm64Dmg", provenance.macArm64Dmg],
   ];
-  if (wantsOptional) {
-    checks.push(["Apple Silicon DMG", provenance.macArm64Dmg, "darwin", "arm64"]);
-  }
-  // Only enforced when the WSL payload was actually inspected. `undefined`
-  // means the caller did not extract it (for example a pure manifest check).
-  if (targets === "all" && provenance.embeddedWslEqualsStandalone === false) {
-    problems.push(
-      "the WSL runtime embedded in the Windows installer is not byte-identical to the standalone Linux archive",
-    );
-  }
-  if (
-    targets === "all" &&
-    provenance.windowsInstaller !== undefined &&
-    provenance.linuxArchive !== undefined &&
-    provenance.embeddedWslEqualsStandalone === undefined
-  ) {
-    problems.push(
-      "the Windows installer was inspected but its embedded WSL runtime was not compared to the standalone Linux archive",
-    );
-  }
-  for (const [label, record, platform, arch] of checks) {
-    if (record === undefined) continue; // Not inspected in this invocation.
+  for (const [key, record] of recordChecks) {
+    const label = PACKAGED_PROVENANCE_LABELS[key];
+    if (record === undefined) {
+      if (required.has(key)) {
+        problems.push(`${label} provenance was required but was not inspected`);
+      }
+      continue;
+    }
     if (record === null) {
       problems.push(`${label} has no readable packaged provenance`);
       continue;
@@ -495,13 +702,87 @@ export function verifyPackagedProvenance(input: {
     if (record.version !== expected.version) {
       problems.push(`${label} provenance version is ${record.version}`);
     }
-    if (record.platform !== platform) {
+    const platform = PACKAGED_PLATFORM[key];
+    if (platform !== undefined && record.platform !== platform) {
       problems.push(`${label} provenance platform is ${record.platform}, expected ${platform}`);
     }
-    if (record.arch !== arch) {
+    const arch = PACKAGED_ARCH[key];
+    if (arch !== undefined && record.arch !== arch) {
       problems.push(`${label} provenance arch is ${record.arch}, expected ${arch}`);
     }
   }
+
+  // The bundled server sidecar records name+version only (no repository/SHA).
+  const serverLabel = PACKAGED_PROVENANCE_LABELS.windowsServerBundle;
+  if (provenance.windowsServerBundle !== undefined) {
+    const server = provenance.windowsServerBundle;
+    if (server === null) {
+      problems.push(`${serverLabel} has no readable packaged metadata`);
+    } else {
+      if (server.name !== "t3code-server") {
+        problems.push(`${serverLabel} name is ${server.name}, expected t3code-server`);
+      }
+      if (server.version !== expected.version) {
+        problems.push(`${serverLabel} version is ${server.version}, expected ${expected.version}`);
+      }
+    }
+  } else if (required.has("windowsServerBundle")) {
+    problems.push(`${serverLabel} provenance was required but was not inspected`);
+  }
+
+  if (targets === "all" && provenance.embeddedWslEqualsStandalone === false) {
+    problems.push(
+      "the WSL runtime embedded in the Windows installer is not byte-identical to the standalone Linux archive",
+    );
+  }
+  if (
+    targets === "all" &&
+    required.has("embeddedWsl") &&
+    required.has("linuxArchive") &&
+    provenance.embeddedWslEqualsStandalone === undefined
+  ) {
+    problems.push(
+      "the Windows installer was inspected but its embedded WSL runtime was not compared to the standalone Linux archive",
+    );
+  }
+}
+
+/**
+ * Per-target packaged-provenance verification for a host that is building one
+ * platform before the aggregate exists. It requires only that platform's own
+ * components, and accepts digest-bound evidence for any it cannot open.
+ */
+export function verifyTargetPackagedProvenance(input: {
+  readonly provenance: PackagedProvenance;
+  readonly evidence: ReadonlyArray<PackagedInspectionEvidence | undefined>;
+  readonly observedAssets: ReadonlyArray<ReleaseAsset>;
+  readonly expected: CandidateExpectations;
+  readonly targets: CandidateTargetSelection;
+  readonly includeMacosArm64: boolean;
+}): VerificationResult {
+  const problems: string[] = [];
+  const requiredKeys = requiredProvenanceKeysForSelection({
+    targets: input.targets,
+    artifacts: provenanceAvailabilityFromAssets(input.expected.version, input.observedAssets),
+    includeMacosArm64: input.includeMacosArm64,
+  });
+  const merged = mergePackagedInspection({
+    provenance: input.provenance,
+    evidence: input.evidence,
+    observedAssets: input.observedAssets,
+    version: input.expected.version,
+    requiredKeys,
+  });
+  problems.push(...merged.problems);
+  verifyPackagedProvenance({
+    problems,
+    provenance: merged.provenance,
+    expected: input.expected,
+    targets: input.targets,
+    includeMacosArm64: input.includeMacosArm64,
+    requiredKeys,
+  });
+  return failures(problems);
 }
 
 export interface VerifyPromotionInput extends VerifyCandidateInput {
@@ -519,7 +800,13 @@ export interface VerifyPromotionInput extends VerifyCandidateInput {
  * authorization gate must actually exist.
  */
 export function verifyPromotion(input: VerifyPromotionInput): VerificationResult {
-  const candidate = verifyCandidate({ ...input, targets: "all", packagedProvenance: undefined });
+  // Promotion must not qualify bytes that were never inspected: it either
+  // re-inspects the downloaded artifacts or consumes digest-bound evidence.
+  const candidate = verifyCandidate({
+    ...input,
+    targets: "all",
+    requirePackagedProvenance: input.requirePackagedProvenance ?? true,
+  });
   const problems = [...candidate.failures];
 
   if (input.tagTargetSha !== input.expected.sourceSha) {

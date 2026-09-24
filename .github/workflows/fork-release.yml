@@ -663,8 +663,9 @@ jobs:
             --arch x64
 
       # Freeze the candidate: manifest + checksums from the exact distributed
-      # bytes. Native acceptance receipts are attached separately and required
-      # only at promotion.
+      # bytes. Required packaged inspection is fail-closed: every component this
+      # Linux runner cannot open itself (notably the macOS DMG) must be covered
+      # by a digest-bound native inspection dropped into `candidate/`.
       - name: Freeze candidate manifest and checksums
         shell: bash
         env:
@@ -683,6 +684,11 @@ jobs:
             --write-checksums
           )
           if [[ "$INCLUDE_ARM64" == "true" ]]; then args+=(--include-macos-arm64); fi
+          shopt -s nullglob
+          evidence=(candidate/fork-inspection-evidence*.json)
+          if (( ${#evidence[@]} > 0 )); then
+            args+=(--inspection-evidence "$(IFS=,; echo "${evidence[*]}")")
+          fi
           node scripts/verify-fork-candidate.ts "${args[@]}"
 
       # A machine-readable record of the frozen bytes, keyed by the immutable

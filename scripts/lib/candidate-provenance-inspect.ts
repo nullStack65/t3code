@@ -3,10 +3,24 @@
 /**
  * Reads the *actual* packaged provenance from a candidate's distributed bytes.
  *
- * A manifest that claims the right source is not evidence; the archive must be
- * opened and its `t3code-build-info.json` read. This module extracts the Linux
- * tarball and the Windows ZIP and reads their provenance, and (on Windows)
- * runs the real NSIS installer to reach `resources/wsl-runtime.tar.gz`.
+ * A manifest that claims the right source is not evidence; each archive must be
+ * opened and its own `t3code-build-info.json` (or, for the Windows server
+ * sidecar, its `package.json`) read. The components are kept distinct:
+ *
+ *   - `linuxArchive`        the standalone Linux x64 tarball;
+ *   - `windowsZip`          the standalone Windows CLI ZIP;
+ *   - `windowsDesktop`      the Windows Electron app's own build info, read from
+ *                           `resources/app.asar` inside the real NSIS payload;
+ *   - `windowsServerBundle` the bundled `server.asar` sidecar metadata;
+ *   - `embeddedWsl`         the Linux runtime the installer embeds beside the app;
+ *   - `macDmg`              the Intel macOS app's build info, read from the
+ *                           mounted DMG's `Contents/Resources/app.asar`.
+ *
+ * The Windows desktop application is never inferred from the WSL payload or the
+ * CLI ZIP. A component that cannot be opened because a required extraction tool
+ * is missing is left `undefined` (BLOCKED), not silently accepted. The result
+ * also carries a digest-bound evidence record so a host that cannot open an
+ * artifact can consume a native inspection of the exact bytes.
  *
  * It never trusts the file name for the platform/arch/version.
  */
@@ -15,12 +29,22 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { parseBuildInfo } from "./source-provenance.ts";
+import { extractFile } from "@electron/asar";
+
+import { BUILD_INFO_FILE_NAME, parseBuildInfo } from "./source-provenance.ts";
 import {
   WSL_RUNTIME_ARCHIVE_NAME,
   WSL_RUNTIME_ARCHIVE_HASH_NAME,
 } from "../build-desktop-artifact.ts";
-import type { PackagedProvenance, PackagedProvenanceRecord } from "./fork-release-manifest.ts";
+import {
+  sha256Hex,
+  type BundledServerRecord,
+  type PackagedInspectionEvidence,
+  type PackagedInspectionRecord,
+  type PackagedProvenance,
+  type PackagedProvenanceKey,
+  type PackagedProvenanceRecord,
+} from "./fork-release-manifest.ts";
 
 const which = (command: string): string | undefined => {
   // eslint-disable-next-line t3code/no-global-process-runtime -- a plain Node CLI helper, not Effect code
@@ -64,9 +88,11 @@ function findFile(root: string, name: string): string | undefined {
 const run = (
   command: string,
   args: ReadonlyArray<string>,
-  options: { allowFailure?: boolean } = {},
+  options: { allowFailure?: boolean; quiet?: boolean } = {},
 ): number => {
-  const result = NodeChildProcess.spawnSync(command, args, { stdio: "inherit" });
+  const result = NodeChildProcess.spawnSync(command, args, {
+    stdio: options.quiet === true ? "ignore" : "inherit",
+  });
   const status = result.status ?? 1;
   if (status !== 0 && options.allowFailure !== true) {
     throw new Error(`${command} ${args.join(" ")} exited ${status}`);
@@ -75,69 +101,203 @@ const run = (
 };
 
 function readBuildInfoAt(root: string): PackagedProvenanceRecord | null {
-  const infoPath = findFile(root, "t3code-build-info.json");
+  const infoPath = findFile(root, BUILD_INFO_FILE_NAME);
   if (infoPath === undefined) return null;
-  const parsed = parseBuildInfo(NodeFS.readFileSync(infoPath, "utf8"));
-  return {
-    repository: parsed.repository,
-    sourceSha: parsed.sourceSha,
-    version: parsed.version,
-    platform: parsed.platform,
-    arch: parsed.arch,
-  };
+  try {
+    const parsed = parseBuildInfo(NodeFS.readFileSync(infoPath, "utf8"));
+    return {
+      repository: parsed.repository,
+      sourceSha: parsed.sourceSha,
+      version: parsed.version,
+      platform: parsed.platform,
+      arch: parsed.arch,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function readTarGzProvenance(archive: string, scratch: string): PackagedProvenanceRecord | null {
   const dir = NodeFS.mkdtempSync(NodePath.join(scratch, "tar-"));
-  run("tar", ["-xzf", archive, "-C", dir]);
+  const status = run("tar", ["-xzf", archive, "-C", dir], { allowFailure: true });
+  if (status !== 0) return null;
   return readBuildInfoAt(dir);
 }
 
 function readZipProvenance(archive: string, scratch: string): PackagedProvenanceRecord | null {
   const sevenZip = detectSevenZip();
+  const dir = NodeFS.mkdtempSync(NodePath.join(scratch, "zip-"));
   if (sevenZip !== undefined) {
-    const dir = NodeFS.mkdtempSync(NodePath.join(scratch, "zip-"));
-    run(sevenZip, ["x", "-y", `-o${dir}`, archive]);
-    return readBuildInfoAt(dir);
+    const status = run(sevenZip, ["x", "-y", `-o${dir}`, archive], { allowFailure: true });
+    return status === 0 ? readBuildInfoAt(dir) : null;
   }
   // bsdtar can read zip on every supported host.
-  const dir = NodeFS.mkdtempSync(NodePath.join(scratch, "zip-"));
-  run("tar", ["-xf", archive, "-C", dir]);
-  return readBuildInfoAt(dir);
+  const status = run("tar", ["-xf", archive, "-C", dir], { allowFailure: true });
+  return status === 0 ? readBuildInfoAt(dir) : null;
+}
+
+/** Reads `t3code-build-info.json` from inside a real ASAR archive. */
+function readAsarBuildInfo(asarPath: string): PackagedProvenanceRecord | null {
+  let raw: Buffer | undefined;
+  try {
+    raw = extractFile(asarPath, BUILD_INFO_FILE_NAME);
+  } catch {
+    return null;
+  }
+  if (raw === undefined) return null;
+  try {
+    const parsed = parseBuildInfo(raw.toString("utf8"));
+    return {
+      repository: parsed.repository,
+      sourceSha: parsed.sourceSha,
+      version: parsed.version,
+      platform: parsed.platform,
+      arch: parsed.arch,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Reads the name/version the bundled Windows server sidecar records. */
+function readAsarPackageMetadata(asarPath: string): BundledServerRecord | null {
+  let raw: Buffer | undefined;
+  try {
+    raw = extractFile(asarPath, "package.json");
+  } catch {
+    return null;
+  }
+  if (raw === undefined) return null;
+  try {
+    const parsed = JSON.parse(raw.toString("utf8")) as { name?: unknown; version?: unknown };
+    if (typeof parsed.name !== "string" || typeof parsed.version !== "string") return null;
+    return { name: parsed.name, version: parsed.version };
+  } catch {
+    return null;
+  }
+}
+
+function readAsarBuildInfoInTree(root: string): PackagedProvenanceRecord | null {
+  const asarPath = findFile(root, "app.asar");
+  if (asarPath === undefined) return null;
+  return readAsarBuildInfo(asarPath);
 }
 
 /**
- * Extracts the WSL archive from a Windows installer by unpacking the real NSIS
- * app payload (`$PLUGINSDIR/app-64.7z`, the stream the installer's own
- * `nsis7z.dll` unpacks). Executing the installer is avoided because it launches
- * the Electron app. Returns the embedded bytes and the standalone comparison.
+ * Extracts the Windows installer through its real NSIS payload layout.
+ *
+ * electron-builder's NSIS installer is a wrapper whose app payload is the
+ * `$PLUGINSDIR/app-64.7z` stream that the installer's own `nsis7z.dll` unpacks
+ * at install time, producing `resources/app.asar` (the desktop app),
+ * `resources/server.asar` (the bundled server) and `resources/wsl-runtime.tar.gz`
+ * (the WSL runtime). This never executes the installer, so it cannot launch the
+ * Electron app or touch a live profile. It fails closed when 7-Zip is absent.
  */
-function inspectEmbeddedWsl(
+function inspectWindowsInstaller(
   installer: string,
   standaloneArchive: string,
   scratch: string,
-): { embedded: Uint8Array | undefined; equalsStandalone: boolean | undefined } {
+): {
+  desktop: PackagedProvenanceRecord | null | undefined;
+  serverBundle: BundledServerRecord | null | undefined;
+  embeddedWsl: PackagedProvenanceRecord | null | undefined;
+  equalsStandalone: boolean | undefined;
+} {
   const sevenZip = detectSevenZip();
-  if (sevenZip === undefined) return { embedded: undefined, equalsStandalone: undefined };
+  if (sevenZip === undefined) {
+    return {
+      desktop: undefined,
+      serverBundle: undefined,
+      embeddedWsl: undefined,
+      equalsStandalone: undefined,
+    };
+  }
+  const unreadable = {
+    desktop: null,
+    serverBundle: null,
+    embeddedWsl: null,
+    equalsStandalone: undefined,
+  } as const;
+
   const wrapperDir = NodeFS.mkdtempSync(NodePath.join(scratch, "installer-"));
-  run(sevenZip, ["x", "-y", `-o${wrapperDir}`, installer]);
-  const appPayload = findFile(NodePath.join(wrapperDir, "$PLUGINSDIR"), "app-64.7z");
+  const wrapperStatus = run(sevenZip, ["x", "-y", `-o${wrapperDir}`, installer], {
+    allowFailure: true,
+  });
+  if (wrapperStatus !== 0) return unreadable;
+
   let extractRoot = wrapperDir;
+  const appPayload = findFile(NodePath.join(wrapperDir, "$PLUGINSDIR"), "app-64.7z");
   if (appPayload !== undefined) {
     extractRoot = NodeFS.mkdtempSync(NodePath.join(scratch, "payload-"));
-    run(sevenZip, ["x", "-y", `-o${extractRoot}`, appPayload]);
+    const payloadStatus = run(sevenZip, ["x", "-y", `-o${extractRoot}`, appPayload], {
+      allowFailure: true,
+    });
+    if (payloadStatus !== 0) return unreadable;
   }
+
+  const appAsarPath = findFile(extractRoot, "app.asar");
+  const serverAsarPath = findFile(extractRoot, "server.asar");
   const embeddedPath = findFile(extractRoot, WSL_RUNTIME_ARCHIVE_NAME);
-  if (embeddedPath === undefined) return { embedded: undefined, equalsStandalone: undefined };
-  const embedded = NodeFS.readFileSync(embeddedPath);
-  // The standalone Linux archive may not be in a Windows-only candidate
-  // directory; the aggregate step performs the byte-equality check when both
-  // are present. Read its provenance from the embedded copy either way.
-  if (!NodeFS.existsSync(standaloneArchive)) {
-    return { embedded, equalsStandalone: undefined };
+
+  let equalsStandalone: boolean | undefined;
+  if (embeddedPath !== undefined && NodeFS.existsSync(standaloneArchive)) {
+    equalsStandalone = NodeFS.readFileSync(embeddedPath).equals(
+      NodeFS.readFileSync(standaloneArchive),
+    );
   }
-  const standalone = NodeFS.readFileSync(standaloneArchive);
-  return { embedded, equalsStandalone: embedded.equals(standalone) };
+  return {
+    desktop: appAsarPath === undefined ? null : readAsarBuildInfo(appAsarPath),
+    serverBundle: serverAsarPath === undefined ? null : readAsarPackageMetadata(serverAsarPath),
+    embeddedWsl: embeddedPath === undefined ? null : readTarGzProvenance(embeddedPath, scratch),
+    equalsStandalone,
+  };
+}
+
+/**
+ * Reads the macOS app's own build info from inside a real DMG.
+ *
+ * On the native Mac this attaches the image read-only to an isolated temporary
+ * mount point and detaches it in `finally`; it never runs the app or an
+ * installer. Elsewhere it falls back to 7-Zip's HFS reader. A host with neither
+ * tool leaves the record `undefined` (BLOCKED).
+ */
+function inspectMacDmg(dmg: string, scratch: string): PackagedProvenanceRecord | null | undefined {
+  const hdiutil = which("hdiutil");
+  // eslint-disable-next-line t3code/no-global-process-runtime -- a plain Node CLI helper, not Effect code
+  if (process.platform === "darwin" && hdiutil !== undefined) {
+    const mountDir = NodeFS.mkdtempSync(NodePath.join(scratch, "dmg-"));
+    let attached = false;
+    try {
+      const status = run(
+        "hdiutil",
+        [
+          "attach",
+          "-readonly",
+          "-nobrowse",
+          "-noautoopen",
+          "-noverify",
+          "-mountpoint",
+          mountDir,
+          dmg,
+        ],
+        { allowFailure: true, quiet: true },
+      );
+      if (status !== 0) return null;
+      attached = true;
+      return readAsarBuildInfoInTree(mountDir);
+    } finally {
+      if (attached) {
+        run("hdiutil", ["detach", mountDir, "-force"], { allowFailure: true, quiet: true });
+      }
+      NodeFS.rmSync(mountDir, { recursive: true, force: true });
+    }
+  }
+
+  const sevenZip = detectSevenZip();
+  if (sevenZip === undefined) return undefined;
+  const dir = NodeFS.mkdtempSync(NodePath.join(scratch, "dmg-"));
+  const status = run(sevenZip, ["x", "-y", `-o${dir}`, dmg], { allowFailure: true });
+  return status === 0 ? readAsarBuildInfoInTree(dir) : null;
 }
 
 export interface InspectCandidateInput {
@@ -147,20 +307,33 @@ export interface InspectCandidateInput {
   readonly includeMacosArm64: boolean;
 }
 
+export interface InspectCandidateResult {
+  readonly provenance: PackagedProvenance;
+  /** Digest-bound evidence for the components this host actually inspected. */
+  readonly evidence: PackagedInspectionEvidence;
+}
+
 /**
  * Reads the real embedded provenance for the target selection. Missing
- * extraction prerequisites (for example no 7-Zip for the Windows ZIP) leave the
- * record `undefined` rather than falsely passing; the caller reports that as an
- * inspection gap when the artifact is required.
+ * extraction prerequisites (for example no 7-Zip for the NSIS payload) leave the
+ * component `undefined` rather than falsely passing; the caller reports that as
+ * a BLOCKED inspection when the artifact is required.
  */
-export function inspectCandidateProvenance(input: InspectCandidateInput): PackagedProvenance {
+export function inspectCandidateProvenance(input: InspectCandidateInput): InspectCandidateResult {
   const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-inspect-"));
   const provenance: {
-    windowsInstaller?: PackagedProvenanceRecord | null;
-    linuxArchive?: PackagedProvenanceRecord | null;
-    windowsZip?: PackagedProvenanceRecord | null;
-    macDmg?: PackagedProvenanceRecord | null;
+    windowsDesktop?: PackagedProvenanceRecord | null | undefined;
+    windowsServerBundle?: BundledServerRecord | null | undefined;
+    embeddedWsl?: PackagedProvenanceRecord | null | undefined;
+    linuxArchive?: PackagedProvenanceRecord | null | undefined;
+    windowsZip?: PackagedProvenanceRecord | null | undefined;
+    macDmg?: PackagedProvenanceRecord | null | undefined;
+    macArm64Dmg?: PackagedProvenanceRecord | null | undefined;
+    embeddedWslEqualsStandalone?: boolean | undefined;
   } = {};
+  const records: Partial<Record<PackagedProvenanceKey, PackagedInspectionRecord>> = {};
+  const digests: Partial<Record<PackagedProvenanceKey, string>> = {};
+
   const wantsAll = input.targets === "all";
   const linuxArchivePath = NodePath.join(
     input.candidateDir,
@@ -171,43 +344,78 @@ export function inspectCandidateProvenance(input: InspectCandidateInput): Packag
     input.candidateDir,
     `T3-Code-${input.version}-x64.exe`,
   );
+  const macDmgPath = NodePath.join(input.candidateDir, `T3-Code-${input.version}-x64.dmg`);
+  const macArm64DmgPath = NodePath.join(input.candidateDir, `T3-Code-${input.version}-arm64.dmg`);
 
-  if ((wantsAll || input.targets === "linux") && NodeFS.existsSync(linuxArchivePath)) {
-    provenance.linuxArchive = readTarGzProvenance(linuxArchivePath, scratch);
-  }
-  if ((wantsAll || input.targets === "win") && NodeFS.existsSync(windowsZipPath)) {
-    provenance.windowsZip = readZipProvenance(windowsZipPath, scratch);
-  }
+  const digestOf = (file: string): string => sha256Hex(NodeFS.readFileSync(file));
 
-  let embeddedWslEqualsStandalone: boolean | undefined;
-  if ((wantsAll || input.targets === "win") && NodeFS.existsSync(windowsInstallerPath)) {
-    const wsl = inspectEmbeddedWsl(windowsInstallerPath, linuxArchivePath, scratch);
-    embeddedWslEqualsStandalone = wsl.equalsStandalone;
-    // Read the embedded archive's own provenance.
-    if (wsl.embedded !== undefined) {
-      const embeddedDir = NodeFS.mkdtempSync(NodePath.join(scratch, "wsl-"));
-      const embeddedFile = NodePath.join(embeddedDir, WSL_RUNTIME_ARCHIVE_NAME);
-      NodeFS.writeFileSync(embeddedFile, wsl.embedded);
-      provenance.windowsInstaller = readTarGzProvenance(embeddedFile, scratch);
-    } else {
-      provenance.windowsInstaller = null;
+  try {
+    if ((wantsAll || input.targets === "linux") && NodeFS.existsSync(linuxArchivePath)) {
+      provenance.linuxArchive = readTarGzProvenance(linuxArchivePath, scratch);
+      records.linuxArchive = provenance.linuxArchive;
+      digests.linuxArchive = digestOf(linuxArchivePath);
     }
+    if ((wantsAll || input.targets === "win") && NodeFS.existsSync(windowsZipPath)) {
+      provenance.windowsZip = readZipProvenance(windowsZipPath, scratch);
+      records.windowsZip = provenance.windowsZip;
+      digests.windowsZip = digestOf(windowsZipPath);
+    }
+    if ((wantsAll || input.targets === "win") && NodeFS.existsSync(windowsInstallerPath)) {
+      const installer = inspectWindowsInstaller(windowsInstallerPath, linuxArchivePath, scratch);
+      provenance.windowsDesktop = installer.desktop;
+      provenance.windowsServerBundle = installer.serverBundle;
+      provenance.embeddedWsl = installer.embeddedWsl;
+      records.windowsDesktop = installer.desktop;
+      records.windowsServerBundle = installer.serverBundle;
+      records.embeddedWsl = installer.embeddedWsl;
+      const installerDigest = digestOf(windowsInstallerPath);
+      digests.windowsDesktop = installerDigest;
+      digests.windowsServerBundle = installerDigest;
+      digests.embeddedWsl = installerDigest;
+      if (installer.equalsStandalone !== undefined) {
+        provenance.embeddedWslEqualsStandalone = installer.equalsStandalone;
+      }
+    }
+    if ((wantsAll || input.targets === "mac") && NodeFS.existsSync(macDmgPath)) {
+      provenance.macDmg = inspectMacDmg(macDmgPath, scratch);
+      records.macDmg = provenance.macDmg;
+      digests.macDmg = digestOf(macDmgPath);
+    }
+    if (
+      (wantsAll || input.targets === "mac") &&
+      input.includeMacosArm64 &&
+      NodeFS.existsSync(macArm64DmgPath)
+    ) {
+      provenance.macArm64Dmg = inspectMacDmg(macArm64DmgPath, scratch);
+      records.macArm64Dmg = provenance.macArm64Dmg;
+      digests.macArm64Dmg = digestOf(macArm64DmgPath);
+    }
+  } finally {
+    NodeFS.rmSync(scratch, { recursive: true, force: true });
   }
 
-  NodeFS.rmSync(scratch, { recursive: true, force: true });
   console.log(
     `Inspected packaged provenance: ${JSON.stringify(
       {
         ...provenance,
-        embeddedWslEqualsStandalone,
+        embeddedWslEqualsStandalone: provenance.embeddedWslEqualsStandalone,
       },
       null,
       2,
     )}`,
   );
-  return embeddedWslEqualsStandalone === undefined
-    ? { ...provenance }
-    : { ...provenance, embeddedWslEqualsStandalone };
+
+  const evidence: PackagedInspectionEvidence = {
+    schemaVersion: 1,
+    // eslint-disable-next-line t3code/no-global-process-runtime -- a plain Node CLI helper, not Effect code
+    host: `${process.platform}-${process.arch}`,
+    records,
+    digests,
+    ...(provenance.embeddedWslEqualsStandalone === undefined
+      ? {}
+      : { embeddedWslEqualsStandalone: provenance.embeddedWslEqualsStandalone }),
+  };
+  return { provenance, evidence };
 }
 
 export { WSL_RUNTIME_ARCHIVE_HASH_NAME };

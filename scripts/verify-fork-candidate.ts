@@ -14,7 +14,12 @@
  *     before creating a release.
  *
  * It never builds or mutates an asset; it only reads bytes and writes the
- * manifest/checksum metadata beside them.
+ * manifest/checksum/evidence metadata beside them.
+ *
+ * Required packaged inspection is fail-closed: for every selected target whose
+ * artifact is present, the packaged provenance must be read from the actual
+ * bytes (locally) or supplied as digest-bound evidence from a native host. A
+ * missing extraction tool or unsupported host is BLOCKED, not verified.
  */
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -24,6 +29,7 @@ import {
   CANDIDATE_MANIFEST_FILE_NAME,
   NATIVE_RECEIPTS_FILE_NAME,
   NATIVE_RECEIPTS_SCHEMA_VERSION,
+  PACKAGED_INSPECTION_FILE_NAME,
   RELEASE_ENVIRONMENT,
   SHA256SUMS_FILE_NAME,
   compareStableVersions,
@@ -33,8 +39,10 @@ import {
   sha256Hex,
   verifyCandidate,
   verifyPromotion,
+  verifyTargetPackagedProvenance,
   type CandidateTargetSelection,
   type NativeReceipt,
+  type PackagedInspectionEvidence,
   type ReleaseAsset,
   type ReleaseCandidateManifest,
 } from "./lib/fork-release-manifest.ts";
@@ -60,6 +68,8 @@ interface Args {
   latestVersion: string | undefined;
   authorizationGateExists: boolean;
   nativeReceiptsPath: string | undefined;
+  emitInspection: string | undefined;
+  inspectionEvidence: ReadonlyArray<string>;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): Args {
@@ -92,6 +102,10 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
   if (!["all", "linux", "win", "mac"].includes(targets)) {
     throw new Error("--targets must be all, linux, win, or mac");
   }
+  const inspectionEvidence = (values.get("inspection-evidence") ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
   return {
     candidateDir: required("candidate-dir"),
     version: required("version"),
@@ -113,6 +127,8 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
     latestVersion: values.get("latest-version")?.trim(),
     authorizationGateExists: bool("authorization-gate-exists"),
     nativeReceiptsPath: values.get("native-receipts")?.trim(),
+    emitInspection: values.get("emit-inspection")?.trim(),
+    inspectionEvidence,
   };
 }
 
@@ -120,6 +136,7 @@ const META_FILES = new Set([
   CANDIDATE_MANIFEST_FILE_NAME,
   NATIVE_RECEIPTS_FILE_NAME,
   SHA256SUMS_FILE_NAME,
+  PACKAGED_INSPECTION_FILE_NAME,
 ]);
 
 function listAssetFiles(dir: string): string[] {
@@ -153,6 +170,16 @@ function readNativeReceipts(dir: string): NativeReceipt[] {
   return NodeFS.existsSync(path) ? readNativeReceiptsFile(path) : [];
 }
 
+function readInspectionEvidence(paths: ReadonlyArray<string>): PackagedInspectionEvidence[] {
+  return paths.map((path) => {
+    const parsed = JSON.parse(NodeFS.readFileSync(path, "utf8")) as PackagedInspectionEvidence;
+    if (parsed.schemaVersion !== 1) {
+      throw new Error(`${path} is not packaged inspection evidence`);
+    }
+    return parsed;
+  });
+}
+
 function fail(problems: ReadonlyArray<string>): never {
   for (const problem of problems) {
     console.error(`::error::${problem}`);
@@ -176,12 +203,18 @@ function highestStableVersion(list: string | undefined): string | undefined {
 /**
  * Verifies one platform's own artifacts before the aggregate manifest exists.
  * It requires that platform's exact asset names and checks the real embedded
- * provenance; it never demands another platform's bytes.
+ * provenance (locally or via digest-bound evidence); it never demands another
+ * platform's bytes, and it never skips a required inspection.
  */
 function verifyPerTargetProvenance(
   args: Args,
   observedAssets: ReadonlyArray<ReleaseAsset>,
-): { ok: boolean; failures: ReadonlyArray<string> } {
+  evidence: ReadonlyArray<PackagedInspectionEvidence>,
+): {
+  ok: boolean;
+  failures: ReadonlyArray<string>;
+  evidence: PackagedInspectionEvidence | undefined;
+} {
   const problems: string[] = [];
   const expectedNames = requiredReleaseAssetNamesForTargets(args.version, args.targets, {
     includeMacosArm64: args.includeMacosArm64,
@@ -196,44 +229,37 @@ function verifyPerTargetProvenance(
       problems.push(`${name} is empty`);
     }
   }
-  if (args.inspectProvenance) {
-    const provenance = inspectCandidateProvenance({
-      candidateDir: args.candidateDir,
-      version: args.version,
-      targets: args.targets,
-      includeMacosArm64: args.includeMacosArm64,
-    });
-    const records: Array<
-      [string, { readonly sourceSha: string; readonly version: string } | null | undefined]
-    > =
-      args.targets === "linux"
-        ? [["Linux runtime archive", provenance.linuxArchive]]
-        : args.targets === "win"
-          ? [
-              ["Windows CLI archive", provenance.windowsZip],
-              ["Windows installer", provenance.windowsInstaller],
-            ]
-          : [["Intel macOS DMG", provenance.macDmg]];
-    for (const [label, record] of records) {
-      if (record === undefined) continue;
-      if (record === null) {
-        problems.push(`${label} has no readable packaged provenance`);
-        continue;
-      }
-      if (record.sourceSha !== args.sha) {
-        problems.push(`${label} provenance sourceSha is ${record.sourceSha}, expected ${args.sha}`);
-      }
-      if (record.version !== args.version) {
-        problems.push(`${label} provenance version is ${record.version}, expected ${args.version}`);
-      }
-    }
+
+  if (!args.inspectProvenance) {
+    return { ok: problems.length === 0, failures: problems, evidence: undefined };
   }
-  return problems.length === 0 ? { ok: true, failures: [] } : { ok: false, failures: problems };
+
+  const inspection = inspectCandidateProvenance({
+    candidateDir: args.candidateDir,
+    version: args.version,
+    targets: args.targets,
+    includeMacosArm64: args.includeMacosArm64,
+  });
+  const result = verifyTargetPackagedProvenance({
+    provenance: inspection.provenance,
+    evidence: [...evidence, inspection.evidence],
+    observedAssets,
+    expected: { repository: args.repository, version: args.version, sourceSha: args.sha },
+    targets: args.targets,
+    includeMacosArm64: args.includeMacosArm64,
+  });
+  problems.push(...result.failures);
+  return {
+    ok: problems.length === 0,
+    failures: problems,
+    evidence: inspection.evidence,
+  };
 }
 
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   const observedAssets = observeAssets(args.candidateDir);
+  const externalEvidence = readInspectionEvidence(args.inspectionEvidence);
   const manifestPath = NodePath.join(args.candidateDir, CANDIDATE_MANIFEST_FILE_NAME);
 
   if (args.writeManifest) {
@@ -266,7 +292,11 @@ function main(): void {
   // checks only this platform's own assets and their embedded provenance. The
   // aggregate step (targets: all) is the one that requires the manifest.
   if (!NodeFS.existsSync(manifestPath) && args.targets !== "all") {
-    const result = verifyPerTargetProvenance(args, observedAssets);
+    const result = verifyPerTargetProvenance(args, observedAssets, externalEvidence);
+    if (result.evidence !== undefined && args.emitInspection !== undefined) {
+      NodeFS.writeFileSync(args.emitInspection, `${JSON.stringify(result.evidence, null, 2)}\n`);
+      console.log(`Wrote native inspection evidence to ${args.emitInspection}`);
+    }
     if (!result.ok) fail(result.failures);
     console.log(
       `Per-target verification passed: ${observedAssets.length} ${args.targets} asset(s) for ${args.repository} v${args.version} @ ${args.sha}.`,
@@ -316,6 +346,24 @@ function main(): void {
     }
   }
 
+  const inspection = args.inspectProvenance
+    ? inspectCandidateProvenance({
+        candidateDir: args.candidateDir,
+        version: args.version,
+        targets: args.targets,
+        includeMacosArm64: args.includeMacosArm64,
+      })
+    : undefined;
+  if (inspection !== undefined && args.emitInspection !== undefined) {
+    NodeFS.writeFileSync(args.emitInspection, `${JSON.stringify(inspection.evidence, null, 2)}\n`);
+    console.log(`Wrote native inspection evidence to ${args.emitInspection}`);
+  }
+  const packagedProvenance = inspection?.provenance;
+  const inspectionEvidence = [
+    ...externalEvidence,
+    ...(inspection === undefined ? [] : [inspection.evidence]),
+  ];
+
   const result = args.promote
     ? verifyPromotion({
         manifest,
@@ -328,6 +376,9 @@ function main(): void {
         tagExists: args.tagExists,
         latestExistingVersion: highestStableVersion(args.latestVersion),
         authorizationGateExists: args.authorizationGateExists,
+        packagedProvenance,
+        inspectionEvidence,
+        requirePackagedProvenance: args.inspectProvenance,
       })
     : verifyCandidate({
         manifest,
@@ -336,15 +387,9 @@ function main(): void {
         includeMacosArm64: args.includeMacosArm64,
         targets: args.targets,
         requireNativeReceipts: args.requireNativeReceipts,
-        packagedProvenance:
-          args.promote || !args.inspectProvenance
-            ? undefined
-            : inspectCandidateProvenance({
-                candidateDir: args.candidateDir,
-                version: args.version,
-                targets: args.targets,
-                includeMacosArm64: args.includeMacosArm64,
-              }),
+        packagedProvenance,
+        inspectionEvidence,
+        requirePackagedProvenance: args.inspectProvenance,
       });
 
   if (!result.ok) {
