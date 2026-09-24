@@ -117,3 +117,33 @@ it("uses the shared aggregate verifier so local and CI candidates are frozen ide
   // Native receipts are a promotion gate, not a build-time requirement.
   assert.notInclude(command, "--require-native-receipts");
 });
+
+it("emits and consumes digest-bound inspection evidence through the local route", () => {
+  const verify = planCandidateTargetVerification({
+    target: "win",
+    version: VERSION,
+    sourceSha: SHA,
+    repository: "nullStack65/t3code",
+    candidateDir: "candidate",
+    emitInspection: "candidate/fork-inspection-evidence-win.json",
+  });
+  assert.include(
+    verify.command.join(" "),
+    "--emit-inspection candidate/fork-inspection-evidence-win.json",
+  );
+
+  const aggregate = planCandidateVerification({
+    version: VERSION,
+    sourceSha: SHA,
+    repository: "nullStack65/t3code",
+    candidateDir: "candidate",
+    inspectionEvidence: [
+      "candidate/fork-inspection-evidence-win.json",
+      "candidate/fork-inspection-evidence-mac.json",
+    ],
+  });
+  assert.include(
+    aggregate.command.join(" "),
+    "--inspection-evidence candidate/fork-inspection-evidence-win.json,candidate/fork-inspection-evidence-mac.json",
+  );
+});

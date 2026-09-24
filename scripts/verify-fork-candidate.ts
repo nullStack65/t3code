@@ -30,6 +30,7 @@ import {
   NATIVE_RECEIPTS_FILE_NAME,
   NATIVE_RECEIPTS_SCHEMA_VERSION,
   PACKAGED_INSPECTION_FILE_NAME,
+  PACKAGED_INSPECTION_FILE_PREFIX,
   RELEASE_ENVIRONMENT,
   SHA256SUMS_FILE_NAME,
   compareStableVersions,
@@ -142,6 +143,7 @@ const META_FILES = new Set([
 function listAssetFiles(dir: string): string[] {
   return NodeFS.readdirSync(dir)
     .filter((name) => !META_FILES.has(name))
+    .filter((name) => !name.startsWith(PACKAGED_INSPECTION_FILE_PREFIX))
     .filter((name) => NodeFS.statSync(NodePath.join(dir, name)).isFile())
     .sort();
 }

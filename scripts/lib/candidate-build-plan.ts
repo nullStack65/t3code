@@ -57,6 +57,11 @@ export interface VerificationPlanInput {
   readonly repository: string;
   readonly candidateDir: string;
   readonly includeMacosArm64?: boolean;
+  /**
+   * Native inspection evidence files to consume for components this host cannot
+   * open. Each must be bound to the artifact's exact digest.
+   */
+  readonly inspectionEvidence?: ReadonlyArray<string> | undefined;
 }
 
 /** The per-target asset each target is responsible for producing. */
@@ -287,24 +292,30 @@ export function planCandidateTargetVerification(input: {
   readonly sourceSha: string;
   readonly repository: string;
   readonly candidateDir: string;
+  /** When set, write this host's native inspection evidence here. */
+  readonly emitInspection?: string | undefined;
 }): CandidatePlanStep {
+  const command = [
+    "node",
+    "scripts/verify-fork-candidate.ts",
+    "--candidate-dir",
+    input.candidateDir,
+    "--version",
+    input.version,
+    "--sha",
+    input.sourceSha,
+    "--repository",
+    input.repository,
+    "--targets",
+    input.target,
+  ];
+  if (input.emitInspection !== undefined) {
+    command.push("--emit-inspection", input.emitInspection);
+  }
   return {
     id: `verify-${input.target}`,
     description: `Verify the ${input.target} artifacts' presence and embedded provenance`,
-    command: [
-      "node",
-      "scripts/verify-fork-candidate.ts",
-      "--candidate-dir",
-      input.candidateDir,
-      "--version",
-      input.version,
-      "--sha",
-      input.sourceSha,
-      "--repository",
-      input.repository,
-      "--targets",
-      input.target,
-    ],
+    command,
     phase: "verify",
   };
 }
@@ -332,6 +343,9 @@ export function planCandidateVerification(input: VerificationPlanInput): Candida
   ];
   if (input.includeMacosArm64 === true) {
     command.push("--include-macos-arm64");
+  }
+  if (input.inspectionEvidence !== undefined && input.inspectionEvidence.length > 0) {
+    command.push("--inspection-evidence", input.inspectionEvidence.join(","));
   }
   return {
     id: "verify",

@@ -40,6 +40,7 @@ import {
   type CandidatePlanStep,
   type CandidateTarget,
 } from "./lib/candidate-build-plan.ts";
+import { PACKAGED_INSPECTION_FILE_PREFIX } from "./lib/fork-release-manifest.ts";
 
 type Phase = "target" | "aggregate";
 type SourceMode = "public" | "candidate";
@@ -59,6 +60,7 @@ interface Args {
   assumeInstalled: boolean;
   execute: boolean;
   keepGoing: boolean;
+  inspectionEvidence: ReadonlyArray<string>;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): Args {
@@ -110,6 +112,10 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
     assumeInstalled: flags.has("assume-installed"),
     execute: flags.has("execute"),
     keepGoing: flags.has("keep-going"),
+    inspectionEvidence: (values.get("inspection-evidence") ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== ""),
   };
 }
 
@@ -228,6 +234,23 @@ function buildPlan(args: Args): ReadonlyArray<CandidatePlanStep> {
   });
 }
 
+/**
+ * The evidence files the aggregate should consume: any explicit `--inspection-evidence`
+ * plus every per-target evidence file already staged in the shared directory.
+ * Each is digest-bound, so a stale file simply cannot qualify changed bytes.
+ */
+function discoveredInspectionEvidence(args: Args): ReadonlyArray<string> {
+  const discovered: string[] = [];
+  if (NodeFS.existsSync(args.outputDir)) {
+    for (const name of NodeFS.readdirSync(args.outputDir).sort()) {
+      if (name.startsWith(PACKAGED_INSPECTION_FILE_PREFIX) && name.endsWith(".json")) {
+        discovered.push(NodePath.join(args.outputDir, name));
+      }
+    }
+  }
+  return [...new Set([...args.inspectionEvidence, ...discovered])];
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   const aggregateStep = planCandidateVerification({
@@ -236,6 +259,7 @@ function main(): void {
     repository: args.repository,
     candidateDir: args.outputDir,
     includeMacosArm64: args.includeMacosArm64,
+    inspectionEvidence: discoveredInspectionEvidence(args),
   });
 
   if (args.phase === "aggregate") {
@@ -263,6 +287,10 @@ function main(): void {
     sourceSha: args.sha,
     repository: args.repository,
     candidateDir: args.outputDir,
+    emitInspection: NodePath.join(
+      args.outputDir,
+      `${PACKAGED_INSPECTION_FILE_PREFIX}-${args.target}.json`,
+    ),
   });
   const steps = [...buildSteps, ...stageSteps, verifyStep];
 

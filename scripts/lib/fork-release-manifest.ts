@@ -26,6 +26,8 @@ export const CANDIDATE_MANIFEST_FILE_NAME = "fork-release-manifest.json";
 export const NATIVE_RECEIPTS_FILE_NAME = "fork-native-receipts.json";
 export const SHA256SUMS_FILE_NAME = "SHA256SUMS";
 export const PACKAGED_INSPECTION_FILE_NAME = "fork-inspection-evidence.json";
+/** Prefix for per-target native inspection evidence files staged beside a candidate. */
+export const PACKAGED_INSPECTION_FILE_PREFIX = "fork-inspection-evidence";
 export const CANDIDATE_ARTIFACT_NAME = "fork-release-candidate";
 export const NATIVE_RECEIPTS_ARTIFACT_NAME = "fork-release-native-receipts";
 
