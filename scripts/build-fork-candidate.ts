@@ -231,6 +231,7 @@ function buildPlan(args: Args): ReadonlyArray<CandidatePlanStep> {
     resourceMonitorDir: args.resourceMonitorDir,
     linuxArchive: args.linuxArchive,
     assumeInstalled: args.assumeInstalled,
+    includeMacosArm64: args.includeMacosArm64,
   });
 }
 
@@ -280,6 +281,7 @@ function main(): void {
     target: args.target,
     version: args.version,
     outputDir: args.outputDir,
+    includeMacosArm64: args.includeMacosArm64,
   });
   const verifyStep = planCandidateTargetVerification({
     target: args.target,

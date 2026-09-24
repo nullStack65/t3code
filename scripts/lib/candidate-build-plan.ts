@@ -49,6 +49,8 @@ export interface CandidatePlanInput {
    * installed. When omitted the plan runs `vp install` first.
    */
   readonly assumeInstalled?: boolean | undefined;
+  /** Build and stage the optional Apple Silicon DMG too. */
+  readonly includeMacosArm64?: boolean | undefined;
 }
 
 export interface VerificationPlanInput {
@@ -68,12 +70,17 @@ export interface VerificationPlanInput {
 export function candidateTargetAssets(
   target: CandidateTarget,
   version: string,
+  options: { readonly includeMacosArm64?: boolean } = {},
 ): ReadonlyArray<string> {
   if (target === "linux") return [`t3-${version}-linux-x64.tar.gz`];
   if (target === "win") {
     return [`T3-Code-${version}-x64.exe`, `t3-${version}-win32-x64.zip`];
   }
-  return [`T3-Code-${version}-x64.dmg`, `T3-Code-${version}-arm64.dmg`];
+  // Apple Silicon is optional and deferred; it must never be demanded unless the
+  // caller explicitly asked for it, or an Intel-only build fails at staging.
+  const mac = [`T3-Code-${version}-x64.dmg`];
+  if (options.includeMacosArm64 === true) mac.push(`T3-Code-${version}-arm64.dmg`);
+  return mac;
 }
 
 /** The steps that build one target's artifacts into `outputDir`. */
@@ -278,6 +285,30 @@ export function planCandidateBuild(input: CandidatePlanInput): ReadonlyArray<Can
       ],
       phase: "build",
     },
+    ...(input.includeMacosArm64 === true
+      ? [
+          {
+            id: "desktop-arm64",
+            description: "Package the Apple Silicon macOS arm64 DMG (optional target)",
+            command: [
+              "node",
+              "scripts/build-desktop-artifact.ts",
+              "--platform",
+              "mac",
+              "--target",
+              "dmg",
+              "--arch",
+              "arm64",
+              "--build-version",
+              input.version,
+              "--output-dir",
+              input.outputDir,
+              "--verbose",
+            ],
+            phase: "build" as const,
+          },
+        ]
+      : []),
   ];
 }
 
@@ -360,8 +391,11 @@ export function planCandidateStaging(input: {
   readonly target: CandidateTarget;
   readonly version: string;
   readonly outputDir: string;
+  readonly includeMacosArm64?: boolean | undefined;
 }): ReadonlyArray<CandidatePlanStep> {
-  return candidateTargetAssets(input.target, input.version).map((asset) => ({
+  return candidateTargetAssets(input.target, input.version, {
+    includeMacosArm64: input.includeMacosArm64 === true,
+  }).map((asset) => ({
     id: `stage-${asset}`,
     description: `Stage ${asset} into the shared candidate directory`,
     command: [

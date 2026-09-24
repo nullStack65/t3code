@@ -102,6 +102,24 @@ it("stages each target artifact into the shared candidate directory", () => {
   assert.include(commands, "--output-dir out dir");
 });
 
+it("does not demand the optional Apple Silicon DMG for an Intel-only mac build", () => {
+  const intel = flat(
+    planCandidateStaging({ target: "mac", version: VERSION, outputDir: "candidate" }),
+  );
+  assert.include(intel, `T3-Code-${VERSION}-x64.dmg`);
+  assert.notInclude(intel, `T3-Code-${VERSION}-arm64.dmg`);
+
+  const withArm = flat(
+    planCandidateStaging({
+      target: "mac",
+      version: VERSION,
+      outputDir: "candidate",
+      includeMacosArm64: true,
+    }),
+  );
+  assert.include(withArm, `T3-Code-${VERSION}-arm64.dmg`);
+});
+
 it("uses the shared aggregate verifier so local and CI candidates are frozen identically", () => {
   const step = planCandidateVerification({
     version: VERSION,
