@@ -25,6 +25,9 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     },
     reportedCostUsd: null,
     dedupeKey: "msg_1:",
+    measurement: "observed",
+    measurementCompleteness: "complete",
+    dedupeKeyScope: "global",
     ...overrides,
   };
 }
@@ -49,6 +52,8 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
       records,
       tailRecords: [],
       position: position(),
+      identity: "declared",
+      qualityMetadata: "declared",
     });
   }
   return cache;
@@ -69,6 +74,8 @@ describe("scan cache round trip", () => {
       ],
       tailRecords: [record({ provider: "grok", model: "grok-4.5-build", dedupeKey: null })],
       position: position({ resumeOffset: 30, guardLength: 30, guardHash: 123 }),
+      identity: "declared",
+      qualityMetadata: "declared",
     });
     original.set("/codex.jsonl", {
       size: 80,
@@ -86,6 +93,8 @@ describe("scan cache round trip", () => {
           forkCopyAnchorMs: 0,
         },
       }),
+      identity: "declared",
+      qualityMetadata: "declared",
     });
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
@@ -95,6 +104,85 @@ describe("scan cache round trip", () => {
     expect(restored.get("/b.jsonl")).toEqual(original.get("/b.jsonl"));
     expect(restored.get("/grok.jsonl")).toEqual(original.get("/grok.jsonl"));
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
+  });
+
+  it("preserves native request, message, and prompt ids", () => {
+    const original = cacheWith([
+      [
+        "/a.jsonl",
+        100,
+        [
+          record({
+            providerRequestId: "r1",
+            providerMessageId: "m1",
+            promptId: "p1",
+          }),
+        ],
+      ],
+    ]);
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+
+    expect(restored.get("/a.jsonl")?.records[0]).toMatchObject({
+      providerRequestId: "r1",
+      providerMessageId: "m1",
+      promptId: "p1",
+    });
+  });
+
+  it("round-trips validity, completeness, and key-scope metadata", () => {
+    const original = cacheWith([
+      [
+        "/partial.jsonl",
+        100,
+        [
+          record({
+            measurementCompleteness: "partial",
+            invalidTokenFields: 1,
+            dedupeKeyScope: "source-local",
+          }),
+        ],
+      ],
+      ["/invalid.jsonl", 100, [record({ measurement: "invalid" })]],
+    ]);
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+
+    expect(restored.get("/partial.jsonl")?.records[0]).toMatchObject({
+      measurement: "observed",
+      measurementCompleteness: "partial",
+      invalidTokenFields: 1,
+      dedupeKeyScope: "source-local",
+    });
+    expect(restored.get("/invalid.jsonl")?.records[0]?.measurement).toBe("invalid");
+  });
+
+  it("preserves the legacy identity-unavailable marker across a round trip", () => {
+    // A decoded v3 entry carries identityAvailable: false; re-encoding must not
+    // promote it to a declared identity.
+    const v3 = {
+      version: 3,
+      models: ["claude-fable-5"],
+      sessions: ["deleted-session"],
+      files: {
+        "/deleted.jsonl": {
+          s: 100,
+          m: 500,
+          p: "claude",
+          r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, "msg_d:", null]],
+          t: [],
+          o: 90,
+          gl: 64,
+          gh: 11,
+          cs: null,
+        },
+      },
+    };
+    const once = decodeScanCache(JSON.parse(JSON.stringify(v3)));
+    const again = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(once))));
+
+    expect(again.get("/deleted.jsonl")?.records[0]?.identityAvailable).toBe(false);
+    expect(again.get("/deleted.jsonl")?.records[0]?.measurementCompleteness).toBe("partial");
   });
 
   it("drops an entry whose persisted parse state is corrupt", () => {
@@ -123,7 +211,7 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("rejects a document from the previous cache version", () => {
+  it("rejects a v1/v2 document that predates the parse position", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
     const previous = { ...encoded, version: 2 };
 
@@ -185,6 +273,242 @@ describe("scan cache round trip", () => {
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(poisoned)));
     expect(restored.has("/a.jsonl")).toBe(false);
+  });
+});
+
+describe("legacy v3 cache history", () => {
+  const TS = 1_786_000_000_000;
+
+  /** One deleted transcript (unrecoverable) and one extant transcript. */
+  function v3Document(): unknown {
+    return {
+      version: 3,
+      models: ["claude-fable-5"],
+      sessions: ["deleted-session", "live-session"],
+      files: {
+        "/deleted.jsonl": {
+          s: 100,
+          m: 500,
+          p: "claude",
+          r: [[TS, 0, 0, 2, 1000, 10, 50, 0, "msg_d:", null]],
+          t: [],
+          o: 90,
+          gl: 64,
+          gh: 11,
+          cs: null,
+        },
+        "/live.jsonl": {
+          s: 40,
+          m: 9000,
+          p: "claude",
+          r: [[TS, 0, 1, 0, 0, 0, 0, 0, null, null]],
+          t: [],
+          o: 30,
+          gl: 30,
+          gh: 22,
+          cs: null,
+        },
+      },
+    };
+  }
+
+  it("reads a v3 entry instead of discarding the retained history", () => {
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(v3Document())));
+
+    expect([...decoded.keys()].toSorted()).toEqual(["/deleted.jsonl", "/live.jsonl"]);
+    const deleted = decoded.get("/deleted.jsonl")!;
+    expect(deleted.identity).toBe("unavailable");
+    expect(deleted.records[0]?.totals.outputTokens).toBe(50);
+    // Native ids are unavailable, not asserted as absent.
+    expect(deleted.records[0]?.providerRequestId).toBeUndefined();
+    // A nonzero v3 row is still a known measurement.
+    expect(deleted.records[0]?.measurement).toBe("observed");
+  });
+
+  it("keeps an all-zero v3 row explicitly unavailable, not a measured zero", () => {
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(v3Document())));
+
+    const live = decoded.get("/live.jsonl")!;
+    expect(live.identity).toBe("unavailable");
+    expect(live.records[0]?.measurement).toBe("unavailable");
+  });
+
+  it("persists the legacy marker so deleted history stays unavailable across restarts", () => {
+    const once = decodeScanCache(JSON.parse(JSON.stringify(v3Document())));
+    const again = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(once))));
+
+    expect(again.get("/deleted.jsonl")?.identity).toBe("unavailable");
+    expect(again.get("/deleted.jsonl")?.records[0]?.totals.outputTokens).toBe(50);
+  });
+
+  it("marks a freshly re-parsed entry declared so it can resume and enrich", () => {
+    const encoded = encodeScanCache(
+      cacheWith([["/live.jsonl", 9000, [record({ sessionId: "live-session" })]]]),
+    );
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
+
+    expect(decoded.get("/live.jsonl")?.identity).toBe("declared");
+  });
+});
+
+describe("predecessor v4 format policy", () => {
+  /**
+   * Generated verbatim by the ACTUAL predecessor writer (its own
+   * `parseClaudeLine` + `encodeScanCache`) at pin
+   * `e4f36af5ef279246bcb0f8463adeee8a09b7bde1`, which emitted 15-field v4 rows
+   * with no completeness/validity/key-scope metadata. Rows: `{input_tokens:10}`
+   * (partial under the current parser), `{input_tokens:null}` (invalid), and
+   * `{input_tokens:4, output_tokens:6}` (complete). Generation receipt: a
+   * one-off test in a worktree at that pin parsed those three Claude lines and
+   * encoded one entry, then printed the document below unchanged.
+   */
+  const PINNED_PREDECESSOR_DOCUMENT = {
+    version: 4,
+    models: ["claude-fable-5"],
+    sessions: ["session-pred"],
+    files: {
+      "/pred/live.jsonl": {
+        s: 120,
+        m: 500,
+        p: "claude",
+        r: [
+          [
+            1785578400000,
+            0,
+            0,
+            10,
+            0,
+            0,
+            0,
+            0,
+            "msg_partial:req_msg_partial",
+            null,
+            "req_msg_partial",
+            "msg_partial",
+            null,
+            0,
+            0,
+          ],
+          [
+            1785578400000,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "msg_invalid:req_msg_invalid",
+            null,
+            "req_msg_invalid",
+            "msg_invalid",
+            null,
+            0,
+            0,
+          ],
+          [
+            1785578400000,
+            0,
+            0,
+            4,
+            0,
+            0,
+            6,
+            0,
+            "msg_valid:req_msg_valid",
+            null,
+            "req_msg_valid",
+            "msg_valid",
+            null,
+            0,
+            0,
+          ],
+        ],
+        t: [],
+        o: 120,
+        gl: 64,
+        gh: 12345,
+        cs: null,
+      },
+    },
+  };
+
+  it("decodes a predecessor row as partial, never as a silent complete", () => {
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(PINNED_PREDECESSOR_DOCUMENT)));
+    const entry = decoded.get("/pred/live.jsonl")!;
+
+    // Identity is asserted, so only the numeric-quality axis marks the entry as
+    // stale. Reading the missing completeness as `complete` would promote an
+    // unknown measurement; `partial` is the conservative floor.
+    expect(entry.identity).toBe("declared");
+    expect(entry.qualityMetadata).toBe("predecessor");
+    expect(entry.records.map((row) => row.measurement)).toEqual([
+      "observed",
+      "observed",
+      "observed",
+    ]);
+    expect(entry.records.map((row) => row.measurementCompleteness)).toEqual([
+      "partial",
+      "partial",
+      "partial",
+    ]);
+    // Totals are retained, not discarded for the format change.
+    expect(entry.records[0]?.totals.uncachedInputTokens).toBe(10);
+  });
+
+  it("marks a current-format entry qualityMetadata declared", () => {
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
+    const decoded = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
+
+    expect(decoded.get("/a.jsonl")?.qualityMetadata).toBe("declared");
+  });
+
+  it("treats a row with no appended fields as predecessor", () => {
+    // A hand-built or truncated row that stops after the scope code is exactly
+    // the predecessor shape and must be treated the same way.
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
+    const truncated = {
+      ...encoded,
+      files: {
+        "/a.jsonl": {
+          ...encoded.files["/a.jsonl"]!,
+          r: [encoded.files["/a.jsonl"]!.r[0]!.slice(0, 15)],
+        },
+      },
+    };
+
+    const entry = decodeScanCache(JSON.parse(JSON.stringify(truncated))).get("/a.jsonl")!;
+
+    expect(entry.qualityMetadata).toBe("predecessor");
+    expect(entry.records[0]?.measurementCompleteness).toBe("partial");
+  });
+
+  it("marks a legacy v3 entry predecessor as well as identity-unavailable", () => {
+    const decoded = decodeScanCache(
+      JSON.parse(
+        JSON.stringify({
+          version: 3,
+          models: ["claude-fable-5"],
+          sessions: ["deleted-session"],
+          files: {
+            "/deleted.jsonl": {
+              s: 100,
+              m: 500,
+              p: "claude",
+              r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, "msg_d:", null]],
+              t: [],
+              o: 90,
+              gl: 64,
+              gh: 11,
+              cs: null,
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(decoded.get("/deleted.jsonl")?.identity).toBe("unavailable");
+    expect(decoded.get("/deleted.jsonl")?.qualityMetadata).toBe("predecessor");
   });
 });
 

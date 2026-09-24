@@ -17,13 +17,58 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
+import type {
+  CodexScanState,
+  DedupeKeyScope,
+  UsageMeasurement,
+  UsageMeasurementCompleteness,
+  UsageObservationScope,
+  UsageRecord,
+} from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
-const USAGE_SCAN_CACHE_VERSION = 3 as const;
+// v4: records carry native request/message/prompt ids. Without the bump, warm
+// v3 entries would silently report those levels as unsupported until the file
+// next changed. The v4 row later gained validity/completeness and dedupe-key
+// scope fields appended after the first v4 rows; the version deliberately
+// stayed 4 because those fields are additive.
+//
+// Supported-format policy:
+// - v3 documents are still *read*. The scan retains measured records from
+//   transcripts that have since been deleted, and those cannot be re-parsed, so
+//   discarding a v3 cache would destroy 90 days of history. A v3 row decodes
+//   with its native ids and measurement presence explicitly `unavailable`.
+// - A v4 row written by the predecessor (15 fields, no quality metadata)
+//   decodes conservatively: completeness is `partial`, never `complete`, and
+//   the entry is `qualityMetadata: "predecessor"` so an extant file is cold
+//   re-parsed once. No row is discarded for the format change.
+// - Only v1/v2 (no parse position, different fork semantics) are rejected.
+const USAGE_SCAN_CACHE_VERSION = 4 as const;
+const LEGACY_USAGE_SCAN_CACHE_VERSION = 3 as const;
+
+/** Index of the first appended post-v4 field (completeness code) in a row. */
+const POST_V4_FIELD_INDEX = 15;
+
+/**
+ * Whether a cache entry's rows still carry their native ids and measurement
+ * presence. A `v3` entry erased both; the projection must report them as
+ * unavailable rather than as a measured zero or an absent id.
+ */
+export type ScanCacheIdentity = "declared" | "unavailable";
+
+/**
+ * Whether a cache entry's rows carry the current numeric quality metadata
+ * (validity/completeness and dedupe-key scope, appended after the first v4
+ * rows). Native-id availability alone does not prove that: a `15`-field v4 row
+ * written before that metadata existed has identity `declared` but no
+ * completeness, so reading it as complete would silently promote an unknown
+ * measurement. Such an entry is `predecessor`: its retained rows are treated as
+ * partial, and an extant file is cold re-parsed once to enrich it.
+ */
+export type ScanCacheQualityMetadata = "declared" | "predecessor";
 
 export interface CachedFile {
   readonly size: number;
@@ -38,6 +83,17 @@ export interface CachedFile {
    */
   readonly tailRecords: readonly UsageRecord[];
   readonly position: TranscriptParsePosition;
+  /**
+   * `unavailable` for a legacy row whose ids/presence were erased. Callers must
+   * not resume such an entry: a cold re-parse is the only way to enrich it.
+   */
+  readonly identity: ScanCacheIdentity;
+  /**
+   * `predecessor` for an entry whose rows omit the current quality metadata.
+   * Callers must not serve it warm or resume it: the numeric quality is
+   * unasserted, so a cold re-parse is the only way to establish completeness.
+   */
+  readonly qualityMetadata: ScanCacheQualityMetadata;
 }
 
 export type ScanCache = Map<string, CachedFile>;
@@ -58,7 +114,57 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  providerRequestId: string | null,
+  providerMessageId: string | null,
+  promptId: string | null,
+  measurementCode: number,
+  scopeCode: number,
+  /** Appended after the first v4 rows; absent means `complete` when observed. */
+  completenessCode: number,
+  /** Appended after the first v4 rows; count of present-but-invalid fields. */
+  invalidTokenFields: number,
+  /** Appended after the first v4 rows; absent means `global`. */
+  dedupeKeyScopeCode: number,
 ];
+
+// `invalid` is appended last so the existing observed/empty/unavailable codes
+// keep their values and older v4 rows keep decoding.
+const MEASUREMENT_CODES: readonly UsageMeasurement[] = [
+  "observed",
+  "empty",
+  "unavailable",
+  "invalid",
+];
+const SCOPE_CODES: readonly UsageObservationScope[] = ["delta", "snapshot"];
+const COMPLETENESS_CODES: readonly UsageMeasurementCompleteness[] = ["complete", "partial"];
+const DEDUPE_KEY_SCOPE_CODES: readonly DedupeKeyScope[] = ["global", "source-local"];
+
+function encodeMeasurement(measurement: UsageMeasurement | undefined): number {
+  const index = MEASUREMENT_CODES.indexOf(measurement ?? "observed");
+  return index < 0 ? 0 : index;
+}
+
+function encodeScope(scope: UsageObservationScope | undefined): number {
+  const index = SCOPE_CODES.indexOf(scope ?? "delta");
+  return index < 0 ? 0 : index;
+}
+
+function encodeCompleteness(completeness: UsageMeasurementCompleteness | undefined): number {
+  const index = COMPLETENESS_CODES.indexOf(completeness ?? "complete");
+  return index < 0 ? 0 : index;
+}
+
+function encodeDedupeKeyScope(scope: DedupeKeyScope | undefined): number {
+  const index = DEDUPE_KEY_SCOPE_CODES.indexOf(scope ?? "global");
+  return index < 0 ? 0 : index;
+}
+
+function decodeCode<Value extends string>(
+  value: unknown,
+  codes: readonly Value[],
+): Value | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? codes[value] : undefined;
+}
 
 interface SerializedFile {
   readonly s: number;
@@ -73,6 +179,12 @@ interface SerializedFile {
   readonly gh: number;
   /** Codex reducer state at `o`; `null` for stateless providers. */
   readonly cs: CodexScanState | null;
+  /**
+   * `1` when this entry's rows predate native ids / measurement presence. Kept
+   * on the file so an erased-history entry stays `unavailable` across restarts
+   * until an extant file is cold re-parsed. Absent on a fresh entry.
+   */
+  readonly li?: number;
 }
 
 interface SerializedCache {
@@ -109,6 +221,14 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.totals.reasoningTokens,
     record.dedupeKey,
     record.reportedCostUsd,
+    record.providerRequestId ?? null,
+    record.providerMessageId ?? null,
+    record.promptId ?? null,
+    encodeMeasurement(record.measurement),
+    encodeScope(record.scope),
+    encodeCompleteness(record.measurementCompleteness),
+    record.invalidTokenFields ?? 0,
+    encodeDedupeKeyScope(record.dedupeKeyScope),
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -123,6 +243,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
       gl: entry.position.guardLength,
       gh: entry.position.guardHash,
       cs: entry.position.codexState,
+      ...(entry.identity === "unavailable" ? { li: 1 } : {}),
     };
   }
 
@@ -144,7 +265,15 @@ export function decodeScanCache(document: unknown): ScanCache {
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
-  if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
+  if (
+    root.version !== USAGE_SCAN_CACHE_VERSION &&
+    root.version !== LEGACY_USAGE_SCAN_CACHE_VERSION
+  ) {
+    return cache;
+  }
+  // A v3 document has no native ids or measurement presence anywhere; every
+  // entry it holds is erased-history. A v4 entry carries its own marker.
+  const legacyDocument = root.version === LEGACY_USAGE_SCAN_CACHE_VERSION;
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
@@ -162,10 +291,18 @@ export function decodeScanCache(document: unknown): ScanCache {
   const decodeRecords = (
     rows: readonly unknown[],
     provider: UsageProviderKind,
-  ): UsageRecord[] | null => {
+    legacy: boolean,
+  ): { records: UsageRecord[]; qualityDeclared: boolean } | null => {
     const records: UsageRecord[] = [];
+    // Every row must carry the appended post-v4 fields for the entry to be
+    // current. A 15-field row was written before completeness existed; the
+    // entry's numeric quality is then unasserted and must not be read as
+    // complete. Empty row lists are vacuously current: there is no measurement
+    // to promote.
+    let qualityDeclared = true;
     for (const row of rows) {
       if (!isRecordArray(row) || row.length < 10) return null;
+      if (row.length <= POST_V4_FIELD_INDEX) qualityDeclared = false;
       const [
         timestampMs,
         modelIndex,
@@ -178,6 +315,21 @@ export function decodeScanCache(document: unknown): ScanCache {
         dedupeKey,
         reportedCostUsd,
       ] = row as SerializedRecord;
+      // Appended in v4. Absent on a hand-built or truncated row, in which case
+      // the identity is simply not asserted rather than defaulted to a value.
+      const providerRequestId = row[10];
+      const providerMessageId = row[11];
+      const promptId = row[12];
+      // Appended after v4. A v3 or early-v4 row has no presence information, so
+      // a nonzero total proves a measurement while an all-zero row stays
+      // explicitly `unavailable` rather than being read as a measured zero.
+      const measurementCode = row[13];
+      const scopeCode = row[14];
+      // Appended after the first v4 rows: validity/completeness metadata. Absent
+      // on an older row, whose completeness is then unasserted (`partial`).
+      const completenessCode = row[15];
+      const invalidTokenFieldsRaw = row[16];
+      const dedupeKeyScopeCode = row[17];
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       if (
@@ -193,6 +345,31 @@ export function decodeScanCache(document: unknown): ScanCache {
         return null;
       }
 
+      const measurement: UsageMeasurement =
+        decodeCode(measurementCode, MEASUREMENT_CODES) ??
+        (uncached + cached + cacheCreation + output > 0 ? "observed" : "unavailable");
+      const scope: UsageObservationScope = decodeCode(scopeCode, SCOPE_CODES) ?? "delta";
+      // A row that omits the completeness code proves nothing about coverage,
+      // whether it is a legacy row (presence erased) or a predecessor v4 row
+      // (metadata predates the field). Default to `partial`, never `complete`:
+      // missing quality metadata must not be silently promoted to a measured
+      // complete observation. The current writer always emits the code, so this
+      // only applies to older rows.
+      const completeness: UsageMeasurementCompleteness | undefined =
+        measurement === "observed"
+          ? (decodeCode(completenessCode, COMPLETENESS_CODES) ?? "partial")
+          : undefined;
+      const invalidTokenFields =
+        typeof invalidTokenFieldsRaw === "number" &&
+        Number.isFinite(invalidTokenFieldsRaw) &&
+        invalidTokenFieldsRaw > 0
+          ? Math.trunc(invalidTokenFieldsRaw)
+          : 0;
+      const dedupeKeyScope: DedupeKeyScope | undefined = decodeCode(
+        dedupeKeyScopeCode,
+        DEDUPE_KEY_SCOPE_CODES,
+      );
+
       records.push({
         provider,
         timestampMs,
@@ -207,9 +384,25 @@ export function decodeScanCache(document: unknown): ScanCache {
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
+        // A v3 row cannot carry native ids; they are unavailable, not absent.
+        ...(legacy
+          ? {}
+          : {
+              ...(typeof providerRequestId === "string" ? { providerRequestId } : {}),
+              ...(typeof providerMessageId === "string" ? { providerMessageId } : {}),
+              ...(typeof promptId === "string" ? { promptId } : {}),
+            }),
+        measurement,
+        ...(completeness === undefined ? {} : { measurementCompleteness: completeness }),
+        ...(invalidTokenFields === 0 ? {} : { invalidTokenFields }),
+        // Legacy rows erased identity; keep that visible so the projection does
+        // not read an absent native id as a missing one.
+        ...(legacy ? { identityAvailable: false } : {}),
+        ...(dedupeKeyScope === undefined ? {} : { dedupeKeyScope }),
+        ...(scope === "delta" ? {} : { scope }),
       });
     }
-    return records;
+    return { records, qualityDeclared };
   };
 
   for (const [path, raw] of Object.entries(root.files)) {
@@ -240,22 +433,26 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (codexState === undefined) continue;
 
     const provider: UsageProviderKind = entry.p;
-    const records = decodeRecords(entry.r, provider);
-    const tailRecords = decodeRecords(entry.t, provider);
-    if (records === null || tailRecords === null) continue;
+    const legacy = legacyDocument || entry.li === 1;
+    const decodedRecords = decodeRecords(entry.r, provider, legacy);
+    const decodedTail = decodeRecords(entry.t, provider, legacy);
+    if (decodedRecords === null || decodedTail === null) continue;
 
     cache.set(path, {
       size: entry.s,
       mtimeMs: entry.m,
       provider,
-      records,
-      tailRecords,
+      records: decodedRecords.records,
+      tailRecords: decodedTail.records,
       position: {
         resumeOffset: entry.o,
         guardLength: entry.gl,
         guardHash: entry.gh,
         codexState,
       },
+      identity: legacy ? "unavailable" : "declared",
+      qualityMetadata:
+        decodedRecords.qualityDeclared && decodedTail.qualityDeclared ? "declared" : "predecessor",
     });
   }
 
