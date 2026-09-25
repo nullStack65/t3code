@@ -148,7 +148,14 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
             binding.runtimePayload,
           ),
         },
-        options,
+        {
+          ...options,
+          attribution: {
+            parentNativeSessionId: binding.parentNativeSessionId ?? null,
+            requestedRoute: binding.requestedRoute ?? null,
+            routeEvent: binding.routeEvent ?? null,
+          },
+        },
       )
       .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.upsert:upsert")));
   });
