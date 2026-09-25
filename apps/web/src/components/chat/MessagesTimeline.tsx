@@ -24,6 +24,11 @@ import {
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import type {
+  PostStartActivityAnchors,
+  PostStartConnectionState,
+} from "@t3tools/shared/postStartActivity";
+import { PostStartActivityNotice } from "./PostStartActivityNotice";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import {
   resolveWorkEntryToolPresentation,
@@ -411,6 +416,10 @@ interface MessagesTimelineProps {
   isPreparingWorktree?: boolean;
   isCompacting?: boolean;
   activeTurnStartedAt: string | null;
+  /** Current-turn provider activity anchors for the post-start silence notice. */
+  postStartActivityAnchors?: PostStartActivityAnchors | null;
+  /** Whether the active environment can currently be observed. */
+  postStartConnection?: PostStartConnectionState;
   /** Live bootstrap progress for this thread, or null when none is tracked. */
   worktreeSetup?: WorktreeSetupSnapshot | null;
   onCancelWorktreeSetup?: () => void;
@@ -488,6 +497,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isPreparingWorktree = false,
   isCompacting = false,
   activeTurnStartedAt,
+  postStartActivityAnchors = null,
+  postStartConnection = "live",
   agentPanelModel,
   onOpenAgents = NOOP_OPEN_AGENTS,
   listRef,
@@ -782,6 +793,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedWorkGroupIds: paintedExpandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
+        postStartActivityAnchors,
+        postStartConnection,
         turnDiffSummaries,
         supportsConversationRollback,
         liveAgentTaskIds,
@@ -805,6 +818,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     paintedExpandedWorkGroupIds,
     isWorking,
     activeTurnStartedAt,
+    postStartActivityAnchors,
+    postStartConnection,
     turnDiffSummaries,
     supportsConversationRollback,
     liveAgentTaskIds,
@@ -1724,6 +1739,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "thinking" ? <ThinkingTimelineRow /> : null}
+      {row.kind === "post-start-activity" ? (
+        <PostStartActivityNotice anchors={row.anchors} connection={row.connection} />
+      ) : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
       {row.kind === "queued-message" ? <QueuedMessageTimelineRow row={row} /> : null}
     </div>

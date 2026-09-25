@@ -32,6 +32,7 @@ import {
   shouldPreserveAssistantLineBreaks,
   type MessagesTimelineRow,
   type MessagesTimelineRowsProjection,
+  POST_START_ACTIVITY_ROW_ID,
   WORKTREE_SETUP_ROW_ID,
   workEntryDisplayLabel,
 } from "./MessagesTimeline.logic";
@@ -1125,6 +1126,54 @@ describe("deriveMessagesTimelineRows", () => {
       { id: "queued-message:q1", isNext: true, queuedMessage: { prompt: "first" } },
       { id: "queued-message:q2", isNext: false, queuedMessage: { prompt: "second" } },
     ]);
+  });
+
+  it("carries one post-start notice row only while a turn is observably active", () => {
+    const anchors = {
+      turnId: "turn-1",
+      active: true,
+      turnStartedAt: "2026-01-01T00:00:00Z",
+      lastProviderActivityAt: null,
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+      outstandingTool: null,
+      knownWait: null,
+    } as const;
+    const base = {
+      timelineEntries: [],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    } as const;
+
+    const working = deriveMessagesTimelineRows({ ...base, postStartActivityAnchors: anchors });
+    const noticeRow = working.find((row) => row.kind === "post-start-activity");
+    expect(noticeRow?.id).toBe(POST_START_ACTIVITY_ROW_ID);
+
+    // A settled turn clears the row instead of inheriting the old episode.
+    expect(
+      deriveMessagesTimelineRows({
+        ...base,
+        isWorking: false,
+        postStartActivityAnchors: anchors,
+      }).some((row) => row.kind === "post-start-activity"),
+    ).toBe(false);
+
+    // Background-only / terminal anchors never resurrect the warning.
+    expect(
+      deriveMessagesTimelineRows({
+        ...base,
+        postStartActivityAnchors: { ...anchors, active: false },
+      }).some((row) => row.kind === "post-start-activity"),
+    ).toBe(false);
+
+    // No anchors at all (another thread is painted) leaves the row out.
+    expect(
+      deriveMessagesTimelineRows({ ...base, postStartActivityAnchors: null }).some(
+        (row) => row.kind === "post-start-activity",
+      ),
+    ).toBe(false);
   });
 
   it("leads the worktree setup card with the working header", () => {
