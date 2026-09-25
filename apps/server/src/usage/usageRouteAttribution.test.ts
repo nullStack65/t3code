@@ -9,6 +9,7 @@ import type {
 } from "./usageAttribution.ts";
 import type { ExtractedSessionHistory } from "./usageAttributionSources.ts";
 import type { RouteEventMetadata } from "./routeMetadata.ts";
+import { decodeScanCache } from "./usageScanCache.ts";
 import { buildUsageRouteAttribution } from "./usageRouteAttribution.ts";
 import { totalTokens } from "./usageTranscripts.ts";
 
@@ -508,5 +509,192 @@ describe("durable history keeps #4 measurement and identity quality", () => {
     // or a fabricated `measured`.
     expect(child.usage).toBeNull();
     expect(child.quality).toBeNull();
+  });
+});
+
+describe("durable history preserves #4 zero and invalid quality", () => {
+  const CLAUDE_SESSION = "5a128faa-8253-489e-b935-6c08e8e670c0";
+  const ZERO_TOTALS: UsageTokenTotals = {
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+  };
+
+  function claudeBinding(): AttributionThreadBinding {
+    return binding({ provider: "claude", nativeSessionId: CLAUDE_SESSION });
+  }
+
+  function claudeHistory(): ExtractedSessionHistory {
+    return history({
+      providerName: "claudeAgent",
+      adapterKey: "claudeAgent",
+      nativeSessionId: CLAUDE_SESSION,
+      usageProvider: "claude",
+    });
+  }
+
+  // Regressions A-D from the R3-T3 restack brief. They prove the #6 route view
+  // is a faithful mirror of the #4 (M3D) measurement/identity quality axes and
+  // never promotes an unknown or invalid measurement to an exact one.
+
+  it("keeps an explicit measured zero as a measured zero, not missing (A)", () => {
+    const report = build({
+      records: [
+        record({
+          totals: ZERO_TOTALS,
+          costUsd: 0,
+          measurement: "observed",
+          measurementCompleteness: "complete",
+        }),
+      ],
+      bindings: [binding()],
+      history: [history()],
+    });
+
+    const session = sessionOf(report, DEEPSEEK_SESSION);
+    // A measured zero is present and complete; it is not the absence of a
+    // measurement, and it is not dropped.
+    expect(session.usage).not.toBeNull();
+    expect(session.usage!.totalTokens).toBe(0);
+    expect(session.quality?.measurement).toBe("measured");
+    expect(session.quality?.measurement).not.toBe("missing");
+  });
+
+  it("keeps an all-invalid eligible observation invalid, not missing or zero (B)", () => {
+    const report = build({
+      records: [
+        record({
+          totals: ZERO_TOTALS,
+          costUsd: 0,
+          measurement: "invalid",
+        }),
+      ],
+      bindings: [binding()],
+      history: [history()],
+    });
+
+    const session = sessionOf(report, DEEPSEEK_SESSION);
+    expect(session.quality?.measurement).toBe("invalid");
+    expect(session.quality?.measurement).not.toBe("missing");
+    expect(session.quality?.measurement).not.toBe("measured");
+    // The route view mirrors the base projection rather than recomputing it.
+    const baseSession = report.base.sessions.find((entry) => entry.sessionId === DEEPSEEK_SESSION)!;
+    expect(baseSession.measurementQuality).toBe("invalid");
+  });
+
+  it("does not promote predecessor-quality partial cache evidence to complete (C)", () => {
+    // A predecessor v4 shape: 15-field rows written before completeness metadata
+    // existed. The M3D decoder reads the missing metadata as `partial`, never
+    // `complete`; the route view must not undo that.
+    const predecessorDocument = {
+      version: 4,
+      models: ["claude-fable-5"],
+      sessions: [CLAUDE_SESSION],
+      files: {
+        "/pred/live.jsonl": {
+          s: 120,
+          m: 500,
+          p: "claude",
+          r: [
+            [
+              1_785_578_400_000,
+              0,
+              0,
+              10,
+              0,
+              0,
+              0,
+              0,
+              "msg_partial:req_msg_partial",
+              null,
+              "req_msg_partial",
+              "msg_partial",
+              null,
+              0,
+              0,
+            ],
+            [
+              1_785_578_400_000,
+              0,
+              0,
+              4,
+              0,
+              0,
+              6,
+              0,
+              "msg_valid:req_msg_valid",
+              null,
+              "req_msg_valid",
+              "msg_valid",
+              null,
+              0,
+              0,
+            ],
+          ],
+          t: [],
+          o: 120,
+          gl: 64,
+          gh: 12_345,
+          cs: null,
+        },
+      },
+    };
+
+    const cache = decodeScanCache(JSON.parse(JSON.stringify(predecessorDocument)));
+    const entry = cache.get("/pred/live.jsonl")!;
+    expect(entry.qualityMetadata).toBe("predecessor");
+    expect(entry.records.map((row) => row.measurementCompleteness)).toEqual(["partial", "partial"]);
+
+    const records = entry.records.map((row): AttributionUsageRecord => ({
+      provider: row.provider,
+      sessionId: row.sessionId,
+      model: row.model,
+      timestampMs: row.timestampMs,
+      totals: row.totals,
+      costUsd: row.reportedCostUsd ?? 0,
+      dedupeKey: row.dedupeKey,
+      sourceFingerprint: "/pred/live.jsonl",
+      ...(row.measurement === undefined ? {} : { measurement: row.measurement }),
+      ...(row.measurementCompleteness === undefined
+        ? {}
+        : { measurementCompleteness: row.measurementCompleteness }),
+      ...(row.invalidTokenFields === undefined
+        ? {}
+        : { invalidTokenFields: row.invalidTokenFields }),
+      ...(row.dedupeKeyScope === undefined ? {} : { dedupeKeyScope: row.dedupeKeyScope }),
+    }));
+
+    const report = build({
+      records,
+      bindings: [claudeBinding()],
+      history: [claudeHistory()],
+    });
+
+    const session = sessionOf(report, CLAUDE_SESSION);
+    // Totals are retained, but the measurement is a lower bound, never complete.
+    expect(session.usage).not.toBeNull();
+    expect(session.quality?.measurement).toBe("partial");
+    expect(session.quality?.measurement).not.toBe("measured");
+    expect(
+      report.base.sessions.find((entry) => entry.sessionId === CLAUDE_SESSION)?.measurementQuality,
+    ).toBe("partial");
+  });
+
+  it("keeps a history-only measured-provider identity at usage null / quality null (D)", () => {
+    const missingSession = "019f0000-0000-7000-8000-0000000000bb";
+    const report = build({
+      records: [],
+      bindings: [],
+      history: [history({ nativeSessionId: missingSession })],
+    });
+
+    const session = sessionOf(report, missingSession);
+    // The provider is known from durable history, but no usage was measured:
+    // unknown, never a measured zero and never a fabricated quality.
+    expect(session.provider).toBe("codex");
+    expect(session.usage).toBeNull();
+    expect(session.quality).toBeNull();
   });
 });
