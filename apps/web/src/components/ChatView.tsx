@@ -80,6 +80,10 @@ import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import { truncate } from "@t3tools/shared/String";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
+  derivePostStartActivityAnchors,
+  type PostStartKnownWait,
+} from "@t3tools/shared/postStartActivity";
+import {
   getTerminalLabel,
   nextTerminalId,
   resolveTerminalSessionLabel,
@@ -2106,6 +2110,27 @@ export default function ChatView(props: ChatViewProps) {
   const activeRunningTurnId =
     (activeThread?.session?.status === "running" ? activeThread.session.activeTurnId : null) ??
     (activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null);
+  // Post-start visibility: reduce the current turn's persisted events once per
+  // thread-data change; the notice row resolves this against the clock itself.
+  const postStartActivityAnchors = useMemo(() => {
+    if (!activeThread) return null;
+    const knownWait: PostStartKnownWait | null = activeThreadShell?.hasPendingApprovals
+      ? "approval"
+      : activeThreadShell?.hasPendingUserInput
+        ? "input"
+        : null;
+    return derivePostStartActivityAnchors({
+      activities: activeThread.activities ?? [],
+      latestTurn: activeLatestTurn,
+      session: activeThread.session ?? null,
+      knownWait,
+    });
+  }, [
+    activeThread,
+    activeLatestTurn,
+    activeThreadShell?.hasPendingApprovals,
+    activeThreadShell?.hasPendingUserInput,
+  ]);
   // Reading a finished thread clears the sidebar's Done badge. The visit is
   // stamped at the turn's completion time — not now/updatedAt — so it clears
   // exactly the completion the user is looking at: a wake or completion that
@@ -9902,6 +9927,10 @@ export default function ChatView(props: ChatViewProps) {
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
                 isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
                 activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
+                postStartActivityAnchors={
+                  paintOnlyDisplayedTimeline ? null : postStartActivityAnchors
+                }
+                postStartConnection={activeEnvironmentUnavailable ? "disconnected" : "live"}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetup}
                 {...(draftId ? { onWorktreeSetupWorkLocally } : {})}

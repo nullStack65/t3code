@@ -99,6 +99,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./postStartActivity": {
+      "types": "./src/postStartActivity.ts",
+      "import": "./src/postStartActivity.ts"
+    },
     "./favicon": {
       "types": "./src/favicon.ts",
       "import": "./src/favicon.ts"

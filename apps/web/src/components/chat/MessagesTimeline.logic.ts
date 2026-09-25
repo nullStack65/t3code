@@ -31,6 +31,10 @@ import {
 } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
+import type {
+  PostStartActivityAnchors,
+  PostStartConnectionState,
+} from "@t3tools/shared/postStartActivity";
 import {
   type MessageId,
   type OrchestrationLatestTurn,
@@ -313,6 +317,7 @@ export type TimelineLatestTurn = Pick<
 >;
 
 const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
+export const POST_START_ACTIVITY_ROW_ID = "post-start-activity-row";
 
 type ActivityEntry = Extract<TimelineEntry, { kind: "message" | "work" }>;
 
@@ -419,6 +424,15 @@ export type MessagesTimelineRow =
       kind: "thinking";
       id: string;
       createdAt: string | null;
+    }
+  | {
+      kind: "post-start-activity";
+      id: string;
+      createdAt: string | null;
+      /** Stable anchors; the notice resolves them against the live clock. */
+      anchors: PostStartActivityAnchors;
+      /** Whether the environment can be observed right now. */
+      connection: PostStartConnectionState;
     }
   | {
       kind: "worktree-setup";
@@ -946,6 +960,10 @@ export function deriveMessagesTimelineRows(input: {
   expandedWorkGroupIds?: ReadonlySet<string>;
   isWorking: boolean;
   activeTurnStartedAt: string | null;
+  /** Current-turn provider activity anchors for the silence notice. */
+  postStartActivityAnchors?: PostStartActivityAnchors | null | undefined;
+  /** Whether the environment can be observed right now. */
+  postStartConnection?: PostStartConnectionState | undefined;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   supportsConversationRollback: boolean;
   /** Task ids of subagents still working, used by the active tool indicator. */
@@ -1452,6 +1470,19 @@ export function deriveMessagesTimelineRows(input: {
       createdAt: input.activeTurnStartedAt,
     });
   }
+  // Post-start visibility: while the turn is live, carry one notice row that
+  // resolves "recent progress vs silence vs known wait" against the clock. It
+  // only renders once silence crosses the threshold, so the list does not
+  // churn while work is healthy.
+  if (input.isWorking && input.postStartActivityAnchors?.active) {
+    nextRows.push({
+      kind: "post-start-activity",
+      id: POST_START_ACTIVITY_ROW_ID,
+      createdAt: input.postStartActivityAnchors.turnStartedAt,
+      anchors: input.postStartActivityAnchors,
+      connection: input.postStartConnection ?? "live",
+    });
+  }
   const rows = attachTrailingToolGroupsToAssistant(nextRows);
   input.queuedMessages?.forEach((queuedMessage, index) => {
     rows.push({
@@ -1593,6 +1624,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return a.createdAt === (b as typeof a).createdAt;
     case "worktree-setup":
       return a.snapshot === (b as typeof a).snapshot;
+    case "post-start-activity":
+      return a.anchors === (b as typeof a).anchors;
 
     case "assistant-meta": {
       const bm = b as typeof a;
