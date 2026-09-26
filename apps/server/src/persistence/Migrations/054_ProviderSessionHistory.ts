@@ -7,13 +7,28 @@ import * as Effect from "effect/Effect";
  * `provider_session_runtime` keeps a single current `resume_cursor_json`. A
  * resume, fork, or model switch overwrites it, so earlier native sessions that
  * contributed to a thread become unrecoverable. This table records one row per
- * `(thread_id, provider_name, native_session_id)` so a thread can answer which
- * native sessions it used even after the cursor moved on. Repeated observations
- * of the same session only advance `last_seen_at`; they never replace a
- * different session's row.
+ * durable identity so a thread can answer which native sessions it used even
+ * after the cursor moved on. Repeated observations of the same identity only
+ * advance `last_seen_at`; they never replace a different session's row.
+ *
+ * Identity includes the configured provider instance, not just the provider
+ * name. Two instances of one driver can expose the same native session id on
+ * one thread (for example native OpenCode Go and a CLIProxyAPI loopback), and
+ * collapsing them would erase which instance produced the session. SQLite
+ * treats `NULL` as distinct in `UNIQUE`, so the instance is stored as a
+ * normalized non-null `provider_instance_key`: a trimmed instance id, or `""`
+ * for an unknown/null instance. `""` is a deterministic bucket, so two
+ * unknown-instance observations collapse to one row while a real instance
+ * stays distinct. The runtime writer computes the same key in JS via
+ * `normalizeProviderInstanceKey`.
  *
  * The backfill seeds the table from whatever cursor already exists so an
- * upgraded database does not start empty.
+ * upgraded database does not start empty. Its id selection mirrors the runtime
+ * `nativeSessionIdOf` semantics exactly: only a JSON text value that is
+ * non-empty after trimming is accepted, and the precedence `resume` →
+ * `threadId` → `sessionId` falls through to the next candidate on any absent,
+ * null, non-string, or blank value. A numeric/boolean/object cursor never
+ * becomes an id.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -24,13 +39,14 @@ export default Effect.gen(function* () {
       thread_id TEXT NOT NULL,
       provider_name TEXT NOT NULL,
       provider_instance_id TEXT,
+      provider_instance_key TEXT NOT NULL,
       adapter_key TEXT NOT NULL,
       native_session_id TEXT NOT NULL,
       parent_native_session_id TEXT,
       origin TEXT NOT NULL,
       first_seen_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
-      UNIQUE (thread_id, provider_name, native_session_id)
+      UNIQUE (thread_id, provider_name, provider_instance_key, native_session_id)
     )
   `;
 
@@ -44,6 +60,7 @@ export default Effect.gen(function* () {
       thread_id,
       provider_name,
       provider_instance_id,
+      provider_instance_key,
       adapter_key,
       native_session_id,
       parent_native_session_id,
@@ -55,6 +72,7 @@ export default Effect.gen(function* () {
       current.thread_id,
       current.provider_name,
       current.provider_instance_id,
+      COALESCE(NULLIF(TRIM(current.provider_instance_id), ''), ''),
       current.adapter_key,
       current.native_session_id,
       NULL,
@@ -68,11 +86,18 @@ export default Effect.gen(function* () {
         runtime.provider_instance_id,
         runtime.adapter_key,
         runtime.last_seen_at,
-        COALESCE(
-          json_extract(runtime.cursor, '$.resume'),
-          json_extract(runtime.cursor, '$.threadId'),
-          json_extract(runtime.cursor, '$.sessionId')
-        ) AS native_session_id
+        CASE
+          WHEN json_type(runtime.cursor, '$.resume') = 'text'
+            AND TRIM(json_extract(runtime.cursor, '$.resume')) <> ''
+          THEN TRIM(json_extract(runtime.cursor, '$.resume'))
+          WHEN json_type(runtime.cursor, '$.threadId') = 'text'
+            AND TRIM(json_extract(runtime.cursor, '$.threadId')) <> ''
+          THEN TRIM(json_extract(runtime.cursor, '$.threadId'))
+          WHEN json_type(runtime.cursor, '$.sessionId') = 'text'
+            AND TRIM(json_extract(runtime.cursor, '$.sessionId')) <> ''
+          THEN TRIM(json_extract(runtime.cursor, '$.sessionId'))
+          ELSE NULL
+        END AS native_session_id
       FROM (
         SELECT
           thread_id,
@@ -89,6 +114,5 @@ export default Effect.gen(function* () {
       ) AS runtime
     ) AS current
     WHERE current.native_session_id IS NOT NULL
-      AND current.native_session_id <> ''
   `;
 });

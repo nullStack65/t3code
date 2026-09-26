@@ -23,6 +23,8 @@ import type { ThreadPullRequestLinkSource, UsageProviderKind } from "@t3tools/co
 import type { AttributionPullRequestLink, AttributionThreadBinding } from "./usageAttribution.ts";
 import {
   isRouteEventKind,
+  normalizeEscalationReason,
+  normalizeProviderInstanceKey,
   normalizeRouteSelection,
   normalizeTaskStratum,
   readOptionalString,
@@ -378,6 +380,10 @@ export interface AttributionHistoryDiagnostics {
   readonly sessions: number;
   readonly bindings: number;
   readonly withParent: number;
+  /** Rows whose canonical identity repeated an earlier row and were merged. */
+  readonly duplicatesDropped: number;
+  /** Merged duplicate rows that disagreed on a non-null field (kept-first). */
+  readonly conflictingDuplicates: number;
   /** Durable identities for a provider T3 does not scan for usage. */
   readonly unsupportedProviderBindings: number;
   readonly malformed: number;
@@ -405,9 +411,16 @@ export function extractAttributionHistory(
     sessions: 0,
     bindings: 0,
     withParent: 0,
+    duplicatesDropped: 0,
+    conflictingDuplicates: 0,
     unsupportedProviderBindings: 0,
     malformed: 0,
   };
+  // Canonical identity is exactly what the table's unique key is: thread,
+  // provider, normalized provider instance, native session. A join that
+  // repeats a row must not become a second report, and two instances that
+  // share a native session id must stay distinct.
+  const byIdentity = new Map<string, number>();
 
   for (const row of rows) {
     const threadId = readOptionalString(row.threadId);
@@ -423,10 +436,40 @@ export function extractAttributionHistory(
       diagnostics.malformed += 1;
       continue;
     }
+    const identity = `${threadId}\u0000${providerName}\u0000${normalizeProviderInstanceKey(
+      row.providerInstanceId,
+    )}\u0000${nativeSessionId}`;
+    const existingIndex = byIdentity.get(identity);
+    if (existingIndex !== undefined) {
+      const existing = history[existingIndex]!;
+      diagnostics.duplicatesDropped += 1;
+      // Merge only monotonically: never let a duplicate erase a known value.
+      if (adapterKey !== existing.adapterKey) diagnostics.conflictingDuplicates += 1;
+      const parentNativeSessionId = readOptionalString(row.parentNativeSessionId);
+      if (existing.parentNativeSessionId === null && parentNativeSessionId !== null) {
+        diagnostics.withParent += 1;
+        history[existingIndex] = { ...existing, parentNativeSessionId };
+      }
+      const firstSeenAt = readOptionalString(row.firstSeenAt) ?? row.lastSeenAt;
+      history[existingIndex] = {
+        ...history[existingIndex]!,
+        firstSeenAt:
+          firstSeenAt < history[existingIndex]!.firstSeenAt
+            ? firstSeenAt
+            : history[existingIndex]!.firstSeenAt,
+        lastSeenAt:
+          row.lastSeenAt > history[existingIndex]!.lastSeenAt
+            ? row.lastSeenAt
+            : history[existingIndex]!.lastSeenAt,
+      };
+      continue;
+    }
+
     const usageProvider = usageProviderOf(providerName, adapterKey);
     const parentNativeSessionId = readOptionalString(row.parentNativeSessionId);
     diagnostics.sessions += 1;
     if (parentNativeSessionId !== null) diagnostics.withParent += 1;
+    byIdentity.set(identity, history.length);
     history.push({
       threadId,
       providerName,
@@ -465,6 +508,8 @@ export interface AttributionRouteEventDiagnostics {
   readonly declared: number;
   /** Automatic "what was requested" records with no classified kind. */
   readonly requests: number;
+  /** Request records whose stored selection disagreed with a later observation. */
+  readonly conflictingSelections: number;
   readonly malformed: number;
 }
 
@@ -486,6 +531,7 @@ export function extractAttributionRouteEvents(
     events: 0,
     declared: 0,
     requests: 0,
+    conflictingSelections: 0,
     malformed: 0,
   };
 
@@ -510,9 +556,11 @@ export function extractAttributionRouteEvents(
       effort: row.requestedEffort,
     });
     const kind = isRouteEventKind(rawKind) ? rawKind : null;
+    const selectionConflict = row.selectionConflict === 1;
     diagnostics.events += 1;
     if (kind === null) diagnostics.requests += 1;
     else diagnostics.declared += 1;
+    if (selectionConflict) diagnostics.conflictingSelections += 1;
     events.push({
       eventId,
       threadId,
@@ -523,7 +571,8 @@ export function extractAttributionRouteEvents(
       managerId: readOptionalString(row.managerId),
       agentId: readOptionalString(row.agentId),
       requested,
-      reason: readOptionalString(row.escalationReason),
+      reason: normalizeEscalationReason(row.escalationReason),
+      selectionConflict,
       recordedAt,
     });
   }

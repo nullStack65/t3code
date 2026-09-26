@@ -178,16 +178,27 @@ establish numeric metadata freshness; the two are separate axes.
 The current resume cursor is single-valued: a resume, fork, or model switch overwrites
 it, which previously left every earlier native session unattributable. Migration `054`
 adds `provider_session_history`, an append-only identity record keyed on
-`(thread_id, provider_name, native_session_id)`. `ProviderSessionRuntime.upsert` appends
-one row per distinct native session and only advances `last_seen_at` on a repeat, so a
-thread can answer "which sessions and models contributed" after the cursor moved on. The
-migration backfills the current cursor of an upgraded database, and a conflicting
-`onConflict: "ignore"` write appends nothing because that cursor was never applied.
+`(thread_id, provider_name, provider_instance_key, native_session_id)`. `provider_instance_key`
+is a normalized non-null string (a trimmed instance id, or `""` for an unknown/null
+instance), because SQLite treats `NULL` as distinct in a `UNIQUE` key; two instances of one
+driver that expose the same native session id on one thread therefore stay two rows instead
+of collapsing and erasing one instance. The runtime writer computes the key the same way,
+and the backfill mirrors the runtime `nativeSessionIdOf` precedence exactly — `resume`,
+then `threadId`, then `sessionId`, accepting only a non-empty JSON text value and falling
+through on absent, null, non-string, or blank candidates. The whole `ProviderSessionRuntime.upsert`
+is one SQLite transaction: the runtime cursor, the history row it implies, and the route
+events commit together or not at all.
 
-`parent_native_session_id` carries a true sub-agent parent when a caller knows it. T3
-does not yet persist OpenCode child session ids (they live only in the adapter's
-in-memory `relatedSessionIds` and its native event log), so a child identity stays
-distinguishable but its usage is `null` — unknown, never folded into the parent.
+A repeated observation of one identity only advances `last_seen_at`; it never replaces a
+different session's row, and a conflicting `onConflict: "ignore"` write appends nothing
+because that cursor was never applied. `extractAttributionHistory` de-duplicates its input
+by the same canonical identity, so a join that repeats a row cannot become a second report.
+
+`parent_native_session_id` carries a true sub-agent parent when a caller supplies one. T3
+does not yet persist OpenCode child session ids (they live only in the adapter's in-memory
+`relatedSessionIds` and its native event log), and no production caller sets this field yet,
+so a child identity is structurally supported and stays distinguishable but its usage is
+`null` — unknown, never folded into the parent.
 
 ## Requested versus observed, and experiment metadata
 
@@ -199,6 +210,14 @@ automatic "this is what was requested" record (`kind = null`) is distinguishable
 declared experiment/fallback/escalation event. It also carries the pre-execution task
 stratum, experiment/cohort id, readable manager/agent ids, and the escalation reason.
 
+The automatic request record is monotonically enrichable rather than first-write-wins: a
+later observation may fill a previously unknown/null requested field, a model-less
+recovery/stop/rollback write never erases a known value, and a conflicting non-null value is
+retained (first non-null wins) while `selection_conflict` is set to surface the
+disagreement. `escalation_reason` is a bounded lowercase code/slug, not free text; anything
+outside the allowlist length/charset is rejected rather than stored. Declared event ids are
+scoped by thread so a globally reused id cannot suppress another thread's event.
+
 Requested provider/model/effort are captured at session start from the model selection
 T3 was actually given. The observed model is read from measured usage records. The two are
 never copied into each other: a requested value is not evidence of what ran, and an
@@ -209,16 +228,24 @@ join key.
 
 [`usageRouteAttribution.ts`](../../apps/server/src/usage/usageRouteAttribution.ts)
 composes the base projection and adds this view: per-session requested/observed/experiment
-metadata, per-thread rollups, and identity diagnostics. Its usage rollup sums each session
-once, so associating a thread with several PRs cannot duplicate tokens. No prompts,
-responses, code, or tool bodies are stored anywhere in this path.
+metadata, per-session allocation and provider-instance identity, per-thread rollups, and
+identity diagnostics. A session bound to more than one thread is `ambiguous`; its usage is
+not duplicated onto each candidate thread but pooled once in the route view's `unallocated`
+bucket, so per-thread totals plus `unallocated` reconcile additively to each session's
+usage exactly once. No prompts, responses, code, or tool bodies are stored anywhere in this
+path.
 
 ## What still needs architecture approval
 
 The projection proves the join and the levels with fixtures. It does not choose a
-storage or transport for the result and registers no endpoint. Provider-instance identity
-is still not recoverable from a transcript scan; correlate that when the scan starts
-tagging files with the instance that produced them.
+storage or transport for the result and registers no endpoint. The two new tables have a
+tested write seam and extraction seam but no production read consumer yet. Only the
+automatic request record is written by a production caller; every declared kind and
+`parent_native_session_id` require a future agent-config/harness producer, so they are
+structurally supported and remain `null`/absent in practice today. Provider-instance
+identity is carried through the route view but is still not recoverable from a transcript
+scan; correlate that when the scan starts tagging files with the instance that produced
+them.
 
 `UsageProviderKind` is `claude | codex | grok`. OpenCode, Antigravity, and Cursor have a
 native cursor id but no transcript T3 scans, so they have no usage source here.
