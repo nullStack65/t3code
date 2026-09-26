@@ -155,6 +155,13 @@ The scan cache version is still `4`. Supported-format policy:
   coverage. Missing quality metadata is never silently promoted. The entry is marked
   `qualityMetadata: "predecessor"`, so an extant file is cold re-parsed once and then
   accepted warm. No row is discarded for the format change.
+- The freshness provenance is persisted on the entry (`lq`), not inferred from row
+  length. The encoder always rewrites rows to the current 18-field shape, so a
+  predecessor entry kept as a fallback (its transcript temporarily unreadable) would
+  otherwise decode as a freshly parsed, `declared` entry after the next save and be
+  served warm forever. `lq` is cleared only when a successful full parse replaces the
+  entry; a current parser's genuinely partial measurement carries its completeness
+  field and stays `declared`, so it does not re-parse on every scan.
 - Only `v1`/`v2` (no parse position, different fork semantics) are rejected.
 
 Warm-cache acceptance therefore requires both `identity: "declared"` (native ids and

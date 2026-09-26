@@ -183,6 +183,9 @@ describe("scan cache round trip", () => {
 
     expect(again.get("/deleted.jsonl")?.records[0]?.identityAvailable).toBe(false);
     expect(again.get("/deleted.jsonl")?.records[0]?.measurementCompleteness).toBe("partial");
+    // The quality provenance survives the save too, so an erased-history entry
+    // is not promoted to a declared measurement after a restart.
+    expect(again.get("/deleted.jsonl")?.qualityMetadata).toBe("predecessor");
   });
 
   it("drops an entry whose persisted parse state is corrupt", () => {
@@ -339,6 +342,7 @@ describe("legacy v3 cache history", () => {
 
     expect(again.get("/deleted.jsonl")?.identity).toBe("unavailable");
     expect(again.get("/deleted.jsonl")?.records[0]?.totals.outputTokens).toBe(50);
+    expect(again.get("/deleted.jsonl")?.qualityMetadata).toBe("predecessor");
   });
 
   it("marks a freshly re-parsed entry declared so it can resume and enrich", () => {
@@ -461,6 +465,39 @@ describe("predecessor v4 format policy", () => {
     const decoded = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
 
     expect(decoded.get("/a.jsonl")?.qualityMetadata).toBe("declared");
+  });
+
+  it("persists predecessor freshness across a save so it is not promoted on restart", () => {
+    // The encoder rewrites every row to the current 18-field shape, so a
+    // predecessor entry that is persisted (e.g. kept as a fallback while its
+    // transcript is unreadable) would decode as `declared` from row length
+    // alone and then be served warm forever, skipping the cold re-parse that
+    // asserts numeric quality.
+    const once = decodeScanCache(JSON.parse(JSON.stringify(PINNED_PREDECESSOR_DOCUMENT)));
+    expect(once.get("/pred/live.jsonl")?.qualityMetadata).toBe("predecessor");
+
+    const encoded = encodeScanCache(once);
+    expect(encoded.files["/pred/live.jsonl"]?.lq).toBe(1);
+
+    const again = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
+    expect(again.get("/pred/live.jsonl")?.qualityMetadata).toBe("predecessor");
+    expect(
+      again.get("/pred/live.jsonl")?.records.map((row) => row.measurementCompleteness),
+    ).toEqual(["partial", "partial", "partial"]);
+  });
+
+  it("leaves a current partial entry declared across a save so it can stay warm", () => {
+    // A legitimately partial measurement from the current parser carries the
+    // completeness field; it is not stale parser-format metadata and must not
+    // be marked predecessor or it would re-parse on every scan.
+    const encoded = encodeScanCache(
+      cacheWith([["/a.jsonl", 100, [record({ measurementCompleteness: "partial" })]]]),
+    );
+    expect(encoded.files["/a.jsonl"]?.lq).toBeUndefined();
+
+    const again = decodeScanCache(JSON.parse(JSON.stringify(encoded)));
+    expect(again.get("/a.jsonl")?.qualityMetadata).toBe("declared");
+    expect(again.get("/a.jsonl")?.records[0]?.measurementCompleteness).toBe("partial");
   });
 
   it("treats a row with no appended fields as predecessor", () => {

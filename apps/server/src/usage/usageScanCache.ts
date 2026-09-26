@@ -44,7 +44,10 @@ import type {
 // - A v4 row written by the predecessor (15 fields, no quality metadata)
 //   decodes conservatively: completeness is `partial`, never `complete`, and
 //   the entry is `qualityMetadata: "predecessor"` so an extant file is cold
-//   re-parsed once. No row is discarded for the format change.
+//   re-parsed once. No row is discarded for the format change. The marker is
+//   persisted on the file (`lq`) because the encoder rewrites rows to the
+//   current 18-field shape, so provenance cannot be recovered from row length
+//   after a save/restart.
 // - Only v1/v2 (no parse position, different fork semantics) are rejected.
 const USAGE_SCAN_CACHE_VERSION = 4 as const;
 const LEGACY_USAGE_SCAN_CACHE_VERSION = 3 as const;
@@ -185,6 +188,15 @@ interface SerializedFile {
    * until an extant file is cold re-parsed. Absent on a fresh entry.
    */
   readonly li?: number;
+  /**
+   * `1` when this entry's rows predate the current numeric quality metadata.
+   * Like `li`, it is a file-level provenance marker: the encoder rewrites every
+   * row to the current 18-field shape, so row length alone cannot tell a
+   * predecessor entry apart from a freshly parsed one after a persist. Kept on
+   * the file so a predecessor entry stays `predecessor` across restarts until a
+   * successful full parse replaces it. Absent on a fresh entry.
+   */
+  readonly lq?: number;
 }
 
 interface SerializedCache {
@@ -244,6 +256,11 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
       gh: entry.position.guardHash,
       cs: entry.position.codexState,
       ...(entry.identity === "unavailable" ? { li: 1 } : {}),
+      // Persist the freshness provenance, not just the row shape. The rows are
+      // always rewritten to the current 18-field form, so without this marker a
+      // predecessor entry would decode as `declared` after the first persist and
+      // be served warm forever, skipping the cold re-parse that asserts quality.
+      ...(entry.qualityMetadata === "predecessor" ? { lq: 1 } : {}),
     };
   }
 
@@ -451,8 +468,13 @@ export function decodeScanCache(document: unknown): ScanCache {
         codexState,
       },
       identity: legacy ? "unavailable" : "declared",
+      // `lq` records provenance the row shape cannot: the encoder always emits
+      // the current 18-field rows, so a persisted predecessor entry would
+      // otherwise decode as `declared` on the next start without any parse.
       qualityMetadata:
-        decodedRecords.qualityDeclared && decodedTail.qualityDeclared ? "declared" : "predecessor",
+        entry.lq === 1 || !decodedRecords.qualityDeclared || !decodedTail.qualityDeclared
+          ? "predecessor"
+          : "declared",
     });
   }
 
