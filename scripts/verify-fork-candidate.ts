@@ -380,7 +380,11 @@ function main(): void {
         authorizationGateExists: args.authorizationGateExists,
         packagedProvenance,
         inspectionEvidence,
-        requirePackagedProvenance: args.inspectProvenance,
+        // Promotion must never qualify bytes that were not inspected. Forcing
+        // this true (rather than defaulting to `args.inspectProvenance`) means
+        // `--promote --skip-provenance-inspection` still requires digest-bound
+        // evidence; it cannot skip the provenance gate by skipping extraction.
+        requirePackagedProvenance: true,
       })
     : verifyCandidate({
         manifest,

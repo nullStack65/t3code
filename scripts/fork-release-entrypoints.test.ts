@@ -607,6 +607,107 @@ itMac("inspects a real macOS DMG's app.asar provenance (real process)", async ()
   }
 });
 
+/** Digest-bound inspection evidence for a synthetic complete candidate. */
+function writePromotionEvidence(
+  candidateDir: string,
+  options: { readonly wrongDigest?: boolean } = {},
+): string {
+  const manifest = JSON.parse(
+    NodeFS.readFileSync(NodePath.join(candidateDir, "fork-release-manifest.json"), "utf8"),
+  ) as { assets: Array<{ name: string; sha256: string }> };
+  const digestFor = (name: string): string => {
+    const found = manifest.assets.find((asset) => asset.name === name);
+    if (found === undefined) throw new Error(`fixture is missing asset ${name}`);
+    return options.wrongDigest === true ? "0".repeat(64) : found.sha256;
+  };
+  const record = (platform: string, arch: string): Record<string, string> => ({
+    repository: "nullStack65/t3code",
+    sourceSha: SHA,
+    version: VERSION,
+    platform,
+    arch,
+  });
+  const installer = `T3-Code-${VERSION}-x64.exe`;
+  const evidence = {
+    schemaVersion: 1,
+    host: "r7-fixture",
+    records: {
+      windowsDesktop: record("win", "x64"),
+      windowsServerBundle: { name: "t3code-server", version: VERSION },
+      embeddedWsl: record("linux", "x64"),
+      windowsZip: record("win", "x64"),
+      linuxArchive: record("linux", "x64"),
+      macDmg: record("mac", "x64"),
+    },
+    digests: {
+      windowsDesktop: digestFor(installer),
+      windowsServerBundle: digestFor(installer),
+      embeddedWsl: digestFor(installer),
+      windowsZip: digestFor(`t3-${VERSION}-win32-x64.zip`),
+      linuxArchive: digestFor(`t3-${VERSION}-linux-x64.tar.gz`),
+      macDmg: digestFor(`T3-Code-${VERSION}-x64.dmg`),
+    },
+    embeddedWslEqualsStandalone: true,
+  };
+  const path = NodePath.join(
+    NodePath.dirname(candidateDir),
+    `evidence-${NodePath.basename(candidateDir)}.json`,
+  );
+  NodeFS.writeFileSync(path, `${JSON.stringify(evidence, null, 2)}\n`);
+  return path;
+}
+
+it("promotion cannot bypass required provenance via --skip-provenance-inspection (real process)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    writeCandidate(dir, { withReceipts: true });
+    const base = [
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--promote",
+      "--tag-target",
+      SHA,
+      "--latest-version",
+      "0.0.42",
+      "--authorization-gate-exists",
+      "true",
+      "--skip-provenance-inspection",
+    ];
+
+    // No inspection and no evidence: promotion must fail closed even though the
+    // caller asked to skip local extraction.
+    const blocked = runNode(base);
+    assert.equal(blocked.status, 1, blocked.stdout);
+    assert.include(blocked.stderr, "packaged provenance inspection is required");
+
+    // Digest-bound evidence satisfies the same gate: skipping extraction does
+    // not skip provenance when valid evidence is supplied.
+    const eligible = runNode([...base, "--inspection-evidence", writePromotionEvidence(dir)]);
+    assert.equal(eligible.status, 0, eligible.stderr);
+    assert.include(eligible.stdout, "Promotion checks passed");
+
+    // Evidence bound to the wrong bytes is still rejected.
+    const wrong = runNode([
+      ...base,
+      "--inspection-evidence",
+      writePromotionEvidence(dir, { wrongDigest: true }),
+    ]);
+    assert.equal(wrong.status, 1);
+    assert.match(wrong.stderr, /inspection evidence is bound to digest/);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("the source selector accepts a candidate-mode fork SHA (real process)", () => {
   const root = scratch();
   try {
