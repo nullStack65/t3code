@@ -73,6 +73,7 @@ import {
 import {
   ProviderAdapterRequestError,
   type ProviderAdapterError,
+  ProviderLaunchPreflightBlockedError,
   ProviderValidationError,
   ProviderWorkspaceMissingError,
 } from "../Errors.ts";
@@ -87,6 +88,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -257,6 +259,17 @@ export interface ProviderServiceLiveOptions {
    * test see whether a credential was requested at all.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
+  /**
+   * Sink for launch-preflight warnings, so they reach the user instead of only
+   * the server log. The composition root wires this to an existing
+   * user-visible transport (a thread activity append). Failures are swallowed.
+   */
+  readonly reportLaunchPreflightWarning?: (input: {
+    readonly threadId: ThreadId;
+    readonly cwd: string;
+    readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+    readonly message: string;
+  }) => Effect.Effect<void, never>;
 }
 
 interface TurnAnalyticsMetadata {
@@ -508,6 +521,61 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
+  const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
+
+  /**
+   * Runs the bounded launch preflight against the exact cwd a provider process
+   * is about to start in, before the caller's own workspace read. Warnings are
+   * surfaced through the existing log and the injected user-visible sink;
+   * blockers stop the launch with an actionable error.
+   */
+  const guardProviderLaunch = Effect.fn("ProviderService.guardProviderLaunch")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly cwd: string;
+  }) {
+    const result = yield* launchPreflight.run(input.cwd);
+    for (const warning of result.warnings) {
+      yield* Effect.logWarning(`launch preflight: ${warning.message}`, {
+        code: warning.code,
+        threadId: input.threadId,
+        cwd: input.cwd,
+      });
+      if (options?.reportLaunchPreflightWarning) {
+        yield* options
+          .reportLaunchPreflightWarning({
+            threadId: input.threadId,
+            cwd: input.cwd,
+            code: warning.code,
+            message: warning.message,
+          })
+          .pipe(Effect.catchCause(() => Effect.void));
+      }
+    }
+    const blocker = result.blockers[0];
+    if (blocker !== undefined) {
+      yield* Effect.logError(`launch preflight blocked provider launch: ${blocker.message}`, {
+        code: blocker.code,
+        threadId: input.threadId,
+        cwd: input.cwd,
+      });
+      if (options?.reportLaunchPreflightWarning) {
+        yield* options
+          .reportLaunchPreflightWarning({
+            threadId: input.threadId,
+            cwd: input.cwd,
+            code: blocker.code,
+            message: blocker.message,
+          })
+          .pipe(Effect.catchCause(() => Effect.void));
+      }
+      return yield* new ProviderLaunchPreflightBlockedError({
+        threadId: input.threadId,
+        cwd: input.cwd,
+        code: blocker.code,
+        detail: blocker.message,
+      });
+    }
+  });
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const timedOutNativeCompactions = new Set<ThreadId>();
@@ -1292,6 +1360,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
+      if (persistedCwd) {
+        yield* guardProviderLaunch({
+          threadId: input.binding.threadId,
+          cwd: persistedCwd,
+        });
+      }
+
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
         .startSession({
@@ -1508,6 +1583,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         if (effectiveCwd !== undefined) {
+          yield* guardProviderLaunch({ threadId, cwd: effectiveCwd });
           // Fail fast with an actionable error when the workspace folder is
           // gone (e.g. moved, deleted, or replaced by a plain file).
           // Otherwise every adapter surfaces this as a misleading "failed to
@@ -2447,8 +2523,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 export const ProviderServiceLive = Layer.effect(
   ProviderService.ProviderService,
   makeProviderService(),
-);
+).pipe(Layer.provide(LaunchPreflight.layer));
 
 export function makeProviderServiceLive(options?: ProviderServiceLiveOptions) {
-  return Layer.effect(ProviderService.ProviderService, makeProviderService(options));
+  return Layer.effect(ProviderService.ProviderService, makeProviderService(options)).pipe(
+    Layer.provide(LaunchPreflight.layer),
+  );
 }

@@ -34,6 +34,7 @@ import * as Scope from "effect/Scope";
 
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
+import * as LaunchPreflight from "./environment/LaunchPreflight.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -907,6 +908,7 @@ export const make = (options?: StartupOptions) =>
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+    const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
     const crypto = yield* Crypto.Crypto;
@@ -956,6 +958,41 @@ export const make = (options?: StartupOptions) =>
               environmentVariable: error.environmentVariable,
               cause: error.cause,
             }),
+          ),
+        ),
+      );
+
+      yield* Effect.logDebug("startup phase: running launch preflight");
+      yield* runStartupPhase(
+        "launch.preflight",
+        launchPreflight.run(serverConfig.cwd).pipe(
+          Effect.tap((result) =>
+            Effect.gen(function* () {
+              yield* Effect.forEach(
+                result.warnings,
+                (warning) =>
+                  Effect.logWarning(`launch preflight: ${warning.message}`, {
+                    code: warning.code,
+                    severity: warning.severity,
+                    cwd: serverConfig.cwd,
+                  }),
+                { discard: true },
+              );
+              yield* Effect.forEach(
+                result.blockers,
+                (blocker) =>
+                  Effect.logError(`launch preflight: ${blocker.message}`, {
+                    code: blocker.code,
+                    severity: blocker.severity,
+                    cwd: serverConfig.cwd,
+                  }),
+                { discard: true },
+              );
+            }),
+          ),
+          Effect.asVoid,
+          Effect.catchCause((cause) =>
+            Effect.logWarning("launch preflight failed to run", { cause }),
           ),
         ),
       );
@@ -1132,6 +1169,6 @@ export const make = (options?: StartupOptions) =>
   });
 
 export const layerWithOptions = (options?: StartupOptions) =>
-  Layer.effect(ServerRuntimeStartup, make(options));
+  Layer.effect(ServerRuntimeStartup, make(options)).pipe(Layer.provide(LaunchPreflight.layer));
 
 export const layer = layerWithOptions();
