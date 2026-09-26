@@ -46,6 +46,7 @@ import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/La
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
+import { ThreadPostStartActivityService } from "../ThreadPostStartActivity.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderRuntimeIngestionService,
@@ -1019,6 +1020,7 @@ export function runtimeEventToActivities(
 const make = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
+  const threadPostStartActivity = yield* ThreadPostStartActivityService;
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -2579,6 +2581,23 @@ const make = Effect.gen(function* () {
       }
 
       const activities = runtimeEventToActivities(activityEvent, taskTitle);
+      // Post-start visibility observes meaningful provider progress on the
+      // server clock. Persisted provider timestamps can stay pinned to a part
+      // or tool start (OpenCode text, running tools), so the shell needs an
+      // observation that actually advances while work continues.
+      const observedAt = DateTime.formatIso(yield* DateTime.now);
+      for (const activity of activities) {
+        threadPostStartActivity.recordActivity(thread.id, observedAt, activity);
+      }
+      if (
+        event.type === "content.delta" &&
+        event.payload.delta.length > 0 &&
+        (event.payload.streamKind === "assistant_text" ||
+          event.payload.streamKind === "reasoning_text" ||
+          event.payload.streamKind === "reasoning_summary_text")
+      ) {
+        threadPostStartActivity.recordContentProgress(thread.id, observedAt);
+      }
       yield* Effect.forEach(activities, (activity) =>
         providerCommandId(event, "thread-activity-append").pipe(
           Effect.flatMap((commandId) =>
@@ -2592,6 +2611,11 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+      // The turn is over: drop the live observation so the settled shell does
+      // not keep advertising provider progress.
+      if (isTerminalTurn || event.type === "session.exited") {
+        threadPostStartActivity.clearThread(thread.id);
+      }
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;

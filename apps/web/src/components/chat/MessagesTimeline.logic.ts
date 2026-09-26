@@ -1625,7 +1625,9 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "worktree-setup":
       return a.snapshot === (b as typeof a).snapshot;
     case "post-start-activity":
-      return a.anchors === (b as typeof a).anchors;
+      // Connection-only changes must produce a new row: row reuse otherwise
+      // keeps the stale disconnected/reconnected presentation.
+      return a.anchors === (b as typeof a).anchors && a.connection === (b as typeof a).connection;
 
     case "assistant-meta": {
       const bm = b as typeof a;

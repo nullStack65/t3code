@@ -180,6 +180,29 @@ describe("derivePostStartActivityAnchors", () => {
       ],
     });
     expect(anchors.outstandingTools).toEqual([]);
+    expect(anchors.lastToolCompletedAt).toBe(T(3 * MIN));
+  });
+
+  it("correlates the provider toolUseId alias and advances the call on progress", () => {
+    const aliased = anchorsFor({
+      activities: [
+        activity({
+          kind: "tool.started",
+          createdAt: T0,
+          turnId: TURN_ID,
+          payload: { toolUseId: "claude-tool-1", title: "Bash" },
+        }),
+        activity({
+          kind: "tool.progress",
+          createdAt: T(4 * MIN),
+          turnId: TURN_ID,
+          payload: { toolUseId: "claude-tool-1", toolName: "Bash", elapsedSeconds: 240 },
+        }),
+      ],
+    });
+    expect(aliased.outstandingTools.map((tool) => tool.toolCallId)).toEqual(["claude-tool-1"]);
+    expect(aliased.outstandingTool?.lastObservedAt).toBe(T(4 * MIN));
+    expect(aliased.lastProviderActivityAt).toBe(T(4 * MIN));
   });
 
   it("never fabricates tool completion from a terminal turn or closed connection", () => {
@@ -212,6 +235,70 @@ describe("derivePostStartActivityAnchors", () => {
     expect(anchors.lastProviderActivityAt).toBe(T(1 * MIN));
     expect(anchors.outstandingTools.map((tool) => tool.title)).toEqual(["current"]);
   });
+
+  it("observes the pending-start shape (starting session, no active turn, no latest turn)", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: null,
+      session: { status: "starting", activeTurnId: null },
+      pendingStartedAt: T0,
+    });
+    expect(anchors.active).toBe(true);
+    expect(anchors.turnId).toBeNull();
+    expect(anchors.turnStartedAt).toBe(T0);
+    // The submitted request time anchors the warning before any provider event.
+    expect(resolvePostStartActivity(anchors, Date.parse(T(5 * MIN))).status).toBe("quiet");
+  });
+
+  it("does not keep warning when the latest turn has already ended under a lagging session", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [turnTool("a", T0, "tool.started")],
+      latestTurn: { ...RUNNING_TURN, state: "completed", completedAt: T(2 * MIN) },
+      session: { status: "running", activeTurnId: TURN_ID },
+    });
+    expect(anchors.active).toBe(false);
+    expect(resolvePostStartActivity(anchors, Date.parse(T(60 * MIN))).status).toBe("inactive");
+  });
+
+  it("ignores usage-only task.progress rows", () => {
+    const anchors = anchorsFor({
+      activities: [
+        turnTool("a", T0, "tool.started", { title: "run" }),
+        activity({
+          kind: "task.progress",
+          createdAt: T(4 * MIN),
+          turnId: TURN_ID,
+          payload: { taskId: "t1", usageSnapshot: true, typedUsage: { inputTokens: 1 } },
+        }),
+      ],
+    });
+    expect(anchors.lastProviderActivityAt).toBe(T0);
+  });
+
+  it("merges live server-clock observation over persisted rows", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: T(4 * MIN),
+        lastToolCompletedAt: T(3 * MIN),
+        outstandingTools: [
+          {
+            toolCallId: "a",
+            title: "Bash",
+            itemType: null,
+            startedAt: T0,
+            lastObservedAt: T(4 * MIN),
+          },
+        ],
+      },
+    });
+    expect(anchors.lastProviderActivityAt).toBe(T(4 * MIN));
+    expect(anchors.lastToolCompletedAt).toBe(T(3 * MIN));
+    expect(anchors.outstandingTool?.lastObservedAt).toBe(T(4 * MIN));
+    expect(resolvePostStartActivity(anchors, Date.parse(T(4 * MIN + 1_000))).status).toBe("active");
+  });
 });
 
 describe("resolvePostStartActivity", () => {
@@ -228,7 +315,7 @@ describe("resolvePostStartActivity", () => {
     const atThreshold = resolvePostStartActivity(anchors, Date.parse(T(5 * MIN)));
     expect(atThreshold.status).toBe("quiet");
     expect(atThreshold.quietSinceAt).toBe(T0);
-    expect(atThreshold.episodeKey).toBe(`turn-1:${T0}`);
+    expect(atThreshold.episodeKey).toBe(`turn-1:${Date.parse(T0)}`);
   });
 
   it("carries the outstanding tool identity and its own age", () => {
@@ -315,8 +402,19 @@ describe("resolvePostStartActivity", () => {
     const future = anchorsFor({
       activities: [turnTool("a", T(10 * MIN), "tool.started")],
     });
-    // A future (clock-skewed) activity must not produce a negative age.
-    expect(resolvePostStartActivity(future, Date.parse(T(3 * MIN))).status).toBe("active");
+    // A future (clock-skewed) origin is an unsupported clock relationship, not
+    // freshness: report honest uncertainty instead of clamping it to "active".
+    const futureObservation = resolvePostStartActivity(future, Date.parse(T(3 * MIN)));
+    expect(futureObservation.status).toBe("unknown");
+    expect(futureObservation.lastProviderActivityAgeMs).toBeNull();
+
+    // A small skew within tolerance is still treated as recent, never negative.
+    const nearFuture = anchorsFor({
+      activities: [turnTool("a", "2026-01-01T00:00:30.000Z", "tool.started")],
+    });
+    const nearFutureObservation = resolvePostStartActivity(nearFuture, Date.parse(T0));
+    expect(nearFutureObservation.status).toBe("active");
+    expect(nearFutureObservation.lastProviderActivityAgeMs).toBe(0);
 
     const noOrigin = derivePostStartActivityAnchors({
       activities: [],
@@ -352,6 +450,19 @@ describe("resolvePostStartActivity", () => {
     expect(
       resolvePostStartActivity(anchors, Date.parse(T(2 * MIN)), { thresholdMs: MIN }).status,
     ).toBe("quiet");
+  });
+
+  it("canonicalizes equivalent-instants to one episode key regardless of offset", () => {
+    const zulu = anchorsFor({
+      activities: [turnTool("a", "2026-01-01T00:00:00.000Z", "tool.started")],
+    });
+    const offset = anchorsFor({
+      activities: [turnTool("a", "2026-01-01T05:00:00.000+05:00", "tool.started")],
+    });
+    const nowMs = Date.parse(T(6 * MIN));
+    expect(resolvePostStartActivity(offset, nowMs).episodeKey).toBe(
+      resolvePostStartActivity(zulu, nowMs).episodeKey,
+    );
   });
 
   it("keeps local and remote environments isolated by turn scoping", () => {

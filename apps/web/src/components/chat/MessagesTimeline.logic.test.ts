@@ -3734,6 +3734,41 @@ describe("computeStableMessagesTimelineRows", () => {
     expect(updated.result[0]).toBe(enrichedRow);
   });
 
+  it("reuses the cached post-start row only when connection is unchanged", () => {
+    const anchors = {
+      turnId: "turn-1",
+      active: true,
+      turnStartedAt: "2026-01-01T00:00:00Z",
+      lastProviderActivityAt: null,
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+      outstandingTool: null,
+      knownWait: null,
+    } as const;
+    const liveRow: MessagesTimelineRow = {
+      kind: "post-start-activity",
+      id: POST_START_ACTIVITY_ROW_ID,
+      createdAt: anchors.turnStartedAt,
+      anchors,
+      connection: "live",
+    };
+    const initial = computeStableMessagesTimelineRows([liveRow], {
+      byId: new Map(),
+      result: [],
+    });
+
+    // Same anchors object, connection changed: row reuse must not keep the
+    // stale live/disconnected presentation.
+    const disconnected: MessagesTimelineRow = { ...liveRow, connection: "disconnected" };
+    const updated = computeStableMessagesTimelineRows([disconnected], initial);
+    expect(updated).not.toBe(initial);
+    expect(updated.byId.get(POST_START_ACTIVITY_ROW_ID)).toBe(disconnected);
+
+    // Unchanged connection still reuses the row object.
+    const stable = computeStableMessagesTimelineRows([liveRow], initial);
+    expect(stable).toBe(initial);
+  });
+
   it.each(["", " \n"])("keeps Thinking after assistant content grows from %j", (text) => {
     const startedAt = "2026-01-01T00:00:00Z";
     const turnId = TurnId.make("turn-1");

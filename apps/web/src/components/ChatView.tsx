@@ -2112,6 +2112,10 @@ export default function ChatView(props: ChatViewProps) {
     (activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null);
   // Post-start visibility: reduce the current turn's persisted events once per
   // thread-data change; the notice row resolves this against the clock itself.
+  // The shell's live observation (server clock) advances on streaming text and
+  // tool heartbeats whose provider timestamps stay pinned to the start; a
+  // restarted or replayed server supplies none, so stored rows never fake
+  // resumed progress.
   const postStartActivityAnchors = useMemo(() => {
     if (!activeThread) return null;
     const knownWait: PostStartKnownWait | null = activeThreadShell?.hasPendingApprovals
@@ -2119,17 +2123,22 @@ export default function ChatView(props: ChatViewProps) {
       : activeThreadShell?.hasPendingUserInput
         ? "input"
         : null;
+    const live = activeThreadShell?.postStartActivity ?? null;
     return derivePostStartActivityAnchors({
       activities: activeThread.activities ?? [],
       latestTurn: activeLatestTurn,
       session: activeThread.session ?? null,
       knownWait,
+      pendingStartedAt: activeThreadShell?.latestUserMessageAt ?? null,
+      live,
     });
   }, [
     activeThread,
     activeLatestTurn,
     activeThreadShell?.hasPendingApprovals,
     activeThreadShell?.hasPendingUserInput,
+    activeThreadShell?.latestUserMessageAt,
+    activeThreadShell?.postStartActivity,
   ]);
   // Reading a finished thread clears the sidebar's Done badge. The visit is
   // stamped at the turn's completion time — not now/updatedAt — so it clears

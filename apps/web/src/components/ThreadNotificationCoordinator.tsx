@@ -5,10 +5,15 @@ import * as Option from "effect/Option";
 import {
   CircleAlertIcon,
   CircleCheckIcon,
+  ClockIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  derivePostStartActivityAnchors,
+  resolvePostStartActivity,
+} from "@t3tools/shared/postStartActivity";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironments } from "../state/environments";
@@ -106,6 +111,20 @@ function EnvironmentNotifications({
   const previous = useRef(
     new Map<ThreadId, { attention: string | null; completion: number | null }>(),
   );
+  // Post-start silence episodes already surfaced as an in-app toast. Keyed by
+  // environment+thread+episode so a resumed turn notifies again while a tick,
+  // remount or reconnect cannot replay the same episode.
+  const quietToastIds = useRef(new Map<string, string>());
+  // Episodes already surfaced. Kept separately from the open toast map so a
+  // disconnect, reconnect or preference change can close the toast without
+  // losing the "already notified" memory and replaying it.
+  const notifiedEpisodes = useRef(new Set<string>());
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (shell.status !== "live" || Option.isNone(shell.snapshot)) {
@@ -232,6 +251,96 @@ function EnvironmentNotifications({
     onNotification,
     shell,
   ]);
+
+  // Post-start silence: an unattended running thread whose provider has gone
+  // quiet past the conservative threshold raises one in-app toast per episode.
+  // The environment shell already carries the server-observed activity, so
+  // this warns about threads the user is not viewing, follows the existing
+  // in-app preference and navigation convention, and closes as the episode
+  // ends or notifications are turned off.
+  useEffect(() => {
+    // A quiet provider produces no shell updates, so the wall-clock state
+    // drives re-evaluation of the threshold.
+    const closeToasts = () => {
+      for (const toastId of quietToastIds.current.values()) toastManager.close(toastId);
+      quietToastIds.current.clear();
+    };
+    if (!inAppNotificationsEnabled || shell.status !== "live" || Option.isNone(shell.snapshot)) {
+      closeToasts();
+      return;
+    }
+    const seen = new Set<string>();
+    for (const thread of shell.snapshot.value.threads) {
+      if (thread.archivedAt !== null) continue;
+      const anchors = derivePostStartActivityAnchors({
+        activities: [],
+        latestTurn: thread.latestTurn,
+        session: thread.session,
+        knownWait: thread.hasPendingApprovals
+          ? "approval"
+          : thread.hasPendingUserInput
+            ? "input"
+            : null,
+        pendingStartedAt: thread.latestUserMessageAt,
+        live: thread.postStartActivity ?? null,
+      });
+      const observation = resolvePostStartActivity(anchors, nowMs);
+      if (observation.status !== "quiet" || observation.episodeKey === null) continue;
+      const key = `${environmentId}:${thread.id}:${observation.episodeKey}`;
+      seen.add(key);
+      if (notifiedEpisodes.current.has(key)) continue;
+      if (
+        document.visibilityState !== "visible" ||
+        !document.hasFocus() ||
+        (activeEnvironmentId === environmentId && activeThreadId === thread.id)
+      ) {
+        continue;
+      }
+      const toastId = toastManager.add({
+        type: "warning",
+        title: "No recent provider activity",
+        description: thread.title,
+        data: { hideCopyButton: true, leadingIcon: <ClockIcon aria-hidden className="size-4" /> },
+        actionProps: {
+          children: "Open thread",
+          onClick: () => {
+            toastManager.close(toastId);
+            void navigate({
+              to: "/$environmentId/$threadId",
+              params: { environmentId, threadId: thread.id },
+            });
+          },
+        },
+      });
+      notifiedEpisodes.current.add(key);
+      quietToastIds.current.set(key, toastId);
+    }
+    for (const key of notifiedEpisodes.current) {
+      if (seen.has(key)) continue;
+      const toastId = quietToastIds.current.get(key);
+      if (toastId !== undefined) {
+        toastManager.close(toastId);
+        quietToastIds.current.delete(key);
+      }
+      notifiedEpisodes.current.delete(key);
+    }
+  }, [
+    activeEnvironmentId,
+    activeThreadId,
+    environmentId,
+    inAppNotificationsEnabled,
+    navigate,
+    nowMs,
+    shell,
+  ]);
+
+  useEffect(
+    () => () => {
+      for (const toastId of quietToastIds.current.values()) toastManager.close(toastId);
+      quietToastIds.current.clear();
+    },
+    [],
+  );
 
   return null;
 }

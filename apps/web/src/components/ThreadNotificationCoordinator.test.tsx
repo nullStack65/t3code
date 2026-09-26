@@ -17,6 +17,12 @@ const state = vi.hoisted(() => ({
   approval: false,
   sessionError: false,
   turnError: false,
+  sessionRunning: false,
+  postStartActivity: null as null | {
+    lastProviderActivityAt: string | null;
+    lastToolCompletedAt: string | null;
+    outstandingTools: [];
+  },
   add: vi.fn(
     (_toast: { title: string; description: string; actionProps: { onClick: () => void } }) =>
       "toast-1",
@@ -40,7 +46,13 @@ vi.mock("@effect/atom-react", () => ({
           archivedAt: state.archivedAt,
           hasPendingUserInput: state.input,
           hasPendingApprovals: state.approval,
-          session: state.sessionError ? { status: "error" } : null,
+          session: state.sessionError
+            ? { status: "error" }
+            : state.sessionRunning
+              ? { status: "running", activeTurnId: "turn-1" }
+              : null,
+          postStartActivity: state.postStartActivity,
+          latestUserMessageAt: null,
           latestTurn: {
             turnId: "turn-1",
             state: state.turnError ? "error" : state.completedAt ? "completed" : "running",
@@ -109,9 +121,17 @@ beforeEach(() => {
     approval: false,
     sessionError: false,
     turnError: false,
+    sessionRunning: false,
+    postStartActivity: null,
   });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("window", new EventTarget());
+  const stubWindow = new EventTarget() as EventTarget & {
+    setInterval: typeof setInterval;
+    clearInterval: typeof clearInterval;
+  };
+  stubWindow.setInterval = globalThis.setInterval.bind(globalThis);
+  stubWindow.clearInterval = globalThis.clearInterval.bind(globalThis);
+  vi.stubGlobal("window", stubWindow);
   vi.stubGlobal("document", {
     get visibilityState() {
       return state.visible;
@@ -250,5 +270,60 @@ describe("thread notifications", () => {
       tag: "env-1:thread-1",
       silent: true,
     });
+  });
+
+  it("warns once per silence episode for an unattended running thread", async () => {
+    state.sessionRunning = true;
+    state.postStartActivity = {
+      lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "No recent provider activity" }),
+    );
+
+    // Another shell update within the same episode does not re-notify.
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+
+    // Provider progress resumes: the episode ends and the toast closes.
+    state.postStartActivity = {
+      lastProviderActivityAt: "2999-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    expect(state.close).toHaveBeenCalledWith("toast-1");
+  });
+
+  it("closes the silence toast when in-app notifications are disabled", async () => {
+    state.sessionRunning = true;
+    state.postStartActivity = {
+      lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+
+    state.inApp = false;
+    await render();
+    expect(state.close).toHaveBeenCalledWith("toast-1");
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not warn about a silent thread the user is viewing", async () => {
+    state.sessionRunning = true;
+    state.active.threadId = "thread-1";
+    state.postStartActivity = {
+      lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
   });
 });

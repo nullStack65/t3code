@@ -58,6 +58,7 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
+import * as ThreadPostStartActivity from "../ThreadPostStartActivity.ts";
 import {
   ProviderRuntimeIngestionLive,
   splitBufferedAssistantText,
@@ -328,6 +329,7 @@ describe("ProviderRuntimeIngestion", () => {
       // engine, and the snapshot query (reader).
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
       Layer.provideMerge(ThreadPlanProgress.layer),
+      Layer.provideMerge(ThreadPostStartActivity.layer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -1380,6 +1382,47 @@ describe("ProviderRuntimeIngestion", () => {
 
     await harness.drain();
     expect(await harness.readModel()).toEqual(initial);
+  });
+
+  it("observes assistant text on the server clock and exposes it on the shell", async () => {
+    const harness = await createHarness();
+    // A provider part timestamp pinned far in the past: the observation must
+    // use the server clock, not this value.
+    const providerStamp = "2020-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-post-start-text"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-obs"),
+      payload: { streamKind: "assistant_text", delta: "streaming" },
+    });
+    await harness.drain();
+
+    const observed = (await harness.readThreadShell()).postStartActivity?.lastProviderActivityAt;
+    expect(observed).toBeDefined();
+    expect(Date.parse(observed!)).toBeGreaterThan(Date.parse(providerStamp));
+
+    // Usage-only task metadata does not count as meaningful progress.
+    harness.advanceClock(60_000);
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-post-start-usage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2020-01-01T00:01:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-obs"),
+      payload: {
+        taskId: "task-1",
+        description: "Token usage",
+        typedUsage: { totalTokens: 10, inputTokens: 10 },
+      },
+    });
+    await harness.drain();
+    expect((await harness.readThreadShell()).postStartActivity?.lastProviderActivityAt).toBe(
+      observed,
+    );
   });
 
   it("maps canonical content delta/item completed into finalized assistant messages", async () => {

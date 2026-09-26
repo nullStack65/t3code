@@ -4,20 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import type { PostStartActivityAnchors } from "@t3tools/shared/postStartActivity";
 
-const state = vi.hoisted(() => ({
-  inApp: true,
-  add: vi.fn(() => "toast-1"),
-  close: vi.fn(),
-}));
-
-vi.mock("../../hooks/useSettings", () => ({
-  useClientSettings: (select: (settings: { inAppNotificationsEnabled: boolean }) => unknown) =>
-    select({ inAppNotificationsEnabled: state.inApp }),
-}));
-vi.mock("../ui/toast", () => ({
-  toastManager: { add: state.add, close: state.close },
-}));
-
 import { PostStartActivityNotice } from "./PostStartActivityNotice";
 
 const T0 = "2026-01-01T00:00:00.000Z";
@@ -65,21 +51,19 @@ describe("PostStartActivityNotice", () => {
       setInterval: globalThis.setInterval,
       clearInterval: globalThis.clearInterval,
     });
-    state.inApp = true;
-    state.add.mockClear();
-    state.close.mockClear();
   });
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
-  it("stays silent while activity is recent, then warns exactly at the threshold", () => {
+  it("stays informative while active, then warns exactly at the threshold", () => {
     vi.setSystemTime(T0_MS + THRESHOLD_MS - 1_000);
     let renderer!: ReactTestRenderer;
     act(() => {
       renderer = create(<PostStartActivityNotice anchors={anchors()} connection="live" />);
     });
+    expect(renderedText(renderer)).toContain("Provider active");
     expect(renderedText(renderer)).not.toContain("No provider activity observed");
 
     act(() => {
@@ -88,53 +72,44 @@ describe("PostStartActivityNotice", () => {
     expect(renderedText(renderer)).toContain(
       "No provider activity observed for over 5 minutes; this turn may still be working.",
     );
-    expect(state.add).toHaveBeenCalledTimes(1);
-
-    // Ticking further in the same episode does not re-notify.
-    act(() => {
-      vi.advanceTimersByTime(3_000);
-    });
-    expect(state.add).toHaveBeenCalledTimes(1);
   });
 
-  it("names an outstanding tool and clears when activity resumes", () => {
-    vi.setSystemTime(T0_MS + THRESHOLD_MS);
-    const quietAnchors = anchors({
-      outstandingTool: {
-        toolCallId: "call-1",
-        title: "npm test",
-        itemType: "command_execution",
-        startedAt: T0,
-        lastObservedAt: T0,
-      },
-      outstandingTools: [
-        {
-          toolCallId: "call-1",
-          title: "npm test",
-          itemType: "command_execution",
-          startedAt: T0,
-          lastObservedAt: T0,
-        },
-      ],
-    });
+  it("names an outstanding tool while active and when quiet", () => {
+    const tool = {
+      toolCallId: "call-1",
+      title: "npm test",
+      itemType: "command_execution",
+      startedAt: T0,
+      lastObservedAt: T0,
+    };
+    vi.setSystemTime(T0_MS + 2 * 60_000);
     let renderer!: ReactTestRenderer;
     act(() => {
-      renderer = create(<PostStartActivityNotice anchors={quietAnchors} connection="live" />);
-    });
-    expect(renderedText(renderer)).toContain("No activity from npm test");
-
-    // A resumed provider event moves the anchor and clears the warning.
-    const resumedAt = "2026-01-01T00:05:00.000Z";
-    act(() => {
-      renderer.update(
+      renderer = create(
         <PostStartActivityNotice
-          anchors={anchors({ lastProviderActivityAt: resumedAt })}
+          anchors={anchors({ outstandingTool: tool, outstandingTools: [tool] })}
           connection="live"
         />,
       );
     });
-    expect(renderedText(renderer)).not.toContain("No activity from npm test");
-    expect(state.close).toHaveBeenCalledWith("toast-1");
+    expect(renderedText(renderer)).toContain("Working: npm test");
+
+    act(() => {
+      vi.setSystemTime(T0_MS + 8 * 60_000);
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(renderedText(renderer)).toContain("No activity from npm test");
+  });
+
+  it("shows a pending decision as an explained wait, not silence", () => {
+    vi.setSystemTime(T0_MS + 30 * 60_000);
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(
+        <PostStartActivityNotice anchors={anchors({ knownWait: "approval" })} connection="live" />,
+      );
+    });
+    expect(renderedText(renderer)).toContain("Waiting for your approval");
   });
 
   it("shows uncertainty instead of a stop when disconnected", () => {
@@ -144,6 +119,5 @@ describe("PostStartActivityNotice", () => {
       renderer = create(<PostStartActivityNotice anchors={anchors()} connection="disconnected" />);
     });
     expect(renderedText(renderer)).toContain("its state is unknown");
-    expect(state.add).not.toHaveBeenCalled();
   });
 });
