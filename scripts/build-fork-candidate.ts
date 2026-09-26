@@ -41,6 +41,7 @@ import {
   type CandidateTarget,
 } from "./lib/candidate-build-plan.ts";
 import { PACKAGED_INSPECTION_FILE_PREFIX } from "./lib/fork-release-manifest.ts";
+import { stageResourceMonitor } from "./lib/resource-monitor-staging.ts";
 
 type Phase = "target" | "aggregate";
 type SourceMode = "public" | "candidate";
@@ -213,16 +214,6 @@ function assertSource(args: Args): void {
   );
 }
 
-function stageResourceMonitor(args: Args): void {
-  const target = NodePath.join(args.resourceMonitorDir, "linux-x64");
-  NodeFS.mkdirSync(target, { recursive: true });
-  NodeFS.copyFileSync(
-    NodePath.join("native/resource-monitor/target/release/t3-resource-monitor"),
-    NodePath.join(target, "t3-resource-monitor"),
-  );
-  console.log(`Staged resource monitor into ${target}`);
-}
-
 function buildPlan(args: Args): ReadonlyArray<CandidatePlanStep> {
   return planCandidateBuild({
     target: args.target,
@@ -318,12 +309,18 @@ function main(): void {
   // Install once, then build; never abort the whole run for one optional step.
   for (const step of buildSteps) {
     try {
-      if (step.id === "resource-monitor" && args.target === "linux") {
-        run(step, args);
-        stageResourceMonitor(args);
-        continue;
-      }
       run(step, args);
+      // The CLI archive consumes the helper from `<resourceMonitorDir>/<key>/`,
+      // so stage it for every target whose plan builds one from source. The
+      // `win` route stages `win32-x64/t3-resource-monitor.exe`; staging only
+      // Linux left the Windows `cli-archive` step without its required input.
+      if (step.id === "resource-monitor" && (args.target === "linux" || args.target === "win")) {
+        const staged = stageResourceMonitor({
+          target: args.target,
+          resourceMonitorDir: args.resourceMonitorDir,
+        });
+        console.log(`Staged resource monitor into ${NodePath.dirname(staged.destination)}`);
+      }
     } catch (error) {
       if (!args.keepGoing) throw error;
       console.error(`step '${step.id}' failed; preserving completed outputs and continuing.`);
