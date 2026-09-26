@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Stages over plain files in a temp fixture.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

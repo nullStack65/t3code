@@ -66,6 +66,39 @@ stages each target's artifacts into the shared directory, and freezes the
 complete candidate with the same `verify-fork-candidate.ts` the workflow uses. It
 never invents a native acceptance receipt.
 
+### Local/draft promotion handoff (no CI run)
+
+The workflow's `publish` job consumes a `fork-release-candidate` **CI run** and is
+unreachable without an authorized runner. `scripts/promote-fork-candidate.ts` is
+the small documented local handoff for a candidate frozen on disk. It reuses
+`verify-fork-candidate.ts --promote` for the byte-level checks (complete asset
+set, current hashes, native receipts, digest-bound inspection evidence, tag
+target, no-overwrite, version ordering, approval-gate existence) and adds only
+fork-main eligibility and candidate-specific approval. It never rebuilds.
+
+It defaults to a **read-only dry run**:
+
+```sh
+# Read-only preflight: verify the frozen candidate, check fork-main eligibility,
+# release/tag conflicts and the approval gate, then print the exact
+# `gh release create` command without running it.
+node scripts/promote-fork-candidate.ts --candidate-dir "<shared candidate dir>" \
+  --version 0.0.43 --sha <full-sha> \
+  --native-receipts fork-native-receipts.json \
+  --inspection-evidence "<dir>/fork-inspection-evidence-win.json,<dir>/fork-inspection-evidence-mac.json"
+
+# Inspect an existing release's required-asset completeness (read-only), for
+# example the incomplete draft 395230248:
+node scripts/promote-fork-candidate.ts --inspect-release 395230248 --version 0.0.43
+```
+
+Publication requires all of: an ancestor-of-`main` SHA, the complete asset set
+with current hashes, real `fork-native-receipts.json`, digest-bound packaged
+inspections, a conflict-free `v<version>` tag, and
+`--execute --approve <frozen manifest sha256>` naming the exact frozen bytes.
+`--preflight-json` and `--gh-bin`/`--gh-prefix` substitute clearly-labeled
+fixtures for the live read-only probes and the publication command in tests.
+
 ### Transfer and aggregation
 
 The three machines produce native outputs; gather them into one directory keyed
