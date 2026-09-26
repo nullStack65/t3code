@@ -85,6 +85,7 @@ function routeEvent(overrides: Partial<RouteEventMetadata> = {}): RouteEventMeta
     agentId: "T3",
     requested: { provider: "openai", model: "gpt-6-luna", effort: "high" },
     reason: null,
+    selectionConflict: false,
     recordedAt: "2026-09-23T09:00:00.000Z",
     ...overrides,
   };
@@ -696,5 +697,116 @@ describe("durable history preserves #4 zero and invalid quality", () => {
     expect(session.provider).toBe("codex");
     expect(session.usage).toBeNull();
     expect(session.quality).toBeNull();
+  });
+});
+
+describe("route-view allocation and provider-instance identity", () => {
+  const THREAD_1 = "thread-amb-1";
+  const THREAD_2 = "thread-amb-2";
+
+  it("does not double count one measured session bound to two threads", () => {
+    const report = build({
+      records: [record({ sessionId: DEEPSEEK_SESSION })],
+      bindings: [
+        binding({ threadId: THREAD_1 }),
+        binding({ threadId: THREAD_2, providerInstanceId: "codex-secondary" }),
+      ],
+      history: [history({ threadId: THREAD_1 }), history({ threadId: THREAD_2 })],
+    });
+
+    const session = sessionOf(report, DEEPSEEK_SESSION);
+    expect(session.allocation).toBe("ambiguous");
+    expect(session.threadId).toBeNull();
+    expect(session.boundThreadIds).toEqual([THREAD_1, THREAD_2]);
+    expect(report.identity.ambiguousSessions).toBe(1);
+
+    // Neither candidate thread receives the ambiguous session's usage, but both
+    // remain visible as (empty) threads because the bindings name them.
+    for (const threadId of [THREAD_1, THREAD_2]) {
+      const thread = report.threads.find((entry) => entry.threadId === threadId);
+      expect(thread).toBeDefined();
+      expect(thread!.usage.totalTokens).toBe(0);
+      expect(thread!.sessionLabels).toEqual([]);
+    }
+
+    // Global reconciliation is additive exactly once: per-thread totals plus
+    // the unallocated bucket equal the single measured session usage.
+    const sessionTotal = session.usage!.totalTokens;
+    const threadSum = report.threads.reduce((sum, thread) => sum + thread.usage.totalTokens, 0);
+    expect(threadSum + report.unallocated.totalTokens).toBe(sessionTotal);
+    expect(report.unallocated.totalTokens).toBe(sessionTotal);
+    expect(report.limitations.some((line) => line.includes("unallocated"))).toBe(true);
+  });
+
+  it("counts a uniquely bound session once in per-thread totals", () => {
+    const report = build({
+      records: [record({ sessionId: DEEPSEEK_SESSION })],
+      bindings: [binding()],
+      history: [history()],
+    });
+
+    const session = sessionOf(report, DEEPSEEK_SESSION);
+    expect(session.allocation).toBe("unallocated");
+    const thread = report.threads.find((entry) => entry.threadId === THREAD)!;
+    expect(thread.usage.totalTokens).toBe(session.usage!.totalTokens);
+    expect(report.unallocated.totalTokens).toBe(0);
+  });
+
+  it("exposes all provider instances that produced one session", () => {
+    const report = build({
+      records: [record({ sessionId: DEEPSEEK_SESSION })],
+      bindings: [
+        binding({ providerInstanceId: "codex-default" }),
+        binding({ providerInstanceId: "codex-secondary" }),
+      ],
+      history: [
+        history({ providerInstanceId: "codex-default" }),
+        history({ providerInstanceId: "codex-secondary" }),
+      ],
+    });
+
+    const session = sessionOf(report, DEEPSEEK_SESSION);
+    expect(session.providerInstanceIds).toEqual(["codex-default", "codex-secondary"]);
+  });
+
+  it("keeps two provider instances of one unmeasured session distinct", () => {
+    const report = build({
+      history: [
+        history({
+          usageProvider: null,
+          providerName: "opencode",
+          adapterKey: "opencode",
+          providerInstanceId: "opencode-go",
+        }),
+        history({
+          usageProvider: null,
+          providerName: "opencode",
+          adapterKey: "opencode",
+          providerInstanceId: "cliproxy-loopback",
+        }),
+      ],
+    });
+
+    const sessions = report.sessions.filter((entry) => entry.sessionId === DEEPSEEK_SESSION);
+    expect(sessions).toHaveLength(2);
+    expect(
+      sessions
+        .flatMap((entry) => entry.providerInstanceIds)
+        .toSorted((left, right) => left.localeCompare(right)),
+    ).toEqual(["cliproxy-loopback", "opencode-go"]);
+    expect(sessions.every((entry) => entry.usage === null && entry.provider === null)).toBe(true);
+  });
+
+  it("surfaces a selection conflict carried by the selected route event", () => {
+    const report = build({
+      records: [record({ sessionId: DEEPSEEK_SESSION })],
+      bindings: [binding()],
+      history: [history()],
+      routeEvents: [routeEvent({ kind: null, selectionConflict: true, eventId: "req-conflict" })],
+    });
+
+    const session = sessionOf(report, DEEPSEEK_SESSION);
+    expect(session.routeSelectionConflict).toBe(true);
+    expect(report.identity.conflictingSelections).toBe(1);
   });
 });

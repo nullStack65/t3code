@@ -25,6 +25,7 @@ import type { UsageProviderKind } from "@t3tools/contracts";
 
 import {
   buildUsageAttribution,
+  type AttributionAllocation,
   type AttributionIdentityQuality,
   type AttributionPullRequestLink,
   type AttributionQuality,
@@ -38,6 +39,7 @@ import {
 import type { ExtractedSessionHistory } from "./usageAttributionSources.ts";
 import {
   hasRouteSelectionValue,
+  normalizeProviderInstanceKey,
   type RouteEventKind,
   type RouteEventMetadata,
   type RouteSelectionMetadata,
@@ -95,6 +97,19 @@ export interface SessionRouteReport {
    * usage was measured for this identity (so there is no measurement to qualify).
    */
   readonly quality: SessionRouteQuality | null;
+  /**
+   * Base allocation evidence, carried so the route view cannot drop it. In
+   * particular `ambiguous` marks a session bound to more than one thread; such
+   * a session's usage is never duplicated onto each candidate thread.
+   */
+  readonly allocation: AttributionAllocation;
+  /** Threads this identity is bound to, from the base binding evidence. */
+  readonly boundThreadIds: readonly string[];
+  /**
+   * Configured provider-instance identities that produced this session.
+   * Provider-instance identity is never erased from the report.
+   */
+  readonly providerInstanceIds: readonly string[];
   readonly parentSessionId: string | null;
   readonly requested: RouteSelectionMetadata | null;
   readonly requestedQuality: RouteSelectionQuality;
@@ -109,13 +124,19 @@ export interface SessionRouteReport {
   readonly managerId: string | null;
   readonly agentId: string | null;
   readonly escalationReason: string | null;
+  /** `true` when the selected request record carried a selection conflict. */
+  readonly routeSelectionConflict: boolean;
 }
 
 export interface ThreadRouteReport {
   readonly threadId: string;
   readonly sessionLabels: readonly string[];
   readonly models: readonly string[];
-  /** Additive over this thread's sessions; misses nothing, double counts nothing. */
+  /**
+   * Additive over sessions uniquely bound to this thread. A session bound to
+   * more than one thread is `ambiguous` and is not summed here; its usage is
+   * pooled once in `UsageRouteAttribution.unallocated`.
+   */
   readonly usage: AttributionTotals;
   readonly pullRequestKeys: readonly string[];
   readonly experimentIds: readonly string[];
@@ -129,6 +150,10 @@ export interface RouteIdentityDiagnostics {
   readonly agentIds: readonly string[];
   readonly sessionsWithRouteMetadata: number;
   readonly sessionsWithParent: number;
+  /** Sessions bound to more than one thread; their usage is not per-thread. */
+  readonly ambiguousSessions: number;
+  /** Request records whose stored selection disagreed with a later observation. */
+  readonly conflictingSelections: number;
 }
 
 export interface UsageRouteAttribution {
@@ -138,6 +163,12 @@ export interface UsageRouteAttribution {
   readonly base: UsageAttribution;
   readonly sessions: readonly SessionRouteReport[];
   readonly threads: readonly ThreadRouteReport[];
+  /**
+   * Usage held in no single thread: sessions that are `ambiguous` (bound to
+   * more than one thread) or `unallocated` (no thread). It is additive once
+   * with the per-thread totals, never duplicated into each candidate thread.
+   */
+  readonly unallocated: AttributionTotals;
   readonly routeEvents: readonly RouteEventMetadata[];
   readonly identity: RouteIdentityDiagnostics;
   readonly limitations: readonly string[];
@@ -216,14 +247,6 @@ export function buildUsageRouteAttribution(
   for (const session of base.sessions) {
     baseByKey.set(sessionKey(session.provider, session.sessionId), session);
   }
-  // Thread(s) a session is bound to, for sessions that have no history row.
-  const threadsByKey = new Map<string, string[]>();
-  for (const binding of input.bindings) {
-    const key = sessionKey(binding.provider, binding.nativeSessionId);
-    const threads = threadsByKey.get(key) ?? [];
-    if (!threads.includes(binding.threadId)) threads.push(binding.threadId);
-    threadsByKey.set(key, threads);
-  }
 
   const declaredByThread = new Map<string, RouteEventMetadata[]>();
   const requestsByThread = new Map<string, RouteEventMetadata[]>();
@@ -240,10 +263,28 @@ export function buildUsageRouteAttribution(
   const sessionReports: SessionRouteReport[] = [];
   const consumedBaseKeys = new Set<string>();
 
+  const unionSorted = (left: readonly string[], right: Iterable<string>): string[] =>
+    sortedUnique([...left, ...right]);
+
+  const routeEventFields = (selected: RouteEventMetadata | null) =>
+    ({
+      requested: selected?.requested ?? null,
+      requestedQuality: (selected?.requested ?? null) === null ? "unknown" : "declared",
+      routeEventKind: selected?.kind ?? null,
+      taskStratum: selected?.taskStratum ?? "unknown",
+      experimentId: selected?.experimentId ?? null,
+      managerId: selected?.managerId ?? null,
+      agentId: selected?.agentId ?? null,
+      escalationReason: selected?.reason ?? null,
+      routeSelectionConflict: selected?.selectionConflict ?? false,
+    }) as const;
+
   const reportForBase = (
     session: AttributionSessionReport,
     threadId: string | null,
     parentSessionId: string | null,
+    boundThreadIds: readonly string[],
+    providerInstanceIds: readonly string[],
   ): SessionRouteReport => {
     const selected = selectRouteEvent(
       session.sessionId,
@@ -251,7 +292,6 @@ export function buildUsageRouteAttribution(
       declaredByThread,
       requestsByThread,
     );
-    const requested = selected?.requested ?? null;
     const actualModel = session.models.length === 1 ? (session.models[0] ?? null) : null;
     return {
       provider: session.provider,
@@ -267,61 +307,126 @@ export function buildUsageRouteAttribution(
         recordIdentity: session.recordIdentity,
         conflict: session.conflict,
       },
+      allocation: session.allocation,
+      boundThreadIds,
+      providerInstanceIds,
       parentSessionId,
-      requested,
-      requestedQuality: requested === null ? "unknown" : "declared",
+      ...routeEventFields(selected),
       actualProvider: session.provider,
       actualModel,
       actualEffort: null,
       actualEffortQuality: "unsupported",
-      routeEventKind: selected?.kind ?? null,
-      taskStratum: selected?.taskStratum ?? "unknown",
-      experimentId: selected?.experimentId ?? null,
-      managerId: selected?.managerId ?? null,
-      agentId: selected?.agentId ?? null,
-      escalationReason: selected?.reason ?? null,
     };
   };
 
-  // 1. Every durable identity, including providers T3 cannot measure. An
-  //    unmeasured identity reports a null total, never a zero.
-  for (const entry of input.history) {
-    const key =
-      entry.usageProvider === null ? null : sessionKey(entry.usageProvider, entry.nativeSessionId);
-    const baseSession = key === null ? undefined : baseByKey.get(key);
-    if (key !== null) consumedBaseKeys.add(key);
-    if (baseSession !== undefined) {
-      sessionReports.push(reportForBase(baseSession, entry.threadId, entry.parentNativeSessionId));
-      continue;
-    }
+  /**
+   * A durable identity for a provider T3 cannot measure (OpenCode, a
+   * CLIProxyAPI loopback, ...). Its usage is `null` — unknown, never zero — and
+   * its provider-instance identity is preserved rather than erased.
+   */
+  const reportForUnmeasured = (
+    entry: ExtractedSessionHistory,
+    threadId: string | null,
+    boundThreadIds: readonly string[],
+    providerInstanceIds: readonly string[],
+  ): SessionRouteReport => {
     const selected = selectRouteEvent(
       entry.nativeSessionId,
-      entry.threadId,
+      threadId,
       declaredByThread,
       requestsByThread,
     );
-    const requested = selected?.requested ?? null;
-    sessionReports.push({
+    return {
       provider: entry.usageProvider,
       sessionId: entry.nativeSessionId,
-      threadId: entry.threadId,
+      threadId,
       models: [],
       usage: null,
       quality: null,
+      allocation: "unallocated",
+      boundThreadIds,
+      providerInstanceIds,
       parentSessionId: entry.parentNativeSessionId,
-      requested,
-      requestedQuality: requested === null ? "unknown" : "declared",
+      ...routeEventFields(selected),
       actualProvider: null,
       actualModel: null,
       actualEffort: null,
       actualEffortQuality: "unsupported",
-      routeEventKind: selected?.kind ?? null,
-      taskStratum: selected?.taskStratum ?? "unknown",
-      experimentId: selected?.experimentId ?? null,
-      managerId: selected?.managerId ?? null,
-      agentId: selected?.agentId ?? null,
-      escalationReason: selected?.reason ?? null,
-    });
+    };
+  };
+
+  // Group measured history by base session identity (provider + native id) so a
+  // session observed on two threads yields one report. Provider-instance ids
+  // are merged, never dropped, and the thread set decides ambiguity.
+  interface MeasuredHistoryGroup {
+    readonly first: ExtractedSessionHistory;
+    readonly threadIds: Set<string>;
+    readonly instanceIds: Set<string>;
+    parent: string | null;
+  }
+  const measuredHistory = new Map<string, MeasuredHistoryGroup>();
+  const unmeasuredHistory = new Map<string, ExtractedSessionHistory>();
+  for (const entry of input.history) {
+    if (entry.usageProvider !== null) {
+      const key = sessionKey(entry.usageProvider, entry.nativeSessionId);
+      const group = measuredHistory.get(key) ?? {
+        first: entry,
+        threadIds: new Set<string>(),
+        instanceIds: new Set<string>(),
+        parent: null,
+      };
+      group.threadIds.add(entry.threadId);
+      if (entry.providerInstanceId !== null) group.instanceIds.add(entry.providerInstanceId);
+      if (group.parent === null && entry.parentNativeSessionId !== null) {
+        group.parent = entry.parentNativeSessionId;
+      }
+      measuredHistory.set(key, group);
+    } else {
+      const key = `${entry.threadId}\u0000${entry.providerName}\u0000${normalizeProviderInstanceKey(
+        entry.providerInstanceId,
+      )}\u0000${entry.nativeSessionId}`;
+      if (!unmeasuredHistory.has(key)) unmeasuredHistory.set(key, entry);
+    }
+  }
+
+  // 1a. Measured durable identities, including providers T3 cannot measure. An
+  //     unmeasured identity reports a null total, never a zero.
+  for (const [baseKey, group] of measuredHistory) {
+    consumedBaseKeys.add(baseKey);
+    const baseSession = baseByKey.get(baseKey);
+    if (baseSession !== undefined) {
+      const boundThreadIds = unionSorted(baseSession.boundThreadIds, group.threadIds);
+      const threadId = boundThreadIds.length === 1 ? boundThreadIds[0]! : null;
+      sessionReports.push(
+        reportForBase(
+          baseSession,
+          threadId,
+          group.parent,
+          boundThreadIds,
+          unionSorted(baseSession.providerInstanceIds, group.instanceIds),
+        ),
+      );
+      continue;
+    }
+    // A measured-provider history row with no matching base slot: usage unknown.
+    const boundThreadIds = [...group.threadIds].toSorted();
+    const threadId = boundThreadIds.length === 1 ? boundThreadIds[0]! : null;
+    sessionReports.push(
+      reportForUnmeasured(group.first, threadId, boundThreadIds, [...group.instanceIds].toSorted()),
+    );
+  }
+
+  // 1b. Unmeasured durable identities: each row is its own history
+  //     contribution and its provider instance is preserved.
+  for (const entry of unmeasuredHistory.values()) {
+    sessionReports.push(
+      reportForUnmeasured(
+        entry,
+        entry.threadId,
+        [entry.threadId],
+        entry.providerInstanceId === null ? [] : [entry.providerInstanceId],
+      ),
+    );
   }
 
   // 2. Sessions the base projection knows but history did not name (for
@@ -329,9 +434,10 @@ export function buildUsageRouteAttribution(
   for (const session of base.sessions) {
     const key = sessionKey(session.provider, session.sessionId);
     if (consumedBaseKeys.has(key)) continue;
-    const threads = threadsByKey.get(key) ?? [];
-    const threadId = threads.length === 1 ? (threads[0] ?? null) : null;
-    sessionReports.push(reportForBase(session, threadId, null));
+    const threadId = session.boundThreadIds.length === 1 ? session.boundThreadIds[0]! : null;
+    sessionReports.push(
+      reportForBase(session, threadId, null, session.boundThreadIds, session.providerInstanceIds),
+    );
   }
 
   sessionReports.sort((left, right) =>
@@ -353,6 +459,10 @@ export function buildUsageRouteAttribution(
   const threadIds = new Set<string>();
   for (const session of sessionReports)
     if (session.threadId !== null) threadIds.add(session.threadId);
+  // Every thread that appears in the binding evidence, even if all of its
+  // sessions are ambiguous, so a candidate thread is visible with zero usage
+  // rather than silently disappearing.
+  for (const binding of input.bindings) threadIds.add(binding.threadId);
   for (const threadId of declaredByThread.keys()) threadIds.add(threadId);
   for (const threadId of requestsByThread.keys()) threadIds.add(threadId);
 
@@ -393,6 +503,15 @@ export function buildUsageRouteAttribution(
       };
     });
 
+  // 4. Usage held in no single thread is pooled exactly once. An ambiguous
+  //    session (bound to two threads) is never summed into either candidate.
+  let unallocated = ZERO;
+  for (const session of sessionReports) {
+    if (session.threadId === null && session.usage !== null) {
+      unallocated = addTotalsOf(unallocated, session.usage);
+    }
+  }
+
   const identity: RouteIdentityDiagnostics = {
     managerIds: sortedUnique(
       input.routeEvents.map((event) => event.managerId).filter((id): id is string => id !== null),
@@ -404,6 +523,9 @@ export function buildUsageRouteAttribution(
       (session) => session.routeEventKind !== null || hasRouteSelectionValue(session.requested),
     ).length,
     sessionsWithParent: sessionReports.filter((session) => session.parentSessionId !== null).length,
+    ambiguousSessions: sessionReports.filter((session) => session.allocation === "ambiguous")
+      .length,
+    conflictingSelections: input.routeEvents.filter((event) => event.selectionConflict).length,
   };
 
   return {
@@ -412,6 +534,7 @@ export function buildUsageRouteAttribution(
     base,
     sessions: sessionReports,
     threads,
+    unallocated,
     routeEvents: input.routeEvents.slice().sort(compareEvents),
     identity,
     limitations: limitationsFor(input, sessionReports),
@@ -435,6 +558,11 @@ function limitationsFor(
   if (sessions.some((session) => session.usage === null)) {
     limitations.push(
       "Some sessions have no measured usage. A null total is unknown, not a zero-cost success.",
+    );
+  }
+  if (sessions.some((session) => session.allocation === "ambiguous")) {
+    limitations.push(
+      "Some sessions are bound to more than one thread. Their usage is reported once in `unallocated`, never split or duplicated across candidate threads.",
     );
   }
   if (input.routeEvents.length === 0) {

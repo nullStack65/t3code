@@ -67,6 +67,42 @@ export function readOptionalString(value: unknown): string | null {
 }
 
 /**
+ * Normalized provider-instance identity key for durable session-history
+ * identity.
+ *
+ * SQLite `UNIQUE` treats `NULL` as distinct, so a nullable instance column
+ * cannot express "these are the same instance" — every null would be its own
+ * row. The key is therefore a non-null string: a trimmed instance id, or `""`
+ * for an unknown/null instance. `""` is a first-class bucket, not a wildcard,
+ * so two unknown-instance observations of one `(thread, provider, native
+ * session)` collapse to one row while a real instance stays distinct.
+ *
+ * The migration backfill computes the same value in SQL as
+ * `COALESCE(NULLIF(TRIM(provider_instance_id), ''), '')`.
+ */
+export function normalizeProviderInstanceKey(value: unknown): string {
+  const trimmed = readOptionalString(value);
+  return trimmed ?? "";
+}
+
+/**
+ * `escalation_reason` is bounded metadata, not a content channel. Only a
+ * low-cardinality code/slug is accepted: lowercase letters, digits, and
+ * `_`, `-`, `.`, `:` — no whitespace, no multiline payload. Anything else
+ * normalizes to `null` rather than being stored, so arbitrary prose cannot
+ * leak into the metadata carrier.
+ */
+export const MAX_ESCALATION_REASON_LENGTH = 64;
+const ESCALATION_REASON_PATTERN = /^[a-z0-9][a-z0-9_.:-]*$/;
+
+export function normalizeEscalationReason(value: unknown): string | null {
+  const trimmed = readOptionalString(value);
+  if (trimmed === null) return null;
+  if (trimmed.length > MAX_ESCALATION_REASON_LENGTH) return null;
+  return ESCALATION_REASON_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+/**
  * The provider/model/effort a route decision asked for. Each field is
  * independently optional: a caller that knows the model but not the effort
  * must leave the effort `null` rather than default it.
@@ -123,6 +159,13 @@ export interface RouteEventMetadata {
   readonly requested: RouteSelectionMetadata | null;
   /** Availability-fallback or quality-escalation reason, when declared. */
   readonly reason: string | null;
+  /**
+   * `true` when a later automatic request observation disagreed with an
+   * already-stored non-null requested field. The stored value is retained
+   * (first non-null wins) and the conflict is surfaced rather than silently
+   * overwritten.
+   */
+  readonly selectionConflict: boolean;
   readonly recordedAt: string;
 }
 
@@ -156,6 +199,8 @@ export interface PersistedRouteEventRow {
   readonly requestedModel: string | null;
   readonly requestedEffort: string | null;
   readonly escalationReason: string | null;
+  /** 0/1; `1` when a later request observation conflicted with the stored selection. */
+  readonly selectionConflict: number;
   readonly recordedAt: string;
 }
 

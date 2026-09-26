@@ -285,6 +285,64 @@ describe("extractAttributionHistory", () => {
     expect(diagnostics.sessions).toBe(1);
     expect(diagnostics.malformed).toBe(2);
   });
+
+  it("de-duplicates repeated rows by canonical identity", () => {
+    const row = historyRow();
+    const { history, bindings, diagnostics } = extractAttributionHistory([row, { ...row }]);
+
+    expect(history).toHaveLength(1);
+    expect(bindings).toHaveLength(1);
+    expect(diagnostics.duplicatesDropped).toBe(1);
+    expect(diagnostics.conflictingDuplicates).toBe(0);
+  });
+
+  it("keeps the same native session under two provider instances distinct", () => {
+    const { history, diagnostics } = extractAttributionHistory([
+      historyRow({
+        providerName: "opencode",
+        adapterKey: "opencode",
+        providerInstanceId: "opencode-go",
+      }),
+      historyRow({
+        providerName: "opencode",
+        adapterKey: "opencode",
+        providerInstanceId: "cliproxy-loopback",
+      }),
+    ]);
+
+    expect(history).toHaveLength(2);
+    expect(history.map((entry) => entry.providerInstanceId)).toEqual([
+      "opencode-go",
+      "cliproxy-loopback",
+    ]);
+    expect(diagnostics.duplicatesDropped).toBe(0);
+  });
+
+  it("collapses a null provider instance deterministically", () => {
+    const { history, diagnostics } = extractAttributionHistory([
+      historyRow({ providerInstanceId: null }),
+      historyRow({ providerInstanceId: null }),
+    ]);
+
+    expect(history).toHaveLength(1);
+    expect(diagnostics.duplicatesDropped).toBe(1);
+  });
+
+  it("merges duplicate rows monotonically and surfaces a conflicting field", () => {
+    const { history, diagnostics } = extractAttributionHistory([
+      historyRow({ lastSeenAt: "2026-09-23T09:10:00.000Z" }),
+      historyRow({
+        adapterKey: "codex-alt",
+        lastSeenAt: "2026-09-23T09:20:00.000Z",
+        parentNativeSessionId: "parent-x",
+      }),
+    ]);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]!.lastSeenAt).toBe("2026-09-23T09:20:00.000Z");
+    expect(history[0]!.parentNativeSessionId).toBe("parent-x");
+    expect(diagnostics.conflictingDuplicates).toBe(1);
+  });
 });
 
 describe("extractAttributionRouteEvents", () => {
@@ -302,6 +360,7 @@ describe("extractAttributionRouteEvents", () => {
       requestedModel: "gpt-6-luna",
       requestedEffort: "high",
       escalationReason: null,
+      selectionConflict: 0,
       recordedAt: "2026-09-23T09:00:00.000Z",
       ...overrides,
     };
@@ -322,6 +381,7 @@ describe("extractAttributionRouteEvents", () => {
         agentId: "T3",
         requested: { provider: "openai", model: "gpt-6-luna", effort: "high" },
         reason: null,
+        selectionConflict: false,
         recordedAt: "2026-09-23T09:00:00.000Z",
       },
     ]);
@@ -351,6 +411,37 @@ describe("extractAttributionRouteEvents", () => {
 
     expect(events).toHaveLength(1);
     expect(diagnostics.malformed).toBe(2);
+  });
+
+  it("rejects an unbounded escalation reason and keeps a bounded code", () => {
+    const { events } = extractAttributionRouteEvents([
+      routeEventRow({ escalationReason: "this is human prose with spaces and CAPS!" }),
+      routeEventRow({ eventId: "evt-2", escalationReason: "reviewer_blocker" }),
+      routeEventRow({ eventId: "evt-3", escalationReason: "x".repeat(200) }),
+    ]);
+
+    expect(events.map((event) => event.reason)).toEqual([null, "reviewer_blocker", null]);
+  });
+
+  it("surfaces a persisted selection conflict on a request record", () => {
+    const { events, diagnostics } = extractAttributionRouteEvents([
+      routeEventRow({ routeEventKind: null, selectionConflict: 1 }),
+    ]);
+
+    expect(events[0]!.selectionConflict).toBe(true);
+    expect(diagnostics.conflictingSelections).toBe(1);
+  });
+
+  it("normalizes a malformed requested route to null", () => {
+    const { events } = extractAttributionRouteEvents([
+      routeEventRow({
+        requestedProvider: 123 as unknown as string,
+        requestedModel: "",
+        requestedEffort: "   ",
+      }),
+    ]);
+
+    expect(events[0]!.requested).toBeNull();
   });
 });
 
@@ -614,6 +705,8 @@ describe("extractAttributionSnapshot", () => {
           sessions: 0,
           bindings: 0,
           withParent: 0,
+          duplicatesDropped: 0,
+          conflictingDuplicates: 0,
           unsupportedProviderBindings: 0,
           malformed: 0,
         },
@@ -622,6 +715,7 @@ describe("extractAttributionSnapshot", () => {
           events: 0,
           declared: 0,
           requests: 0,
+          conflictingSelections: 0,
           malformed: 0,
         },
         links: { rows: 3, links: 3, dismissed: 0, malformed: 0 },
@@ -660,6 +754,7 @@ describe("extractAttributionSnapshot", () => {
           requestedModel: "gpt-6-luna",
           requestedEffort: "high",
           escalationReason: null,
+          selectionConflict: 0,
           recordedAt: "2026-09-23T09:00:00.000Z",
         },
       ],

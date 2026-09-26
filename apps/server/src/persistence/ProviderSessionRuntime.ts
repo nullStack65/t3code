@@ -19,6 +19,8 @@ import {
 } from "@t3tools/contracts";
 
 import {
+  normalizeEscalationReason,
+  normalizeProviderInstanceKey,
   normalizeTaskStratum,
   type RouteEventInput,
   type RouteSelectionMetadata,
@@ -318,6 +320,7 @@ export const make = Effect.gen(function* () {
       threadId: Schema.String,
       providerName: Schema.String,
       providerInstanceId: Schema.NullOr(Schema.String),
+      providerInstanceKey: Schema.String,
       adapterKey: Schema.String,
       nativeSessionId: Schema.String,
       parentNativeSessionId: Schema.NullOr(Schema.String),
@@ -329,6 +332,7 @@ export const make = Effect.gen(function* () {
           thread_id,
           provider_name,
           provider_instance_id,
+          provider_instance_key,
           adapter_key,
           native_session_id,
           parent_native_session_id,
@@ -340,6 +344,7 @@ export const make = Effect.gen(function* () {
           ${entry.threadId},
           ${entry.providerName},
           ${entry.providerInstanceId},
+          ${entry.providerInstanceKey},
           ${entry.adapterKey},
           ${entry.nativeSessionId},
           ${entry.parentNativeSessionId},
@@ -347,7 +352,7 @@ export const make = Effect.gen(function* () {
           ${entry.seenAt},
           ${entry.seenAt}
         )
-        ON CONFLICT (thread_id, provider_name, native_session_id)
+        ON CONFLICT (thread_id, provider_name, provider_instance_key, native_session_id)
         DO UPDATE SET
           adapter_key = excluded.adapter_key,
           provider_instance_id = COALESCE(
@@ -366,25 +371,41 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  const recordRouteEventRow = SqlSchema.void({
-    Request: Schema.Struct({
-      eventId: Schema.String,
-      threadId: Schema.String,
-      nativeSessionId: Schema.NullOr(Schema.String),
-      routeEventKind: Schema.NullOr(Schema.String),
-      taskStratum: Schema.String,
-      experimentId: Schema.NullOr(Schema.String),
-      managerId: Schema.NullOr(Schema.String),
-      agentId: Schema.NullOr(Schema.String),
-      requestedProvider: Schema.NullOr(Schema.String),
-      requestedModel: Schema.NullOr(Schema.String),
-      requestedEffort: Schema.NullOr(Schema.String),
-      escalationReason: Schema.NullOr(Schema.String),
-      recordedAt: Schema.String,
-    }),
+  const RouteEventRowRequest = Schema.Struct({
+    eventId: Schema.String,
+    threadId: Schema.String,
+    nativeSessionId: Schema.NullOr(Schema.String),
+    routeEventKind: Schema.NullOr(Schema.String),
+    taskStratum: Schema.String,
+    experimentId: Schema.NullOr(Schema.String),
+    managerId: Schema.NullOr(Schema.String),
+    agentId: Schema.NullOr(Schema.String),
+    requestedProvider: Schema.NullOr(Schema.String),
+    requestedModel: Schema.NullOr(Schema.String),
+    requestedEffort: Schema.NullOr(Schema.String),
+    escalationReason: Schema.NullOr(Schema.String),
+    recordedAt: Schema.String,
+  });
+
+  /**
+   * Automatic request record. Unlike a declared event, it is not authoritative
+   * and is written on every status transition (start, recovery, stop,
+   * rollback), so the first write can carry less than a later one. It uses an
+   * explicit enrichment policy instead of `INSERT OR IGNORE`:
+   *
+   * - null → non-null: enrich (a later observation fills an unknown field);
+   * - equal → equal: idempotent, no change;
+   * - non-null → null: retain the known value (never erased by a model-less
+   *   recovery/stop/rollback write);
+   * - conflicting non-null → different non-null: retain the first value and
+   *   raise `selection_conflict` so the disagreement is surfaced, never
+   *   silently last-write-wins.
+   */
+  const enrichRequestRouteEventRow = SqlSchema.void({
+    Request: RouteEventRowRequest,
     execute: (event) =>
       sql`
-        INSERT OR IGNORE INTO thread_route_events (
+        INSERT INTO thread_route_events (
           event_id,
           thread_id,
           native_session_id,
@@ -397,6 +418,7 @@ export const make = Effect.gen(function* () {
           requested_model,
           requested_effort,
           escalation_reason,
+          selection_conflict,
           recorded_at
         )
         VALUES (
@@ -412,6 +434,83 @@ export const make = Effect.gen(function* () {
           ${event.requestedModel},
           ${event.requestedEffort},
           ${event.escalationReason},
+          0,
+          ${event.recordedAt}
+        )
+        ON CONFLICT (event_id)
+        DO UPDATE SET
+          requested_provider = CASE
+            WHEN thread_route_events.requested_provider IS NULL THEN excluded.requested_provider
+            WHEN excluded.requested_provider IS NULL THEN thread_route_events.requested_provider
+            ELSE thread_route_events.requested_provider
+          END,
+          requested_model = CASE
+            WHEN thread_route_events.requested_model IS NULL THEN excluded.requested_model
+            WHEN excluded.requested_model IS NULL THEN thread_route_events.requested_model
+            ELSE thread_route_events.requested_model
+          END,
+          requested_effort = CASE
+            WHEN thread_route_events.requested_effort IS NULL THEN excluded.requested_effort
+            WHEN excluded.requested_effort IS NULL THEN thread_route_events.requested_effort
+            ELSE thread_route_events.requested_effort
+          END,
+          selection_conflict = CASE
+            WHEN (
+              (thread_route_events.requested_provider IS NOT NULL
+                AND excluded.requested_provider IS NOT NULL
+                AND thread_route_events.requested_provider <> excluded.requested_provider)
+              OR (thread_route_events.requested_model IS NOT NULL
+                AND excluded.requested_model IS NOT NULL
+                AND thread_route_events.requested_model <> excluded.requested_model)
+              OR (thread_route_events.requested_effort IS NOT NULL
+                AND excluded.requested_effort IS NOT NULL
+                AND thread_route_events.requested_effort <> excluded.requested_effort)
+            ) THEN 1
+            ELSE thread_route_events.selection_conflict
+          END
+      `,
+  });
+
+  /**
+   * Declared experiment/fallback/escalation event. Authority-supplied and
+   * deterministic, so a repeat is ignored rather than overwritten. The caller
+   * scopes the persisted id by thread, so a globally reused declared id cannot
+   * silently suppress another thread's event.
+   */
+  const insertDeclaredRouteEventRow = SqlSchema.void({
+    Request: RouteEventRowRequest,
+    execute: (event) =>
+      sql`
+        INSERT OR IGNORE INTO thread_route_events (
+          event_id,
+          thread_id,
+          native_session_id,
+          route_event_kind,
+          task_stratum,
+          experiment_id,
+          manager_id,
+          agent_id,
+          requested_provider,
+          requested_model,
+          requested_effort,
+          escalation_reason,
+          selection_conflict,
+          recorded_at
+        )
+        VALUES (
+          ${event.eventId},
+          ${event.threadId},
+          ${event.nativeSessionId},
+          ${event.routeEventKind},
+          ${event.taskStratum},
+          ${event.experimentId},
+          ${event.managerId},
+          ${event.agentId},
+          ${event.requestedProvider},
+          ${event.requestedModel},
+          ${event.requestedEffort},
+          ${event.escalationReason},
+          0,
           ${event.recordedAt}
         )
       `,
@@ -435,6 +534,7 @@ export const make = Effect.gen(function* () {
     attribution: ProviderSessionRuntimeAttributionOptions | undefined,
     nativeSessionId: string | null,
   ): ReadonlyArray<{
+    readonly mode: "request" | "declared";
     readonly eventId: string;
     readonly threadId: string;
     readonly nativeSessionId: string | null;
@@ -456,6 +556,7 @@ export const make = Effect.gen(function* () {
       (requested.provider ?? requested.model ?? requested.effort) !== null
     ) {
       events.push({
+        mode: "request" as const,
         eventId: `${runtime.threadId}::request::${nativeSessionId ?? "unbound"}`,
         threadId: runtime.threadId,
         nativeSessionId,
@@ -474,10 +575,15 @@ export const make = Effect.gen(function* () {
     const declared = attribution?.routeEvent;
     if (declared !== undefined && declared !== null) {
       const kind = declared.kind ?? null;
+      const declaredId = declared.eventId?.trim();
       events.push({
+        mode: "declared" as const,
+        // Scope the persisted primary key by thread: a declared id reused by
+        // another thread must not collide and suppress that event.
         eventId:
-          declared.eventId?.trim() ||
-          `${runtime.threadId}::declared::${kind ?? "unclassified"}::${nativeSessionId ?? "thread"}`,
+          declaredId !== undefined && declaredId.length > 0
+            ? `${runtime.threadId}::declared::${declaredId}`
+            : `${runtime.threadId}::declared::${kind ?? "unclassified"}::${nativeSessionId ?? "thread"}`,
         threadId: runtime.threadId,
         nativeSessionId: declared.nativeSessionId ?? nativeSessionId,
         routeEventKind: kind,
@@ -488,7 +594,7 @@ export const make = Effect.gen(function* () {
         requestedProvider: declared.requested?.provider ?? null,
         requestedModel: declared.requested?.model ?? null,
         requestedEffort: declared.requested?.effort ?? null,
-        escalationReason: declared.reason ?? null,
+        escalationReason: normalizeEscalationReason(declared.reason),
         recordedAt: runtime.lastSeenAt,
       });
     }
@@ -591,32 +697,45 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
-    Effect.gen(function* () {
+  const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) => {
+    const writeEffects = Effect.gen(function* () {
       if (options?.onConflict === "ignore") {
         // A conflicting write is a stale caller; it must not append history for
-        // a cursor that was never applied.
+        // a cursor that was never applied. This is a single statement, so it is
+        // already atomic.
         yield* insertRuntimeRow(runtime);
         return;
       }
-      yield* upsertRuntimeRow(runtime);
-      const attribution = options?.attribution;
-      const nativeSessionId = nativeSessionIdOf(runtime.resumeCursor);
-      if (nativeSessionId !== null) {
-        yield* recordSessionHistoryRow({
-          threadId: runtime.threadId,
-          providerName: runtime.providerName,
-          providerInstanceId: runtime.providerInstanceId,
-          adapterKey: runtime.adapterKey,
-          nativeSessionId,
-          parentNativeSessionId: attribution?.parentNativeSessionId ?? null,
-          seenAt: runtime.lastSeenAt,
-        });
-      }
-      for (const event of routeEventsFor(runtime, attribution, nativeSessionId)) {
-        yield* recordRouteEventRow(event);
-      }
-    }).pipe(
+      // One logical upsert is one atomic durable effect: the runtime cursor, the
+      // history identity it implies, and the route events. A failure in any of
+      // them rolls the whole thing back, so a caller that sees an error never
+      // leaves a runtime cursor without its history (or vice versa).
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* upsertRuntimeRow(runtime);
+          const attribution = options?.attribution;
+          const nativeSessionId = nativeSessionIdOf(runtime.resumeCursor);
+          if (nativeSessionId !== null) {
+            yield* recordSessionHistoryRow({
+              threadId: runtime.threadId,
+              providerName: runtime.providerName,
+              providerInstanceId: runtime.providerInstanceId,
+              providerInstanceKey: normalizeProviderInstanceKey(runtime.providerInstanceId),
+              adapterKey: runtime.adapterKey,
+              nativeSessionId,
+              parentNativeSessionId: attribution?.parentNativeSessionId ?? null,
+              seenAt: runtime.lastSeenAt,
+            });
+          }
+          for (const event of routeEventsFor(runtime, attribution, nativeSessionId)) {
+            yield* event.mode === "request"
+              ? enrichRequestRouteEventRow(event)
+              : insertDeclaredRouteEventRow(event);
+          }
+        }),
+      );
+    });
+    return writeEffects.pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProviderSessionRuntimeRepository.upsert:query",
@@ -625,6 +744,7 @@ export const make = Effect.gen(function* () {
         ),
       ),
     );
+  };
 
   const recordImportedTranscript: ProviderSessionRuntimeRepository["Service"]["recordImportedTranscript"] =
     (input) =>

@@ -14,6 +14,11 @@ import * as Effect from "effect/Effect";
  * event is distinguishable from a declared canary/fallback/escalation event.
  * Observed (actual) values are deliberately NOT stored here: they must come
  * from measured usage, never be copied from the request.
+ *
+ * `escalation_reason` is a bounded code/slug, not free text; the writer rejects
+ * anything that is not a low-cardinality token. `selection_conflict` marks an
+ * automatic request row whose stored selection disagreed with a later
+ * observation, so a conflict is surfaced rather than silently overwritten.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -32,6 +37,7 @@ export default Effect.gen(function* () {
       requested_model TEXT,
       requested_effort TEXT,
       escalation_reason TEXT,
+      selection_conflict INTEGER NOT NULL DEFAULT 0,
       recorded_at TEXT NOT NULL
     )
   `;
