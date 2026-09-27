@@ -374,11 +374,33 @@ mod tests {
     }
 
     /// A host whose spawn always fails admission, carrying the injected cleanup
-    /// outcome. Used to prove the spawn→run retry decision structurally.
+    /// outcome through the real `admit` decision. Used to prove the spawn→run
+    /// retry decision structurally rather than by hand-building the failure.
     struct AdmissionFailHost {
         cleanup: CleanupOutcome,
         events: Events,
         attempts: usize,
+    }
+
+    /// Fails the first admission step; `terminate_created` returns the injected
+    /// reclaim outcome (for example a failed termination or a bounded timeout).
+    struct FailingAdmission {
+        cleanup: CleanupOutcome,
+    }
+
+    impl crate::admission::AdmissionOps for FailingAdmission {
+        fn assign_to_job(&mut self) -> Result<(), String> {
+            Err("AssignProcessToJobObject failed (5)".to_owned())
+        }
+        fn capture_identity(&mut self) -> Result<ProcessIdentity, String> {
+            Err("capture_identity must not run after a failed assignment".to_owned())
+        }
+        fn resume(&mut self) -> Result<(), String> {
+            Err("resume must not run after a failed assignment".to_owned())
+        }
+        fn terminate_created(&mut self) -> CleanupOutcome {
+            self.cleanup
+        }
     }
 
     impl ChildHost for AdmissionFailHost {
@@ -386,11 +408,13 @@ mod tests {
         fn spawn(&mut self, _config: &ServiceConfig) -> Result<FakeChild, SpawnError> {
             self.attempts += 1;
             self.events.lock().unwrap().push("spawn".to_owned());
-            Err(SpawnError::Admission(crate::admission::AdmissionFailure {
-                stage: crate::admission::AdmissionStage::AssignToJob,
-                reason: "AssignProcessToJobObject failed (5)".to_owned(),
+            let mut ops = FailingAdmission {
                 cleanup: self.cleanup,
-            }))
+            };
+            match crate::admission::admit(&mut ops) {
+                Ok(_) => unreachable!("a failing admission never succeeds"),
+                Err(failure) => Err(SpawnError::Admission(failure)),
+            }
         }
     }
 
