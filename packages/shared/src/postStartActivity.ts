@@ -77,6 +77,18 @@ export type PostStartLiveObservation = {
   readonly lastProviderActivityAt: string | null;
   readonly lastToolCompletedAt: string | null;
   readonly outstandingTools: ReadonlyArray<PostStartOutstandingTool>;
+  /**
+   * Tool ids the server has observed as completed this turn. Lets the merge
+   * drop a stale live outstanding call when persisted rows already show it
+   * finished (and vice versa).
+   */
+  readonly completedToolIds?: ReadonlyArray<string> | undefined;
+  /**
+   * Server clock instant the observation/shell was produced. Used as the
+   * observation-time basis so provider ages are not compared to a browser
+   * clock that may disagree. Absent on peers that predate the field.
+   */
+  readonly observedAt?: string | null | undefined;
 };
 
 export type PostStartActivityAnchors = {
@@ -99,6 +111,17 @@ export type PostStartActivityAnchors = {
   readonly outstandingTool: PostStartOutstandingTool | null;
   /** A pending user decision explains the quiet; suppresses the warning. */
   readonly knownWait: PostStartKnownWait | null;
+  /**
+   * True when the server's own live observation is the basis for this turn's
+   * ages, so the resolver should measure against the server clock.
+   */
+  readonly observingServerClock: boolean;
+  /**
+   * Server clock minus client clock, in milliseconds, estimated when the live
+   * observation arrived. Null when the peer omitted its clock basis. A large
+   * magnitude is an unsupported relationship, not a freshness signal.
+   */
+  readonly observationClockOffsetMs: number | null;
 };
 
 export type PostStartActivityStatus = "inactive" | "active" | "quiet" | "waiting" | "unknown";
@@ -141,6 +164,12 @@ export type DerivePostStartActivityInput = {
   readonly pendingStartedAt?: string | null;
   /** Server-observed progress on its own clock; merged over persisted rows. */
   readonly live?: PostStartLiveObservation | null;
+  /**
+   * Client clock instant the live observation was received, used only to
+   * estimate the server/client clock relationship. Omit it to fall back to
+   * the local clock (older callers and tests).
+   */
+  readonly receivedAtMs?: number | null;
 };
 
 function parseMs(value: string | null | undefined): number | null {
@@ -239,19 +268,24 @@ function activityOrder(
 type OutstandingToolsDerivation = {
   readonly tools: ReadonlyArray<PostStartOutstandingTool>;
   readonly lastCompletedAt: string | null;
+  /** Tool ids seen to complete in this turn; completion is terminal per id. */
+  readonly completedToolIds: ReadonlySet<string>;
 };
 
 /**
  * Correlate tool lifecycles by `toolCallId`/`toolUseId`. A completion — whether
  * an explicit `tool.completed` or a terminal `tool.updated` status — clears
  * exactly the call it identifies, so overlapping tools never clear each other.
- * `tool.progress` heartbeats advance the matching call's observation age
- * without changing its identity.
+ * Completion is terminal for a tool id: a later progress/update for the same id
+ * is a late update, not a new call, and must not reopen it. `tool.progress`
+ * heartbeats advance the matching call's observation age without changing its
+ * identity.
  */
 function deriveOutstandingTools(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): OutstandingToolsDerivation {
   const byKey = new Map<string, PostStartOutstandingTool>();
+  const completedToolIds = new Set<string>();
   let lastCompletedAt: string | null = null;
   for (const activity of [...activities].sort(activityOrder)) {
     const payload = payloadRecord(activity);
@@ -259,6 +293,7 @@ function deriveOutstandingTools(
     if (key === undefined) continue;
 
     if (activity.kind === "tool.started") {
+      if (completedToolIds.has(key)) continue;
       byKey.set(key, {
         toolCallId: key,
         title: toolTitle(payload) ?? "Tool",
@@ -271,6 +306,7 @@ function deriveOutstandingTools(
 
     if (activity.kind === "tool.completed") {
       byKey.delete(key);
+      completedToolIds.add(key);
       lastCompletedAt = maxTimestamp(lastCompletedAt, activity.createdAt);
       continue;
     }
@@ -283,9 +319,11 @@ function deriveOutstandingTools(
         TERMINAL_TOOL_STATUSES.has(status)
       ) {
         byKey.delete(key);
+        completedToolIds.add(key);
         lastCompletedAt = maxTimestamp(lastCompletedAt, activity.createdAt);
         continue;
       }
+      if (completedToolIds.has(key)) continue;
       const existing = byKey.get(key);
       if (existing === undefined) {
         // An update/progress whose start aged out of retention still identifies
@@ -307,16 +345,23 @@ function deriveOutstandingTools(
       });
     }
   }
-  return { tools: [...byKey.values()], lastCompletedAt };
+  return { tools: [...byKey.values()], lastCompletedAt, completedToolIds };
 }
 
-/** Merge persisted and live tool observations by identity, keeping the latest age. */
+/**
+ * Merge persisted and live tool observations by identity, keeping the latest
+ * age, but never resurrect a call either source has seen complete. Stale live
+ * evidence cannot reopen a persisted completion, and stale persisted evidence
+ * cannot reopen a live completion.
+ */
 function mergeOutstandingTools(
   persisted: ReadonlyArray<PostStartOutstandingTool>,
   live: ReadonlyArray<PostStartOutstandingTool>,
+  completedToolIds: ReadonlySet<string>,
 ): ReadonlyArray<PostStartOutstandingTool> {
   const byKey = new Map<string, PostStartOutstandingTool>();
   for (const tool of [...persisted, ...live]) {
+    if (completedToolIds.has(tool.toolCallId)) continue;
     const existing = byKey.get(tool.toolCallId);
     if (existing === undefined) {
       byKey.set(tool.toolCallId, tool);
@@ -388,6 +433,16 @@ export function derivePostStartActivityAnchors(
         ? pendingStartedAt
         : null;
 
+  // The server's live observation is the observation-time basis when present:
+  // its instants are on the server clock, so a skewed persisted provider
+  // timestamp must not be maxed into the age. Estimate the server/client offset
+  // from the observation's own stamp when the client passed its receipt time.
+  const observingServerClock = live != null;
+  const liveObservedAtMs = parseMs(live?.observedAt ?? null);
+  const receivedAtMs = input.receivedAtMs ?? null;
+  const observationClockOffsetMs =
+    liveObservedAtMs !== null && receivedAtMs !== null ? liveObservedAtMs - receivedAtMs : null;
+
   if (!active) {
     return {
       turnId,
@@ -398,6 +453,8 @@ export function derivePostStartActivityAnchors(
       outstandingTools: [],
       outstandingTool: null,
       knownWait: input.knownWait ?? null,
+      observingServerClock,
+      observationClockOffsetMs,
     };
   }
 
@@ -411,20 +468,32 @@ export function derivePostStartActivityAnchors(
   }
 
   const derived = deriveOutstandingTools(turnActivities);
-  const outstandingTools = mergeOutstandingTools(derived.tools, live?.outstandingTools ?? []);
+  const completedToolIds = new Set<string>([
+    ...derived.completedToolIds,
+    ...(live?.completedToolIds ?? []),
+  ]);
+  const outstandingTools = mergeOutstandingTools(
+    derived.tools,
+    live?.outstandingTools ?? [],
+    completedToolIds,
+  );
+
+  // Prefer the server clock for activity/completion recency; fall back to the
+  // persisted provider chronology only when the server has no live observation.
+  const liveLastActivity = live?.lastProviderActivityAt ?? null;
+  const liveLastCompleted = live?.lastToolCompletedAt ?? null;
 
   return {
     turnId,
     active: true,
     turnStartedAt,
-    lastProviderActivityAt: maxTimestamp(
-      lastProviderActivityAt,
-      live?.lastProviderActivityAt ?? null,
-    ),
-    lastToolCompletedAt: maxTimestamp(derived.lastCompletedAt, live?.lastToolCompletedAt ?? null),
+    lastProviderActivityAt: liveLastActivity ?? lastProviderActivityAt,
+    lastToolCompletedAt: liveLastCompleted ?? derived.lastCompletedAt,
     outstandingTools,
     outstandingTool: latestOutstandingTool(outstandingTools),
     knownWait: input.knownWait ?? null,
+    observingServerClock,
+    observationClockOffsetMs,
   };
 }
 
@@ -448,17 +517,28 @@ export function resolvePostStartActivity(
   );
   const connection = options.connection ?? "live";
 
+  // Measured against the server clock when the live observation supplies the
+  // basis; the browser clock only supplies elapsed time on top of it. A clock
+  // relationship too far off to trust is honest uncertainty, never a warning.
+  const clockUnsupported =
+    anchors.observingServerClock &&
+    anchors.observationClockOffsetMs !== null &&
+    Math.abs(anchors.observationClockOffsetMs) > futureToleranceMs;
+  const nowBasisMs =
+    anchors.observationClockOffsetMs === null ? nowMs : nowMs + anchors.observationClockOffsetMs;
+
   const lastActivityMs = parseMs(anchors.lastProviderActivityAt);
-  const lastActivityAgeMs = lastActivityMs === null ? null : Math.max(0, nowMs - lastActivityMs);
+  const lastActivityAgeMs =
+    lastActivityMs === null ? null : Math.max(0, nowBasisMs - lastActivityMs);
   const lastToolCompletedMs = parseMs(anchors.lastToolCompletedAt);
   const lastToolCompletedAgeMs =
-    lastToolCompletedMs === null ? null : Math.max(0, nowMs - lastToolCompletedMs);
+    lastToolCompletedMs === null ? null : Math.max(0, nowBasisMs - lastToolCompletedMs);
   const outstandingToolAgeMs =
     anchors.outstandingTool === null
       ? null
       : (() => {
           const observed = parseMs(anchors.outstandingTool.lastObservedAt);
-          return observed === null ? null : Math.max(0, nowMs - observed);
+          return observed === null ? null : Math.max(0, nowBasisMs - observed);
         })();
 
   const base = {
@@ -480,12 +560,32 @@ export function resolvePostStartActivity(
     return { ...base, status: "unknown", quietSinceAt: null, quietForMs: 0, episodeKey: null };
   }
 
+  // Clocks that disagree beyond tolerance make every age untrustworthy; report
+  // the known instants but not an age, and never assert silence.
+  if (clockUnsupported) {
+    return {
+      ...base,
+      lastProviderActivityAgeMs: null,
+      lastToolCompletedAgeMs: null,
+      outstandingToolAgeMs: null,
+      status: "unknown",
+      quietSinceAt: null,
+      quietForMs: 0,
+      episodeKey: null,
+    };
+  }
+
   // A pending approval/input is an explained wait, not unexplained silence.
   if (anchors.knownWait !== null) {
     return { ...base, status: "waiting", quietSinceAt: null, quietForMs: 0, episodeKey: null };
   }
 
-  const originAt = maxTimestamp(anchors.lastProviderActivityAt, anchors.turnStartedAt);
+  // With the server's own observation, the origin stays on the server clock; a
+  // persisted provider `turnStartedAt` must not be maxed back in.
+  const originAt =
+    anchors.observingServerClock && anchors.lastProviderActivityAt !== null
+      ? anchors.lastProviderActivityAt
+      : maxTimestamp(anchors.lastProviderActivityAt, anchors.turnStartedAt);
   const originMs = parseMs(originAt);
 
   if (originAt === null || originMs === null) {
@@ -497,16 +597,18 @@ export function resolvePostStartActivity(
   // relationship, not freshness. Do not clamp it to "just happened" and claim
   // the turn is active; report honest uncertainty instead. The stored instant
   // stays known, but its age is not trustworthy.
-  if (originMs - nowMs > futureToleranceMs) {
+  if (originMs - nowBasisMs > futureToleranceMs) {
     return {
       ...base,
       lastProviderActivityAgeMs:
-        lastActivityMs !== null && lastActivityMs > nowMs ? null : lastActivityAgeMs,
+        lastActivityMs !== null && lastActivityMs > nowBasisMs ? null : lastActivityAgeMs,
       lastToolCompletedAgeMs:
-        lastToolCompletedMs !== null && lastToolCompletedMs > nowMs ? null : lastToolCompletedAgeMs,
+        lastToolCompletedMs !== null && lastToolCompletedMs > nowBasisMs
+          ? null
+          : lastToolCompletedAgeMs,
       outstandingToolAgeMs:
         anchors.outstandingTool !== null &&
-        (parseMs(anchors.outstandingTool.lastObservedAt) ?? 0) > nowMs
+        (parseMs(anchors.outstandingTool.lastObservedAt) ?? 0) > nowBasisMs
           ? null
           : outstandingToolAgeMs,
       status: "unknown",
@@ -516,7 +618,7 @@ export function resolvePostStartActivity(
     };
   }
 
-  const quietForMs = Math.max(0, nowMs - originMs);
+  const quietForMs = Math.max(0, nowBasisMs - originMs);
   if (quietForMs < thresholdMs) {
     return { ...base, status: "active", quietSinceAt: null, quietForMs, episodeKey: null };
   }

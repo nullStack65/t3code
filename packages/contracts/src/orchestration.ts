@@ -693,6 +693,20 @@ export const OrchestrationPostStartActivity = Schema.Struct({
   lastProviderActivityAt: Schema.NullOr(IsoDateTime),
   lastToolCompletedAt: Schema.NullOr(IsoDateTime),
   outstandingTools: Schema.Array(OrchestrationOutstandingTool),
+  /**
+   * Tool ids the server has observed as completed this turn. Carried so a
+   * client can reconcile live evidence against persisted rows without
+   * resurrecting a finished call from stale progress in either direction.
+   * Optional so older peers still decode.
+   */
+  completedToolIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /**
+   * Server clock instant the shell was mapped. This is the observation-time
+   * basis: the client measures provider ages against the server's clock using
+   * this stamp instead of assuming the two clocks agree. Optional so peers
+   * that omit it fall back to their own clock.
+   */
+  observedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type OrchestrationPostStartActivity = typeof OrchestrationPostStartActivity.Type;
 

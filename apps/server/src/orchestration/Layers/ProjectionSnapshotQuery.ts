@@ -38,6 +38,7 @@ import {
 } from "@t3tools/contracts";
 import { legacyLinkedPullRequestOf } from "@t3tools/shared/threadPullRequests";
 import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -498,6 +499,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
+  // Live observation is stamped with the server clock at mapping time so the
+  // client can measure provider ages against the server's clock rather than
+  // assuming its own agrees.
+  const readPostStartActivity = (threadId: string, observedAt: string) => {
+    const state = threadPostStartActivity.getThreadPostStartActivity(threadId);
+    return state === null ? null : { ...state, observedAt };
+  };
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
     "ProjectionSnapshotQuery.resolveRepositoryIdentitiesForProjects",
   )(function* (
@@ -2705,6 +2713,7 @@ pending_approval_requests AS (
                 sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
               );
               const pullRequestsByThread = groupPullRequestRowsByThread(pullRequestRows);
+              const postStartObservedAt = DateTime.formatIso(yield* DateTime.now);
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -2755,9 +2764,7 @@ pending_approval_requests AS (
                           row.threadId,
                         ),
                         planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
-                        postStartActivity: threadPostStartActivity.getThreadPostStartActivity(
-                          row.threadId,
-                        ),
+                        postStartActivity: readPostStartActivity(row.threadId, postStartObservedAt),
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
                 ),
@@ -2873,6 +2880,7 @@ pending_approval_requests AS (
               const sessionByThread = new Map(
                 sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
               );
+              const postStartObservedAt = DateTime.formatIso(yield* DateTime.now);
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -2921,9 +2929,7 @@ pending_approval_requests AS (
                     row.threadId,
                   ),
                   planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
-                  postStartActivity: threadPostStartActivity.getThreadPostStartActivity(
-                    row.threadId,
-                  ),
+                  postStartActivity: readPostStartActivity(row.threadId, postStartObservedAt),
                 })),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               };
@@ -3239,6 +3245,8 @@ pending_approval_requests AS (
         return Option.none<OrchestrationThreadShell>();
       }
 
+      const postStartObservedAt = DateTime.formatIso(yield* DateTime.now);
+
       return Option.some({
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
@@ -3280,9 +3288,7 @@ pending_approval_requests AS (
           threadRow.value.threadId,
         ),
         planProgress: threadPlanProgress.getThreadPlanProgress(threadRow.value.threadId),
-        postStartActivity: threadPostStartActivity.getThreadPostStartActivity(
-          threadRow.value.threadId,
-        ),
+        postStartActivity: readPostStartActivity(threadRow.value.threadId, postStartObservedAt),
       } satisfies OrchestrationThreadShell);
     });
 

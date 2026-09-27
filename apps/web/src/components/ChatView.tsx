@@ -2116,6 +2116,12 @@ export default function ChatView(props: ChatViewProps) {
   // tool heartbeats whose provider timestamps stay pinned to the start; a
   // restarted or replayed server supplies none, so stored rows never fake
   // resumed progress.
+  // Capture the client instant the observation landed so the age is measured
+  // against the server clock. Set in an effect (never during render).
+  const [postStartReceivedAtMs, setPostStartReceivedAtMs] = useState<number | null>(null);
+  useEffect(() => {
+    setPostStartReceivedAtMs(Date.now());
+  }, [activeThreadShell?.postStartActivity]);
   const postStartActivityAnchors = useMemo(() => {
     if (!activeThread) return null;
     const knownWait: PostStartKnownWait | null = activeThreadShell?.hasPendingApprovals
@@ -2131,6 +2137,7 @@ export default function ChatView(props: ChatViewProps) {
       knownWait,
       pendingStartedAt: activeThreadShell?.latestUserMessageAt ?? null,
       live,
+      receivedAtMs: postStartReceivedAtMs,
     });
   }, [
     activeThread,
@@ -2139,6 +2146,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell?.hasPendingUserInput,
     activeThreadShell?.latestUserMessageAt,
     activeThreadShell?.postStartActivity,
+    postStartReceivedAtMs,
   ]);
   // Reading a finished thread clears the sidebar's Done badge. The visit is
   // stamped at the turn's completion time — not now/updatedAt — so it clears

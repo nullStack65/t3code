@@ -58,17 +58,23 @@ export function PostStartActivityNotice({
   }
 
   const lastActivityDetail =
-    observation.lastProviderActivityAgeMs === null
+    observation.lastProviderActivityAt === null
       ? "no provider activity observed yet"
-      : `last provider activity ${relativeAge(observation.lastProviderActivityAgeMs)}`;
+      : observation.lastProviderActivityAgeMs === null
+        ? "provider activity observed; age unknown"
+        : `last provider activity ${relativeAge(observation.lastProviderActivityAgeMs)}`;
   const completionDetail =
     observation.lastToolCompletedAt === null
       ? "no tool completion observed"
-      : `last tool completed ${relativeAge(observation.lastToolCompletedAgeMs)}`;
+      : observation.lastToolCompletedAgeMs === null
+        ? "tool completion observed; age unknown"
+        : `last tool completed ${relativeAge(observation.lastToolCompletedAgeMs)}`;
   const toolDetail =
     observation.outstandingTool === null
       ? null
-      : `${observation.outstandingTool.title} observed ${relativeAge(observation.outstandingToolAgeMs)}`;
+      : observation.outstandingToolAgeMs === null
+        ? `${observation.outstandingTool.title} observed; age unknown`
+        : `${observation.outstandingTool.title} observed ${relativeAge(observation.outstandingToolAgeMs)}`;
 
   const mainLabel = (() => {
     switch (status) {

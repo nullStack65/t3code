@@ -1036,6 +1036,51 @@ const make = Effect.gen(function* () {
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
 
+  // Post-start delivery: buffered `turn`-mode content and parent tool
+  // heartbeats advance the in-memory observation without dispatching an
+  // activity row, so an already-subscribed shell never refetches and can
+  // falsely warn while generation continues. Nudge the existing activity/shell
+  // delivery path with a coalesced, user-invisible append, bounded per thread
+  // so it is never per-token or per-delta.
+  const POST_START_DELIVERY_INTERVAL_MS = 10_000;
+  const lastPostStartDeliveryAtMs = new Map<string, number>();
+  const nudgePostStartDelivery = (
+    threadId: ThreadId,
+    event: ProviderRuntimeEvent,
+    turnId: TurnId | null,
+    observedAt: string,
+  ) =>
+    Effect.gen(function* () {
+      const nowMs = yield* Clock.currentTimeMillis;
+      const last = lastPostStartDeliveryAtMs.get(threadId) ?? Number.NEGATIVE_INFINITY;
+      if (nowMs - last < POST_START_DELIVERY_INTERVAL_MS) return;
+      lastPostStartDeliveryAtMs.set(threadId, nowMs);
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: yield* providerCommandId(event, "post-start-observation"),
+          threadId,
+          activity: {
+            id: EventId.make(`post-start-observation:${threadId}`),
+            tone: "info",
+            kind: "post-start-observation",
+            summary: "Provider progress",
+            payload: {},
+            turnId,
+            createdAt: observedAt,
+          },
+          createdAt: observedAt,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("post-start observation delivery nudge failed", {
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+    });
+
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
     timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
@@ -1842,6 +1887,49 @@ const make = Effect.gen(function* () {
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
 
+      // Post-start observation. Record on the server clock before any dispatch
+      // so the live record and the delivered shell agree, and scope it to the
+      // current turn so a superseded turn's late traffic cannot refresh it.
+      // The observation is recorded for content text and ephemeral parent tool
+      // heartbeats (which never become persisted rows) as well as persisted
+      // activity rows.
+      const observedAt = DateTime.formatIso(yield* DateTime.now);
+      const observationTurnId = eventTurnId ?? activeTurnId ?? null;
+      const observationAllowed = !conflictsWithActiveTurn;
+      if (event.type === "turn.started" && shouldApplyThreadLifecycle) {
+        // A newly accepted turn supersedes the previous one: reset the record
+        // so the new turn cannot inherit outstanding tools or completion
+        // memory, and stale old-turn traffic is rejected by identity.
+        threadPostStartActivity.beginTurn(thread.id, eventTurnId ?? null);
+      }
+      if (observationAllowed) {
+        const isContentProgress =
+          event.type === "content.delta" &&
+          event.payload.delta.length > 0 &&
+          (event.payload.streamKind === "assistant_text" ||
+            event.payload.streamKind === "reasoning_text" ||
+            event.payload.streamKind === "reasoning_summary_text");
+        const isEphemeralToolHeartbeat =
+          event.type === "tool.progress" && event.payload.toolUseId !== undefined;
+        if (isContentProgress) {
+          threadPostStartActivity.recordContentProgress(thread.id, observedAt, observationTurnId);
+        }
+        if (isEphemeralToolHeartbeat) {
+          // Canonical Claude parent-conversation heartbeats carry no taskId and
+          // are intentionally dropped from persisted activities; observe them
+          // directly so their liveness does not depend on persistence.
+          threadPostStartActivity.recordActivity(
+            thread.id,
+            observedAt,
+            { kind: "tool.progress", payload: event.payload },
+            observationTurnId,
+          );
+        }
+        if (isContentProgress || isEphemeralToolHeartbeat) {
+          yield* nudgePostStartDelivery(thread.id, event, observationTurnId, observedAt);
+        }
+      }
+
       if (
         event.type === "session.started" ||
         event.type === "session.state.changed" ||
@@ -2581,22 +2669,10 @@ const make = Effect.gen(function* () {
       }
 
       const activities = runtimeEventToActivities(activityEvent, taskTitle);
-      // Post-start visibility observes meaningful provider progress on the
-      // server clock. Persisted provider timestamps can stay pinned to a part
-      // or tool start (OpenCode text, running tools), so the shell needs an
-      // observation that actually advances while work continues.
-      const observedAt = DateTime.formatIso(yield* DateTime.now);
+      // Persisted activity rows feed the same live observation, scoped to the
+      // turn the event named so a stale row cannot refresh a newer turn.
       for (const activity of activities) {
-        threadPostStartActivity.recordActivity(thread.id, observedAt, activity);
-      }
-      if (
-        event.type === "content.delta" &&
-        event.payload.delta.length > 0 &&
-        (event.payload.streamKind === "assistant_text" ||
-          event.payload.streamKind === "reasoning_text" ||
-          event.payload.streamKind === "reasoning_summary_text")
-      ) {
-        threadPostStartActivity.recordContentProgress(thread.id, observedAt);
+        threadPostStartActivity.recordActivity(thread.id, observedAt, activity, observationTurnId);
       }
       yield* Effect.forEach(activities, (activity) =>
         providerCommandId(event, "thread-activity-append").pipe(
@@ -2612,8 +2688,10 @@ const make = Effect.gen(function* () {
         ),
       ).pipe(Effect.asVoid);
       // The turn is over: drop the live observation so the settled shell does
-      // not keep advertising provider progress.
-      if (isTerminalTurn || event.type === "session.exited") {
+      // not keep advertising provider progress. Only the accepted lifecycle
+      // owner may clear: a delayed completion rejected for a superseded turn
+      // must not erase the current turn's evidence.
+      if (event.type === "session.exited" || (isTerminalTurn && shouldApplyThreadLifecycle)) {
         threadPostStartActivity.clearThread(thread.id);
       }
     });

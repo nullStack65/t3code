@@ -37,6 +37,16 @@ export function ThreadNotificationCoordinator() {
   const pending = useRef(
     new Map<string, { environmentId: EnvironmentId; notification: Notification }>(),
   );
+  // Silence-episode memory lives on the always-mounted parent. The child list
+  // unmounts when both notification preferences are off; keeping this here
+  // means re-enabling in-app alerts cannot replay an episode the user already
+  // saw. Keyed by `${environmentId}:${threadId}:${episodeKey}`.
+  const notifiedSilenceEpisodes = useRef(new Set<string>());
+  const openSilenceToasts = useRef(new Map<string, string>());
+  // Threads already seen in a live snapshot. Kept on the always-mounted parent
+  // so a child remount caused by both preferences being off does not re-baseline
+  // and suppress a genuinely new episode.
+  const hydratedThreads = useRef(new Set<string>());
   const onNotification = useCallback((environmentId: EnvironmentId, notification: Notification) => {
     pending.current.get(notification.tag)?.notification.close();
     pending.current.set(notification.tag, { environmentId, notification });
@@ -81,6 +91,23 @@ export function ThreadNotificationCoordinator() {
     };
   }, [mode]);
 
+  useEffect(
+    () => () => {
+      for (const toastId of openSilenceToasts.current.values()) toastManager.close(toastId);
+      openSilenceToasts.current.clear();
+    },
+    [],
+  );
+
+  // When both preferences are off the child list unmounts, so its effect cannot
+  // close the warnings it opened. Close them here; the episode memory above
+  // still prevents a replay when notifications are re-enabled.
+  useEffect(() => {
+    if (mode !== "off" || inAppNotificationsEnabled) return;
+    for (const toastId of openSilenceToasts.current.values()) toastManager.close(toastId);
+    openSilenceToasts.current.clear();
+  }, [inAppNotificationsEnabled, mode]);
+
   if (mode === "off" && !inAppNotificationsEnabled) return null;
 
   return environments.map((environment) => (
@@ -88,6 +115,9 @@ export function ThreadNotificationCoordinator() {
       key={environment.environmentId}
       environmentId={environment.environmentId}
       onNotification={onNotification}
+      notifiedSilenceEpisodes={notifiedSilenceEpisodes}
+      openSilenceToasts={openSilenceToasts}
+      hydratedThreads={hydratedThreads}
     />
   ));
 }
@@ -95,9 +125,15 @@ export function ThreadNotificationCoordinator() {
 function EnvironmentNotifications({
   environmentId,
   onNotification,
+  notifiedSilenceEpisodes,
+  openSilenceToasts,
+  hydratedThreads,
 }: {
   environmentId: EnvironmentId;
   onNotification: (environmentId: EnvironmentId, notification: Notification) => void;
+  notifiedSilenceEpisodes: React.RefObject<Set<string>>;
+  openSilenceToasts: React.RefObject<Map<string, string>>;
+  hydratedThreads: React.RefObject<Set<string>>;
 }) {
   const shell = useAtomValue(environmentShell.stateValueAtom(environmentId));
   const mode = useClientSettings((settings) => settings.notificationMode);
@@ -111,14 +147,15 @@ function EnvironmentNotifications({
   const previous = useRef(
     new Map<ThreadId, { attention: string | null; completion: number | null }>(),
   );
-  // Post-start silence episodes already surfaced as an in-app toast. Keyed by
-  // environment+thread+episode so a resumed turn notifies again while a tick,
-  // remount or reconnect cannot replay the same episode.
-  const quietToastIds = useRef(new Map<string, string>());
-  // Episodes already surfaced. Kept separately from the open toast map so a
-  // disconnect, reconnect or preference change can close the toast without
-  // losing the "already notified" memory and replaying it.
-  const notifiedEpisodes = useRef(new Set<string>());
+  // Threads already seen in a live snapshot. The first sighting establishes the
+  // hydration baseline for the silence signal: an already-quiet thread the user
+  // did not just watch must not toast the moment notifications connect.
+  // Owned by the parent so a child remount does not re-baseline.
+  // Server-clock basis: the observation stamps the server instant, and we pair
+  // it with the client instant the shell landed so ages are measured against
+  // the server clock instead of assuming the two agree.
+  const shellRef = useRef<unknown>(undefined);
+  const shellReceivedAtRef = useRef<number>(Date.now());
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -253,22 +290,29 @@ function EnvironmentNotifications({
   ]);
 
   // Post-start silence: an unattended running thread whose provider has gone
-  // quiet past the conservative threshold raises one in-app toast per episode.
-  // The environment shell already carries the server-observed activity, so
-  // this warns about threads the user is not viewing, follows the existing
-  // in-app preference and navigation convention, and closes as the episode
-  // ends or notifications are turned off.
+  // quiet past the conservative threshold raises one alert per episode. The
+  // environment shell already carries the server-observed activity, so this
+  // covers threads the user is not viewing and follows the same in-app,
+  // desktop and sound modes as the attention/completion signal above.
   useEffect(() => {
-    // A quiet provider produces no shell updates, so the wall-clock state
-    // drives re-evaluation of the threshold.
     const closeToasts = () => {
-      for (const toastId of quietToastIds.current.values()) toastManager.close(toastId);
-      quietToastIds.current.clear();
+      for (const toastId of openSilenceToasts.current.values()) toastManager.close(toastId);
+      openSilenceToasts.current.clear();
     };
-    if (!inAppNotificationsEnabled || shell.status !== "live" || Option.isNone(shell.snapshot)) {
+    if (shell.status !== "live" || Option.isNone(shell.snapshot)) {
       closeToasts();
       return;
     }
+    // Turning in-app alerts off closes any open silence toast; the episode stays
+    // remembered so re-enabling cannot replay it.
+    if (!inAppNotificationsEnabled) {
+      closeToasts();
+    }
+    if (shellRef.current !== shell) {
+      shellRef.current = shell;
+      shellReceivedAtRef.current = Date.now();
+    }
+    const receivedAtMs = shellReceivedAtRef.current;
     const seen = new Set<string>();
     for (const thread of shell.snapshot.value.threads) {
       if (thread.archivedAt !== null) continue;
@@ -283,64 +327,102 @@ function EnvironmentNotifications({
             : null,
         pendingStartedAt: thread.latestUserMessageAt,
         live: thread.postStartActivity ?? null,
+        receivedAtMs,
       });
       const observation = resolvePostStartActivity(anchors, nowMs);
+      const baselineKey = `${environmentId}:${thread.id}`;
       if (observation.status !== "quiet" || observation.episodeKey === null) continue;
-      const key = `${environmentId}:${thread.id}:${observation.episodeKey}`;
+      const key = `${baselineKey}:${observation.episodeKey}`;
       seen.add(key);
-      if (notifiedEpisodes.current.has(key)) continue;
-      if (
-        document.visibilityState !== "visible" ||
-        !document.hasFocus() ||
-        (activeEnvironmentId === environmentId && activeThreadId === thread.id)
-      ) {
+      if (!hydratedThreads.current.has(baselineKey)) {
+        // First sighting: record the current episode as already known so the
+        // initial snapshot cannot storm the user, matching the existing
+        // attention/completion hydration baseline.
+        hydratedThreads.current.add(baselineKey);
+        notifiedSilenceEpisodes.current.add(key);
         continue;
       }
-      const toastId = toastManager.add({
-        type: "warning",
-        title: "No recent provider activity",
-        description: thread.title,
-        data: { hideCopyButton: true, leadingIcon: <ClockIcon aria-hidden className="size-4" /> },
-        actionProps: {
-          children: "Open thread",
-          onClick: () => {
-            toastManager.close(toastId);
+      if (notifiedSilenceEpisodes.current.has(key)) continue;
+
+      const isViewing = activeEnvironmentId === environmentId && activeThreadId === thread.id;
+      const isForeground = document.visibilityState === "visible" && document.hasFocus();
+      if (isViewing) {
+        notifiedSilenceEpisodes.current.add(key);
+        continue;
+      }
+      if (hasNotificationSound(mode)) {
+        void playNotificationSound("input", () =>
+          hasNotificationSound(getClientSettings().notificationMode),
+        );
+      }
+      let alerted = false;
+      if (inAppNotificationsEnabled && isForeground) {
+        const toastId = toastManager.add({
+          type: "warning",
+          title: "No recent provider activity",
+          description: thread.title,
+          data: { hideCopyButton: true, leadingIcon: <ClockIcon aria-hidden className="size-4" /> },
+          actionProps: {
+            children: "Open thread",
+            onClick: () => {
+              toastManager.close(toastId);
+              void navigate({
+                to: "/$environmentId/$threadId",
+                params: { environmentId, threadId: thread.id },
+              });
+            },
+          },
+        });
+        openSilenceToasts.current.set(key, toastId);
+        alerted = true;
+      } else if (
+        hasDesktopNotifications(mode) &&
+        !isForeground &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
+        try {
+          const notification = new Notification("No recent provider activity", {
+            body: thread.title,
+            tag: `${environmentId}:${thread.id}:silence`,
+            silent: true,
+          });
+          onNotification(environmentId, notification);
+          notification.addEventListener("click", () => {
+            notification.close();
+            window.focus();
             void navigate({
               to: "/$environmentId/$threadId",
               params: { environmentId, threadId: thread.id },
             });
-          },
-        },
-      });
-      notifiedEpisodes.current.add(key);
-      quietToastIds.current.set(key, toastId);
+          });
+          alerted = true;
+        } catch {
+          // Browser exposes Notification but rejects desktop presentation.
+        }
+      }
+      if (alerted) notifiedSilenceEpisodes.current.add(key);
     }
-    for (const key of notifiedEpisodes.current) {
+    for (const key of [...notifiedSilenceEpisodes.current]) {
       if (seen.has(key)) continue;
-      const toastId = quietToastIds.current.get(key);
+      const toastId = openSilenceToasts.current.get(key);
       if (toastId !== undefined) {
         toastManager.close(toastId);
-        quietToastIds.current.delete(key);
+        openSilenceToasts.current.delete(key);
       }
-      notifiedEpisodes.current.delete(key);
+      notifiedSilenceEpisodes.current.delete(key);
     }
   }, [
     activeEnvironmentId,
     activeThreadId,
     environmentId,
     inAppNotificationsEnabled,
+    mode,
     navigate,
     nowMs,
+    onNotification,
     shell,
   ]);
-
-  useEffect(
-    () => () => {
-      for (const toastId of quietToastIds.current.values()) toastManager.close(toastId);
-      quietToastIds.current.clear();
-    },
-    [],
-  );
 
   return null;
 }
