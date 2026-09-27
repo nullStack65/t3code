@@ -2,7 +2,10 @@ import { assert, it } from "@effect/vitest";
 
 import {
   checksumCoverageFailures,
+  evidenceLayoutFailures,
+  finalReleaseConfirmationFailures,
   parseChecksumsFile,
+  parseGhReleaseViewInventory,
   parsePublicationProbe,
   parseRemoteReleaseInventory,
   promotionGateFailures,
@@ -206,4 +209,112 @@ it("accepts a complete remote asset inventory with metadata", () => {
     ],
   });
   assert.deepStrictEqual(releaseInventoryFailures(inventory, "0.0.43"), []);
+});
+
+it("parses the camelCase gh release view shape distinctly from REST", () => {
+  const view = parseGhReleaseViewInventory({
+    id: 4242,
+    tagName: "v0.0.43",
+    name: "T3 Code (fork) v0.0.43",
+    isDraft: false,
+    targetCommitish: SHA,
+    assets: [{ name: "a.bin", size: 3, state: "uploaded" }],
+  });
+  assert.equal(view.id, 4242);
+  assert.equal(view.tagName, "v0.0.43");
+  assert.equal(view.isDraft, false);
+  assert.equal(view.draft, false);
+  assert.equal(view.targetCommitish, SHA);
+  assert.equal(view.assets[0]!.name, "a.bin");
+
+  // A REST snake_case object is not silently treated as a release view response.
+  const restAsView = parseGhReleaseViewInventory({ tag_name: "v0.0.43", draft: false });
+  assert.equal(restAsView.tagName, "");
+  assert.equal(restAsView.isDraft, undefined);
+  assert.equal(restAsView.draft, false);
+});
+
+it("fails the final confirmation on missing, non-boolean, wrong-tag or draft responses", () => {
+  const complete = {
+    id: 1,
+    tagName: "v0.0.43",
+    name: "x",
+    targetCommitish: SHA,
+    assets: [{ name: "a.bin", size: 3, state: "uploaded" }],
+  };
+  assert.deepStrictEqual(
+    finalReleaseConfirmationFailures(
+      parseGhReleaseViewInventory({ ...complete, isDraft: false }),
+      "v0.0.43",
+    ),
+    [],
+  );
+  assert.match(
+    finalReleaseConfirmationFailures(parseGhReleaseViewInventory(complete), "v0.0.43").join("\n"),
+    /explicit boolean isDraft=false/,
+  );
+  assert.match(
+    finalReleaseConfirmationFailures(
+      parseGhReleaseViewInventory({ ...complete, isDraft: "true" }),
+      "v0.0.43",
+    ).join("\n"),
+    /explicit boolean isDraft=false/,
+  );
+  assert.match(
+    finalReleaseConfirmationFailures(
+      parseGhReleaseViewInventory({ ...complete, isDraft: true }),
+      "v0.0.43",
+    ).join("\n"),
+    /still a draft/,
+  );
+  assert.match(
+    finalReleaseConfirmationFailures(
+      parseGhReleaseViewInventory({ ...complete, isDraft: false, tagName: "vWRONG" }),
+      "v0.0.43",
+    ).join("\n"),
+    /expected 'v0\.0\.43'/,
+  );
+  // Expected source identity is enforced when supplied.
+  assert.match(
+    finalReleaseConfirmationFailures(
+      parseGhReleaseViewInventory({ ...complete, isDraft: false, targetCommitish: "f".repeat(40) }),
+      "v0.0.43",
+      SHA,
+    ).join("\n"),
+    /target commitish/,
+  );
+  assert.deepStrictEqual(
+    finalReleaseConfirmationFailures(
+      parseGhReleaseViewInventory({ ...complete, isDraft: false }),
+      "v0.0.43",
+      SHA,
+    ),
+    [],
+  );
+});
+
+it("requires acceptance evidence to be in the enumerated publication payload", () => {
+  const candidateDir = "/tmp/candidate";
+  const published = [
+    "/tmp/candidate/fork-inspection-evidence.json",
+    "/tmp/candidate/fork-native-receipts.json",
+  ];
+  assert.deepStrictEqual(
+    evidenceLayoutFailures({
+      candidateDir,
+      nativeReceipts: "/tmp/candidate/fork-native-receipts.json",
+      inspectionEvidence: ["/tmp/candidate/fork-inspection-evidence.json"],
+      publishedFiles: published,
+    }),
+    [],
+  );
+  const external = evidenceLayoutFailures({
+    candidateDir,
+    nativeReceipts: "/tmp/elsewhere/receipts.json",
+    inspectionEvidence: ["/tmp/elsewhere/evidence.json"],
+    publishedFiles: published,
+  });
+  assert.equal(external.length, 2);
+  assert.match(external.join("\n"), /--inspection-evidence .* not part of the publication payload/);
+  assert.match(external.join("\n"), /--native-receipts .* not part of the publication payload/);
 });

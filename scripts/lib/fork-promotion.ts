@@ -12,8 +12,12 @@
  * Keeping these pure lets the entry point exercise them against labeled
  * fixtures while its live path stays read-only until `--execute`.
  */
+import * as NodePath from "node:path";
+
 import {
   CANDIDATE_MANIFEST_FILE_NAME,
+  NATIVE_RECEIPTS_FILE_NAME,
+  PACKAGED_INSPECTION_FILE_NAME,
   SHA256SUMS_FILE_NAME,
   requiredReleaseAssetNames,
 } from "./fork-release-manifest.ts";
@@ -269,6 +273,117 @@ export function parseRemoteReleaseInventory(raw: unknown): RemoteReleaseInventor
       };
     }),
   };
+}
+
+/**
+ * A `gh release view --json id,tagName,isDraft,targetCommitish,assets` response.
+ * `gh` emits camelCase keys here, deliberately distinct from the REST
+ * `tag_name`/`draft`/`target_commitish` shape that `parseRemoteReleaseInventory`
+ * handles for `gh api repos/<repo>/releases/<id>`. Modeled separately so a
+ * REST fixture can never be mistaken for a `release view` response. `isDraft` is
+ * `undefined` when absent or not a boolean, so the caller can fail closed rather
+ * than defaulting a missing field to "not a draft".
+ */
+export interface GhReleaseViewInventory extends RemoteReleaseInventory {
+  readonly isDraft: boolean | undefined;
+}
+
+/** Maps a raw `gh release view --json` response to the fields the publisher uses. */
+export function parseGhReleaseViewInventory(raw: unknown): GhReleaseViewInventory {
+  const value = (raw ?? {}) as Record<string, unknown>;
+  const assets = Array.isArray(value["assets"]) ? (value["assets"] as unknown[]) : [];
+  return {
+    id: typeof value["id"] === "number" ? (value["id"] as number) : 0,
+    tagName: typeof value["tagName"] === "string" ? (value["tagName"] as string) : "",
+    name: typeof value["name"] === "string" ? (value["name"] as string) : "",
+    isDraft: typeof value["isDraft"] === "boolean" ? (value["isDraft"] as boolean) : undefined,
+    draft: value["isDraft"] === true,
+    targetCommitish:
+      typeof value["targetCommitish"] === "string" ? (value["targetCommitish"] as string) : "",
+    assets: assets.map((entry) => {
+      const asset = (entry ?? {}) as Record<string, unknown>;
+      return {
+        name: typeof asset["name"] === "string" ? (asset["name"] as string) : "",
+        size: typeof asset["size"] === "number" ? (asset["size"] as number) : 0,
+        state: typeof asset["state"] === "string" ? (asset["state"] as string) : "",
+      };
+    }),
+  };
+}
+
+/**
+ * The final post-finalization confirmation. A syntactically valid JSON object is
+ * not a confirmation: the release must report an explicit boolean `isDraft:
+ * false`, the expected `tagName` (and, when supplied, the expected
+ * `targetCommitish` source identity), and (checked separately) the expected asset
+ * inventory. Missing or wrongly-typed fields, a wrong tag/source, or a
+ * still-draft release all fail closed so no success is reported for an
+ * unverifiable release.
+ */
+export function finalReleaseConfirmationFailures(
+  inventory: GhReleaseViewInventory,
+  expectedTag: string,
+  expectedTargetCommitish?: string,
+): ReadonlyArray<string> {
+  const problems: string[] = [];
+  if (inventory.isDraft !== false) {
+    problems.push(
+      inventory.isDraft === true
+        ? `release ${expectedTag} is still a draft after finalization; not reporting success`
+        : `final readback for ${expectedTag} did not report an explicit boolean isDraft=false; not reporting success`,
+    );
+  }
+  if (inventory.tagName !== expectedTag) {
+    problems.push(
+      `final readback reports tag '${inventory.tagName || "(missing)"}', expected '${expectedTag}'; not reporting success`,
+    );
+  }
+  if (
+    expectedTargetCommitish !== undefined &&
+    inventory.targetCommitish.toLowerCase() !== expectedTargetCommitish.toLowerCase()
+  ) {
+    problems.push(
+      `final readback reports target commitish '${inventory.targetCommitish || "(missing)"}', expected '${expectedTargetCommitish}'; not reporting success`,
+    );
+  }
+  return problems;
+}
+
+/**
+ * V9-F2: acceptance evidence the verifier used (`--inspection-evidence`,
+ * `--native-receipts`) must be part of the enumerated publication payload, so
+ * the published release carries the exact files that accepted it. The canonical
+ * layout is the candidate-local metadata directory; anything outside the
+ * enumerated payload (external/non-canonical paths) is rejected before any
+ * GitHub mutation rather than silently omitted.
+ */
+export function evidenceLayoutFailures(input: {
+  readonly candidateDir: string;
+  readonly nativeReceipts: string | undefined;
+  readonly inspectionEvidence: ReadonlyArray<string>;
+  readonly publishedFiles: ReadonlyArray<string>;
+}): ReadonlyArray<string> {
+  const problems: string[] = [];
+  const published = new Set(input.publishedFiles.map((file) => NodePath.resolve(file)));
+  const requirePublished = (flag: string, file: string): void => {
+    if (published.has(NodePath.resolve(file))) return;
+    problems.push(
+      `${flag} ${file} is not part of the publication payload; acceptance evidence must live in the candidate directory's canonical metadata layout (${NodePath.join(
+        input.candidateDir,
+        PACKAGED_INSPECTION_FILE_NAME,
+      )} for evidence, ${NodePath.join(
+        input.candidateDir,
+        NATIVE_RECEIPTS_FILE_NAME,
+      )} for receipts) so the published release carries the files used to accept it`,
+    );
+  };
+  if (input.nativeReceipts !== undefined) {
+    requirePublished("--native-receipts", input.nativeReceipts);
+  }
+  for (const file of input.inspectionEvidence) {
+    requirePublished("--inspection-evidence", file);
+  }
+  return problems;
 }
 
 /**

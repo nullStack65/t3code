@@ -89,8 +89,8 @@ it:
 # release/tag conflicts, the approval gate, and the complete payload.
 node scripts/promote-fork-candidate.ts --candidate-dir "<shared candidate dir>" \
   --version 0.0.43 --sha 929b63795e7696855ada61de5fd359dc2f51da78 \
-  --native-receipts fork-native-receipts.json \
-  --inspection-evidence "<dir>/fork-inspection-evidence-win.json,<dir>/fork-inspection-evidence-mac.json"
+  --native-receipts "<shared candidate dir>/fork-native-receipts.json" \
+  --inspection-evidence "<shared candidate dir>/fork-inspection-evidence-win.json,<shared candidate dir>/fork-inspection-evidence-mac.json"
 
 # Inspect an existing release's required payload completeness (read-only), for
 # example the incomplete draft 395230248:
@@ -121,6 +121,18 @@ partial upload, changed bytes, a failed read, or missing candidate-specific
 approval all stop the operation before finalization. A configured reviewer rule
 is not itself proof that a specific candidate was approved: `--execute` still
 needs `--approve` naming the exact frozen manifest digest.
+
+The verifier's `--inspection-evidence` and `--native-receipts` paths must be in
+the candidate directory's canonical metadata layout — `fork-inspection-evidence*.json`
+and `fork-native-receipts.json` beside the assets — so the published release
+carries the exact files used to accept it. An external or non-canonical path is
+rejected before any GitHub mutation rather than silently omitted.
+
+Finalization is confirmed by re-reading `gh release view --json` and requiring an
+explicit boolean `isDraft=false`, the expected `tagName`, and the complete asset
+inventory at the expected sizes. A missing or wrongly-typed field, a wrong tag, a
+still-draft release, or a missing asset is reported as **unconfirmed**, not as
+publication success; a write that already happened is not rolled back.
 
 ### Remaining Windows commands (preserve artifact source `929b63795`)
 
@@ -195,7 +207,7 @@ preflight (no publication):
 # owner W, target win32-x64, bound to T3-Code-0.0.43-x64.exe's observed digest
 node scripts/promote-fork-candidate.ts --candidate-dir "<candidate-win>" \
   --version 0.0.43 --sha 929b63795e7696855ada61de5fd359dc2f51da78 \
-  --native-receipts fork-native-receipts.json \
+  --native-receipts "<candidate-win>/fork-native-receipts.json" \
   --inspection-evidence "<candidate-win>/fork-inspection-evidence-win.json,<candidate-win>/fork-inspection-evidence-mac.json"
 ```
 

@@ -44,7 +44,10 @@ import * as NodePath from "node:path";
 
 import {
   checksumCoverageFailures,
+  evidenceLayoutFailures,
+  finalReleaseConfirmationFailures,
   parseChecksumsFile,
+  parseGhReleaseViewInventory,
   parsePublicationProbe,
   parseRemoteReleaseInventory,
   promotionGateFailures,
@@ -52,9 +55,9 @@ import {
   publicationProbeFailures,
   releaseInventoryFailures,
   uploadReadbackFailures,
+  type GhReleaseViewInventory,
   type GitHubPublicationProbe,
   type ProbeReadState,
-  type RemoteReleaseInventory,
 } from "./lib/fork-promotion.ts";
 import {
   CANDIDATE_MANIFEST_FILE_NAME,
@@ -479,11 +482,16 @@ function publish(args: Args, files: ReadonlyArray<string>): void {
         `could not read back release ${tag} after upload: ${view.stderr.trim() || "gh release view failed"}`,
       ]);
     }
-    let inventory: RemoteReleaseInventory;
+    let inventory: GhReleaseViewInventory;
     try {
-      inventory = parseRemoteReleaseInventory(JSON.parse(view.stdout));
+      inventory = parseGhReleaseViewInventory(JSON.parse(view.stdout));
     } catch {
       fail([`release ${tag} readback was not valid JSON; treating it as unresolved`]);
+    }
+    if (inventory.tagName !== tag || inventory.isDraft !== true) {
+      fail([
+        `release readback for ${tag} did not report the expected draft '${tag}' (tag '${inventory.tagName || "(missing)"}', isDraft ${JSON.stringify(inventory.isDraft)}); treating it as unresolved`,
+      ]);
     }
     const expected = files.map((file) => ({
       name: NodePath.basename(file),
@@ -552,22 +560,35 @@ function publish(args: Args, files: ReadonlyArray<string>): void {
 
     const confirm = run(
       args.ghBin,
-      ghArgs(args, ["release", "view", tag, "--repo", repo, "--json", "isDraft,assets"]),
+      ghArgs(args, [
+        "release",
+        "view",
+        tag,
+        "--repo",
+        repo,
+        "--json",
+        "id,tagName,isDraft,targetCommitish,assets",
+      ]),
     );
     if (confirm.status !== 0) {
       fail([
         `could not confirm the final release ${tag}: ${confirm.stderr.trim() || "gh release view failed"}`,
       ]);
     }
-    let final: { isDraft?: boolean };
+    let final: GhReleaseViewInventory;
     try {
-      final = JSON.parse(confirm.stdout) as { isDraft?: boolean };
+      final = parseGhReleaseViewInventory(JSON.parse(confirm.stdout));
     } catch {
       fail([`final release ${tag} readback was not valid JSON; not reporting success`]);
     }
-    if (final.isDraft === true) {
-      fail([`release ${tag} is still a draft after finalization; not reporting success`]);
-    }
+    // A syntactically valid JSON object is not a confirmation: require an
+    // explicit boolean non-draft state, the expected tag identity, and the
+    // complete expected asset inventory at the expected sizes.
+    const confirmationProblems = [
+      ...finalReleaseConfirmationFailures(final, tag, args.sha),
+      ...uploadReadbackFailures(final, expected),
+    ];
+    if (confirmationProblems.length > 0) fail(confirmationProblems);
     finalized = true;
   } finally {
     NodeFS.rmSync(notesFile, { force: true });
@@ -601,6 +622,14 @@ function main(): void {
   if (args.simulate && args.ghPrefix.length === 0) {
     fail([
       "--simulate requires an offline mock transport (--gh-bin <node> --gh-prefix <mock>); refusing to use the live gh",
+    ]);
+  }
+  // V9-F4: `--simulate` must not be able to fall back to the real `gh` binary.
+  // A non-empty prefix alone does not prove the transport is offline.
+  const ghBinName = NodePath.basename(args.ghBin).toLowerCase();
+  if (args.simulate && (ghBinName === "gh" || ghBinName === "gh.exe")) {
+    fail([
+      `--simulate refuses --gh-bin '${args.ghBin}': an offline mock transport is required, not the live gh binary`,
     ]);
   }
 
@@ -676,6 +705,17 @@ function main(): void {
 
   const payload = publicationPayload(args, manifest);
   if (payload.problems.length > 0) fail(payload.problems);
+
+  // The evidence used for acceptance must be part of what is published, or be
+  // rejected before any GitHub mutation (V9-F2). This is checked before the dry
+  // run so an operator sees the layout error without --execute.
+  const evidenceProblems = evidenceLayoutFailures({
+    candidateDir: args.candidateDir,
+    nativeReceipts: args.nativeReceipts,
+    inspectionEvidence: args.inspectionEvidence,
+    publishedFiles: payload.files,
+  });
+  if (evidenceProblems.length > 0) fail(evidenceProblems);
 
   if (!args.execute) {
     console.log("PROMOTION READY (dry run — no GitHub write performed).");
