@@ -179,6 +179,11 @@ Packaging (`packaging/**`, root workspaces, release workflows): compile the host
 and ship it beside the pinned runtime. Root Cargo/package workspaces and the
 release pipeline are outside this slice.
 
+CI (`.github/workflows/ci.yml`): the `Rust` job hardcodes the native crate list
+(`resource-monitor kde-snap-shot hyprland-snap-shot`). Add `windows-service-host`
+there so its portable tests and `cargo fmt --check` run on every PR. The host
+already passes both locally; the workflow itself is outside this slice.
+
 ## Artifact and provenance inputs
 
 - The host binary: pinned fork commit and toolchain, signed, with a recorded
