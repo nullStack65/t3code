@@ -1,0 +1,42 @@
+[package]
+name = "t3-windows-service-host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Minimal T3-owned Windows SCM host for the pinned service launcher."
+
+[lib]
+name = "t3_windows_service_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "t3-windows-service-host"
+path = "src/main.rs"
+
+[features]
+# Development and test only. Enables `--exec` so the host can spawn an arbitrary
+# dummy child instead of the pinned `t3.exe __service-launcher`. A packaged
+# build must never enable this: the production child is selected by `--runtime`.
+test-child = []
+
+# SCM dispatch, job objects and process creation are Windows-only. Gating the
+# dependency by target keeps `cargo test` on a developer host dependency-free
+# and lets the portable core compile and run without a Windows toolchain.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true
