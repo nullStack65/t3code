@@ -327,7 +327,13 @@ function main(): void {
   };
 
   const checksumPath = NodePath.join(args.candidateDir, SHA256SUMS_FILE_NAME);
-  if (NodeFS.existsSync(checksumPath)) {
+  if (!NodeFS.existsSync(checksumPath)) {
+    if (args.promote) {
+      fail([
+        `${SHA256SUMS_FILE_NAME} is required for promotion but is missing; a release without it cannot be verified by an installer`,
+      ]);
+    }
+  } else {
     const recorded = new Map(
       NodeFS.readFileSync(checksumPath, "utf8")
         .split(/\r?\n/)
