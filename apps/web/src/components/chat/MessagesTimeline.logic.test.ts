@@ -1138,6 +1138,8 @@ describe("deriveMessagesTimelineRows", () => {
       outstandingTools: [],
       outstandingTool: null,
       knownWait: null,
+      observingServerClock: false,
+      observationClockOffsetMs: null,
     } as const;
     const base = {
       timelineEntries: [],
@@ -3744,6 +3746,8 @@ describe("computeStableMessagesTimelineRows", () => {
       outstandingTools: [],
       outstandingTool: null,
       knownWait: null,
+      observingServerClock: false,
+      observationClockOffsetMs: null,
     } as const;
     const liveRow: MessagesTimelineRow = {
       kind: "post-start-activity",

@@ -481,3 +481,227 @@ describe("resolvePostStartActivity", () => {
     expect(resolvePostStartActivity(remote, Date.parse(T(10 * MIN))).quietSinceAt).toBe(T0);
   });
 });
+
+describe("tool lifecycle reconciliation", () => {
+  it("keeps a completed call finished when stale live evidence still lists it", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [
+        turnTool("a", T0, "tool.started", { title: "A" }),
+        turnTool("a", T(2 * MIN), "tool.completed", { title: "A" }),
+      ],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: T(3 * MIN),
+        lastToolCompletedAt: null,
+        outstandingTools: [
+          {
+            toolCallId: "a",
+            title: "A",
+            itemType: null,
+            startedAt: T0,
+            lastObservedAt: T(3 * MIN),
+          },
+        ],
+      },
+    });
+    expect(anchors.outstandingTools).toEqual([]);
+  });
+
+  it("drops a persisted outstanding call when newer live evidence completes it", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [turnTool("a", T0, "tool.started", { title: "A" })],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: T(3 * MIN),
+        lastToolCompletedAt: T(3 * MIN),
+        outstandingTools: [],
+        completedToolIds: ["a"],
+      },
+    });
+    expect(anchors.outstandingTools).toEqual([]);
+    expect(anchors.lastToolCompletedAt).toBe(T(3 * MIN));
+  });
+
+  it("does not reopen a completed call on a later progress update", () => {
+    const anchors = anchorsFor({
+      activities: [
+        turnTool("a", T0, "tool.started", { title: "A" }),
+        turnTool("a", T(2 * MIN), "tool.completed", { title: "A" }),
+        activity({
+          kind: "tool.progress",
+          createdAt: T(3 * MIN),
+          id: EventId.make("late-progress"),
+          payload: { toolCallId: "a", title: "A" },
+        }),
+      ],
+    });
+    expect(anchors.outstandingTools).toEqual([]);
+    expect(anchors.lastToolCompletedAt).toBe(T(2 * MIN));
+  });
+
+  it("keeps overlapping tools independent under completion", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [
+        turnTool("a", T0, "tool.started", { title: "A" }),
+        turnTool("b", T(MIN), "tool.started", { title: "B" }),
+      ],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: T(2 * MIN),
+        lastToolCompletedAt: T(2 * MIN),
+        outstandingTools: [
+          {
+            toolCallId: "b",
+            title: "B",
+            itemType: null,
+            startedAt: T(MIN),
+            lastObservedAt: T(2 * MIN),
+          },
+        ],
+        completedToolIds: ["a"],
+      },
+    });
+    expect(anchors.outstandingTools.map((tool) => tool.toolCallId)).toEqual(["b"]);
+  });
+
+  it("preserves a tool whose start is outside retained history", () => {
+    const anchors = anchorsFor({
+      activities: [
+        activity({
+          kind: "tool.progress",
+          createdAt: T(4 * MIN),
+          turnId: TURN_ID,
+          payload: { toolCallId: "orphan", title: "Orphan" },
+        }),
+      ],
+    });
+    expect(anchors.outstandingTools.map((tool) => tool.toolCallId)).toEqual(["orphan"]);
+    expect(anchors.outstandingTool?.startedAt).toBe(T(4 * MIN));
+  });
+});
+
+describe("observation clock basis", () => {
+  const SERVER_T0 = T0;
+
+  it("prefers the server observation over a skewed stored provider timestamp", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [
+        activity({
+          kind: "tool.started",
+          createdAt: "2026-01-01T12:00:00.000Z",
+          payload: { toolCallId: "a", title: "A" },
+        }),
+      ],
+      latestTurn: {
+        turnId: TURN_ID,
+        state: "running",
+        requestedAt: "2026-01-01T12:00:00.000Z",
+        startedAt: "2026-01-01T12:00:00.000Z",
+        completedAt: null,
+      },
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: SERVER_T0,
+      },
+      receivedAtMs: Date.parse(SERVER_T0),
+    });
+    const observation = resolvePostStartActivity(anchors, Date.parse(T(1 * MIN)));
+    expect(observation.status).toBe("active");
+  });
+
+  it("reports uncertainty when the browser clock is far ahead of the server", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: SERVER_T0,
+      },
+      // Browser reads 01:00 when the server stamped 00:00.
+      receivedAtMs: Date.parse(T(60 * MIN)),
+    });
+    const observation = resolvePostStartActivity(anchors, Date.parse(T(60 * MIN + 1_000)));
+    expect(observation.status).toBe("unknown");
+    expect(observation.lastProviderActivityAgeMs).toBeNull();
+    expect(observation.lastProviderActivityAt).toBe(SERVER_T0);
+  });
+
+  it("reports uncertainty when the browser clock is far behind the server", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: SERVER_T0,
+      },
+      receivedAtMs: Date.parse(T(-60 * MIN)),
+    });
+    const observation = resolvePostStartActivity(anchors, Date.parse(T(-60 * MIN + 1_000)));
+    expect(observation.status).toBe("unknown");
+  });
+
+  it("measures quiet on the server basis across a clock offset", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: SERVER_T0,
+      },
+      // A consistent 10s offset between the clocks.
+      receivedAtMs: Date.parse(T(10_000)),
+    });
+    // At 4 minutes in server terms, still active; at 5 minutes, quiet.
+    expect(resolvePostStartActivity(anchors, Date.parse(T(10_000 + 4 * MIN))).status).toBe(
+      "active",
+    );
+    const quiet = resolvePostStartActivity(anchors, Date.parse(T(10_000 + 5 * MIN)));
+    expect(quiet.status).toBe("quiet");
+    expect(quiet.episodeKey).toBe(`${TURN_ID}:${Date.parse(SERVER_T0)}`);
+  });
+
+  it("re-establishes the basis when a fresh observation lands", () => {
+    const first = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: SERVER_T0,
+      },
+      receivedAtMs: Date.parse(SERVER_T0),
+    });
+    expect(resolvePostStartActivity(first, Date.parse(T(6 * MIN))).status).toBe("quiet");
+
+    const resumed = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: T(6 * MIN),
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: T(6 * MIN),
+      },
+      receivedAtMs: Date.parse(T(6 * MIN + 2_000)),
+    });
+    expect(resolvePostStartActivity(resumed, Date.parse(T(6 * MIN + 2_000))).status).toBe("active");
+  });
+});

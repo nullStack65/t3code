@@ -10,6 +10,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  type OrchestrationEvent,
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
@@ -354,6 +355,21 @@ describe("ProviderRuntimeIngestion", () => {
     const ingestion = await testRuntime.runPromise(Effect.service(ProviderRuntimeIngestionService));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await testRuntime.runPromise(ingestion.start().pipe(Scope.provide(scope)));
+    // Mimic an already-open shell subscription: collect the domain events the
+    // ws shell stream would turn into a refetch, so delivery can be asserted
+    // without a fresh direct query.
+    const domainEvents: OrchestrationEvent[] = [];
+    await testRuntime.runPromise(
+      Effect.forkScoped(
+        engine.streamDomainEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              domainEvents.push(event);
+            }),
+          ),
+        ),
+      ).pipe(Scope.provide(scope)),
+    );
     const drain = () => testRuntime.runPromise(ingestion.drain);
     const dispatch = (command: OrchestrationCommand) =>
       testRuntime.runPromise(engine.dispatch(command));
@@ -439,6 +455,7 @@ describe("ProviderRuntimeIngestion", () => {
       sqlCount: sqlCounter.count,
       setProviderSession: provider.setSession,
       drain,
+      domainEvents,
     };
   }
 
@@ -1423,6 +1440,228 @@ describe("ProviderRuntimeIngestion", () => {
     expect((await harness.readThreadShell()).postStartActivity?.lastProviderActivityAt).toBe(
       observed,
     );
+  });
+
+  it("delivers advancing observation to an already-open shell during buffered content", async () => {
+    const harness = await createHarness();
+    const providerStamp = "2020-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-buffered-delivery-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-delivery"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === "turn-buffered-delivery",
+    );
+
+    const before = harness.domainEvents.length;
+    harness.advanceClock(15_000);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-buffered-delivery-content"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-delivery"),
+      payload: { streamKind: "assistant_text", delta: "buffered" },
+    });
+    await harness.drain();
+
+    // The subscribed shell receives a delivery signal even though turn-mode
+    // buffering persists no per-delta row.
+    const delivered = harness.domainEvents.slice(before);
+    expect(
+      delivered.some(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          event.payload.activity.kind === "post-start-observation",
+      ),
+    ).toBe(true);
+
+    const shell = await harness.readThreadShell();
+    const observedAt = shell.postStartActivity?.lastProviderActivityAt;
+    expect(observedAt).toBeDefined();
+    expect(Date.parse(observedAt!)).toBeGreaterThan(Date.parse(providerStamp));
+  });
+
+  it("observes parent tool heartbeats that carry no taskId", async () => {
+    const harness = await createHarness();
+    const providerStamp = "2020-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-parent-heartbeat-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-parent-heartbeat"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === "turn-parent-heartbeat",
+    );
+
+    const before = harness.domainEvents.length;
+    harness.advanceClock(15_000);
+    harness.emit({
+      type: "tool.progress",
+      eventId: asEventId("evt-parent-heartbeat"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-parent-heartbeat"),
+      payload: { toolUseId: "parent-tool-1", toolName: "Bash", elapsedSeconds: 12 },
+    });
+    await harness.drain();
+
+    // The heartbeat is intentionally not persisted, but the observation and its
+    // delivery do not depend on persistence.
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === asThreadId("thread-1"),
+    );
+    expect(thread?.activities.some((activity) => activity.kind === "tool.progress")).toBe(false);
+
+    const shell = await harness.readThreadShell();
+    expect(shell.postStartActivity?.outstandingTools.map((tool) => tool.toolCallId)).toEqual([
+      "parent-tool-1",
+    ]);
+    expect(
+      harness.domainEvents
+        .slice(before)
+        .some(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.activity.kind === "post-start-observation",
+        ),
+    ).toBe(true);
+  });
+
+  it("keeps the current turn's observation across a superseded turn's late events", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-supersede-turn-a"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-a"),
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === "turn-a");
+
+    harness.advanceClock(15_000);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-supersede-a-content"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { streamKind: "assistant_text", delta: "a" },
+    });
+    await harness.drain();
+
+    // Accepted supersession: the session now tracks turn B.
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-supersede-session-b"),
+      threadId,
+      session: {
+        threadId,
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-b"),
+        updatedAt: now,
+        lastError: null,
+      },
+      createdAt: now,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-supersede-turn-b"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-b"),
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === "turn-b");
+
+    harness.advanceClock(15_000);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-supersede-b-content"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-b"),
+      payload: { streamKind: "assistant_text", delta: "b" },
+    });
+    await harness.drain();
+    const bObserved = (await harness.readThreadShell()).postStartActivity?.lastProviderActivityAt;
+    expect(bObserved).toBeDefined();
+
+    // Late A traffic must not refresh B.
+    harness.advanceClock(15_000);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-supersede-a-late"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { streamKind: "assistant_text", delta: "late-a" },
+    });
+    harness.emit({
+      type: "tool.started",
+      eventId: asEventId("evt-supersede-a-tool"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { toolCallId: "stale-a-tool", title: "Stale" },
+    });
+    await harness.drain();
+    const afterLateA = await harness.readThreadShell();
+    expect(afterLateA.postStartActivity?.lastProviderActivityAt).toBe(bObserved);
+    expect(afterLateA.postStartActivity?.outstandingTools ?? []).toEqual([]);
+
+    // A delayed A completion rejected by lifecycle logic must not clear B.
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-supersede-a-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    expect((await harness.readThreadShell()).postStartActivity?.lastProviderActivityAt).toBe(
+      bObserved,
+    );
+
+    // B's own terminal event clears it.
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-supersede-b-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId,
+      turnId: asTurnId("turn-b"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    expect((await harness.readThreadShell()).postStartActivity ?? null).toBeNull();
   });
 
   it("maps canonical content delta/item completed into finalized assistant messages", async () => {
@@ -2760,7 +2999,11 @@ describe("ProviderRuntimeIngestion", () => {
         },
       })),
     );
-    expect(harness.sqlCount() - before).toBe(eventCount);
+    // Buffered deltas do no per-delta lifecycle write; delivery adds one
+    // bounded, coalesced post-start observation nudge for the whole batch.
+    const bufferedStatements = harness.sqlCount() - before;
+    expect(bufferedStatements).toBeGreaterThanOrEqual(eventCount);
+    expect(bufferedStatements).toBeLessThanOrEqual(eventCount + 16);
 
     const midReadModel = await harness.readModel();
     const midThread = midReadModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));

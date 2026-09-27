@@ -20,6 +20,8 @@ function anchors(overrides: Partial<PostStartActivityAnchors> = {}): PostStartAc
     outstandingTools: [],
     outstandingTool: null,
     knownWait: null,
+    observingServerClock: false,
+    observationClockOffsetMs: null,
     ...overrides,
   };
 }
@@ -44,6 +46,7 @@ function renderedText(renderer: ReactTestRenderer): string {
 }
 
 describe("PostStartActivityNotice", () => {
+  const renderers: ReactTestRenderer[] = [];
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -53,16 +56,25 @@ describe("PostStartActivityNotice", () => {
     });
   });
   afterEach(() => {
+    for (const renderer of renderers.splice(0)) {
+      act(() => renderer.unmount());
+    }
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
-  it("stays informative while active, then warns exactly at the threshold", () => {
-    vi.setSystemTime(T0_MS + THRESHOLD_MS - 1_000);
+  function render(element: Parameters<typeof create>[0]): ReactTestRenderer {
     let renderer!: ReactTestRenderer;
     act(() => {
-      renderer = create(<PostStartActivityNotice anchors={anchors()} connection="live" />);
+      renderer = create(element);
     });
+    renderers.push(renderer);
+    return renderer;
+  }
+
+  it("stays informative while active, then warns exactly at the threshold", () => {
+    vi.setSystemTime(T0_MS + THRESHOLD_MS - 1_000);
+    const renderer = render(<PostStartActivityNotice anchors={anchors()} connection="live" />);
     expect(renderedText(renderer)).toContain("Provider active");
     expect(renderedText(renderer)).not.toContain("No provider activity observed");
 
@@ -83,15 +95,12 @@ describe("PostStartActivityNotice", () => {
       lastObservedAt: T0,
     };
     vi.setSystemTime(T0_MS + 2 * 60_000);
-    let renderer!: ReactTestRenderer;
-    act(() => {
-      renderer = create(
-        <PostStartActivityNotice
-          anchors={anchors({ outstandingTool: tool, outstandingTools: [tool] })}
-          connection="live"
-        />,
-      );
-    });
+    const renderer = render(
+      <PostStartActivityNotice
+        anchors={anchors({ outstandingTool: tool, outstandingTools: [tool] })}
+        connection="live"
+      />,
+    );
     expect(renderedText(renderer)).toContain("Working: npm test");
 
     act(() => {
@@ -103,21 +112,30 @@ describe("PostStartActivityNotice", () => {
 
   it("shows a pending decision as an explained wait, not silence", () => {
     vi.setSystemTime(T0_MS + 30 * 60_000);
-    let renderer!: ReactTestRenderer;
-    act(() => {
-      renderer = create(
-        <PostStartActivityNotice anchors={anchors({ knownWait: "approval" })} connection="live" />,
-      );
-    });
+    const renderer = render(
+      <PostStartActivityNotice anchors={anchors({ knownWait: "approval" })} connection="live" />,
+    );
     expect(renderedText(renderer)).toContain("Waiting for your approval");
   });
 
   it("shows uncertainty instead of a stop when disconnected", () => {
     vi.setSystemTime(T0_MS + 30 * 60_000);
-    let renderer!: ReactTestRenderer;
-    act(() => {
-      renderer = create(<PostStartActivityNotice anchors={anchors()} connection="disconnected" />);
-    });
+    const renderer = render(
+      <PostStartActivityNotice anchors={anchors()} connection="disconnected" />,
+    );
     expect(renderedText(renderer)).toContain("its state is unknown");
+  });
+
+  it("does not claim no activity when a timestamp is known but its age is not", () => {
+    vi.setSystemTime(T0_MS + 10 * 60_000);
+    const renderer = render(
+      <PostStartActivityNotice
+        anchors={anchors({ observingServerClock: true, observationClockOffsetMs: 60 * 60_000 })}
+        connection="live"
+      />,
+    );
+    const text = renderedText(renderer);
+    expect(text).toContain("provider activity observed; age unknown");
+    expect(text).not.toContain("no provider activity observed yet");
   });
 });

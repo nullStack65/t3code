@@ -272,10 +272,20 @@ describe("thread notifications", () => {
     });
   });
 
-  it("warns once per silence episode for an unattended running thread", async () => {
+  it("does not storm on the first live snapshot and warns once per later episode", async () => {
     state.sessionRunning = true;
     state.postStartActivity = {
       lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    // First live snapshot: an already-quiet thread is baselined, not alerted.
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+
+    // A later episode (a new quiet origin) alerts once.
+    state.postStartActivity = {
+      lastProviderActivityAt: "2021-01-01T00:00:00.000Z",
       lastToolCompletedAt: null,
       outstandingTools: [],
     };
@@ -289,17 +299,18 @@ describe("thread notifications", () => {
     await render();
     expect(state.add).toHaveBeenCalledTimes(1);
 
-    // Provider progress resumes: the episode ends and the toast closes.
+    // Real resumption: the episode ends and the toast closes.
     state.postStartActivity = {
-      lastProviderActivityAt: "2999-01-01T00:00:00.000Z",
+      lastProviderActivityAt: new Date().toISOString(),
       lastToolCompletedAt: null,
       outstandingTools: [],
     };
     await render();
     expect(state.close).toHaveBeenCalledWith("toast-1");
+    expect(state.add).toHaveBeenCalledTimes(1);
   });
 
-  it("closes the silence toast when in-app notifications are disabled", async () => {
+  it("does not replay an episode across a preference remount", async () => {
     state.sessionRunning = true;
     state.postStartActivity = {
       lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
@@ -307,11 +318,22 @@ describe("thread notifications", () => {
       outstandingTools: [],
     };
     await render();
+    state.postStartActivity = {
+      lastProviderActivityAt: "2021-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
     expect(state.add).toHaveBeenCalledTimes(1);
 
+    // Both preferences off unmounts the environment list and closes the toast.
     state.inApp = false;
     await render();
     expect(state.close).toHaveBeenCalledWith("toast-1");
+
+    // Re-enabling does not replay the same episode.
+    state.inApp = true;
+    await render();
     expect(state.add).toHaveBeenCalledTimes(1);
   });
 
@@ -324,6 +346,55 @@ describe("thread notifications", () => {
       outstandingTools: [],
     };
     await render();
+    state.postStartActivity = {
+      lastProviderActivityAt: "2021-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
     expect(state.add).not.toHaveBeenCalled();
+  });
+
+  it("raises a desktop alert for silence when away from T3", async () => {
+    state.sessionRunning = true;
+    state.mode = "notifications";
+    state.focused = false;
+    state.postStartActivity = {
+      lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    state.postStartActivity = {
+      lastProviderActivityAt: "2021-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.notification).toHaveBeenCalledWith("No recent provider activity", {
+      body: "Fix the login form",
+      tag: "env-1:thread-1:silence",
+      silent: true,
+    });
+  });
+
+  it("plays the input sound for a silence alert when sound is enabled", async () => {
+    state.sessionRunning = true;
+    state.mode = "notifications-and-sound";
+    state.postStartActivity = {
+      lastProviderActivityAt: "2020-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    state.postStartActivity = {
+      lastProviderActivityAt: "2021-01-01T00:00:00.000Z",
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+    };
+    await render();
+    expect(state.sound).toHaveBeenCalledWith("input", expect.any(Function));
+    expect(state.add).toHaveBeenCalledTimes(1);
   });
 });
