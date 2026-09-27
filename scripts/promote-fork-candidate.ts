@@ -11,29 +11,58 @@
  * approval-gate existence) and adds only the gates a local handoff needs:
  * fork-main eligibility and candidate-specific approval.
  *
- * Default is a read-only preflight/dry run: it performs live read-only GitHub
- * probes (release/tag existence, latest version, environment reviewers) and
- * prints the exact publication command **without** running it. `--execute` is
- * required to publish, and it is further gated on `--approve <frozen manifest
- * sha256>` so approval is specific to the exact frozen bytes.
+ * Publication is a draft → upload → readback → verify → finalize sequence, not a
+ * single `gh release create`:
+ *   1. create an empty *draft* at the candidate source SHA;
+ *   2. upload the exact enumerated payload (build assets + `SHA256SUMS` + the
+ *      frozen manifest and available acceptance/evidence metadata);
+ *   3. read the remote inventory back and require every file at the exact size
+ *      in `uploaded` state, with no unenumerated files;
+ *   4. download the published bytes and require each digest to match the local
+ *      candidate, including that a consumer's `SHA256SUMS` validates the runtime;
+ *   5. finalize (undraft + `--latest`) only after (4) passes.
+ * A failed read is never treated as absence; a partially uploaded or mismatched
+ * release is never finalized or advertised as success.
  *
- * `--preflight-json <file>` replaces the live probes with a labeled fixture and
- * `--gh-bin <path>` replaces the `gh` executable, so publication behavior can be
- * exercised without touching GitHub.
+ * Default is a read-only preflight/dry run: it performs live read-only GitHub
+ * probes (release/tag existence, latest version, environment reviewers,
+ * fork-main ancestry) and prints the exact planned sequence **without** running
+ * it. `--execute` is required to publish, and it is further gated on
+ * `--approve <frozen manifest sha256>` so approval is specific to the exact
+ * frozen bytes.
+ *
+ * `--simulate` is the clearly-labeled offline mode for tests: it requires a
+ * `--preflight-json` fixture and an offline mock transport (`--gh-bin` +
+ * `--gh-prefix`) and is the *only* way a fixture can be used. The live publisher
+ * rejects `--preflight-json`, so fixture claims can never reach real GitHub.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  checksumCoverageFailures,
+  parseChecksumsFile,
   parsePublicationProbe,
   parseRemoteReleaseInventory,
   promotionGateFailures,
+  publicationMetadataFailures,
+  publicationProbeFailures,
   releaseInventoryFailures,
+  uploadReadbackFailures,
   type GitHubPublicationProbe,
+  type ProbeReadState,
+  type RemoteReleaseInventory,
 } from "./lib/fork-promotion.ts";
-import { RELEASE_ENVIRONMENT } from "./lib/fork-release-manifest.ts";
+import {
+  CANDIDATE_MANIFEST_FILE_NAME,
+  NATIVE_RECEIPTS_FILE_NAME,
+  PACKAGED_INSPECTION_FILE_PREFIX,
+  RELEASE_ENVIRONMENT,
+  SHA256SUMS_FILE_NAME,
+} from "./lib/fork-release-manifest.ts";
 
 interface Args {
   candidateDir: string | undefined;
@@ -50,6 +79,7 @@ interface Args {
   ghPrefix: ReadonlyArray<string>;
   approve: string | undefined;
   execute: boolean;
+  simulate: boolean;
   inspectRelease: string | undefined;
 }
 
@@ -94,6 +124,7 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
       .filter((entry) => entry !== ""),
     approve: values.get("approve")?.trim(),
     execute: flags.has("execute"),
+    simulate: flags.has("simulate"),
     inspectRelease: values.get("inspect-release")?.trim(),
   };
 }
@@ -130,36 +161,74 @@ function fail(problems: ReadonlyArray<string>): never {
   process.exit(1);
 }
 
-/** Read-only live GitHub probe. Any failure is reported as "not found". */
+/**
+ * Maps a read to present/absent/unresolved. A nonzero exit that does not look
+ * like an authoritative "not found" is `unresolved`, never `absent`: an auth,
+ * permission, rate-limit or malformed-response failure cannot prove a
+ * release/tag/version does not exist.
+ */
+function classifyRead(result: RunResult, absentPattern: RegExp): ProbeReadState {
+  if (result.status === 0) return "present";
+  const text = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  return absentPattern.test(text) ? "absent" : "unresolved";
+}
+
+/** Resolves the writable fork remote whose URL names the requested repository. */
+function resolveForkRemote(args: Args): { remote: string; read: ProbeReadState } {
+  for (const remote of [args.forkRemote, "origin"]) {
+    const url = run("git", ["remote", "get-url", remote]);
+    if (
+      url.status === 0 &&
+      url.stdout.trim().toLowerCase().includes(args.repository.toLowerCase())
+    ) {
+      return { remote, read: "present" };
+    }
+  }
+  return { remote: args.forkRemote, read: "unresolved" };
+}
+
+/** Read-only live GitHub probe, distinguishing confirmed absence from failed reads. */
 function probeGitHub(args: Args): GitHubPublicationProbe {
   const repo = args.repository;
   const tag = `v${args.version}`;
-  const release = run(
-    args.ghBin,
-    ghArgs(args, ["release", "view", tag, "--repo", repo, "--json", "tagName"]),
-  );
-  const tagLookup = run("git", ["ls-remote", "--tags", args.forkRemote, `refs/tags/${tag}`]);
-  const latest = run(
-    args.ghBin,
-    ghArgs(args, [
-      "release",
-      "list",
-      "--repo",
-      repo,
-      "--limit",
-      "100",
-      "--json",
-      "tagName",
-      "--jq",
-      '[.[].tagName | sub("^v"; "")] | join(",")',
-    ]),
-  );
-  const environment = run(
-    args.ghBin,
-    ghArgs(args, ["api", `repos/${repo}/environments/${RELEASE_ENVIRONMENT}`]),
-  );
+  const gh = (rest: ReadonlyArray<string>): RunResult => run(args.ghBin, ghArgs(args, rest));
+  const fork = resolveForkRemote(args);
+
+  const release = gh(["release", "view", tag, "--repo", repo, "--json", "tagName"]);
+  const releaseRead = classifyRead(release, /not found|404|could not find/);
+
+  const tagLookup =
+    fork.read === "present"
+      ? run("git", ["ls-remote", "--tags", fork.remote, `refs/tags/${tag}`])
+      : { status: 1, stdout: "", stderr: "" };
+  const tagRead: ProbeReadState =
+    fork.read === "unresolved"
+      ? "unresolved"
+      : tagLookup.status !== 0
+        ? "unresolved"
+        : tagLookup.stdout.trim() === ""
+          ? "absent"
+          : "present";
+
+  const latest = gh([
+    "release",
+    "list",
+    "--repo",
+    repo,
+    "--limit",
+    "100",
+    "--json",
+    "tagName",
+    "--jq",
+    '[.[].tagName | sub("^v"; "")] | join(",")',
+  ]);
+  const latestRead: ProbeReadState = latest.status === 0 ? "present" : "unresolved";
+  const latestVersion = latestRead === "present" ? latest.stdout.trim() || undefined : undefined;
+
+  const environment = gh(["api", `repos/${repo}/environments/${RELEASE_ENVIRONMENT}`]);
+  const authorizationGateRead = classifyRead(environment, /not found|404/);
   let reviewers = 0;
-  if (environment.status === 0) {
+  if (authorizationGateRead === "present") {
     try {
       const parsed = JSON.parse(environment.stdout) as {
         protection_rules?: Array<{ type?: string; reviewers?: unknown[] }>;
@@ -172,18 +241,43 @@ function probeGitHub(args: Args): GitHubPublicationProbe {
       reviewers = 0;
     }
   }
-  return {
-    releaseExists: release.status === 0,
-    tagExists: tagLookup.status === 0 && tagLookup.stdout.trim() !== "",
-    latestVersion: latest.status === 0 ? latest.stdout.trim() || undefined : undefined,
-    authorizationGateReviewers: reviewers,
-    onForkMain: isAncestor(args.sha, `${args.forkRemote}/main`),
-  };
-}
 
-function isAncestor(sha: string, ref: string): boolean {
-  const result = run("git", ["merge-base", "--is-ancestor", sha, ref]);
-  return result.status === 0;
+  // Confirm the resolved fork remote and fetch current fork-main state before
+  // asserting ancestry.
+  let onForkMain = false;
+  let onForkMainRead: ProbeReadState;
+  if (fork.read === "unresolved") {
+    onForkMainRead = "unresolved";
+  } else {
+    const fetch = run("git", ["fetch", "--quiet", fork.remote, "main"]);
+    if (fetch.status !== 0) {
+      onForkMainRead = "unresolved";
+    } else {
+      const ancestor = run("git", ["merge-base", "--is-ancestor", args.sha, `${fork.remote}/main`]);
+      if (ancestor.status === 0) {
+        onForkMain = true;
+        onForkMainRead = "present";
+      } else if (ancestor.status === 1) {
+        onForkMain = false;
+        onForkMainRead = "present";
+      } else {
+        onForkMainRead = "unresolved";
+      }
+    }
+  }
+
+  return {
+    releaseExists: releaseRead === "present",
+    releaseRead,
+    tagExists: tagRead === "present",
+    tagRead,
+    latestVersion,
+    latestRead,
+    authorizationGateReviewers: reviewers,
+    authorizationGateRead,
+    onForkMain,
+    onForkMainRead,
+  };
 }
 
 function loadProbe(args: Args): GitHubPublicationProbe {
@@ -227,31 +321,73 @@ function verifierArgs(args: Args, probe: GitHubPublicationProbe): string[] {
   return list;
 }
 
-function publicationCommand(args: Args, assets: ReadonlyArray<string>): ReadonlyArray<string> {
-  const tag = `v${args.version}`;
-  const notes = [
+function releaseNotes(args: Args): string {
+  return [
     `Fork build of T3 Code \`${args.sha}\`.`,
     "",
     `Repository: \`${args.repository}\`. Fork version \`${args.version}\` is the fork's own increasing line.`,
     "",
-    "Assets are checksummed in `SHA256SUMS`.",
+    `Assets are checksummed in \`${SHA256SUMS_FILE_NAME}\`; the frozen \`${CANDIDATE_MANIFEST_FILE_NAME}\` records the source and accepted digests.`,
+    "",
   ].join("\n");
+}
+
+interface PublicationPayload {
+  readonly files: ReadonlyArray<string>;
+  readonly problems: ReadonlyArray<string>;
+}
+
+/**
+ * The exact publication payload: the distributed build assets plus the required
+ * checksum/manifest metadata and the available acceptance/evidence metadata. The
+ * list is enumerated by name — never by wildcard — so unrelated screenshots or
+ * logs cannot be swept into a public release.
+ */
+function publicationPayload(
+  args: Args,
+  manifest: { readonly assets: ReadonlyArray<{ readonly name: string; readonly sha256: string }> },
+): PublicationPayload {
+  const dir = args.candidateDir!;
+  const problems: string[] = [];
+  const manifestPath = NodePath.join(dir, CANDIDATE_MANIFEST_FILE_NAME);
+  const checksumsPath = NodePath.join(dir, SHA256SUMS_FILE_NAME);
+  const hasManifest = NodeFS.existsSync(manifestPath);
+  const hasChecksums = NodeFS.existsSync(checksumsPath);
+  problems.push(...publicationMetadataFailures({ hasChecksums, hasManifest }));
+
+  if (hasChecksums) {
+    const checksums = parseChecksumsFile(NodeFS.readFileSync(checksumsPath, "utf8"));
+    problems.push(...checksumCoverageFailures(checksums, manifest.assets));
+  }
+
+  const files = manifest.assets.map((asset) => NodePath.join(dir, asset.name));
+  if (hasManifest) files.push(manifestPath);
+  if (hasChecksums) files.push(checksumsPath);
+  for (const meta of [NATIVE_RECEIPTS_FILE_NAME, "candidate-identity.json"]) {
+    const path = NodePath.join(dir, meta);
+    if (NodeFS.existsSync(path)) files.push(path);
+  }
+  const evidence = NodeFS.readdirSync(dir)
+    .filter((name) => name.startsWith(PACKAGED_INSPECTION_FILE_PREFIX) && name.endsWith(".json"))
+    .sort();
+  for (const name of evidence) files.push(NodePath.join(dir, name));
+
+  for (const file of files) {
+    if (!NodeFS.existsSync(file)) problems.push(`publication payload file ${file} does not exist`);
+  }
+  return { files, problems };
+}
+
+/** A human-readable dry-run of the draft → upload → readback → verify → finalize sequence. */
+function plannedCommandLines(args: Args, files: ReadonlyArray<string>): ReadonlyArray<string> {
+  const tag = `v${args.version}`;
+  const gh = [args.ghBin, ...args.ghPrefix].join(" ");
   return [
-    args.ghBin,
-    ...args.ghPrefix,
-    "release",
-    "create",
-    tag,
-    "--repo",
-    args.repository,
-    "--target",
-    args.sha,
-    "--title",
-    `T3 Code (fork) v${args.version}`,
-    "--notes",
-    notes,
-    "--latest",
-    ...assets,
+    `${gh} release create ${tag} --repo ${args.repository} --target ${args.sha} --title "T3 Code (fork) v${args.version}" --notes-file <generated> --draft`,
+    `${gh} release upload ${tag} --repo ${args.repository} ${files.map((file) => NodePath.basename(file)).join(" ")}`,
+    `${gh} release view ${tag} --repo ${args.repository} --json id,tagName,isDraft,targetCommitish,assets`,
+    `${gh} release download ${tag} --repo ${args.repository} --dir <tmp> (then sha256-verify every file)`,
+    `${gh} release edit ${tag} --repo ${args.repository} --draft=false --latest`,
   ];
 }
 
@@ -279,11 +415,193 @@ function runInspectRelease(args: Args): never {
   process.exit(0);
 }
 
+/**
+ * Draft → upload → readback → verify-bytes → finalize. Returns a nonzero status
+ * (via `fail`) at the first deviation, so a partial upload or digest mismatch can
+ * never be finalized or reported as success. `finalized` records whether the
+ * release was undrafted.
+ */
+function publish(args: Args, files: ReadonlyArray<string>): void {
+  const repo = args.repository;
+  const tag = `v${args.version}`;
+  const notesFile = NodePath.join(NodeOS.tmpdir(), `t3-release-notes-${process.pid}.txt`);
+  NodeFS.writeFileSync(notesFile, releaseNotes(args));
+  const downloadDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-readback-"));
+  let finalized = false;
+  try {
+    const create = run(
+      args.ghBin,
+      ghArgs(args, [
+        "release",
+        "create",
+        tag,
+        "--repo",
+        repo,
+        "--target",
+        args.sha,
+        "--title",
+        `T3 Code (fork) v${args.version}`,
+        "--notes-file",
+        notesFile,
+        "--draft",
+      ]),
+    );
+    if (create.status !== 0) {
+      fail([
+        `could not create the draft release ${tag}: ${create.stderr.trim() || "gh release create failed"}`,
+      ]);
+    }
+
+    const upload = run(
+      args.ghBin,
+      ghArgs(args, ["release", "upload", tag, "--repo", repo, ...files]),
+    );
+    if (upload.status !== 0) {
+      fail([
+        `could not upload the release payload for ${tag}: ${upload.stderr.trim() || "gh release upload failed"}`,
+      ]);
+    }
+
+    const view = run(
+      args.ghBin,
+      ghArgs(args, [
+        "release",
+        "view",
+        tag,
+        "--repo",
+        repo,
+        "--json",
+        "id,tagName,isDraft,targetCommitish,assets",
+      ]),
+    );
+    if (view.status !== 0) {
+      fail([
+        `could not read back release ${tag} after upload: ${view.stderr.trim() || "gh release view failed"}`,
+      ]);
+    }
+    let inventory: RemoteReleaseInventory;
+    try {
+      inventory = parseRemoteReleaseInventory(JSON.parse(view.stdout));
+    } catch {
+      fail([`release ${tag} readback was not valid JSON; treating it as unresolved`]);
+    }
+    const expected = files.map((file) => ({
+      name: NodePath.basename(file),
+      size: NodeFS.statSync(file).size,
+    }));
+    const readback = uploadReadbackFailures(inventory, expected);
+    if (readback.length > 0) fail(readback);
+
+    const download = run(
+      args.ghBin,
+      ghArgs(args, ["release", "download", tag, "--repo", repo, "--dir", downloadDir]),
+    );
+    if (download.status !== 0) {
+      fail([
+        `could not download release ${tag} for byte verification: ${download.stderr.trim() || "gh release download failed"}`,
+      ]);
+    }
+
+    const downloaded = new Map<string, string>();
+    const byteProblems: string[] = [];
+    for (const file of files) {
+      const name = NodePath.basename(file);
+      const path = NodePath.join(downloadDir, name);
+      if (!NodeFS.existsSync(path)) {
+        byteProblems.push(`downloaded release is missing ${name}`);
+        continue;
+      }
+      const remote = sha256File(path);
+      downloaded.set(name, remote);
+      const local = sha256File(file);
+      if (remote !== local) {
+        byteProblems.push(`downloaded ${name} has sha256 ${remote}, uploaded bytes were ${local}`);
+      }
+    }
+
+    const downloadedChecksums = NodePath.join(downloadDir, SHA256SUMS_FILE_NAME);
+    if (!NodeFS.existsSync(downloadedChecksums)) {
+      byteProblems.push(
+        `downloaded release is missing ${SHA256SUMS_FILE_NAME}; a consumer cannot validate the runtime`,
+      );
+    } else {
+      const manifest = JSON.parse(
+        NodeFS.readFileSync(
+          NodePath.join(args.candidateDir!, CANDIDATE_MANIFEST_FILE_NAME),
+          "utf8",
+        ),
+      ) as { readonly assets: ReadonlyArray<{ readonly name: string }> };
+      const checksums = parseChecksumsFile(NodeFS.readFileSync(downloadedChecksums, "utf8"));
+      const observed = manifest.assets.flatMap((asset) => {
+        const digest = downloaded.get(asset.name);
+        return digest === undefined ? [] : [{ name: asset.name, sha256: digest }];
+      });
+      byteProblems.push(...checksumCoverageFailures(checksums, observed));
+    }
+    if (byteProblems.length > 0) fail(byteProblems);
+
+    const finalize = run(
+      args.ghBin,
+      ghArgs(args, ["release", "edit", tag, "--repo", repo, "--draft=false", "--latest"]),
+    );
+    if (finalize.status !== 0) {
+      fail([
+        `all published bytes verified, but finalizing ${tag} failed: ${finalize.stderr.trim() || "gh release edit failed"}`,
+      ]);
+    }
+
+    const confirm = run(
+      args.ghBin,
+      ghArgs(args, ["release", "view", tag, "--repo", repo, "--json", "isDraft,assets"]),
+    );
+    if (confirm.status !== 0) {
+      fail([
+        `could not confirm the final release ${tag}: ${confirm.stderr.trim() || "gh release view failed"}`,
+      ]);
+    }
+    let final: { isDraft?: boolean };
+    try {
+      final = JSON.parse(confirm.stdout) as { isDraft?: boolean };
+    } catch {
+      fail([`final release ${tag} readback was not valid JSON; not reporting success`]);
+    }
+    if (final.isDraft === true) {
+      fail([`release ${tag} is still a draft after finalization; not reporting success`]);
+    }
+    finalized = true;
+  } finally {
+    NodeFS.rmSync(notesFile, { force: true });
+    NodeFS.rmSync(downloadDir, { recursive: true, force: true });
+  }
+  if (finalized) {
+    console.log(
+      `Published v${args.version} from the frozen local candidate (${files.length} verified file(s)).`,
+    );
+  }
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.inspectRelease !== undefined) {
     runInspectRelease(args);
+  }
+
+  // Fixture isolation: a `--preflight-json` fixture can only be used in the
+  // clearly-labeled offline mode with an offline mock transport, so fabricated
+  // preflight claims can never reach the live publisher.
+  if (args.preflightJson !== undefined && !args.simulate) {
+    fail([
+      "--preflight-json is a labeled fixture and requires --simulate; it must never drive the live publisher",
+    ]);
+  }
+  if (args.simulate && args.preflightJson === undefined) {
+    fail(["--simulate requires --preflight-json and an offline mock transport"]);
+  }
+  if (args.simulate && args.ghPrefix.length === 0) {
+    fail([
+      "--simulate requires an offline mock transport (--gh-bin <node> --gh-prefix <mock>); refusing to use the live gh",
+    ]);
   }
 
   if (args.candidateDir === undefined) {
@@ -292,7 +610,7 @@ function main(): void {
   if (args.sha.trim() === "") {
     fail(["--sha is required for the local candidate handoff"]);
   }
-  const manifestPath = NodePath.join(args.candidateDir, "fork-release-manifest.json");
+  const manifestPath = NodePath.join(args.candidateDir, CANDIDATE_MANIFEST_FILE_NAME);
   if (!NodeFS.existsSync(manifestPath)) {
     fail([`candidate is missing ${manifestPath}; run the aggregate freeze first`]);
   }
@@ -302,7 +620,7 @@ function main(): void {
     repository: string;
     version: string;
     sourceSha: string;
-    assets: ReadonlyArray<{ name: string }>;
+    assets: ReadonlyArray<{ name: string; sha256: string }>;
   };
 
   const identityPath = NodePath.join(args.candidateDir, "candidate-identity.json");
@@ -335,6 +653,8 @@ function main(): void {
   );
 
   const probe = loadProbe(args);
+  const probeProblems = publicationProbeFailures(probe);
+  if (probeProblems.length > 0) fail(probeProblems);
 
   // Byte-level promotion checks: reuse the shipped verifier, never a reimplementation.
   const verifier = run(process.execPath, verifierArgs(args, probe));
@@ -354,26 +674,22 @@ function main(): void {
   });
   if (gateProblems.length > 0) fail(gateProblems);
 
-  const assets = manifest.assets.map((asset) => NodePath.join(args.candidateDir!, asset.name));
-  const command = publicationCommand(args, assets);
+  const payload = publicationPayload(args, manifest);
+  if (payload.problems.length > 0) fail(payload.problems);
 
   if (!args.execute) {
     console.log("PROMOTION READY (dry run — no GitHub write performed).");
+    console.log(`Publication payload (${payload.files.length} enumerated file(s)):`);
+    for (const file of payload.files) console.log(`  - ${NodePath.basename(file)}`);
     console.log(`Next, with explicit approval of digest ${frozenManifestDigest}:`);
-    console.log(`  ${command.join(" ")}`);
+    for (const line of plannedCommandLines(args, payload.files)) console.log(`  ${line}`);
     console.log(
       `Re-run with --execute --approve ${frozenManifestDigest} to publish (still unauthorized in this task).`,
     );
     return;
   }
 
-  const published = run(command[0]!, command.slice(1));
-  if (published.stdout.trim() !== "") console.log(published.stdout.trim());
-  if (published.status !== 0) {
-    if (published.stderr.trim() !== "") console.error(published.stderr.trim());
-    fail([`publication command failed with exit code ${published.status}`]);
-  }
-  console.log(`Published v${args.version} from the frozen local candidate.`);
+  publish(args, payload.files);
 }
 
 main();

@@ -76,28 +76,134 @@ set, current hashes, native receipts, digest-bound inspection evidence, tag
 target, no-overwrite, version ordering, approval-gate existence) and adds only
 fork-main eligibility and candidate-specific approval. It never rebuilds.
 
-It defaults to a **read-only dry run**:
+It defaults to a **read-only dry run**. It performs live read-only probes
+(release, tag, existing versions, the `fork-release` environment's required
+reviewers), confirms the selected fork remote points at `nullStack65/t3code`,
+and fetches current `fork/main` before asserting ancestry. A **failed read is
+reported as unresolved and blocks**; it is never reported as absence. It prints
+the exact draft → upload → readback → verify → finalize sequence without running
+it:
 
 ```sh
 # Read-only preflight: verify the frozen candidate, check fork-main eligibility,
-# release/tag conflicts and the approval gate, then print the exact
-# `gh release create` command without running it.
+# release/tag conflicts, the approval gate, and the complete payload.
 node scripts/promote-fork-candidate.ts --candidate-dir "<shared candidate dir>" \
-  --version 0.0.43 --sha <full-sha> \
+  --version 0.0.43 --sha 929b63795e7696855ada61de5fd359dc2f51da78 \
   --native-receipts fork-native-receipts.json \
   --inspection-evidence "<dir>/fork-inspection-evidence-win.json,<dir>/fork-inspection-evidence-mac.json"
 
-# Inspect an existing release's required-asset completeness (read-only), for
+# Inspect an existing release's required payload completeness (read-only), for
 # example the incomplete draft 395230248:
 node scripts/promote-fork-candidate.ts --inspect-release 395230248 --version 0.0.43
 ```
 
-Publication requires all of: an ancestor-of-`main` SHA, the complete asset set
-with current hashes, real `fork-native-receipts.json`, digest-bound packaged
-inspections, a conflict-free `v<version>` tag, and
-`--execute --approve <frozen manifest sha256>` naming the exact frozen bytes.
-`--preflight-json` and `--gh-bin`/`--gh-prefix` substitute clearly-labeled
-fixtures for the live read-only probes and the publication command in tests.
+Publication (`--execute --approve <frozen manifest sha256>`) is a real
+draft → upload → readback → verify → finalize sequence, not a single
+`gh release create`:
+
+1. create an empty **draft** at the source SHA;
+2. upload the exact enumerated payload — the distributed build assets plus the
+   required `SHA256SUMS` and `fork-release-manifest.json`, and the available
+   `fork-native-receipts.json` / inspection evidence / `candidate-identity.json`
+   metadata. The list is enumerated by name, never by wildcard, so unrelated
+   screenshots or logs cannot be swept into a public release;
+3. read the remote inventory back and require every file at the exact size in
+   `uploaded` state, with no unenumerated files;
+4. download the published bytes and require every digest to match the local
+   candidate, including that the downloaded `SHA256SUMS` validates the runtime;
+5. finalize (`--draft=false --latest`) only after step 4 passes.
+
+`--simulate` is the only way to use `--preflight-json`: it additionally requires
+an offline mock transport (`--gh-bin <node> --gh-prefix <mock>`). The live
+publisher rejects `--preflight-json`, so a fixture claim can never reach GitHub.
+`SHA256SUMS` and the frozen manifest are required to publish; missing metadata, a
+partial upload, changed bytes, a failed read, or missing candidate-specific
+approval all stop the operation before finalization. A configured reviewer rule
+is not itself proof that a specific candidate was approved: `--execute` still
+needs `--approve` naming the exact frozen manifest digest.
+
+### Remaining Windows commands (preserve artifact source `929b63795`)
+
+The already-published Mac/Linux artifacts identify source
+`929b63795e7696855ada61de5fd359dc2f51da78` (version `0.0.43`) and must not be
+rebuilt, deleted, relabeled or restamped. Only the Windows target is missing. Run
+this on an authorized Windows host with MSVC + Rust + WSL. It builds **only**
+Windows from the artifact source, reuses the existing Linux runtime as the
+installer's embedded WSL payload, and verifies with the newer tooling checkout —
+it never rebuilds Mac/Linux and never patches the older binaries.
+
+```bat
+:: 1. Two clean checkouts: build from the artifact source, verify with tooling.
+git clone https://github.com/nullStack65/t3code.git t3-artifact
+git -C t3-artifact checkout --detach 929b63795e7696855ada61de5fd359dc2f51da78
+git clone https://github.com/nullStack65/t3code.git t3-tooling
+git -C t3-tooling checkout --detach 0183c68f12edcdc92989f2d409dccb6d58f723cd
+
+:: 2. Reuse the existing Linux x64 runtime (release asset 585058463). Do NOT rebuild it.
+mkdir candidate-win
+gh release download candidate-r4-v0.0.43-929b63795 --repo nullStack65/t3code ^
+  --pattern t3-0.0.43-linux-x64.tar.gz --dir candidate-win
+certutil -hashfile candidate-win\t3-0.0.43-linux-x64.tar.gz SHA256
+:: expect a8d8a519dc572451f19167246fdba0d8eb92cf7d53ec498097b0b3e636c81772
+
+:: 3. Build the Windows steps from the artifact source, stamping version/source, and
+::    stage the real source-built MSVC helper into <resourceMonitorDir>\win32-x64.
+cd t3-artifact
+vp install
+node scripts/update-release-package-versions.ts 0.0.43
+cargo build --locked --release --target x86_64-pc-windows-msvc ^
+  --manifest-path native/resource-monitor/Cargo.toml
+mkdir "%TEMP%\t3-candidate-resource-monitor\win32-x64"
+copy /Y native\resource-monitor\target\x86_64-pc-windows-msvc\release\t3-resource-monitor.exe ^
+  "%TEMP%\t3-candidate-resource-monitor\win32-x64\t3-resource-monitor.exe"
+node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 ^
+  --build-version 0.0.43 --output-dir "..\candidate-win" ^
+  --wsl-runtime "..\candidate-win\t3-0.0.43-linux-x64.tar.gz" --verbose
+node apps/server/scripts/cli.ts build-exe --verbose
+node scripts/build-cli-archive.ts --platform win --arch x64 --version 0.0.43 ^
+  --resource-monitor-dir "%TEMP%\t3-candidate-resource-monitor" ^
+  --output-dir "..\candidate-win"
+node scripts/smoke-cli-archive.ts ^
+  --archive "..\candidate-win\t3-0.0.43-win32-x64.zip" --expect-version 0.0.43
+
+:: 4. Reuse the existing Intel Mac DMG (release asset 584947074) and its
+::    digest-bound inspection evidence untouched; do NOT rebuild the DMG.
+gh release download candidate-r4-v0.0.43-929b63795 --repo nullStack65/t3code ^
+  --pattern T3-Code-0.0.43-x64.dmg ^
+  --pattern fork-inspection-evidence-mac.json --dir candidate-win
+certutil -hashfile candidate-win\T3-Code-0.0.43-x64.dmg SHA256
+:: expect 01af27ad8ed509f6f4af8ccc1d054999fccf6d7c47f1c70f9b461858f951ae68
+
+:: 5. Verify with the NEWER verifier from the tooling checkout: per-target Windows
+::    inspection, then the aggregate freeze of the complete set.
+cd ..\t3-tooling
+vp install
+node scripts/verify-fork-candidate.ts --candidate-dir "..\candidate-win" ^
+  --version 0.0.43 --sha 929b63795e7696855ada61de5fd359dc2f51da78 ^
+  --repository nullStack65/t3code --targets win ^
+  --emit-inspection "..\candidate-win\fork-inspection-evidence-win.json"
+node scripts/verify-fork-candidate.ts --candidate-dir "..\candidate-win" ^
+  --version 0.0.43 --sha 929b63795e7696855ada61de5fd359dc2f51da78 ^
+  --repository nullStack65/t3code --write-manifest --write-checksums ^
+  --inspection-evidence "..\candidate-win\fork-inspection-evidence-win.json,..\candidate-win\fork-inspection-evidence-mac.json"
+```
+
+Then record the Windows acceptance receipt and run the read-only promotion
+preflight (no publication):
+
+```sh
+# owner W, target win32-x64, bound to T3-Code-0.0.43-x64.exe's observed digest
+node scripts/promote-fork-candidate.ts --candidate-dir "<candidate-win>" \
+  --version 0.0.43 --sha 929b63795e7696855ada61de5fd359dc2f51da78 \
+  --native-receipts fork-native-receipts.json \
+  --inspection-evidence "<candidate-win>/fork-inspection-evidence-win.json,<candidate-win>/fork-inspection-evidence-mac.json"
+```
+
+**Not executed by the tooling repair** (separate native/publication gates): the
+Windows MSVC compilation, the NSIS packaging run, `build-cli-archive.ts`, the
+Windows smoke test, and the real Windows `fork-native-receipts.json`. No UAC
+elevation is needed for the tooling repairs. The Linux archive above is the exact
+embedded WSL runtime the verifier asserts byte-identical to the standalone asset.
 
 ### Transfer and aggregation
 

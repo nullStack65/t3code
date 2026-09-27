@@ -3,9 +3,13 @@
  * Process-level tests for the local/draft promotion handoff.
  *
  * These spawn `scripts/promote-fork-candidate.ts` against synthetic candidate
- * directories and a clearly-labeled `--preflight-json` GitHub fixture. The
- * `--execute` publication path is exercised against a mock `gh` script (via
- * `--gh-bin node --gh-prefix`), never the real GitHub API.
+ * directories. The offline mode (`--simulate`) uses a clearly-labeled
+ * `--preflight-json` GitHub fixture plus a *stateful* fake GitHub transport (a
+ * mock `gh` script reached via `--gh-bin node --gh-prefix`) that records the
+ * exact uploaded files and serves them back on `release download`. That lets the
+ * tests assert on the uploaded file *contents*, the draft → upload → readback →
+ * verify → finalize sequence, and that partial uploads or changed bytes never
+ * reach finalization. The live GitHub API is never contacted.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -17,6 +21,8 @@ import { assert, it } from "@effect/vitest";
 const repoRoot = NodePath.resolve(import.meta.dirname, "..");
 const VERSION = "0.0.43";
 const SHA = "cb8a5b0b04b31cd9531e6bb8ebefcddaf1a1c4c2";
+const RUNTIME = `t3-${VERSION}-linux-x64.tar.gz`;
+const INSTALLER = `T3-Code-${VERSION}-x64.exe`;
 
 function scratch(): string {
   return NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-promote-"));
@@ -41,12 +47,7 @@ interface Asset {
 }
 
 function writeCandidate(dir: string): Asset[] {
-  const names = [
-    `T3-Code-${VERSION}-x64.exe`,
-    `T3-Code-${VERSION}-x64.dmg`,
-    `t3-${VERSION}-linux-x64.tar.gz`,
-    `t3-${VERSION}-win32-x64.zip`,
-  ];
+  const names = [INSTALLER, `T3-Code-${VERSION}-x64.dmg`, RUNTIME, `t3-${VERSION}-win32-x64.zip`];
   const assets: Asset[] = names.map((name, index) => {
     const path = NodePath.join(dir, name);
     NodeFS.writeFileSync(path, Buffer.from(`asset-${index}-${name}`));
@@ -110,7 +111,6 @@ function writeEvidence(root: string, assets: ReadonlyArray<Asset>): string {
     if (found === undefined) throw new Error(`fixture missing ${name}`);
     return found.sha256;
   };
-  const installer = `T3-Code-${VERSION}-x64.exe`;
   const record = (platform: string, arch: string) => ({
     repository: "nullStack65/t3code",
     sourceSha: SHA,
@@ -120,7 +120,7 @@ function writeEvidence(root: string, assets: ReadonlyArray<Asset>): string {
   });
   const evidence = {
     schemaVersion: 1,
-    host: "r7-promote-fixture",
+    host: "r8-promote-fixture",
     records: {
       windowsDesktop: record("win", "x64"),
       windowsServerBundle: { name: "t3code-server", version: VERSION },
@@ -130,11 +130,11 @@ function writeEvidence(root: string, assets: ReadonlyArray<Asset>): string {
       macDmg: record("mac", "x64"),
     },
     digests: {
-      windowsDesktop: digest(installer),
-      windowsServerBundle: digest(installer),
-      embeddedWsl: digest(installer),
+      windowsDesktop: digest(INSTALLER),
+      windowsServerBundle: digest(INSTALLER),
+      embeddedWsl: digest(INSTALLER),
       windowsZip: digest(`t3-${VERSION}-win32-x64.zip`),
-      linuxArchive: digest(`t3-${VERSION}-linux-x64.tar.gz`),
+      linuxArchive: digest(RUNTIME),
       macDmg: digest(`T3-Code-${VERSION}-x64.dmg`),
     },
     embeddedWslEqualsStandalone: true,
@@ -144,7 +144,7 @@ function writeEvidence(root: string, assets: ReadonlyArray<Asset>): string {
   return path;
 }
 
-function writePreflight(root: string, onForkMain: boolean): string {
+function writePreflight(root: string, override: Record<string, unknown> = {}): string {
   const path = NodePath.join(root, "preflight.json");
   NodeFS.writeFileSync(
     path,
@@ -153,25 +153,126 @@ function writePreflight(root: string, onForkMain: boolean): string {
       tagExists: false,
       latestVersion: "0.0.42",
       authorizationGateReviewers: 1,
-      onForkMain,
+      onForkMain: true,
+      ...override,
     }),
   );
   return path;
 }
 
-function writeMockGh(root: string): { readonly prefix: string; readonly log: string } {
+/**
+ * A stateful offline fake GitHub transport. It implements the exact gh
+ * subcommands the publisher uses (`release view/create/upload/download/edit`),
+ * copying uploaded files into a state directory so readback is exercised on the
+ * real bytes. Env knobs inject failures without touching GitHub.
+ */
+const MOCK_GH_SOURCE = `const fs = require("node:fs");
+const path = require("node:path");
+
+const argv = process.argv.slice(2);
+const stateDir = process.env.GH_MOCK_STATE;
+const log = process.env.GH_MOCK_LOG;
+if (log) fs.appendFileSync(log, JSON.stringify(argv) + "\\n");
+
+function parse(rest) {
+  const positional = [];
+  const flags = {};
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (token.startsWith("--")) {
+      const eq = token.indexOf("=");
+      if (eq >= 0) flags[token.slice(2, eq)] = token.slice(eq + 1);
+      else if (rest[i + 1] !== undefined && !rest[i + 1].startsWith("--")) {
+        flags[token.slice(2)] = rest[i + 1];
+        i += 1;
+      } else flags[token.slice(2)] = true;
+    } else positional.push(token);
+  }
+  return { positional, flags };
+}
+
+const { positional, flags } = parse(argv);
+const stateFile = path.join(stateDir, "release.json");
+const storeDir = path.join(stateDir, "store");
+
+function readState() {
+  return fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf8")) : undefined;
+}
+function writeState(state) {
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+}
+function finish(code, stdout, stderr) {
+  if (stdout) process.stdout.write(stdout);
+  if (stderr) process.stderr.write(stderr);
+  process.exit(code);
+}
+
+if (positional[0] === "release" && positional[1] === "view") {
+  const state = readState();
+  if (!state) finish(1, "", "release not found\\n");
+  const omit = process.env.GH_MOCK_OMIT;
+  const assets = omit ? state.assets.filter((a) => a.name !== omit) : state.assets;
+  finish(0, JSON.stringify({ ...state, assets }));
+}
+
+if (positional[0] === "release" && positional[1] === "create") {
+  if (process.env.GH_MOCK_FAIL_CREATE === "1") finish(1, "", "create rejected\\n");
+  const tag = positional[2];
+  writeState({ id: 4242, tag_name: tag, name: tag, draft: true, target_commitish: flags.target || "", assets: [] });
+  finish(0, "");
+}
+
+if (positional[0] === "release" && positional[1] === "upload") {
+  if (process.env.GH_MOCK_FAIL_UPLOAD === "1") finish(1, "", "upload rejected\\n");
+  const state = readState() || { id: 4242, tag_name: "", draft: true, assets: [] };
+  fs.mkdirSync(storeDir, { recursive: true });
+  for (const file of positional.slice(3)) {
+    fs.copyFileSync(file, path.join(storeDir, path.basename(file)));
+    state.assets.push({ name: path.basename(file), size: fs.statSync(file).size, state: "uploaded" });
+  }
+  writeState(state);
+  finish(0, "");
+}
+
+if (positional[0] === "release" && positional[1] === "download") {
+  const state = readState();
+  if (!state) finish(1, "", "release not found\\n");
+  fs.mkdirSync(flags.dir, { recursive: true });
+  for (const name of fs.readdirSync(storeDir)) {
+    let bytes = fs.readFileSync(path.join(storeDir, name));
+    if (process.env.GH_MOCK_CORRUPT === name) bytes = Buffer.concat([bytes, Buffer.from("corrupt")]);
+    fs.writeFileSync(path.join(flags.dir, name), bytes);
+  }
+  finish(0, "");
+}
+
+if (positional[0] === "release" && positional[1] === "edit") {
+  const state = readState();
+  if (!state) finish(1, "", "release not found\\n");
+  if (flags.draft === "false") state.draft = false;
+  if (flags.latest === true) state.isLatest = true;
+  writeState(state);
+  finish(0, "");
+}
+
+finish(2, "", "mock gh: unhandled command " + argv.join(" ") + "\\n");
+`;
+
+interface MockGh {
+  readonly prefix: string;
+  readonly log: string;
+  readonly state: string;
+}
+
+function writeMockGh(root: string): MockGh {
   const script = NodePath.join(root, "mock-gh.js");
-  const log = NodePath.join(root, "mock-gh.log");
-  NodeFS.writeFileSync(
-    script,
-    [
-      'const fs = require("node:fs");',
-      "const log = process.env.GH_MOCK_LOG;",
-      'if (log) fs.appendFileSync(log, JSON.stringify(process.argv.slice(2)) + "\\n");',
-      "process.exit(0);",
-    ].join("\n"),
-  );
-  return { prefix: script, log };
+  NodeFS.writeFileSync(script, MOCK_GH_SOURCE);
+  return {
+    prefix: script,
+    log: NodePath.join(root, "mock-gh.log"),
+    state: NodePath.join(root, "gh-state"),
+  };
 }
 
 interface RunResult {
@@ -208,48 +309,57 @@ function baseArgs(candidateDir: string, preflight: string, evidence: string): st
     evidence,
     "--preflight-json",
     preflight,
+    "--simulate",
   ];
 }
 
-it("dry-run reports PROMOTION READY and performs no GitHub write (fixture)", () => {
+function mockArgs(mock: MockGh): string[] {
+  return ["--gh-bin", process.execPath, "--gh-prefix", mock.prefix];
+}
+
+function mockEnv(mock: MockGh, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { GH_MOCK_STATE: mock.state, GH_MOCK_LOG: mock.log, ...extra };
+}
+
+it("dry-run reports PROMOTION READY and performs no GitHub write (simulated)", () => {
   const root = scratch();
   try {
     const dir = NodePath.join(root, "candidate");
     NodeFS.mkdirSync(dir);
     const assets = writeCandidate(dir);
     const evidence = writeEvidence(root, assets);
-    const preflight = writePreflight(root, true);
+    const preflight = writePreflight(root);
     const mock = writeMockGh(root);
 
     const result = runPromote(
-      [
-        ...baseArgs(dir, preflight, evidence),
-        "--gh-bin",
-        process.execPath,
-        "--gh-prefix",
-        mock.prefix,
-      ],
-      { GH_MOCK_LOG: mock.log },
+      [...baseArgs(dir, preflight, evidence), ...mockArgs(mock)],
+      mockEnv(mock),
     );
     assert.equal(result.status, 0, result.stderr);
     assert.include(result.stdout, "PROMOTION READY");
+    assert.include(result.stdout, "SHA256SUMS");
     assert.include(result.stdout, "release create v0.0.43");
-    // The mock gh must never have been invoked: a dry run makes no write.
+    assert.include(result.stdout, "release edit v0.0.43");
+    // The fake transport must never have been invoked: a dry run makes no write.
     assert.notOk(NodeFS.existsSync(mock.log));
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }
 });
 
-it("blocks a candidate-only SHA that is not on fork main (fixture)", () => {
+it("blocks a candidate-only SHA that is not on fork main (simulated)", () => {
   const root = scratch();
   try {
     const dir = NodePath.join(root, "candidate");
     NodeFS.mkdirSync(dir);
     const assets = writeCandidate(dir);
     const evidence = writeEvidence(root, assets);
-    const preflight = writePreflight(root, false);
-    const result = runPromote(baseArgs(dir, preflight, evidence));
+    const preflight = writePreflight(root, { onForkMain: false });
+    const mock = writeMockGh(root);
+    const result = runPromote(
+      [...baseArgs(dir, preflight, evidence), ...mockArgs(mock)],
+      mockEnv(mock),
+    );
     assert.equal(result.status, 1);
     assert.include(result.stderr, "not an ancestor of fork/main");
   } finally {
@@ -257,16 +367,20 @@ it("blocks a candidate-only SHA that is not on fork main (fixture)", () => {
   }
 });
 
-it("blocks an incomplete candidate before any GitHub check (fixture)", () => {
+it("blocks an incomplete candidate before any GitHub check (simulated)", () => {
   const root = scratch();
   try {
     const dir = NodePath.join(root, "candidate");
     NodeFS.mkdirSync(dir);
     const assets = writeCandidate(dir);
     const evidence = writeEvidence(root, assets);
-    const preflight = writePreflight(root, true);
-    NodeFS.rmSync(NodePath.join(dir, `T3-Code-${VERSION}-x64.exe`));
-    const result = runPromote(baseArgs(dir, preflight, evidence));
+    const preflight = writePreflight(root);
+    NodeFS.rmSync(NodePath.join(dir, INSTALLER));
+    const mock = writeMockGh(root);
+    const result = runPromote(
+      [...baseArgs(dir, preflight, evidence), ...mockArgs(mock)],
+      mockEnv(mock),
+    );
     assert.equal(result.status, 1);
     assert.match(result.stderr, /T3-Code-0\.0\.43-x64\.exe/);
   } finally {
@@ -274,60 +388,273 @@ it("blocks an incomplete candidate before any GitHub check (fixture)", () => {
   }
 });
 
-it("requires candidate-specific approval to execute (fixture)", () => {
+it("requires candidate-specific approval to execute (simulated)", () => {
   const root = scratch();
   try {
     const dir = NodePath.join(root, "candidate");
     NodeFS.mkdirSync(dir);
     const assets = writeCandidate(dir);
     const evidence = writeEvidence(root, assets);
-    const preflight = writePreflight(root, true);
-    const args = baseArgs(dir, preflight, evidence);
+    const preflight = writePreflight(root);
+    const mock = writeMockGh(root);
+    const args = [...baseArgs(dir, preflight, evidence), ...mockArgs(mock)];
 
-    const noApproval = runPromote([...args, "--execute"]);
+    const noApproval = runPromote([...args, "--execute"], mockEnv(mock));
     assert.equal(noApproval.status, 1);
     assert.include(noApproval.stderr, "--approve");
 
-    const wrongApproval = runPromote([...args, "--execute", "--approve", "b".repeat(64)]);
+    const wrongApproval = runPromote(
+      [...args, "--execute", "--approve", "b".repeat(64)],
+      mockEnv(mock),
+    );
     assert.equal(wrongApproval.status, 1);
     assert.include(wrongApproval.stderr, "does not match");
+
+    // No approval → no draft was ever created.
+    assert.notOk(NodeFS.existsSync(mock.log));
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }
 });
 
-it("executes the publication command against a mocked gh (fixture)", () => {
+it("refuses a fixture preflight without --simulate, so it cannot drive the live publisher", () => {
   const root = scratch();
   try {
     const dir = NodePath.join(root, "candidate");
     NodeFS.mkdirSync(dir);
     const assets = writeCandidate(dir);
     const evidence = writeEvidence(root, assets);
-    const preflight = writePreflight(root, true);
+    const preflight = writePreflight(root);
+    const liveArgs = baseArgs(dir, preflight, evidence).filter((token) => token !== "--simulate");
+    const result = runPromote(liveArgs);
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, "--simulate");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("requires a fixture and an offline transport for --simulate", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root);
+    const base = [
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--inspection-evidence",
+      evidence,
+    ];
+    const noFixture = runPromote([...base, "--simulate"]);
+    assert.equal(noFixture.status, 1);
+    assert.include(noFixture.stderr, "--preflight-json");
+
+    const noTransport = runPromote([...base, "--preflight-json", preflight, "--simulate"]);
+    assert.equal(noTransport.status, 1);
+    assert.include(noTransport.stderr, "offline mock transport");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("blocks an unresolved GitHub read instead of treating it as absence (simulated)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root, { releaseRead: "unresolved" });
+    const mock = writeMockGh(root);
+    const result = runPromote(
+      [...baseArgs(dir, preflight, evidence), ...mockArgs(mock)],
+      mockEnv(mock),
+    );
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, "could not be read from GitHub");
+    assert.notOk(NodeFS.existsSync(mock.log));
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("blocks publication when SHA256SUMS metadata is missing", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root);
+    const mock = writeMockGh(root);
+    NodeFS.rmSync(NodePath.join(dir, "SHA256SUMS"));
+    const result = runPromote(
+      [
+        ...baseArgs(dir, preflight, evidence),
+        ...mockArgs(mock),
+        "--execute",
+        "--approve",
+        sha256(NodePath.join(dir, "fork-release-manifest.json")),
+      ],
+      mockEnv(mock),
+    );
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, "SHA256SUMS");
+    assert.notOk(NodeFS.existsSync(mock.log));
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("publishes a verified payload through draft → upload → readback → finalize (simulated)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root);
     const mock = writeMockGh(root);
     const manifestDigest = sha256(NodePath.join(dir, "fork-release-manifest.json"));
 
     const result = runPromote(
       [
         ...baseArgs(dir, preflight, evidence),
+        ...mockArgs(mock),
         "--execute",
         "--approve",
         manifestDigest,
-        "--gh-bin",
-        process.execPath,
-        "--gh-prefix",
-        mock.prefix,
       ],
-      { GH_MOCK_LOG: mock.log },
+      mockEnv(mock),
     );
     assert.equal(result.status, 0, result.stderr);
     assert.include(result.stdout, "Published v0.0.43");
-    assert.ok(NodeFS.existsSync(mock.log));
-    const logged = NodeFS.readFileSync(mock.log, "utf8");
-    assert.include(logged, '"release"');
-    assert.include(logged, '"create"');
-    assert.include(logged, '"v0.0.43"');
-    assert.include(logged, `T3-Code-${VERSION}-x64.exe`);
+
+    const log = NodeFS.readFileSync(mock.log, "utf8");
+    for (const verb of ['"create"', '"upload"', '"view"', '"download"', '"edit"']) {
+      assert.include(log, verb);
+    }
+    const state = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(mock.state, "release.json"), "utf8"),
+    ) as {
+      draft: boolean;
+      assets: ReadonlyArray<{ name: string }>;
+    };
+    assert.equal(state.draft, false);
+    const publishedNames = state.assets.map((asset) => asset.name);
+    assert.include(publishedNames, "SHA256SUMS");
+    assert.include(publishedNames, "fork-release-manifest.json");
+
+    // Consumer check: the uploaded SHA256SUMS validates the uploaded runtime.
+    const store = NodePath.join(mock.state, "store");
+    const checksums = NodeFS.readFileSync(NodePath.join(store, "SHA256SUMS"), "utf8");
+    const expectedDigest = sha256(NodePath.join(store, RUNTIME));
+    assert.match(
+      checksums,
+      new RegExp(`${expectedDigest}\\s+\\*?${RUNTIME.replace(/\./g, "\\.")}`),
+    );
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("does not finalize when a downloaded byte changed (simulated)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root);
+    const mock = writeMockGh(root);
+    const manifestDigest = sha256(NodePath.join(dir, "fork-release-manifest.json"));
+
+    const result = runPromote(
+      [
+        ...baseArgs(dir, preflight, evidence),
+        ...mockArgs(mock),
+        "--execute",
+        "--approve",
+        manifestDigest,
+      ],
+      mockEnv(mock, { GH_MOCK_CORRUPT: RUNTIME }),
+    );
+    assert.equal(result.status, 1);
+    assert.notInclude(result.stdout, "Published");
+    assert.include(result.stderr, "sha256");
+    assert.notInclude(NodeFS.readFileSync(mock.log, "utf8"), '"edit"');
+    const state = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(mock.state, "release.json"), "utf8"),
+    ) as {
+      draft: boolean;
+    };
+    assert.equal(state.draft, true);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("does not finalize on a partial upload / missing readback asset (simulated)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root);
+    const mock = writeMockGh(root);
+    const manifestDigest = sha256(NodePath.join(dir, "fork-release-manifest.json"));
+
+    const result = runPromote(
+      [
+        ...baseArgs(dir, preflight, evidence),
+        ...mockArgs(mock),
+        "--execute",
+        "--approve",
+        manifestDigest,
+      ],
+      mockEnv(mock, { GH_MOCK_OMIT: INSTALLER }),
+    );
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, `uploaded asset ${INSTALLER} is missing`);
+    assert.notInclude(NodeFS.readFileSync(mock.log, "utf8"), '"edit"');
+    assert.notInclude(result.stdout, "Published");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("does not print success when the upload command fails (simulated)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(dir);
+    const assets = writeCandidate(dir);
+    const evidence = writeEvidence(root, assets);
+    const preflight = writePreflight(root);
+    const mock = writeMockGh(root);
+    const manifestDigest = sha256(NodePath.join(dir, "fork-release-manifest.json"));
+
+    const result = runPromote(
+      [
+        ...baseArgs(dir, preflight, evidence),
+        ...mockArgs(mock),
+        "--execute",
+        "--approve",
+        manifestDigest,
+      ],
+      mockEnv(mock, { GH_MOCK_FAIL_UPLOAD: "1" }),
+    );
+    assert.equal(result.status, 1);
+    assert.notInclude(result.stdout, "Published");
+    assert.notInclude(NodeFS.readFileSync(mock.log, "utf8"), '"edit"');
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }
