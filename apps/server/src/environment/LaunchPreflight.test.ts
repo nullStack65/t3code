@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - real temp directories exercise the bounded read probe.
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeFS from "node:fs/promises";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { assert, it } from "@effect/vitest";
@@ -276,10 +277,10 @@ it.effect("resolves every probe within the total budget even when all probes han
 it.effect("wires the real service probes and passes a healthy root", () =>
   Effect.gen(function* () {
     const directory = yield* Effect.promise(() =>
-      NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-launch-preflight-")),
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-launch-preflight-")),
     );
     yield* Effect.promise(() =>
-      NodeFS.writeFile(NodePath.join(directory, "package.json"), '{"name":"preflight"}\n'),
+      NodeFSP.writeFile(NodePath.join(directory, "package.json"), '{"name":"preflight"}\n'),
     );
 
     const layer = LaunchPreflight.layer.pipe(
@@ -307,6 +308,34 @@ it.effect("wires the real service probes and passes a healthy root", () =>
     );
 
     assert.deepStrictEqual(result.findings, []);
-    yield* Effect.promise(() => NodeFS.rm(directory, { recursive: true, force: true }));
+    yield* Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true }));
+  }),
+);
+
+it.effect("real Git probes flag a disposable umbrella repository and never write to it", () =>
+  Effect.gen(function* () {
+    const base = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-launch-preflight-real-")),
+    );
+    const umbrella = NodePath.join(base, "umbrella");
+    const nested = NodePath.join(umbrella, "project");
+    yield* Effect.promise(() => NodeFSP.mkdir(nested, { recursive: true }));
+    NodeChildProcess.execFileSync("git", ["init", "-q"], { cwd: umbrella });
+    NodeChildProcess.execFileSync("git", ["init", "-q"], { cwd: nested });
+    const before = (yield* Effect.promise(() => NodeFSP.readdir(umbrella))).sort();
+
+    const layer = LaunchPreflight.layer.pipe(
+      Layer.provide(VcsProcess.layer),
+      Layer.provide(NodeServices.layer),
+    );
+
+    const result = yield* LaunchPreflight.LaunchPreflight.pipe(
+      Effect.flatMap((preflight) => preflight.run(umbrella)),
+      Effect.provide(layer),
+    );
+
+    assert.include(codes(result), "shared-root-git");
+    assert.deepStrictEqual((yield* Effect.promise(() => NodeFSP.readdir(umbrella))).sort(), before);
+    yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
   }),
 );
