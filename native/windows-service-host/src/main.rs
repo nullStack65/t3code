@@ -145,8 +145,8 @@ OPTIONS:
   --console               Run against a terminal, not SCM (development only).
   --help, --version
 
-The service account and its password are registered with SCM (`sc.exe create
-... obj= ...`), never passed here.",
+The service account is registered with SCM out of band (`sc.exe create ... obj=
+...`); its password, if any, stays in LSA and is never passed here.",
         version = env!("CARGO_PKG_VERSION")
     );
 }
