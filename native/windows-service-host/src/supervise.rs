@@ -37,6 +37,9 @@ pub enum ExitCode {
     LaunchFailure,
     /// The cause could not be established.
     Unknown,
+    /// A created process or owned tree could not be confirmed reclaimed. The
+    /// host stops without retrying and reports that recovery is required.
+    RecoveryRequired,
 }
 
 impl ExitCode {
@@ -50,6 +53,7 @@ impl ExitCode {
             ExitCode::RepeatedFailure => (ERROR_SERVICE_SPECIFIC_ERROR, 2),
             ExitCode::LaunchFailure => (ERROR_SERVICE_SPECIFIC_ERROR, 3),
             ExitCode::Unknown => (ERROR_SERVICE_SPECIFIC_ERROR, 4),
+            ExitCode::RecoveryRequired => (ERROR_SERVICE_SPECIFIC_ERROR, 5),
         }
     }
 }
@@ -188,10 +192,30 @@ impl Supervisor {
         ]
     }
 
-    /// The child exited. A `StopPending` exit is the planned stop completing;
-    /// anything else is unexpected and consumes the restart budget.
-    pub fn on_child_exited(&mut self, now: Monotonic, _code: i32) -> Vec<SupervisorAction> {
+    /// A freshly created process could not be admitted and its reclaim could not
+    /// be confirmed. Retrying could leak another orphan while the real ownership
+    /// is unresolved, so finish without a retry and report that recovery is
+    /// required. This is deliberately not the ordinary transient-launch retry.
+    pub fn on_admission_cleanup_unconfirmed(&mut self) -> Vec<SupervisorAction> {
         self.identity = None;
+        self.finish(ExitCode::RecoveryRequired)
+    }
+
+    /// The child exited. A `StopPending` exit is the planned stop completing;
+    /// anything else is unexpected and consumes the restart budget. `cleanup` is
+    /// the explicit whole-owned-tree result: the root exiting is not proof the
+    /// tree is empty, so an unconfirmed cleanup may neither finish clean nor
+    /// start a replacement.
+    pub fn on_child_exited(
+        &mut self,
+        now: Monotonic,
+        _code: i32,
+        cleanup: CleanupOutcome,
+    ) -> Vec<SupervisorAction> {
+        self.identity = None;
+        if !cleanup.is_clean() {
+            return self.finish(ExitCode::RecoveryRequired);
+        }
         if matches!(self.state, ServiceState::StopPending) {
             return self.finish(ExitCode::Clean);
         }
@@ -366,7 +390,7 @@ mod tests {
         let mut supervisor = Supervisor::new(config());
         supervisor.begin(ms(0));
         supervisor.on_child_spawned(identity(42));
-        supervisor.on_child_exited(ms(1_000), 7); // unexpected, budget allows restart
+        supervisor.on_child_exited(ms(1_000), 7, CleanupOutcome::Confirmed); // unexpected, budget allows restart
         let actions = supervisor.on_child_spawned(identity(43));
         assert!(reported(&actions, ServiceState::Running));
         assert!(!supervisor.finished());
@@ -413,7 +437,7 @@ mod tests {
         assert!(actions.contains(&SupervisorAction::RequestGracefulStop));
 
         // The child exits on its own inside the drain window.
-        let actions = supervisor.on_child_exited(ms(200), 0);
+        let actions = supervisor.on_child_exited(ms(200), 0, CleanupOutcome::Confirmed);
         assert!(reported(&actions, ServiceState::Stopped));
         assert!(supervisor.finished());
         assert_eq!(supervisor.exit_code(), ExitCode::Clean);
@@ -435,7 +459,7 @@ mod tests {
         supervisor.begin(ms(0));
         supervisor.on_child_spawned(identity(42));
         supervisor.on_control(ms(100), Control::Stop);
-        supervisor.on_child_exited(ms(200), 1);
+        supervisor.on_child_exited(ms(200), 1, CleanupOutcome::Confirmed);
         assert_eq!(supervisor.exit_code(), ExitCode::Clean);
     }
 
@@ -444,7 +468,7 @@ mod tests {
         let mut supervisor = Supervisor::new(config());
         supervisor.begin(ms(0));
         supervisor.on_child_spawned(identity(42));
-        let actions = supervisor.on_child_exited(ms(1_000), 7);
+        let actions = supervisor.on_child_exited(ms(1_000), 7, CleanupOutcome::Confirmed);
         assert_eq!(spawn_count(&actions), 1);
         assert!(reported(&actions, ServiceState::StartPending));
         assert!(!supervisor.finished());
@@ -458,12 +482,13 @@ mod tests {
         // budget is 3 restarts inside the window
         for index in 0..3 {
             supervisor.on_child_spawned(identity(42));
-            let actions = supervisor.on_child_exited(ms(1_000 + index), 7);
+            let actions =
+                supervisor.on_child_exited(ms(1_000 + index), 7, CleanupOutcome::Confirmed);
             assert_eq!(spawn_count(&actions), 1);
             assert!(!supervisor.finished());
         }
         supervisor.on_child_spawned(identity(42));
-        let actions = supervisor.on_child_exited(ms(2_000), 7);
+        let actions = supervisor.on_child_exited(ms(2_000), 7, CleanupOutcome::Confirmed);
         assert!(reported(&actions, ServiceState::Stopped));
         assert!(supervisor.finished());
         assert_eq!(supervisor.exit_code(), ExitCode::RepeatedFailure);
@@ -475,11 +500,11 @@ mod tests {
         supervisor.begin(ms(0));
         for index in 0..3 {
             supervisor.on_child_spawned(identity(42));
-            supervisor.on_child_exited(ms(1_000 + index), 7);
+            supervisor.on_child_exited(ms(1_000 + index), 7, CleanupOutcome::Confirmed);
         }
         // Outside the 300s window the earlier restarts fall away.
         supervisor.on_child_spawned(identity(42));
-        let actions = supervisor.on_child_exited(ms(500_000), 7);
+        let actions = supervisor.on_child_exited(ms(500_000), 7, CleanupOutcome::Confirmed);
         assert_eq!(spawn_count(&actions), 1);
         assert!(!supervisor.finished());
     }
@@ -516,7 +541,7 @@ mod tests {
         supervisor.begin(ms(0));
         supervisor.on_child_spawned(identity(42));
         supervisor.on_control(ms(100), Control::Stop);
-        supervisor.on_child_exited(ms(150), 0);
+        supervisor.on_child_exited(ms(150), 0, CleanupOutcome::Confirmed);
         assert!(supervisor.finished());
 
         // A tick after the child is gone and the service is stopped is a no-op.
@@ -562,5 +587,41 @@ mod tests {
         assert_eq!(ExitCode::Child(7).win32(), (1066, 1));
         assert_eq!(ExitCode::RepeatedFailure.win32(), (1066, 2));
         assert_eq!(ExitCode::LaunchFailure.win32(), (1066, 3));
+        assert_eq!(ExitCode::Unknown.win32(), (1066, 4));
+        assert_eq!(ExitCode::RecoveryRequired.win32(), (1066, 5));
+    }
+
+    #[test]
+    fn an_unconfirmed_post_exit_cleanup_is_recovery_required_not_clean_or_restarted() {
+        for cleanup in [CleanupOutcome::Failed, CleanupOutcome::Unknown] {
+            let mut supervisor = Supervisor::new(config());
+            supervisor.begin(ms(0));
+            supervisor.on_child_spawned(identity(42));
+            // Unexpected exit, but the whole owned tree is not confirmed empty.
+            let actions = supervisor.on_child_exited(ms(1_000), 7, cleanup);
+            assert_eq!(spawn_count(&actions), 0, "no replacement after {cleanup:?}");
+            assert!(reported(&actions, ServiceState::Stopped));
+            assert_eq!(supervisor.exit_code(), ExitCode::RecoveryRequired);
+
+            // A planned stop with an unconfirmed tree is not a clean stop either.
+            let mut supervisor = Supervisor::new(config());
+            supervisor.begin(ms(0));
+            supervisor.on_child_spawned(identity(42));
+            supervisor.on_control(ms(100), Control::Stop);
+            let actions = supervisor.on_child_exited(ms(200), 0, cleanup);
+            assert_eq!(spawn_count(&actions), 0);
+            assert_eq!(supervisor.exit_code(), ExitCode::RecoveryRequired);
+        }
+    }
+
+    #[test]
+    fn an_unconfirmed_admission_cleanup_finishes_without_retrying() {
+        let mut supervisor = Supervisor::new(config());
+        supervisor.begin(ms(0));
+        let actions = supervisor.on_admission_cleanup_unconfirmed();
+        assert_eq!(spawn_count(&actions), 0);
+        assert!(reported(&actions, ServiceState::Stopped));
+        assert_eq!(supervisor.exit_code(), ExitCode::RecoveryRequired);
+        assert!(supervisor.finished());
     }
 }

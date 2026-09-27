@@ -168,4 +168,22 @@ mod tests {
         let failure = admit(&mut ops).unwrap_err();
         assert_eq!(failure.cleanup, CleanupOutcome::Failed);
     }
+
+    #[test]
+    fn a_timed_out_or_unknown_cleanup_is_reported_with_the_failure() {
+        for cleanup in [CleanupOutcome::Failed, CleanupOutcome::Unknown] {
+            let mut ops = FakeOps {
+                fail_resume: true,
+                cleanup: Some(cleanup),
+                ..FakeOps::default()
+            };
+            let failure = admit(&mut ops).unwrap_err();
+            assert_eq!(failure.stage, AdmissionStage::Resume);
+            assert!(
+                ops.terminated,
+                "the created process is always reclaimed explicitly first"
+            );
+            assert_eq!(failure.cleanup, cleanup);
+        }
+    }
 }

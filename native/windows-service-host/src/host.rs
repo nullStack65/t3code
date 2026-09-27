@@ -9,6 +9,7 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
+use crate::admission::AdmissionFailure;
 use crate::config::{LaunchMode, ServiceConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,10 @@ pub enum SpawnError {
     Config(String),
     /// A transient launch failure.
     Launch(String),
+    /// The child was created but could not be admitted. The cleanup outcome is
+    /// carried structurally so the supervisor can decide whether a retry is
+    /// safe: a confirmed reclaim may retry, an unconfirmed one must not.
+    Admission(AdmissionFailure),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +73,11 @@ pub trait ChildHandle {
     fn request_graceful_stop(&mut self) -> Result<(), QueryError>;
     /// Force the owned tree down and report whether its exit was confirmed.
     fn terminate_tree(&mut self) -> CleanupOutcome;
+    /// The root process has been observed to exit. Reclaim any remaining members
+    /// of the owned tree through the retained handle and report whether the whole
+    /// owned set is confirmed empty. The retained handle is the ownership
+    /// authority, so this does not re-verify a possibly-reused PID.
+    fn cleanup_after_exit(&mut self) -> CleanupOutcome;
 }
 
 pub trait ChildHost {
@@ -190,6 +200,19 @@ impl ChildHandle for CommandChild {
         match self.child.wait() {
             Ok(_) => CleanupOutcome::Confirmed,
             Err(_) => CleanupOutcome::Failed,
+        }
+    }
+
+    fn cleanup_after_exit(&mut self) -> CleanupOutcome {
+        // `try_wait` already reaped the root. The portable host has no job object
+        // to observe for grandchildren, so a reaped root is the limit of what it
+        // can confirm; it never claims more than that.
+        match self.child.try_wait() {
+            Ok(Some(_)) => CleanupOutcome::Confirmed,
+            // Called only after the root was observed to exit; still running is
+            // not something this host can call confirmed-empty.
+            Ok(None) => CleanupOutcome::Unknown,
+            Err(_) => CleanupOutcome::Unknown,
         }
     }
 }

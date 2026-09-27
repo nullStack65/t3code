@@ -139,9 +139,16 @@ where
         if let Some(handle) = child.as_mut() {
             match handle.try_wait() {
                 Ok(Some(code)) => {
+                    // The root exiting is not proof the whole owned tree is gone.
+                    // Reclaim the job through its retained handle and use that
+                    // evidence before finishing clean or starting a replacement.
+                    let cleanup = handle.cleanup_after_exit();
+                    log(&format!(
+                        "child exited (code {code}); owned-tree cleanup: {cleanup:?}"
+                    ));
                     child = None;
                     exit_observed = true;
-                    queue = supervisor.on_child_exited(now(), code);
+                    queue = supervisor.on_child_exited(now(), code, cleanup);
                     continue;
                 }
                 Ok(None) => {}
@@ -200,6 +207,25 @@ fn execute<H: ChildHost, R: Reporter>(
                 Err(SpawnError::Launch(message)) => {
                     log(&format!("launch failed: {message}"));
                     follow_up.extend(supervisor.on_spawn_failed(now, false));
+                }
+                Err(SpawnError::Admission(failure)) => {
+                    log(&format!(
+                        "admission failed at {:?}: {} (created-process cleanup: {:?})",
+                        failure.stage, failure.reason, failure.cleanup
+                    ));
+                    if failure.cleanup.is_clean() {
+                        // The created process was confirmed reclaimed, so this is
+                        // the ordinary bounded transient-launch retry.
+                        follow_up.extend(supervisor.on_spawn_failed(now, false));
+                    } else {
+                        // The created process may still exist outside the job.
+                        // Starting another could leak a second orphan, so stop
+                        // and report the unresolved ownership instead.
+                        log(
+                            "admission cleanup could not be confirmed; not retrying and reporting unresolved ownership",
+                        );
+                        follow_up.extend(supervisor.on_admission_cleanup_unconfirmed());
+                    }
                 }
             },
             SupervisorAction::RequestGracefulStop => match child.as_mut() {
@@ -261,6 +287,7 @@ mod tests {
         query_fails: bool,
         graceful_kills: bool,
         terminate_outcome: CleanupOutcome,
+        after_exit_outcome: CleanupOutcome,
         events: Events,
         unrelated_alive: Arc<AtomicBool>,
     }
@@ -318,6 +345,16 @@ mod tests {
             }
             self.terminate_outcome
         }
+        fn cleanup_after_exit(&mut self) -> CleanupOutcome {
+            self.events
+                .lock()
+                .unwrap()
+                .push("cleanup-after-exit".to_owned());
+            if self.after_exit_outcome.is_clean() {
+                self.alive = false;
+            }
+            self.after_exit_outcome
+        }
     }
 
     struct FakeHost {
@@ -327,7 +364,33 @@ mod tests {
     impl ChildHost for FakeHost {
         type Child = FakeChild;
         fn spawn(&mut self, _config: &ServiceConfig) -> Result<FakeChild, SpawnError> {
+            self.template
+                .events
+                .lock()
+                .unwrap()
+                .push("spawn".to_owned());
             Ok(self.template.clone())
+        }
+    }
+
+    /// A host whose spawn always fails admission, carrying the injected cleanup
+    /// outcome. Used to prove the spawn→run retry decision structurally.
+    struct AdmissionFailHost {
+        cleanup: CleanupOutcome,
+        events: Events,
+        attempts: usize,
+    }
+
+    impl ChildHost for AdmissionFailHost {
+        type Child = FakeChild;
+        fn spawn(&mut self, _config: &ServiceConfig) -> Result<FakeChild, SpawnError> {
+            self.attempts += 1;
+            self.events.lock().unwrap().push("spawn".to_owned());
+            Err(SpawnError::Admission(crate::admission::AdmissionFailure {
+                stage: crate::admission::AdmissionStage::AssignToJob,
+                reason: "AssignProcessToJobObject failed (5)".to_owned(),
+                cleanup: self.cleanup,
+            }))
         }
     }
 
@@ -397,6 +460,7 @@ mod tests {
             query_fails: options.query_fails,
             graceful_kills: options.graceful_kills,
             terminate_outcome: options.terminate_outcome,
+            after_exit_outcome: options.after_exit_outcome,
             events: events.clone(),
             unrelated_alive: options.unrelated_alive,
         }
@@ -409,6 +473,7 @@ mod tests {
         query_fails: bool,
         graceful_kills: bool,
         terminate_outcome: CleanupOutcome,
+        after_exit_outcome: CleanupOutcome,
         unrelated_alive: Arc<AtomicBool>,
     }
 
@@ -420,6 +485,7 @@ mod tests {
                 query_fails: false,
                 graceful_kills: false,
                 terminate_outcome: CleanupOutcome::Confirmed,
+                after_exit_outcome: CleanupOutcome::Confirmed,
                 unrelated_alive: Arc::new(AtomicBool::new(true)),
             }
         }
@@ -451,6 +517,15 @@ mod tests {
 
     fn trace(events: &Events) -> Vec<String> {
         events.lock().unwrap().clone()
+    }
+
+    fn spawn_count(events: &Events) -> usize {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.as_str() == "spawn")
+            .count()
     }
 
     fn stop_and_force() -> Vec<Option<Control>> {
@@ -585,6 +660,141 @@ mod tests {
         assert!(contains(&events, "report:Stopped:Unknown"));
         assert_ne!(outcome.exit, ExitCode::Clean);
         assert!(!outcome.exit_observed, "no clean child exit was observed");
+    }
+
+    #[test]
+    fn successful_termination_request_with_a_nonempty_job_is_not_clean() {
+        // `TerminateJobObject` is only a request; a job still nonempty after the
+        // bounded wait is a failed cleanup, never a clean stop.
+        let options = ChildOptions {
+            terminate_outcome: CleanupOutcome::Failed,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, stop_and_force());
+        assert!(contains(&events, "terminate"));
+        assert_ne!(outcome.exit, ExitCode::Clean);
+        assert!(contains(&events, "report:Stopped:Unknown"));
+    }
+
+    #[test]
+    fn root_exit_with_a_living_grandchild_is_not_clean() {
+        // The root exited during a planned stop, but the job stayed nonempty, so
+        // whole-tree cleanup could not be confirmed.
+        let options = ChildOptions {
+            alive: false,
+            after_exit_outcome: CleanupOutcome::Failed,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, vec![Some(Control::Stop), None]);
+        assert!(
+            contains(&events, "cleanup-after-exit"),
+            "the post-exit cleanup must be explicit"
+        );
+        assert!(contains(&events, "report:Stopped:RecoveryRequired"));
+        assert_ne!(outcome.exit, ExitCode::Clean);
+        assert_eq!(spawn_count(&events), 1, "no replacement tree is started");
+    }
+
+    #[test]
+    fn natural_exit_during_a_planned_stop_is_clean_only_when_the_job_is_empty() {
+        let options = ChildOptions {
+            alive: false,
+            after_exit_outcome: CleanupOutcome::Confirmed,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, vec![Some(Control::Stop), None]);
+        assert!(contains(&events, "report:Stopped:Clean"));
+        assert_eq!(outcome.exit, ExitCode::Clean);
+    }
+
+    #[test]
+    fn unexpected_exit_with_an_unconfirmed_job_does_not_replace_the_child() {
+        let options = ChildOptions {
+            alive: false,
+            after_exit_outcome: CleanupOutcome::Unknown,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, vec![None]);
+        assert_eq!(spawn_count(&events), 1, "the tree is not replaced");
+        assert_eq!(outcome.exit, ExitCode::RecoveryRequired);
+        assert!(contains(&events, "report:Stopped:RecoveryRequired"));
+    }
+
+    #[test]
+    fn job_query_failure_on_a_natural_exit_is_not_clean() {
+        let options = ChildOptions {
+            alive: false,
+            after_exit_outcome: CleanupOutcome::Unknown,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, stop_and_force());
+        assert_eq!(spawn_count(&events), 1);
+        assert_ne!(outcome.exit, ExitCode::Clean);
+    }
+
+    #[test]
+    fn a_natural_exit_does_not_touch_an_unrelated_process() {
+        let unrelated_alive = Arc::new(AtomicBool::new(true));
+        let options = ChildOptions {
+            alive: false,
+            after_exit_outcome: CleanupOutcome::Failed,
+            unrelated_alive: unrelated_alive.clone(),
+            ..ChildOptions::default()
+        };
+        let _ = run_events(options, vec![Some(Control::Stop), None]);
+        assert!(
+            unrelated_alive.load(Ordering::SeqCst),
+            "job cleanup must never reach an unrelated process"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_admission_cleanup_stops_without_a_second_spawn() {
+        // Fault-inject assignment failure plus a failed or unknown/timeout
+        // reclaim through the real spawn→run decision.
+        for cleanup in [CleanupOutcome::Failed, CleanupOutcome::Unknown] {
+            let events: Events = Arc::new(Mutex::new(Vec::new()));
+            let mut host = AdmissionFailHost {
+                cleanup,
+                events: events.clone(),
+                attempts: 0,
+            };
+            let mut controls = ScriptedControl {
+                script: VecDeque::new(),
+            };
+            let mut recorder = Recorder {
+                events: events.clone(),
+            };
+            let mut log = |_message: &str| {};
+            let outcome = run(&config(), &mut host, &mut controls, &mut recorder, &mut log);
+            assert_eq!(
+                host.attempts, 1,
+                "an unconfirmed admission cleanup ({cleanup:?}) must not retry"
+            );
+            assert_eq!(outcome.exit, ExitCode::RecoveryRequired, "{cleanup:?}");
+            assert!(contains(&events, "report:Stopped:RecoveryRequired"));
+        }
+    }
+
+    #[test]
+    fn confirmed_admission_cleanup_takes_the_bounded_retry() {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let mut host = AdmissionFailHost {
+            cleanup: CleanupOutcome::Confirmed,
+            events: events.clone(),
+            attempts: 0,
+        };
+        let mut controls = ScriptedControl {
+            script: VecDeque::new(),
+        };
+        let mut recorder = Recorder {
+            events: events.clone(),
+        };
+        let mut log = |_message: &str| {};
+        let outcome = run(&config(), &mut host, &mut controls, &mut recorder, &mut log);
+        // config() allows 3 restarts, so 1 initial attempt + 3 retries.
+        assert_eq!(host.attempts, 4);
+        assert_eq!(outcome.exit, ExitCode::RepeatedFailure);
     }
 
     #[test]

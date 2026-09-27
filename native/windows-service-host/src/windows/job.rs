@@ -16,6 +16,7 @@
 
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
@@ -27,8 +28,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
@@ -37,15 +39,17 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess, WaitForSingleObject,
 };
 
-use crate::admission::{AdmissionFailure, AdmissionOps, AdmissionStage, admit};
+use crate::admission::{AdmissionOps, admit};
 use crate::config::{LaunchMode, ServiceConfig};
 use crate::host::{
     ChildHandle, ChildHost, CleanupOutcome, ProcessIdentity, QueryError, SpawnError,
 };
 
 const GENERIC_WRITE: u32 = 0x4000_0000;
-/// Bounded wait for an explicitly terminated process to be observed as gone.
+/// Bounded wait for an explicitly terminated process tree to be observed empty.
 const TERMINATE_WAIT_MS: u32 = 5_000;
+/// Poll interval while waiting for the owned job to drain.
+const JOB_DRAIN_POLL_MS: u64 = 20;
 
 struct Handle(HANDLE);
 
@@ -94,6 +98,70 @@ impl WindowsChild {
         let ok =
             unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
         (ok != 0).then(|| ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+
+    /// Number of processes still active in the owned job. This is the whole-tree
+    /// membership evidence: a wait on the root process alone says nothing about
+    /// surviving descendants.
+    fn active_process_count(&self) -> Result<u32, QueryError> {
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.job.0,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            Err(QueryError)
+        } else {
+            Ok(info.ActiveProcesses)
+        }
+    }
+
+    /// Poll job accounting until the owned set is empty or the bounded wait
+    /// expires. `TerminateJobObject` is only a request; membership is what proves
+    /// cleanup, so a still-nonempty job or a failed query is never `Confirmed`.
+    fn wait_for_empty_job(&self) -> CleanupOutcome {
+        let deadline = Instant::now() + Duration::from_millis(TERMINATE_WAIT_MS as u64);
+        loop {
+            match self.active_process_count() {
+                Ok(0) => return CleanupOutcome::Confirmed,
+                Ok(_) if Instant::now() >= deadline => return CleanupOutcome::Failed,
+                Ok(_) => std::thread::sleep(Duration::from_millis(JOB_DRAIN_POLL_MS)),
+                Err(_) => return CleanupOutcome::Unknown,
+            }
+        }
+    }
+
+    /// Request termination of the whole owned job, then confirm emptiness. Used
+    /// while the root may still be alive.
+    fn terminate_owned_job(&mut self) -> CleanupOutcome {
+        let terminated = unsafe { TerminateJobObject(self.job.0, 1) };
+        if terminated == 0 {
+            return CleanupOutcome::Failed;
+        }
+        let outcome = self.wait_for_empty_job();
+        if outcome.is_clean() {
+            self.terminated = true;
+        }
+        outcome
+    }
+
+    /// Reclaim a job whose root has already exited. The retained job handle — not
+    /// a re-opened PID — is the ownership authority, so a surviving grandchild is
+    /// terminated and confirmed through accounting rather than a root-only wait.
+    fn reclaim_after_root_exit(&mut self) -> CleanupOutcome {
+        match self.active_process_count() {
+            Ok(0) => {
+                self.terminated = true;
+                CleanupOutcome::Confirmed
+            }
+            Ok(_) => self.terminate_owned_job(),
+            Err(_) => CleanupOutcome::Unknown,
+        }
     }
 }
 
@@ -154,17 +222,11 @@ impl ChildHandle for WindowsChild {
     }
 
     fn terminate_tree(&mut self) -> CleanupOutcome {
-        let terminated = unsafe { TerminateJobObject(self.job.0, 1) };
-        if terminated == 0 {
-            return CleanupOutcome::Failed;
-        }
-        match unsafe { WaitForSingleObject(self.process.0, TERMINATE_WAIT_MS) } {
-            WAIT_OBJECT_0 => {
-                self.terminated = true;
-                CleanupOutcome::Confirmed
-            }
-            _ => CleanupOutcome::Failed,
-        }
+        self.terminate_owned_job()
+    }
+
+    fn cleanup_after_exit(&mut self) -> CleanupOutcome {
+        self.reclaim_after_root_exit()
     }
 }
 
@@ -224,18 +286,6 @@ impl AdmissionOps for PendingProcess {
             _ => CleanupOutcome::Failed,
         }
     }
-}
-
-fn describe_admission_failure(failure: &AdmissionFailure) -> String {
-    let stage = match failure.stage {
-        AdmissionStage::AssignToJob => "AssignProcessToJobObject",
-        AdmissionStage::CaptureIdentity => "GetProcessTimes",
-        AdmissionStage::Resume => "ResumeThread",
-    };
-    format!(
-        "{stage}: {} (created-process cleanup: {:?})",
-        failure.reason, failure.cleanup
-    )
 }
 
 impl ChildHost for WindowsChildHost {
@@ -354,7 +404,11 @@ impl ChildHost for WindowsChildHost {
         };
         let id = match admit(&mut pending) {
             Ok(id) => id,
-            Err(failure) => return Err(SpawnError::Launch(describe_admission_failure(&failure))),
+            // `pending` stays alive until this point: its process, thread and job
+            // handles must survive the explicit cleanup decision `admit` made.
+            // The cleanup outcome travels structurally so the supervisor never
+            // treats an unconfirmed reclaim as an ordinary retryable launch.
+            Err(failure) => return Err(SpawnError::Admission(failure)),
         };
 
         let process = pending.process;

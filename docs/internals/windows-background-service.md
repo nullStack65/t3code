@@ -88,10 +88,16 @@ report `SERVICE_STOPPED`.
 Every step after `CreateProcessW` succeeds is checked and scoped: assignment to
 the job, creation-time identity capture, and `ResumeThread`. If any of them
 fails, the freshly created process is terminated explicitly — the created
-process handle is retained until that cleanup outcome is known — and the
-failure is reported together with the cleanup result. A suspended child is never
-left orphaned outside the job, and a failed creation-time query is reported as
-unknown rather than a fabricated zero identity.
+process handle is retained until that cleanup outcome is known — and the failure
+is reported together with the cleanup result. The cleanup outcome is carried
+structurally (`SpawnError::Admission`), not flattened into a string: only a
+*confirmed* reclaim may take the ordinary bounded launch retry. A failed,
+unknown or timed-out reclaim — for example assignment failure plus a failed or
+timed-out `TerminateProcess` — stops without a second spawn and reports a
+recovery-required cause, because starting another child could leak a second
+process outside the job while the real ownership is unresolved. A suspended
+child is never silently orphaned outside the job, and a failed creation-time
+query is reported as unknown rather than a fabricated zero identity.
 
 A stop is bounded and two-stage:
 
@@ -107,19 +113,37 @@ A stop is bounded and two-stage:
    than as evidence of a clean shutdown; the job only ever contains this host's
    owned members, so no PID or process name is matched.
 
+Whole-job completion is not the same as the root process exiting. Before a
+natural root exit can finish clean or start a replacement, the host explicitly
+reclaims the owned job through the retained job handle and confirms it is empty.
+`TerminateJobObject` is only a *request*; emptiness is proven with job
+accounting (`QueryInformationJobObject` / `JobObjectBasicAccountingInformation`,
+`ActiveProcesses`), with a bounded drain poll. A still-nonempty job, a
+termination request that does not take effect, or a failed job query is never
+`Confirmed`: a root exit with a surviving grandchild, an unexpected exit, or a
+planned stop all report `STOPPED` with a recovery-required cause instead of a
+clean stop, and no replacement child is started over an uncleared tree. The
+retained process/job handles are the ownership authority here; the host never
+re-opens a possibly-reused PID for this cleanup. `Drop` remains only a
+last-resort safeguard that closes the job; it is never the source of a
+`Confirmed` result.
+
 This is deliberately different from a normal launcher replacement. During an
 update the launcher terminates its own server child but stays alive and starts
 the replacement; the host must not touch the job during that handoff. The host
 only terminates the tree for a whole-service stop. It does not know about
 launcher protocol upgrades and does not manage updates or rollback.
 
-Ownership is verified before any stop or termination: the host re-opens the
-recorded PID and compares its creation time with the one captured at spawn,
-because a held handle stays valid after the child exits and cannot detect PID
-reuse. `Ok(false)` means the PID is foreign and is left alone; a failed query
-means ownership is **unknown** and is never read as a successful stop. Only a
-verified-owned tree is stopped or terminated, so a stale or foreign PID is
-never cleaned up.
+For a graceful stop request and a forced termination while the root may still be
+alive, ownership is verified first: the host re-opens the recorded PID and
+compares its creation time with the one captured at spawn, because a held handle
+stays valid after the child exits and cannot detect PID reuse. `Ok(false)` means
+the PID is foreign and is left alone; a failed query means ownership is
+**unknown** and is never read as a successful stop. Whole-job cleanup after the
+root has already exited instead uses the retained job handle, which only ever
+contains this host's assigned members; a stale or foreign PID is never the
+target. Only owned members and confirmed-empty job accounting may be reported as
+a clean stop.
 
 ## Required launcher control (not implemented here)
 
@@ -151,16 +175,23 @@ fallback or relies solely on the control message.
 
 - **Unexpected exit:** the supervisor restarts the child while a restart budget
   allows it (`--max-restarts` inside `--restart-window-ms`, default 5 in 300s,
-  mirroring the systemd unit), reporting `START_PENDING` between attempts.
+  mirroring the systemd unit), reporting `START_PENDING` between attempts. The
+  restart only happens when the whole owned job was confirmed empty first.
 - **Planned stop:** a child exit while `STOP_PENDING` is success, not a failure;
   a non-zero exit code is ignored so a crashed-but-stopping child does not look
-  like an unexpected stop.
+  like an unexpected stop. An unconfirmed whole-tree cleanup during a planned
+  stop is not reported clean.
 - **Repeated failure:** once the budget is exhausted the service stops with
   `ERROR_SERVICE_SPECIFIC_ERROR` and a specific code instead of respawning
   forever. There is no Windows analog of systemd's finite start limit, so the
   budget lives here.
 - **Slow drain:** reports `STOP_PENDING` with checkpoints and forces the tree
   after the deadline. It never hangs.
+- **Unconfirmed cleanup (specific code 5):** a created process that could not be
+  admitted and could not be confirmed reclaimed, or an owned job that stayed
+  nonempty (or could not be queried) after termination, stops the service with a
+  recovery-required specific code. The host does not retry and does not claim a
+  clean stop; it reports the unresolved ownership rather than promising removal.
 - **Publication failure:** if `SetServiceStatus` fails for any state, the failure
   is surfaced (not ignored); the host abandons the run, cleans the owned child
   once and reports an unknown cause rather than claiming a clean stop.
@@ -237,12 +268,15 @@ Native acceptance (not executed here; see the recipe):
 1. `sc.exe query` reports `STOPPED` before start and `RUNNING` after; the
    control handler answers interrogate without hanging.
 2. A planned stop reaches `STOPPED` within the drain bound; the job tree is
-   empty afterwards.
-3. Killing the dummy child produces a bounded restart sequence, then a specific
-   failure code; no restart storm.
+   empty afterwards, including any grandchild.
+3. Killing the dummy root while its grandchild is still alive does **not**
+   restart over the survivor: the host reclaims the owned job, confirms it
+   empty, and only then reports `STOPPED` (or a recovery-required specific code
+   if the job cannot be confirmed empty); no restart storm.
 4. A child that ignores the stop marker is force-terminated at the deadline and
    reported `STOPPED`.
-5. A stale PID and an unrelated process are never terminated.
+5. A stale PID and an unrelated process are never terminated, and a failed job
+   query is reported as unknown rather than confirmed empty.
 6. Registration and cleanup remove exactly the synthetic service, its
    processes, its home under the disposable test root, and nothing else.
 
