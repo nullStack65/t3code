@@ -150,15 +150,33 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   const timeouts = new Map<string, unknown>();
   const control: {
     failCommand: string | undefined;
+    timedOutCommand: string | undefined;
     stateAfterStop?: string;
     linger: string;
     enabled: boolean;
     active: boolean;
+    systemdShow: string | undefined;
+    systemdExecStartPath: string | undefined;
+    launchdDomainPresent: boolean;
+    launchdDomainStderr: string;
+    launchdJob: "running" | "stopped" | "not-loaded" | "malformed" | "permission";
+    launchdJobStderr: string;
+    launchdProgramPath: string | undefined;
+    launchdDisabled: boolean;
   } = {
     failCommand: undefined,
+    timedOutCommand: undefined,
     linger: "yes",
     enabled: true,
     active: true,
+    systemdShow: undefined,
+    systemdExecStartPath: undefined,
+    launchdDomainPresent: true,
+    launchdDomainStderr: "",
+    launchdJob: "running",
+    launchdJobStderr: "Operation not permitted",
+    launchdProgramPath: undefined,
+    launchdDisabled: false,
   };
   const runner = ProcessRunner.ProcessRunner.of({
     run: Effect.fn("test.run_boot_service_command")(function* (
@@ -167,17 +185,108 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       const command = `${input.command} ${input.args.join(" ")}`;
       commands.push(command);
       timeouts.set(command, input.timeout);
-      const failed = command === control.failCommand;
-      if (!failed && command === "loginctl enable-linger --no-ask-password 501")
+      const timedOut = control.timedOutCommand === command;
+      const failed = !timedOut && command === control.failCommand;
+      if (!failed && !timedOut && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
-      if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
-      if (!failed && command === "systemctl --user restart t3code.service") control.active = true;
+      if (!failed && !timedOut && command === "systemctl --user enable t3code.service")
+        control.enabled = true;
+      if (!failed && !timedOut && command === "systemctl --user restart t3code.service")
+        control.active = true;
       if (
         control.stateAfterStop !== undefined &&
         (command === "systemctl --user stop t3code.service" ||
           command.startsWith("launchctl bootout --wait "))
       ) {
         yield* fs.writeFileString(statePath, control.stateAfterStop).pipe(Effect.orDie);
+      }
+      if (timedOut) {
+        return {
+          stdout: "",
+          stderr: "",
+          code: null,
+          timedOut: true,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
+        };
+      }
+      const ok = (stdout: string) => ({
+        stdout,
+        stderr: "",
+        code: ChildProcessSpawner.ExitCode(0),
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdoutInvalidUtf8: false,
+        stderrInvalidUtf8: false,
+      });
+      const status = (stdout: string, code: number, stderr = "") => ({
+        ...ok(stdout),
+        stderr,
+        code: ChildProcessSpawner.ExitCode(code),
+      });
+      if (failed) return status("", 1);
+      // Manager observation probes. These mirror the real commands and let the
+      // tests exercise running/enabled/identity divergence without a host.
+      if (
+        input.command === "systemctl" &&
+        input.args[1] === "show" &&
+        input.args[2] === "t3code.service"
+      ) {
+        return ok(
+          control.systemdShow ??
+            [
+              "LoadState=loaded",
+              `ActiveState=${control.active ? "active" : "inactive"}`,
+              `SubState=${control.active ? "running" : "dead"}`,
+              `UnitFileState=${control.enabled ? "enabled" : "disabled"}`,
+              `ExecStart={ path=${control.systemdExecStartPath ?? runtime.entryPath} ; argv[]=${runtime.entryPath} __service-launcher ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(never) ; status=0/0 }`,
+              "NRestarts=0",
+              "Result=success",
+            ].join("\n"),
+        );
+      }
+      if (
+        input.command === "launchctl" &&
+        input.args[0] === "print" &&
+        input.args[1] === "gui/501"
+      ) {
+        return control.launchdDomainPresent
+          ? ok("gui/501 = {\n\ttype = login\n}\n")
+          : status("", 1, control.launchdDomainStderr);
+      }
+      if (
+        input.command === "launchctl" &&
+        input.args[0] === "print" &&
+        input.args[1] === "gui/501/com.t3tools.t3code.service"
+      ) {
+        if (control.launchdJob === "not-loaded") return status("", 1);
+        if (control.launchdJob === "permission") return status("", 1, control.launchdJobStderr);
+        if (control.launchdJob === "malformed") return ok("this is not launchctl output\n");
+        const state =
+          control.launchdJob === "running"
+            ? "state = running\n\n\tpid = 4321\n"
+            : "state = not running\n";
+        return ok(
+          `gui/501/com.t3tools.t3code.service = {\n\tactive count = ${
+            control.launchdJob === "running" ? "1" : "0"
+          }\n\ttype = LaunchAgent\n\t${state}\tprogram = ${
+            control.launchdProgramPath ?? runtime.entryPath
+          }\n\tlast exit code = 0\n}\n`,
+        );
+      }
+      if (
+        input.command === "launchctl" &&
+        input.args[0] === "print-disabled" &&
+        input.args[1] === "gui/501"
+      ) {
+        return ok(
+          `disabled services = {\n\t"com.t3tools.t3code.service" => ${
+            control.launchdDisabled ? "true" : "false"
+          }\n}\n`,
+        );
       }
       return {
         stdout:
@@ -247,7 +356,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       ),
     );
   const service = yield* makeService();
-  return { service, makeService, fs, statePath, commands, timeouts, control, runtime };
+  return { service, makeService, fs, home, statePath, commands, timeouts, control, runtime };
 });
 
 it.layer(NodeServices.layer)("boot service install", (it) => {
@@ -832,6 +941,298 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           `launchctl bootstrap gui/501 ${plistPath}`,
         ]);
       }
+    }),
+  );
+});
+
+it("parses only well-formed manager output and exact versions", () => {
+  expect(BootService.parseSystemdShow("no anchors here")).toBeUndefined();
+  expect(BootService.parseSystemdShow("LoadState=loaded\nActiveState=active")).toMatchObject({
+    loadState: "loaded",
+    activeState: "active",
+  });
+  expect(BootService.parseLaunchdPrint("this is not launchctl output")).toBeUndefined();
+  expect(BootService.parseLaunchdPrint("\tstate = running\n\tpid = 12\n")).toMatchObject({
+    state: "running",
+    pid: 12,
+  });
+  expect(
+    BootService.parseLaunchdDisabled(
+      'disabled services = {\n\t"com.t3tools.t3code.service" => true\n}',
+      "com.t3tools.t3code.service",
+    ),
+  ).toBe(true);
+  expect(
+    BootService.parseLaunchdDisabled("disabled services = {}", "com.t3tools.t3code.service"),
+  ).toBeUndefined();
+  expect(
+    BootService.bootServiceVersionFromProgramPath("/home/x/.t3/runtime/versions/1.2.3/t3"),
+  ).toBe("1.2.3");
+  expect(BootService.bootServiceVersionFromProgramPath("/usr/bin/node")).toBeUndefined();
+  expect(BootService.launchdPermissionDenied("Operation not permitted")).toBe(true);
+  expect(BootService.launchdPermissionDenied("Could not find service")).toBe(false);
+  expect(
+    BootService.bootServiceProgramInBaseDir(
+      "/home/x/.t3/runtime/versions/1.2.3/t3",
+      "/home/x/.t3",
+      "/",
+    ),
+  ).toBe(true);
+  expect(
+    BootService.bootServiceProgramInBaseDir(
+      "/other/.t3/runtime/versions/1.2.3/t3",
+      "/home/x/.t3",
+      "/",
+    ),
+  ).toBe(false);
+});
+
+const SYSTEMD_SHOW_PROPERTY =
+  "systemctl --user show t3code.service --property=LoadState,ActiveState,SubState,UnitFileState,ExecStart,NRestarts,Result";
+
+it.layer(NodeServices.layer)("boot service status observations", (it) => {
+  it.effect("separates identity from a stopped Linux manager state", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+      control.active = false;
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({
+        schemaVersion: BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+        supported: true,
+        manager: "systemd",
+        installed: true,
+        enabled: "enabled",
+        running: "stopped",
+        current: false,
+        installedVersion: "1.2.3",
+        runningVersion: "1.2.3",
+      });
+      expect(status.problems).toContain("service-stopped");
+      expect(status.observation?.restartCount).toBe(0);
+      expect(status.observation?.source).toBe("systemctl --user show t3code.service");
+    }),
+  );
+
+  it.effect("reports linger-disabled without hiding the running manager state", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+      control.linger = "no";
+
+      const status = yield* service.status;
+
+      expect(status.problems).toContain("linger-disabled");
+      expect(status.running).toBe("running");
+      expect(status.enabled).toBe("enabled");
+    }),
+  );
+
+  it.effect("does not call a Mac job running when the launch agent is not loaded", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdJob = "not-loaded";
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({
+        schemaVersion: BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+        manager: "launchd",
+        installed: true,
+        running: "not-loaded",
+        enabled: "enabled",
+      });
+      expect(status.observation).toMatchObject({
+        reachable: true,
+        running: "not-loaded",
+        detail: "launch-agent-not-loaded",
+      });
+    }),
+  );
+
+  it.effect("reports an unavailable GUI login domain as unknown, never healthy", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdDomainPresent = false;
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({ manager: "launchd", running: "unknown", enabled: "unknown" });
+      expect(status.observation).toMatchObject({
+        reachable: false,
+        running: "unknown",
+        detail: "gui-login-domain-unavailable",
+      });
+    }),
+  );
+
+  it.effect("keeps a Mac stopped job distinct from a missing one and observes its version", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdJob = "stopped";
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({ running: "stopped", enabled: "enabled" });
+      expect(status.observation?.detail).toBeUndefined();
+      expect(status.runningVersion).toBe("1.2.3");
+    }),
+  );
+
+  it.effect("reports command failure, timeout and malformed output as unknown", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+
+      control.failCommand = SYSTEMD_SHOW_PROPERTY;
+      expect((yield* service.status).observation).toMatchObject({
+        reachable: false,
+        running: "unknown",
+        detail: "manager-unreachable",
+      });
+
+      control.failCommand = undefined;
+      control.timedOutCommand = SYSTEMD_SHOW_PROPERTY;
+      expect((yield* service.status).observation).toMatchObject({
+        running: "unknown",
+        detail: "manager-timeout",
+      });
+      control.timedOutCommand = undefined;
+
+      control.systemdShow = "not key=value output";
+      expect((yield* service.status).observation).toMatchObject({
+        reachable: true,
+        running: "unknown",
+        detail: "manager-output-malformed",
+      });
+    }),
+  );
+
+  it.effect("does not let the launcher state file prove the running artifact", () =>
+    Effect.gen(function* () {
+      const { service, fs, statePath, runtime } = yield* makeHarness();
+      yield* service.install();
+      yield* fs.writeFileString(
+        statePath,
+        `{"protocol":${SERVICE_LAUNCHER_PROTOCOL},"activeVersion":"1.2.4"}`,
+      );
+
+      const status = yield* service.status;
+
+      // The state file claims 1.2.4 and the manager reports the installed
+      // runtime path at 1.2.3: installed/current identity and observed running
+      // identity are different claims.
+      expect(status.installedVersion).toBe("1.2.4");
+      expect(status.runningVersion).toBe("1.2.3");
+      expect(runtime.entryPath).toContain("versions/1.2.3");
+      expect(status.current).toBe(false);
+    }),
+  );
+
+  it.effect("binds identity to the selected T3 home and never calls a foreign home current", () =>
+    Effect.gen(function* () {
+      const { service, fs, home, makeService } = yield* makeHarness();
+      const path = yield* Path.Path;
+      yield* service.install();
+      const otherHome = yield* fs.makeTempDirectoryScoped({ prefix: "t3-other-home-" });
+
+      const other = yield* makeService(undefined, "1.2.3", path.join(otherHome, ".t3"));
+      const status = yield* other.status;
+
+      expect(status.installed).toBe(true);
+      expect(status.installedBaseDir).toBe(path.join(home, ".t3"));
+      expect(status.current).toBe(false);
+    }),
+  );
+
+  it.effect("fails closed on Windows with unknown manager observations", () =>
+    Effect.gen(function* () {
+      const { service } = yield* makeHarness("win32");
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({
+        schemaVersion: BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+        supported: false,
+        manager: "unsupported",
+        installed: false,
+        running: "unknown",
+        enabled: "unknown",
+        current: false,
+      });
+      expect(status.observation).toBeUndefined();
+    }),
+  );
+
+  it.effect("reports a launchctl permission refusal as unknown, never a missing domain", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdDomainPresent = false;
+      control.launchdDomainStderr = "launchctl: Operation not permitted";
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({ manager: "launchd", running: "unknown", enabled: "unknown" });
+      expect(status.observation).toMatchObject({
+        reachable: true,
+        running: "unknown",
+        detail: "manager-permission-denied",
+      });
+    }),
+  );
+
+  it.effect("reports a launchctl permission refusal on the job as unknown, not not-loaded", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdJob = "permission";
+
+      const status = yield* service.status;
+
+      expect(status).toMatchObject({ running: "unknown", enabled: "enabled" });
+      expect(status.observation).toMatchObject({
+        reachable: true,
+        running: "unknown",
+        detail: "manager-permission-denied",
+      });
+    }),
+  );
+
+  it.effect("does not publish a running version from a different T3 home", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdProgramPath = "/Volumes/other/.t3/runtime/versions/9.9.9/t3";
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("running");
+      expect(status.runningVersion).toBeUndefined();
+      expect(status.observation).toMatchObject({
+        reachable: true,
+        running: "running",
+        detail: "running-from-different-home",
+      });
+    }),
+  );
+
+  it.effect("does not publish a running version when systemd points at a different home", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+      control.systemdExecStartPath = "/srv/other/.t3/runtime/versions/9.9.9/t3";
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("running");
+      expect(status.runningVersion).toBeUndefined();
+      expect(status.observation?.detail).toBe("running-from-different-home");
     }),
   );
 });

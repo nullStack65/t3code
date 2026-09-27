@@ -23,11 +23,16 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 const status = {
+  schemaVersion: BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION,
   supported: true,
+  manager: "systemd",
   installed: true,
+  enabled: "enabled",
+  running: "running",
   current: true,
   unitPath: "/home/me/.config/systemd/user/t3code.service",
   logPath: "/home/me/.t3/userdata/logs/boot-service.log",
+  observedAt: "2026-09-26T00:00:00.000Z",
 } as const;
 
 it("reports the installed service version and host paths", () => {
@@ -93,6 +98,58 @@ it("reports a newer installed service and tells the CLI to catch up to it", () =
   assert.include(output, "t3@0.0.32-nightly.1 (newer than this t3@0.0.31 CLI)");
   assert.include(output, "Run `t3 update 0.0.32-nightly.1` to match it");
   assert.notInclude(output, "npx");
+});
+
+const observation = {
+  manager: "systemd",
+  source: "systemctl --user show t3code.service",
+  observedAt: "2026-09-26T00:00:00.000Z",
+  reachable: true,
+  enabled: "enabled",
+  running: "running",
+  runningVersion: "0.0.29",
+  restartCount: 0,
+  lastResult: "success",
+} satisfies BootService.BootServiceManagerObservation;
+
+it("emits the versioned machine-readable status contract with --json", () => {
+  const parsed = JSON.parse(
+    formatServiceStatus({ ...status, observation }, "0.0.29", { json: true }),
+  ) as Record<string, unknown>;
+
+  expect(parsed.schemaVersion).toBe(BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION);
+  expect(parsed.manager).toBe("systemd");
+  expect(parsed.running).toBe("running");
+  expect(parsed.cliVersion).toBe("0.0.29");
+  expect(parsed.unitPath).toBe(status.unitPath);
+  expect((parsed.observation as Record<string, unknown>).runningVersion).toBe("0.0.29");
+});
+
+it("keeps human status output and adds manager observation lines", () => {
+  const output = formatServiceStatus({ ...status, observation }, "0.0.29");
+
+  expect(output).toContain("Status: installed · t3@0.0.29");
+  expect(output).toContain("Manager: systemd · running running · t3@0.0.29");
+  expect(output).toContain("Enabled: enabled");
+  expect(output).toContain(
+    "Observed: 2026-09-26T00:00:00.000Z (systemctl --user show t3code.service)",
+  );
+  expect(output).not.toContain("Note:");
+});
+
+it("does not report a non-running manager observation as healthy", () => {
+  const output = formatServiceStatus(
+    {
+      ...status,
+      running: "not-loaded",
+      observation: { ...observation, running: "not-loaded", detail: "launch-agent-not-loaded" },
+    },
+    "0.0.29",
+  );
+
+  expect(output).toContain("Manager: systemd · running not loaded");
+  expect(output).toContain("Manager detail: launch-agent-not-loaded");
+  expect(output).toContain("that is a manager observation, not application health");
 });
 
 const newerServiceStatus = { ...status, current: false, installedVersion: "999.0.0" };
