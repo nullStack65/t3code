@@ -22,6 +22,8 @@ function anchors(overrides: Partial<PostStartActivityAnchors> = {}): PostStartAc
     knownWait: null,
     observingServerClock: false,
     observationClockOffsetMs: null,
+    receivedAtMs: null,
+    receivedMonotonicMs: null,
     ...overrides,
   };
 }

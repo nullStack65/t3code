@@ -1378,27 +1378,115 @@ describe("ProviderRuntimeIngestion", () => {
     );
   });
 
-  it("ignores provider content deltas that cannot change thread state", async () => {
+  it("observes canonical command/file output without persisting transcript rows", async () => {
     const harness = await createHarness();
-    const initial = await harness.readModel();
+    const providerStamp = "2020-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
 
-    for (const streamKind of ["command_output", "file_change_output"] as const) {
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-codex-output-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId,
+      turnId: asTurnId("turn-codex-output"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === "turn-codex-output",
+    );
+
+    const before = harness.domainEvents.length;
+    harness.advanceClock(15_000);
+    for (const [streamKind, itemId] of [
+      ["command_output", "cmd-item-1"],
+      ["file_change_output", "file-item-1"],
+    ] as const) {
       harness.emit({
         type: "content.delta",
-        eventId: asEventId(`evt-ignored-${streamKind}`),
+        eventId: asEventId(`evt-codex-output-${streamKind}`),
         provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-ignored"),
-        payload: {
-          streamKind,
-          delta: "ignored output",
-        },
+        createdAt: providerStamp,
+        threadId,
+        turnId: asTurnId("turn-codex-output"),
+        itemId: asItemId(itemId),
+        payload: { streamKind, delta: "canonical output" },
       });
     }
-
     await harness.drain();
-    expect(await harness.readModel()).toEqual(initial);
+
+    // These deltas must not become transcript/output rows.
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    const transcriptRows = (thread?.activities ?? []).filter(
+      (activity) => activity.kind !== "post-start-observation",
+    );
+    expect(transcriptRows).toEqual([]);
+
+    // But they are meaningful provider progress on the server clock, and the
+    // named command/file items advance as outstanding tools.
+    const shell = await harness.readThreadShell();
+    expect(Date.parse(shell.postStartActivity?.lastProviderActivityAt ?? "")).toBeGreaterThan(
+      Date.parse(providerStamp),
+    );
+    expect(shell.postStartActivity?.outstandingTools.map((tool) => tool.toolCallId)).toEqual([
+      "cmd-item-1",
+      "file-item-1",
+    ]);
+
+    // An already-open shell receives the delivery signal.
+    expect(
+      harness.domainEvents
+        .slice(before)
+        .some(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.activity.kind === "post-start-observation",
+        ),
+    ).toBe(true);
+  });
+
+  it("observes Codex MCP tool progress identified by the event itemId", async () => {
+    const harness = await createHarness();
+    const providerStamp = "2020-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-mcp-progress-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId,
+      turnId: asTurnId("turn-mcp-progress"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === "turn-mcp-progress",
+    );
+
+    // Codex MCP progress carries only a summary and names its call via the
+    // event itemId, not payload.toolUseId.
+    harness.advanceClock(15_000);
+    harness.emit({
+      type: "tool.progress",
+      eventId: asEventId("evt-mcp-progress"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: providerStamp,
+      threadId,
+      turnId: asTurnId("turn-mcp-progress"),
+      itemId: asItemId("mcp-call-1"),
+      payload: { summary: "Searching files" },
+    });
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.activities.some((activity) => activity.kind === "tool.progress")).toBe(false);
+    const shell = await harness.readThreadShell();
+    expect(shell.postStartActivity?.outstandingTools.map((tool) => tool.toolCallId)).toEqual([
+      "mcp-call-1",
+    ]);
+    expect(Date.parse(shell.postStartActivity?.lastProviderActivityAt ?? "")).toBeGreaterThan(
+      Date.parse(providerStamp),
+    );
   });
 
   it("observes assistant text on the server clock and exposes it on the shell", async () => {
@@ -1662,6 +1750,127 @@ describe("ProviderRuntimeIngestion", () => {
     });
     await harness.drain();
     expect((await harness.readThreadShell()).postStartActivity ?? null).toBeNull();
+  });
+
+  it("anchors a pending request to itself when the ended turn's traffic arrives late", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnAStartedAt = "2026-01-01T00:00:00.000Z";
+
+    // Turn A runs and ends; terminal clearing removes its record.
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-pending-a-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnAStartedAt,
+      threadId,
+      turnId: asTurnId("turn-a"),
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === "turn-a");
+    harness.advanceClock(5 * 60_000);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-pending-a-content"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnAStartedAt,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { streamKind: "assistant_text", delta: "a" },
+    });
+    await harness.drain();
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-pending-a-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnAStartedAt,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { state: "completed" },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "ready" && thread.session?.activeTurnId === null,
+    );
+    await harness.drain();
+    expect((await harness.readThreadShell()).postStartActivity ?? null).toBeNull();
+
+    // B is submitted through the real turn-start command seam; the provider
+    // start is deliberately held, so the session is `starting` with no
+    // activeTurnId and only the pending request identifies B.
+    harness.advanceClock(60_000);
+    const bRequestedAt = "2026-01-01T00:06:00.000Z";
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-pending-submit-b"),
+      threadId,
+      message: {
+        messageId: asMessageId("pending-b-message"),
+        role: "user",
+        text: "B",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: bRequestedAt,
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-pending-session-b-starting"),
+      threadId,
+      session: {
+        threadId,
+        status: "starting",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        updatedAt: bRequestedAt,
+        lastError: null,
+      },
+      createdAt: bRequestedAt,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "starting" && thread.session?.activeTurnId === null,
+    );
+
+    // Ended-turn A traffic, including a delayed completion, arrives while B is
+    // starting with no provider turn id.
+    harness.advanceClock(4 * 60_000);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-pending-a-late-content"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnAStartedAt,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { streamKind: "assistant_text", delta: "late-a" },
+    });
+    harness.emit({
+      type: "tool.started",
+      eventId: asEventId("evt-pending-a-late-tool"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnAStartedAt,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { toolCallId: "stale-a-tool", title: "Stale" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-pending-a-late-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnAStartedAt,
+      threadId,
+      turnId: asTurnId("turn-a"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    const shell = await harness.readThreadShell();
+    // B keeps its own pending record: no A tools and no A activity timestamp,
+    // so its silence is anchored to its own request time.
+    expect(shell.postStartActivity?.turnId ?? null).toBeNull();
+    expect(shell.postStartActivity?.outstandingTools ?? []).toEqual([]);
+    expect(shell.postStartActivity?.lastProviderActivityAt ?? null).toBeNull();
   });
 
   it("maps canonical content delta/item completed into finalized assistant messages", async () => {

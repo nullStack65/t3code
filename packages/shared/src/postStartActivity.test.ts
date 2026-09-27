@@ -704,4 +704,124 @@ describe("observation clock basis", () => {
     });
     expect(resolvePostStartActivity(resumed, Date.parse(T(6 * MIN + 2_000))).status).toBe("active");
   });
+
+  it("keeps a fresh live tool observation over skewed persisted chronology", () => {
+    // The persisted row carries a provider timestamp twelve hours ahead of the
+    // server observation of the same call.
+    const skewed = "2026-01-01T12:00:00.000Z";
+    const anchors = derivePostStartActivityAnchors({
+      activities: [
+        activity({
+          kind: "tool.started",
+          createdAt: skewed,
+          payload: { toolCallId: "a", title: "A" },
+        }),
+      ],
+      latestTurn: { ...RUNNING_TURN, requestedAt: skewed, startedAt: skewed },
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [
+          {
+            toolCallId: "a",
+            title: "A",
+            itemType: null,
+            startedAt: SERVER_T0,
+            lastObservedAt: SERVER_T0,
+          },
+        ],
+        observedAt: SERVER_T0,
+      },
+      receivedAtMs: Date.parse(SERVER_T0),
+    });
+    const observation = resolvePostStartActivity(anchors, Date.parse(T(1 * MIN)));
+    expect(anchors.outstandingTool?.lastObservedAt).toBe(SERVER_T0);
+    expect(observation.outstandingToolAgeMs).toBe(60_000);
+    expect(observation.status).toBe("active");
+  });
+
+  it("measures elapsed monotonically so a wall-clock jump cannot fabricate silence", () => {
+    const receiptWallMs = Date.parse(SERVER_T0);
+    const receiptMonotonicMs = 1_000;
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: RUNNING_TURN,
+      session: { status: "running", activeTurnId: TURN_ID },
+      live: {
+        lastProviderActivityAt: SERVER_T0,
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: SERVER_T0,
+      },
+      receivedAtMs: receiptWallMs,
+      receivedMonotonicMs: receiptMonotonicMs,
+    });
+    // Wall clock jumps an hour, but only ten real seconds have elapsed: the
+    // observation must not read as an hour of silence.
+    const jumped = resolvePostStartActivity(anchors, Date.parse(T(60 * MIN)), {
+      nowMonotonicMs: receiptMonotonicMs + 10_000,
+    });
+    expect(jumped.status).toBe("active");
+    expect(jumped.lastProviderActivityAgeMs).toBe(10_000);
+
+    // Real monotonic silence past the threshold still warns.
+    const later = resolvePostStartActivity(anchors, Date.parse(T(60 * MIN)), {
+      nowMonotonicMs: receiptMonotonicMs + 6 * MIN,
+    });
+    expect(later.status).toBe("quiet");
+  });
+
+  it("rejects a cached observation from a different turn", () => {
+    const turnB = TurnId.make("turn-b");
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: {
+        turnId: turnB,
+        state: "running",
+        requestedAt: T0,
+        startedAt: T0,
+        completedAt: null,
+      },
+      session: { status: "running", activeTurnId: turnB },
+      live: {
+        turnId: "turn-a",
+        lastProviderActivityAt: T(4 * MIN),
+        lastToolCompletedAt: null,
+        outstandingTools: [
+          {
+            toolCallId: "stale-a",
+            title: "Stale",
+            itemType: null,
+            startedAt: T0,
+            lastObservedAt: T(4 * MIN),
+          },
+        ],
+        observedAt: T(4 * MIN),
+      },
+      receivedAtMs: Date.parse(T(4 * MIN)),
+    });
+    expect(anchors.outstandingTools).toEqual([]);
+    expect(anchors.lastProviderActivityAt).toBeNull();
+    expect(anchors.observingServerClock).toBe(false);
+  });
+
+  it("accepts a pending observation while no turn is named", () => {
+    const anchors = derivePostStartActivityAnchors({
+      activities: [],
+      latestTurn: null,
+      session: { status: "starting", activeTurnId: null },
+      pendingStartedAt: T0,
+      live: {
+        turnId: null,
+        lastProviderActivityAt: T(2 * MIN),
+        lastToolCompletedAt: null,
+        outstandingTools: [],
+        observedAt: T(2 * MIN),
+      },
+      receivedAtMs: Date.parse(T(2 * MIN)),
+    });
+    expect(anchors.active).toBe(true);
+    expect(anchors.lastProviderActivityAt).toBe(T(2 * MIN));
+  });
 });

@@ -22,10 +22,14 @@ const state = vi.hoisted(() => ({
     lastProviderActivityAt: string | null;
     lastToolCompletedAt: string | null;
     outstandingTools: [];
+    observedAt?: string | null;
   },
+  environments: ["env-1"] as string[],
+  threadsByEnv: {} as Record<string, ReadonlyArray<Record<string, unknown>>>,
+  toastCounter: 0,
   add: vi.fn(
     (_toast: { title: string; description: string; actionProps: { onClick: () => void } }) =>
-      "toast-1",
+      `toast-${++state.toastCounter}`,
   ),
   close: vi.fn(),
   navigate: vi.fn(),
@@ -36,32 +40,31 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@effect/atom-react", () => ({
-  useAtomValue: () => ({
-    status: state.live ? "live" : "disconnected",
-    snapshot: Option.some({
-      threads: [
-        {
-          id: "thread-1",
-          title: "Fix the login form",
-          archivedAt: state.archivedAt,
-          hasPendingUserInput: state.input,
-          hasPendingApprovals: state.approval,
-          session: state.sessionError
-            ? { status: "error" }
-            : state.sessionRunning
-              ? { status: "running", activeTurnId: "turn-1" }
-              : null,
-          postStartActivity: state.postStartActivity,
-          latestUserMessageAt: null,
-          latestTurn: {
-            turnId: "turn-1",
-            state: state.turnError ? "error" : state.completedAt ? "completed" : "running",
-            completedAt: state.completedAt,
-          },
+  useAtomValue: (environmentId: string) => {
+    if (!state.live) return { status: "disconnected", snapshot: Option.none() };
+    const threads = state.threadsByEnv[environmentId] ?? [
+      {
+        id: "thread-1",
+        title: "Fix the login form",
+        archivedAt: state.archivedAt,
+        hasPendingUserInput: state.input,
+        hasPendingApprovals: state.approval,
+        session: state.sessionError
+          ? { status: "error" }
+          : state.sessionRunning
+            ? { status: "running", activeTurnId: "turn-1" }
+            : null,
+        postStartActivity: state.postStartActivity,
+        latestUserMessageAt: null,
+        latestTurn: {
+          turnId: "turn-1",
+          state: state.turnError ? "error" : state.completedAt ? "completed" : "running",
+          completedAt: state.completedAt,
         },
-      ],
-    }),
-  }),
+      },
+    ];
+    return { status: "live", snapshot: Option.some({ threads }) };
+  },
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => state.navigate,
@@ -76,10 +79,12 @@ vi.mock("../hooks/useSettings", () => ({
   getClientSettings: () => ({ notificationMode: state.mode }),
 }));
 vi.mock("../state/environments", () => ({
-  useEnvironments: () => ({ environments: [{ environmentId: "env-1" }] }),
+  useEnvironments: () => ({
+    environments: state.environments.map((environmentId) => ({ environmentId })),
+  }),
 }));
 vi.mock("../state/shell", () => ({
-  environmentShell: { stateValueAtom: vi.fn() },
+  environmentShell: { stateValueAtom: (environmentId: string) => environmentId },
 }));
 vi.mock("../threadNotifications", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../threadNotifications")>()),
@@ -91,6 +96,7 @@ vi.mock("./ui/toast", () => ({
 }));
 
 import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
+import { resetPostStartObservationReceipts } from "../state/postStartObservationReceipt";
 
 let renderer: ReactTestRenderer | undefined;
 
@@ -106,8 +112,39 @@ async function complete() {
   await render();
 }
 
+const MIN = 60_000;
+function agoIso(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+/**
+ * A running thread carrying a real server observation basis. `lastActivityAgoMs`
+ * of 0 is fresh activity (active); past five minutes is quiet.
+ */
+function observedThread(
+  overrides: Partial<{ id: string; title: string; lastActivityAgoMs: number }> = {},
+) {
+  const lastActivityAgoMs = overrides.lastActivityAgoMs ?? 0;
+  return {
+    id: overrides.id ?? "thread-1",
+    title: overrides.title ?? "Fix the login form",
+    archivedAt: null,
+    hasPendingUserInput: false,
+    hasPendingApprovals: false,
+    session: { status: "running", activeTurnId: "turn-1" },
+    latestUserMessageAt: null,
+    latestTurn: { turnId: "turn-1", state: "running", completedAt: null },
+    postStartActivity: {
+      lastProviderActivityAt: agoIso(lastActivityAgoMs),
+      lastToolCompletedAt: null,
+      outstandingTools: [],
+      observedAt: agoIso(0),
+    },
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  resetPostStartObservationReceipts();
   Object.assign(state, {
     mode: "off",
     inApp: true,
@@ -123,6 +160,9 @@ beforeEach(() => {
     turnError: false,
     sessionRunning: false,
     postStartActivity: null,
+    environments: ["env-1"],
+    threadsByEnv: {},
+    toastCounter: 0,
   });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const stubWindow = new EventTarget() as EventTarget & {
@@ -396,5 +436,143 @@ describe("thread notifications", () => {
     await render();
     expect(state.sound).toHaveBeenCalledWith("input", expect.any(Function));
     expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("baselines on the first live observation then notifies on the real quiet transition", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = true;
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 0 })];
+
+    // First live sighting while active: establish the baseline without alerting.
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+
+    // The first genuine active→quiet transition notifies once.
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 6 * MIN })];
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "No recent provider activity" }),
+    );
+
+    // Staying quiet does not repeat.
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps each environment's warnings and episode memory isolated", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = true;
+    state.environments = ["env-1", "env-2"];
+    const a = (lastActivityAgoMs: number) =>
+      observedThread({ id: "thread-a", title: "Thread A", lastActivityAgoMs });
+    const b = (lastActivityAgoMs: number) =>
+      observedThread({ id: "thread-b", title: "Thread B", lastActivityAgoMs });
+    state.threadsByEnv["env-1"] = [a(0)];
+    state.threadsByEnv["env-2"] = [b(0)];
+    await render(); // baseline both envs, no alerts
+
+    state.threadsByEnv["env-1"] = [a(6 * MIN)];
+    state.threadsByEnv["env-2"] = [b(6 * MIN)];
+    await render(); // both quiet → one alert each
+    expect(state.add).toHaveBeenCalledTimes(2);
+    const idFor = (description: string) => {
+      const index = state.add.mock.calls.findIndex((call) => call[0]?.description === description);
+      return state.add.mock.results[index]?.value;
+    };
+    const toastA = idFor("Thread A");
+    const toastB = idFor("Thread B");
+    expect(toastA).toBeDefined();
+    expect(toastB).toBeDefined();
+
+    // env-2 resumes: only its own warning closes.
+    state.threadsByEnv["env-2"] = [b(0)];
+    await render();
+    expect(state.close).toHaveBeenCalledWith(toastB);
+    expect(state.close).not.toHaveBeenCalledWith(toastA);
+
+    // env-2 quiet again on a new origin notifies again; env-1's memory is intact
+    // and does not replay.
+    state.threadsByEnv["env-2"] = [b(7 * MIN)];
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(3);
+    expect(state.add.mock.calls[2]?.[0]?.description).toBe("Thread B");
+  });
+
+  it("delivers sound-only once per episode rather than on every tick", async () => {
+    state.mode = "sound";
+    state.inApp = false;
+    state.focused = true;
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 0 })];
+    await render();
+    expect(state.sound).not.toHaveBeenCalled();
+
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 6 * MIN })];
+    await render();
+    expect(state.sound).toHaveBeenCalledTimes(1);
+
+    // Repeated shell/clock ticks within the same episode stay silent.
+    await render();
+    await render();
+    expect(state.sound).toHaveBeenCalledTimes(1);
+
+    // A new episode (new quiet origin) delivers again.
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 7 * MIN })];
+    await render();
+    expect(state.sound).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes the matching desktop silence notification on resumption, leaving others open", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = false;
+    state.environments = ["env-1", "env-2"];
+    const a = (lastActivityAgoMs: number) =>
+      observedThread({ id: "thread-a", title: "Thread A", lastActivityAgoMs });
+    const b = (lastActivityAgoMs: number) =>
+      observedThread({ id: "thread-b", title: "Thread B", lastActivityAgoMs });
+    state.threadsByEnv["env-1"] = [a(0)];
+    state.threadsByEnv["env-2"] = [b(0)];
+    await render();
+
+    state.threadsByEnv["env-1"] = [a(6 * MIN)];
+    state.threadsByEnv["env-2"] = [b(6 * MIN)];
+    await render();
+    const sent = state.notification.mock.results.map(
+      (result) => result.value as { tag: string; close: ReturnType<typeof vi.fn> },
+    );
+    const silenceA = sent.find((notification) => notification.tag === "env-1:thread-a:silence");
+    const silenceB = sent.find((notification) => notification.tag === "env-2:thread-b:silence");
+    expect(silenceA).toBeDefined();
+    expect(silenceB).toBeDefined();
+
+    // env-1 resumes: its desktop warning closes; env-2's stays.
+    state.threadsByEnv["env-1"] = [a(0)];
+    await render();
+    expect(silenceA!.close).toHaveBeenCalled();
+    expect(silenceB!.close).not.toHaveBeenCalled();
+  });
+
+  it("treats a selected thread in a hidden window as away from T3", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = false;
+    state.visible = "hidden";
+    state.active = { environmentId: "env-1", threadId: "thread-1" };
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 0 })];
+    await render();
+
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 6 * MIN })];
+    await render();
+    // Not actively viewed, so the away-from-T3 desktop preference applies
+    // instead of suppressing the warning.
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.notification).toHaveBeenCalledTimes(1);
+    expect(state.notification).toHaveBeenCalledWith(
+      "No recent provider activity",
+      expect.objectContaining({ tag: "env-1:thread-1:silence" }),
+    );
   });
 });
