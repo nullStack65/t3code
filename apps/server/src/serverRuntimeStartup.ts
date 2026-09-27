@@ -965,7 +965,7 @@ export const make = (options?: StartupOptions) =>
       yield* Effect.logDebug("startup phase: running launch preflight");
       yield* runStartupPhase(
         "launch.preflight",
-        launchPreflight.run(serverConfig.cwd).pipe(
+        launchPreflight.run(serverConfig.cwd, { isSharedRoot: true }).pipe(
           Effect.tap((result) =>
             Effect.gen(function* () {
               yield* Effect.forEach(

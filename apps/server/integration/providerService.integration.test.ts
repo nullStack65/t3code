@@ -1,25 +1,37 @@
+// @effect-diagnostics nodeBuiltinImport:off - the real dummy-executable fixture writes a launcher with node fs/path.
 import type { ProviderRuntimeEvent } from "@t3tools/contracts";
-import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { GrokSettings, ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import { it, assert } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
 import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
+import { ProviderSessionDirectory } from "../src/provider/Services/ProviderSessionDirectory.ts";
+import { makeGrokAdapter } from "../src/provider/Layers/GrokAdapter.ts";
 import {
   NoOpProviderEventLoggers,
   ProviderEventLoggers,
 } from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
-import { ProviderLaunchPreflightBlockedError } from "../src/provider/Errors.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderLaunchPreflightBlockedError,
+} from "../src/provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -27,6 +39,7 @@ import {
 import * as ServerConfig from "../src/config.ts";
 import * as LaunchPreflight from "../src/environment/LaunchPreflight.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
+import { execScriptSource, writeFakeCli } from "../src/testUtils/fakeCli.ts";
 import { AnalyticsService } from "../src/telemetry/AnalyticsService.ts";
 import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../src/persistence/ProviderSessionRuntime.ts";
@@ -43,6 +56,8 @@ import {
 } from "./fixtures/providerRuntime.ts";
 
 const codexInstanceId = ProviderInstanceId.make("codex");
+const grokInstanceId = ProviderInstanceId.make("grok");
+const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const makeWorkspaceDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -55,7 +70,7 @@ const makeWorkspaceDirectory = Effect.gen(function* () {
 interface IntegrationFixture {
   readonly cwd: string;
   readonly harness: TestProviderAdapterHarness;
-  readonly layer: Layer.Layer<ProviderService, unknown, never>;
+  readonly layer: Layer.Layer<ProviderService | ProviderSessionDirectory, unknown, never>;
 }
 
 interface RecordedAnalyticsEvent {
@@ -82,8 +97,10 @@ const makeRecordingAnalytics = Effect.gen(function* () {
 
 const makeIntegrationFixture = (options?: {
   readonly analytics?: Layer.Layer<AnalyticsService>;
+  readonly grokBinaryPath?: string;
   readonly launchPreflightRunner?: (
     root: string,
+    options?: { readonly isSharedRoot?: boolean },
   ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
   readonly reportLaunchPreflightWarning?: (input: {
     readonly threadId: ThreadId;
@@ -96,8 +113,24 @@ const makeIntegrationFixture = (options?: {
     const cwd = yield* makeWorkspaceDirectory;
     const harness = yield* makeTestProviderAdapterHarness();
 
+    // A real adapter whose configured executable is the caller's path, so a
+    // launch exercises the actual platform spawn/error path (not a mock).
+    const realAdapters =
+      options?.grokBinaryPath === undefined
+        ? {}
+        : {
+            [ProviderDriverKind.make("grok")]: yield* makeGrokAdapter(
+              decodeGrokSettings({ binaryPath: options.grokBinaryPath }),
+            ).pipe(
+              Effect.provide(ServerConfig.layerTest(cwd, cwd)),
+              Effect.provide(NodeServices.layer),
+              Effect.orDie,
+            ),
+          };
+
     const registry = makeAdapterRegistryMock({
       [ProviderDriverKind.make("codex")]: harness.adapter,
+      ...realAdapters,
     });
 
     const directoryLayer = ProviderSessionDirectoryLive.pipe(
@@ -120,7 +153,7 @@ const makeIntegrationFixture = (options?: {
       ...(options?.reportLaunchPreflightWarning !== undefined
         ? { reportLaunchPreflightWarning: options.reportLaunchPreflightWarning }
         : {}),
-    }).pipe(Layer.provide(NodeServices.layer), Layer.provide(shared));
+    }).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(shared));
 
     return {
       cwd,
@@ -470,6 +503,7 @@ it.live("a launch-preflight warning is reported and the session still starts onc
       });
 
       assert.equal((session.threadId ?? "").length > 0, true);
+      assert.equal(fixture.harness.getStartCount(), 1);
       assert.deepStrictEqual(yield* Ref.get(reported), [warningFinding.message]);
     }).pipe(Effect.provide(fixture.layer));
   }).pipe(Effect.provide(NodeServices.layer)),
@@ -506,5 +540,130 @@ it.live("the recovery path also invokes the launch preflight", () =>
 
       assert.instanceOf(error, ProviderLaunchPreflightBlockedError);
     }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// --- R2 / R4: the real configured executable through the real launch composition ---------------
+
+it.live(
+  "a missing configured provider executable is reported before model work (new session)",
+  () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const missing = path.join(yield* fs.makeTempDirectory(), "grok");
+      const fixture = yield* makeIntegrationFixture({ grokBinaryPath: missing });
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = ThreadId.make("thread-real-exec-missing-new");
+
+        const error = yield* provider
+          .startSession(threadId, {
+            threadId,
+            provider: ProviderDriverKind.make("grok"),
+            providerInstanceId: grokInstanceId,
+            cwd: fixture.cwd,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.flip);
+
+        assert.instanceOf(error, ProviderAdapterProcessError);
+        assert.include((error as ProviderAdapterProcessError).message, "grok");
+        assert.isAbove((error as ProviderAdapterProcessError).message.length, 0);
+        // No session was accepted and no turn/model work could have run.
+        const sessions = yield* fixture.harness.adapter.listSessions();
+        assert.equal(sessions.length, 0);
+        assert.isTrue(Option.isNone(yield* directory.getBinding(threadId)));
+      }).pipe(Effect.provide(fixture.layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("recovery/resume reports the same missing configured executable before model work", () =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const missing = path.join(yield* fs.makeTempDirectory(), "grok");
+    const fixture = yield* makeIntegrationFixture({ grokBinaryPath: missing });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-real-exec-missing-recover");
+
+      // A persisted binding with resume state is all recovery needs; the
+      // configured executable is resolved and spawned by the same adapter path
+      // as a new session.
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        providerInstanceId: grokInstanceId,
+        resumeCursor: { sessionId: "resume-e3" },
+        runtimePayload: { cwd: fixture.cwd },
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* provider
+        .sendTurn({ threadId, input: "recover me", attachments: [] })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(error, ProviderAdapterProcessError);
+      assert.include((error as ProviderAdapterProcessError).message, "grok");
+      assert.isAbove((error as ProviderAdapterProcessError).message.length, 0);
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("a real configured dummy provider executable launches exactly once and warns visibly", () =>
+  Effect.gen(function* () {
+    const dir = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e3-grok-wrapper-")),
+    );
+    const argvLogPath = NodePath.join(dir, "argv.log");
+    const mockAgentPath = NodePath.join(
+      NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+      "../scripts/acp-mock-agent.ts",
+    );
+    const wrapperPath = writeFakeCli({
+      directory: dir,
+      name: "fake-grok-e3",
+      source: execScriptSource({ scriptPath: mockAgentPath, argvLogPath }),
+    });
+
+    const reported = yield* Ref.make<ReadonlyArray<string>>([]);
+    const fixture = yield* makeIntegrationFixture({
+      grokBinaryPath: wrapperPath,
+      launchPreflightRunner: () => Effect.succeed(findingResult([warningFinding])),
+      reportLaunchPreflightWarning: ({ message }) =>
+        Ref.update(reported, (current) => [...current, message]),
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = ThreadId.make("thread-real-exec-healthy");
+      const session = yield* provider.startSession(threadId, {
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        providerInstanceId: grokInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(session.provider, "grok");
+      assert.isTrue((session.threadId ?? "").length > 0);
+      // The real configured executable was spawned exactly once, and the client
+      // still received the actionable warning.
+      const invocations = yield* Effect.promise(() =>
+        NodeFSP.readFile(argvLogPath, "utf8").then(
+          (raw) => raw.split("\n").filter((line) => line.trim().length > 0).length,
+          () => 0,
+        ),
+      );
+      assert.equal(invocations, 1);
+      assert.deepStrictEqual(yield* Ref.get(reported), [warningFinding.message]);
+    }).pipe(Effect.provide(fixture.layer));
+
+    yield* Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true }));
   }).pipe(Effect.provide(NodeServices.layer)),
 );

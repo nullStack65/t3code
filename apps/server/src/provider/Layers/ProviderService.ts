@@ -93,6 +93,10 @@ import * as VcsProcess from "../../vcs/VcsProcess.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
+// Narrow-filesystem budget for the launch preflight directory checks, matching
+// the preflight's own per-operation bound so a stalled path cannot hold a launch.
+const NARROW_FS_TIMEOUT = "500 millis";
+
 interface SnapShotPromptAccessibilityNode {
   readonly role: string;
   readonly name?: string;
@@ -277,6 +281,7 @@ export interface ProviderServiceLiveOptions {
    */
   readonly launchPreflightRunner?: (
     root: string,
+    options?: { readonly isSharedRoot?: boolean },
   ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
 }
 
@@ -532,6 +537,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
   const runLaunchPreflight = options?.launchPreflightRunner ?? launchPreflight.run;
 
+  // A launch cwd is a shared root only when it is exactly the configured
+  // `ServerConfig.cwd`. A nested repository selected as the session cwd has a
+  // different path and stays an ordinary repository session.
+  const normalizeResolved = (candidate: string): string => {
+    let resolved: string;
+    try {
+      resolved = pathService.resolve(candidate);
+    } catch {
+      resolved = candidate;
+    }
+    return resolved.length > 1 && resolved.endsWith(pathService.sep)
+      ? resolved.slice(0, -pathService.sep.length)
+      : resolved;
+  };
+  const configuredSharedRoot = normalizeResolved(serverConfig.cwd);
+  const isConfiguredSharedRoot = (cwd: string): boolean =>
+    normalizeResolved(cwd) === configuredSharedRoot;
+
   /**
    * Runs the bounded launch preflight against the exact cwd a provider process
    * is about to start in, before the caller's own workspace read. Warnings are
@@ -544,15 +567,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   }) {
     // Only probe a real directory: spawning Git in a missing path or a plain
     // file would fail at the OS layer. The caller's own workspace read (and
-    // `ProviderWorkspaceMissingError`) handles those cases.
-    const workspaceStat = yield* fileSystem
-      .stat(input.cwd)
-      .pipe(Effect.orElseSucceed(() => undefined));
+    // `ProviderWorkspaceMissingError`) handles those cases. This stat is itself
+    // bounded so a stalled/cloud-offloaded path cannot hold the launch; a
+    // timeout simply skips the preflight and lets the adapter surface the
+    // filesystem problem.
+    const workspaceStat = yield* fileSystem.stat(input.cwd).pipe(
+      Effect.timeoutOption(NARROW_FS_TIMEOUT),
+      Effect.map(Option.getOrElse(() => undefined)),
+      Effect.orElseSucceed(() => undefined),
+    );
     if (workspaceStat === undefined || workspaceStat.type !== "Directory") {
       return;
     }
 
-    const result = yield* runLaunchPreflight(input.cwd).pipe(
+    const isSharedRoot = isConfiguredSharedRoot(input.cwd);
+    const result = yield* runLaunchPreflight(input.cwd, { isSharedRoot }).pipe(
       Effect.catchCause(() =>
         Effect.succeed({
           findings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
@@ -1615,9 +1644,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           // gone (e.g. moved, deleted, or replaced by a plain file).
           // Otherwise every adapter surfaces this as a misleading "failed to
           // spawn <binary>" process error. Stat failures other than "missing"
-          // fall through to the adapter.
+          // fall through to the adapter. Bounded so a stalled path cannot hold
+          // the launch; a timeout falls through and lets the adapter report it.
           const workspaceIsDirectory = yield* fileSystem.stat(effectiveCwd).pipe(
-            Effect.map((workspaceStat) => workspaceStat.type === "Directory"),
+            Effect.timeoutOption(NARROW_FS_TIMEOUT),
+            Effect.flatMap((statOption) =>
+              Option.isSome(statOption)
+                ? Effect.succeed(statOption.value.type === "Directory")
+                : Effect.succeed(true),
+            ),
             Effect.catch((statError) => Effect.succeed(statError.reason._tag !== "NotFound")),
           );
           if (!workspaceIsDirectory) {

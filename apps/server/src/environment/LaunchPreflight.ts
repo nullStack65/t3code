@@ -19,50 +19,37 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
  * the directory auto-bootstrap roots a project at. Before sessions start, this
  * checks the environment the harness actually depends on:
  *
- * - the `git` executable the launch actually resolves can start, and supports
- *   the `rev-parse --path-format=absolute` capability `GitVcsDriver` relies on;
- * - an accidental umbrella repository at the shared root is flagged, using the
- *   effective Git identity (not a folder name), because every project beneath it
- *   would then share one repository and T3 checkpoints could be written into it;
+ * - the `git` executable the launch actually resolves can start;
+ * - an accidental umbrella repository at an explicitly configured shared root
+ *   is flagged using the exact, normalized Git identity reported for that root
+ *   (never a folder name, a child count, or child enumeration);
  * - one small, relevant file at the root is read to detect a stalled or
  *   cloud-offloaded filesystem without scanning the tree.
  *
  * Every probe is bounded, read-only and local. The preflight never mutates Git
- * metadata, disables sync, kills processes, or calls a model. It warns by
- * default and only blocks the launch for a demonstrated inability to execute
- * usefully: when the resolved Git cannot start or lacks the required capability
- * *and* the exact session root is itself a repository, so T3 checkpoints cannot
- * be written. Broad roots, optional capabilities and unexpected markers alone
- * never block.
+ * metadata, disables sync, kills processes, or calls a model. Findings warn by
+ * default. A blocker is emitted only for a demonstrated inability to execute
+ * usefully — the resolved Git cannot start while the exact session root is a
+ * repository, so its worktree/checkpoint plumbing cannot run. Optional Git
+ * capabilities (`rev-parse --path-format`) never block: maintained
+ * `GitVcsDriver` catches that failure and rebuilds the temporary index. Broad
+ * roots, nested regular repositories and retired markers never block.
  */
-
-/**
- * `GitVcsDriver` checkpoint capture runs
- * `git rev-parse --path-format=absolute --git-path index`, which needs Git
- * 2.31.0 or newer. Reported only as context; the capability probe itself is what
- * decides, not an arbitrary version threshold.
- */
-export const MINIMUM_GIT_VERSION = "2.31.0";
 
 const GIT_PROBE_TIMEOUT = "1500 millis";
-const EXISTS_PROBE_TIMEOUT = "500 millis";
-const ROOT_LIST_TIMEOUT = "500 millis";
+const NARROW_FS_TIMEOUT = "500 millis";
 const READ_PROBE_TIMEOUT = "500 millis";
 const TOTAL_PROBE_BUDGET = "5 seconds";
 const READ_PROBE_MAX_BYTES = 32 * 1024;
-const MAX_ROOT_CHILDREN = 32;
 const GIT_VERSION_PATTERN = /\b(\d+\.\d+\.\d+)\b/;
 
 /** Files probed, in order, for the bounded root read. All are small and relevant. */
 const READ_PROBE_CANDIDATES = ["AGENTS.md", "package.json", "README.md", ".git/HEAD"] as const;
 
-/** Retired Git metadata must not count as an active umbrella by name alone. */
-const RETIRED_GIT_MARKER = ".git.macfix-m1-retired";
-
 export type LaunchPreflightFindingCode =
   | "git-startup-failed"
   | "git-probe-timed-out"
-  | "git-capability-missing"
+  | "git-index-fast-path-unavailable"
   | "git-probe-failed"
   | "shared-root-git"
   | "root-read-slow"
@@ -93,51 +80,89 @@ export interface LaunchPreflightGitProbe {
   /** Returns the parsed Git version, or null when the output had none. */
   readonly version: (root: string) => Effect.Effect<string | null, LaunchPreflightProbeError>;
   /**
-   * Runs the exact capability `GitVcsDriver` needs and resolves the effective
-   * repository identity for the root. Uses `allowNonZeroExit`, so "not a
-   * repository" and "unsupported option" are observable states, not failures.
+   * Resolves the effective repository identity for the root using plain
+   * `git rev-parse --show-toplevel` / `--git-common-dir` queries. Uses
+   * `allowNonZeroExit`, so "not a repository" is an observable state, not a
+   * failure. Never depends on the optional `--path-format` flag.
    */
   readonly resolveIdentity: (
     root: string,
   ) => Effect.Effect<LaunchPreflightRepoIdentity, LaunchPreflightProbeError>;
+  /**
+   * Probes the optional `rev-parse --path-format=absolute` convenience used by
+   * the checkpoint index-reuse fast path. `unsupported` only means the faster
+   * path is unavailable — the fallback still checkpoints — so it never blocks.
+   */
+  readonly probeIndexFastPath: (
+    root: string,
+  ) => Effect.Effect<LaunchPreflightIndexFastPath, LaunchPreflightProbeError>;
 }
 
+export type LaunchPreflightIndexFastPath = "supported" | "unsupported" | "unknown";
+
 export interface LaunchPreflightRepoIdentity {
-  readonly state: "ok" | "not-a-repository" | "unsupported" | "failed";
+  readonly state: "ok" | "not-a-repository" | "failed";
   /** Effective work-tree top level when `state` is "ok". */
   readonly topLevel: string | null;
-  /** Effective common Git directory when `state` is "ok". */
+  /** Effective common Git directory (resolved) when `state` is "ok". */
   readonly commonDir: string | null;
   readonly detail: string;
 }
 
 export interface LaunchPreflightFileProbe {
   readonly exists: (target: string) => Effect.Effect<boolean>;
+  /**
+   * Canonicalizes a path (resolving symlinks) so exact root identity compares
+   * correctly across `/var` ↔ `/private/var` style aliases. Returns null when it
+   * cannot be resolved.
+   */
+  readonly realPath: (target: string) => Effect.Effect<string | null>;
   /** Reads at most `maxBytes` and returns the number of bytes read. */
   readonly readFirstBytes: (
     target: string,
     maxBytes: number,
   ) => Effect.Effect<number, LaunchPreflightProbeError>;
-  readonly listDirectory: (
-    target: string,
-  ) => Effect.Effect<ReadonlyArray<string>, LaunchPreflightProbeError>;
 }
 
 export interface LaunchPreflightInput {
   readonly root: string;
   readonly git: LaunchPreflightGitProbe;
   readonly files: LaunchPreflightFileProbe;
+  /**
+   * Whether `root` is an explicitly configured shared session root (as opposed
+   * to a selected nested repository). Only a shared root that is *itself* a
+   * repository is reported as an unexpected umbrella.
+   */
+  readonly isSharedRoot?: boolean;
 }
 
 const parseGitVersion = (output: string): string | null =>
   output.match(GIT_VERSION_PATTERN)?.[1] ?? null;
 
-const severityForGitFailure = (rootGitMarker: boolean): LaunchPreflightSeverity =>
-  rootGitMarker ? "blocker" : "warning";
-
 const blockerSuffix =
-  " T3 Code cannot checkpoint this repository, so the session cannot run usefully." +
-  " Fix Git, then restart T3 Code.";
+  " T3 Code cannot checkpoint or resolve a worktree for this repository, so the session cannot run" +
+  " usefully. Fix Git, then restart T3 Code.";
+
+const normalizeForCompare = (path: Path.Path, value: string): string => {
+  const resolved = path.resolve(value);
+  // A trailing separator would make an otherwise-equal path compare unequal.
+  return resolved.length > 1 && resolved.endsWith(path.sep)
+    ? resolved.slice(0, -path.sep.length)
+    : resolved;
+};
+
+const samePath = (path: Path.Path, a: string | null, b: string): boolean =>
+  a !== null && normalizeForCompare(path, a) === normalizeForCompare(path, b);
+
+const isInside = (path: Path.Path, child: string | null, parent: string): boolean => {
+  if (child === null) return false;
+  const normalizedChild = normalizeForCompare(path, child);
+  const normalizedParent = normalizeForCompare(path, parent);
+  return (
+    normalizedChild === normalizedParent ||
+    normalizedChild.startsWith(`${normalizedParent}${path.sep}`)
+  );
+};
 
 /**
  * Runs every probe against `root` and returns findings. Bounded by construction:
@@ -149,21 +174,32 @@ export const runLaunchPreflight = (
 ): Effect.Effect<LaunchPreflightResult, never, Path.Path> =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
+    const isSharedRoot = input.isSharedRoot === true;
     const collected = yield* Ref.make<ReadonlyArray<LaunchPreflightFinding>>([]);
     const add = (finding: LaunchPreflightFinding) =>
       Ref.update(collected, (current) => [...current, finding]);
 
     const existsBounded = (target: string) =>
       input.files.exists(target).pipe(
-        Effect.timeoutOption(EXISTS_PROBE_TIMEOUT),
+        Effect.timeoutOption(NARROW_FS_TIMEOUT),
         Effect.map(Option.getOrElse(() => false)),
         Effect.orElseSucceed(() => false),
       );
 
+    const realPathBounded = (target: string) =>
+      input.files.realPath(target).pipe(
+        Effect.timeoutOption(NARROW_FS_TIMEOUT),
+        Effect.map(Option.getOrElse(() => null)),
+        Effect.orElseSucceed(() => null),
+      );
+
     const explore = Effect.gen(function* () {
-      // `root/.git` (a directory or a worktree/submodule file) is the evidence
-      // that the root is expected to be a repository. A retired marker such as
-      // `.git.macfix-m1-retired` is a different path and is never counted.
+      // Canonicalize the configured root once so identity comparison is not
+      // confused by macOS `/var` ↔ `/private/var` aliases.
+      const canonicalRoot = (yield* realPathBounded(input.root)) ?? input.root;
+
+      // Only a real `.git` entry counts as repository evidence. A retired marker
+      // such as `.git.macfix-m1-retired` is a different path and is ignored.
       const rootGitMarker = yield* existsBounded(path.join(input.root, ".git"));
 
       const gitOutcome = yield* input.git.version(input.root).pipe(
@@ -196,24 +232,30 @@ export const runLaunchPreflight = (
           const identity = identityOutcome.identity;
           switch (identity.state) {
             case "ok": {
-              effectiveRootRepository = true;
-              break;
-            }
-            case "unsupported": {
-              yield* add({
-                code: "git-capability-missing",
-                severity: severityForGitFailure(rootGitMarker),
-                message:
-                  "The Git this launch resolves does not support `git rev-parse --path-format`, which T3 " +
-                  `Code ${MINIMUM_GIT_VERSION}+ uses to checkpoint changes.` +
-                  (rootGitMarker
-                    ? blockerSuffix
-                    : " Put a newer Git earlier on PATH (for example /usr/local/bin before /usr/bin) and restart T3 Code."),
-              });
+              // Exact normalized root identity: the root itself is the work tree
+              // top level. `topLevel === root` is what makes a shared root an
+              // umbrella; a nested repository selected as the session cwd has a
+              // different top level and stays an ordinary repository session.
+              const rootIsRepository = samePath(path, identity.topLevel, canonicalRoot);
+              effectiveRootRepository = rootIsRepository || rootGitMarker;
+              if (isSharedRoot && rootIsRepository) {
+                const commonUnderRoot = isInside(path, identity.commonDir, canonicalRoot);
+                yield* add({
+                  code: "shared-root-git",
+                  severity: "warning",
+                  message:
+                    `The shared session root ${input.root} is itself a Git repository ` +
+                    `(top-level ${identity.topLevel ?? input.root}). Projects beneath it would share that ` +
+                    "repository." +
+                    (commonUnderRoot
+                      ? ` Move or retire ${path.join(input.root, ".git")} if that is unintended.`
+                      : " Its Git identity points at a different repository; no change to this root is implied."),
+                });
+              }
               break;
             }
             case "not-a-repository": {
-              effectiveRootRepository = false;
+              effectiveRootRepository = rootGitMarker;
               break;
             }
             case "failed": {
@@ -229,36 +271,53 @@ export const runLaunchPreflight = (
         } else if (identityOutcome._tag === "timeout") {
           yield* add({
             code: "git-probe-timed-out",
-            severity: severityForGitFailure(rootGitMarker),
+            severity: "warning",
             message:
               "The Git repository probe did not finish in time. Git or the session-root filesystem may be " +
-              "stalled; Git-backed sessions may hang. Materialize the root and check the Git install." +
-              (rootGitMarker ? blockerSuffix : ""),
+              "stalled; Git-backed sessions may hang. Materialize the root and check the Git install.",
           });
         } else {
           yield* add({
             code: "git-probe-failed",
             severity: "warning",
+            message: `The Git repository probe failed (${identityOutcome.error.detail}). Git-backed sessions may fail.`,
+          });
+        }
+
+        // The optional index-reuse fast path is probed for context only. Its
+        // absence is handled by GitVcsDriver's temporary-index fallback and must
+        // never block a launch.
+        const fastPathOutcome = yield* input.git.probeIndexFastPath(input.root).pipe(
+          Effect.map((state) => ({ _tag: "ok" as const, state })),
+          Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
+          Effect.timeoutOption(GIT_PROBE_TIMEOUT),
+          Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
+        );
+        if (fastPathOutcome._tag === "ok" && fastPathOutcome.state === "unsupported") {
+          yield* add({
+            code: "git-index-fast-path-unavailable",
+            severity: "warning",
             message:
-              `The Git repository probe failed (${identityOutcome.error.detail}). Git-backed sessions may fail.`,
+              "The Git this launch resolves does not support `git rev-parse --path-format`. T3 Code will " +
+              "rebuild the temporary checkpoint index instead of reusing the on-disk index; sessions still " +
+              "run and checkpoint. A newer Git restores the faster path only.",
           });
         }
       } else if (gitOutcome._tag === "timeout" || gitOutcome.error.reason === "timeout") {
         yield* add({
           code: "git-probe-timed-out",
-          severity: severityForGitFailure(rootGitMarker),
+          severity: "warning",
           message:
             "The Git version probe did not finish in time. Git or the session-root filesystem may be " +
-            "stalled; Git-backed sessions may hang. Materialize the root and check the Git install." +
-            (rootGitMarker ? blockerSuffix : ""),
+            "stalled; Git-backed sessions may hang. Materialize the root and check the Git install.",
         });
       } else if (gitOutcome.error.reason === "unavailable") {
         yield* add({
           code: "git-startup-failed",
-          severity: severityForGitFailure(rootGitMarker),
+          severity: effectiveRootRepository ? "blocker" : "warning",
           message:
             "Git could not be started from the session-root PATH (not found or not executable)." +
-            (rootGitMarker
+            (effectiveRootRepository
               ? blockerSuffix
               : " Sessions that checkpoint, diff, or open a repository will fail. Install Git or put its " +
                 "directory earlier on PATH, then restart T3 Code."),
@@ -267,37 +326,8 @@ export const runLaunchPreflight = (
         yield* add({
           code: "git-probe-failed",
           severity: "warning",
-          message:
-            `The Git version probe failed (${gitOutcome.error.detail}). Git-backed sessions may fail.`,
+          message: `The Git version probe failed (${gitOutcome.error.detail}). Git-backed sessions may fail.`,
         });
-      }
-
-      if (effectiveRootRepository) {
-        const children = yield* input.files.listDirectory(input.root).pipe(
-          Effect.timeoutOption(ROOT_LIST_TIMEOUT),
-          Effect.map(Option.getOrElse((): ReadonlyArray<string> => [])),
-          Effect.orElseSucceed((): ReadonlyArray<string> => []),
-        );
-        const nestedRepo = yield* Effect.forEach(
-          children
-            .filter(
-              (child) =>
-                child.length > 0 && child !== "." && child !== ".." && child !== RETIRED_GIT_MARKER,
-            )
-            .slice(0, MAX_ROOT_CHILDREN),
-          (child) => existsBounded(path.join(input.root, child, ".git")),
-          { concurrency: 8 },
-        );
-        if (nestedRepo.some(Boolean)) {
-          yield* add({
-            code: "shared-root-git",
-            severity: "warning",
-            message:
-              `The shared session root ${input.root} is itself a Git repository and contains nested ` +
-              "repositories. Projects beneath it will share one repository, and T3 checkpoints may be " +
-              `written into that umbrella. Move or retire ${path.join(input.root, ".git")} if it is unintended.`,
-          });
-        }
       }
 
       let readTarget: string | undefined;
@@ -310,12 +340,14 @@ export const runLaunchPreflight = (
       }
 
       if (readTarget !== undefined) {
-        const readOutcome = yield* input.files.readFirstBytes(readTarget, READ_PROBE_MAX_BYTES).pipe(
-          Effect.map((bytes) => ({ _tag: "ok" as const, bytes })),
-          Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
-          Effect.timeoutOption(READ_PROBE_TIMEOUT),
-          Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
-        );
+        const readOutcome = yield* input.files
+          .readFirstBytes(readTarget, READ_PROBE_MAX_BYTES)
+          .pipe(
+            Effect.map((bytes) => ({ _tag: "ok" as const, bytes })),
+            Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
+            Effect.timeoutOption(READ_PROBE_TIMEOUT),
+            Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
+          );
         if (readOutcome._tag === "timeout") {
           yield* add({
             code: "root-read-slow",
@@ -360,33 +392,13 @@ const classifyGitProbeError = (error: VcsError): LaunchPreflightProbeError => {
   return new LaunchPreflightProbeError({ reason: "failed", detail: error.message });
 };
 
-const classifyIdentityOutput = (output: { stdout: string; stderr: string; code: number }): LaunchPreflightRepoIdentity => {
-  const stderr = output.stderr.trim();
-  if (output.code === 0) {
-    const lines = output.stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    return {
-      state: "ok",
-      topLevel: lines[0] ?? null,
-      commonDir: lines[1] ?? null,
-      detail: "",
-    };
-  }
-  if (/not a git repository/i.test(stderr) || /must be run in a work tree/i.test(stderr)) {
-    return { state: "not-a-repository", topLevel: null, commonDir: null, detail: stderr };
-  }
-  if (/unknown option|usage: git rev-parse|path-format/i.test(stderr)) {
-    return { state: "unsupported", topLevel: null, commonDir: null, detail: stderr };
-  }
-  return { state: "failed", topLevel: null, commonDir: null, detail: stderr };
-};
-
 export class LaunchPreflight extends Context.Service<
   LaunchPreflight,
   {
-    readonly run: (root: string) => Effect.Effect<LaunchPreflightResult>;
+    readonly run: (
+      root: string,
+      options?: { readonly isSharedRoot?: boolean },
+    ) => Effect.Effect<LaunchPreflightResult>;
   }
 >()("t3/environment/LaunchPreflight") {}
 
@@ -396,46 +408,96 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
+  const runGit = (
+    operation: string,
+    root: string,
+    args: ReadonlyArray<string>,
+    allowNonZeroExit: boolean,
+  ) =>
+    vcsProcess
+      .run({
+        operation,
+        command: "git",
+        args,
+        cwd: root,
+        timeoutMs: 1_500,
+        maxOutputBytes: 4_000,
+        ...(allowNonZeroExit ? { allowNonZeroExit: true } : {}),
+      })
+      .pipe(Effect.mapError(classifyGitProbeError));
+
   const git: LaunchPreflightGitProbe = {
     version: (root) =>
-      vcsProcess
-        .run({
-          operation: "launch-preflight.git-version",
-          command: "git",
-          args: ["--version"],
-          cwd: root,
-          timeoutMs: 1_500,
-          maxOutputBytes: 4_000,
-        })
-        .pipe(
-          Effect.map((result) => parseGitVersion(result.stdout) ?? parseGitVersion(result.stderr)),
-          Effect.mapError(classifyGitProbeError),
-        ),
+      runGit("launch-preflight.git-version", root, ["--version"], false).pipe(
+        Effect.map((result) => parseGitVersion(result.stdout) ?? parseGitVersion(result.stderr)),
+      ),
     resolveIdentity: (root) =>
-      vcsProcess
-        .run({
-          operation: "launch-preflight.git-identity",
-          command: "git",
-          args: ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"],
-          cwd: root,
-          timeoutMs: 1_500,
-          maxOutputBytes: 4_000,
-          allowNonZeroExit: true,
-        })
-        .pipe(
-          Effect.map((result) =>
-            classifyIdentityOutput({
-              stdout: result.stdout,
-              stderr: result.stderr,
-              code: Number(result.exitCode),
-            }),
-          ),
-          Effect.mapError(classifyGitProbeError),
-        ),
+      Effect.gen(function* () {
+        const top = yield* runGit(
+          "launch-preflight.git-toplevel",
+          root,
+          ["rev-parse", "--show-toplevel"],
+          true,
+        );
+        if (Number(top.exitCode) !== 0) {
+          const stderr = top.stderr.trim();
+          if (/not a git repository/i.test(stderr) || /must be run in a work tree/i.test(stderr)) {
+            return {
+              state: "not-a-repository",
+              topLevel: null,
+              commonDir: null,
+              detail: stderr,
+            } satisfies LaunchPreflightRepoIdentity;
+          }
+          return {
+            state: "failed",
+            topLevel: null,
+            commonDir: null,
+            detail: stderr,
+          } satisfies LaunchPreflightRepoIdentity;
+        }
+        const topLevel = top.stdout.trim();
+        const commonResult = yield* runGit(
+          "launch-preflight.git-common-dir",
+          root,
+          ["rev-parse", "--git-common-dir"],
+          true,
+        );
+        const rawCommonDir = Number(commonResult.exitCode) === 0 ? commonResult.stdout.trim() : "";
+        const commonDir =
+          rawCommonDir.length > 0
+            ? path.isAbsolute(rawCommonDir)
+              ? rawCommonDir
+              : path.resolve(topLevel.length > 0 ? topLevel : root, rawCommonDir)
+            : null;
+        return {
+          state: "ok",
+          topLevel: topLevel.length > 0 ? topLevel : null,
+          commonDir,
+          detail: "",
+        } satisfies LaunchPreflightRepoIdentity;
+      }),
+    probeIndexFastPath: (root) =>
+      runGit(
+        "launch-preflight.git-index-fast-path",
+        root,
+        ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        true,
+      ).pipe(
+        Effect.map((result): LaunchPreflightIndexFastPath => {
+          if (Number(result.exitCode) === 0) return "supported";
+          const stderr = result.stderr.trim();
+          if (/unknown option|usage: git rev-parse|path-format/i.test(stderr)) {
+            return "unsupported";
+          }
+          return "unknown";
+        }),
+      ),
   };
 
   const files: LaunchPreflightFileProbe = {
     exists: (target) => fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false)),
+    realPath: (target) => fileSystem.realPath(target).pipe(Effect.orElseSucceed(() => null)),
     readFirstBytes: (target, maxBytes) =>
       fileSystem.stream(target, { bytesToRead: maxBytes }).pipe(
         Stream.runCount,
@@ -443,17 +505,16 @@ export const make = Effect.gen(function* () {
           (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
         ),
       ),
-    listDirectory: (target) =>
-      fileSystem.readDirectory(target).pipe(
-        Effect.mapError(
-          (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
-        ),
-      ),
   };
 
   return LaunchPreflight.of({
-    run: (root: string) =>
-      runLaunchPreflight({ root, git, files }).pipe(Effect.provideService(Path.Path, path)),
+    run: (root: string, options?: { readonly isSharedRoot?: boolean }) =>
+      runLaunchPreflight({
+        root,
+        git,
+        files,
+        ...(options?.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+      }).pipe(Effect.provideService(Path.Path, path)),
   });
 });
 
