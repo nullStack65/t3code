@@ -277,7 +277,7 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 // service itself already runs inside `ProviderService` before each provider
 // start; this sink is injected here because only the composition root has the
 // orchestration engine.
-const ProviderLayerLive = Layer.unwrapEffect(
+const ProviderLayerLive = Layer.unwrap(
   Effect.gen(function* () {
     const orchestrationEngine = yield* OrchestrationEngineService;
     const crypto = yield* Crypto.Crypto;

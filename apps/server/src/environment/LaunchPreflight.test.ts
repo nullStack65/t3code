@@ -33,7 +33,8 @@ const gitProbe = (
   overrides: Partial<LaunchPreflight.LaunchPreflightGitProbe> = {},
 ): LaunchPreflight.LaunchPreflightGitProbe => ({
   version: () => Effect.succeed("2.55.0"),
-  resolveIdentity: () => Effect.succeed(identity({ state: "not-a-repository", topLevel: null, commonDir: null })),
+  resolveIdentity: () =>
+    Effect.succeed(identity({ state: "not-a-repository", topLevel: null, commonDir: null })),
   ...overrides,
 });
 
@@ -71,7 +72,8 @@ it.effect("passes an ordinary repository session with a supported Git", () =>
             Effect.succeed(identity({ topLevel: "/repo", commonDir: "/repo/.git" })),
         }),
         files: {
-          exists: (target) => Effect.succeed(target === "/repo/.git" || target.endsWith("package.json")),
+          exists: (target) =>
+            Effect.succeed(target === "/repo/.git" || target.endsWith("package.json")),
           listDirectory: () => Effect.succeed(["src", "docs"]),
         },
       }),
@@ -96,7 +98,9 @@ it.effect("does not count a retired Git marker as an umbrella by its name alone"
         root: "/Documents",
         git: gitProbe({
           resolveIdentity: () =>
-            Effect.succeed(identity({ state: "not-a-repository", topLevel: null, commonDir: null })),
+            Effect.succeed(
+              identity({ state: "not-a-repository", topLevel: null, commonDir: null }),
+            ),
         }),
         files: {
           exists: (target) => Effect.succeed(target === "/Documents/.git.macfix-m1-retired"),
@@ -140,7 +144,8 @@ it.effect("does not flag an ordinary repository root that has no nested reposito
           resolveIdentity: () => Effect.succeed(identity({ topLevel: "/repo" })),
         }),
         files: {
-          exists: (target) => Effect.succeed(target === "/repo/.git" || target.endsWith("package.json")),
+          exists: (target) =>
+            Effect.succeed(target === "/repo/.git" || target.endsWith("package.json")),
           listDirectory: () => Effect.succeed(["src", "docs"]),
         },
       }),
@@ -172,7 +177,7 @@ it.effect("blocks when Git cannot start and the session root is a repository", (
     );
 
     assert.deepStrictEqual(severities(result), ["blocker"]);
-    assert.include(result.blockers[0]?.message ?? "", "/repo/.git");
+    assert.include(result.blockers[0]?.message ?? "", "could not be started");
   }),
 );
 
@@ -184,7 +189,12 @@ it.effect("blocks when the resolved Git lacks --path-format and the root is a re
         git: gitProbe({
           resolveIdentity: () =>
             Effect.succeed(
-              identity({ state: "unsupported", topLevel: null, commonDir: null, detail: "git 2.24.3" }),
+              identity({
+                state: "unsupported",
+                topLevel: null,
+                commonDir: null,
+                detail: "git 2.24.3",
+              }),
             ),
         }),
         files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
@@ -192,7 +202,7 @@ it.effect("blocks when the resolved Git lacks --path-format and the root is a re
     );
 
     assert.deepStrictEqual(severities(result), ["blocker"]);
-    assert.include(result.blockers[0]?.message ?? "", "2.24.3");
+    assert.include(result.blockers[0]?.message ?? "", "path-format");
   }),
 );
 
@@ -225,9 +235,9 @@ it.effect("flags a Git probe that reports a timeout", () =>
 
 it.effect("bounds a hung Git probe instead of holding the launch", () =>
   Effect.gen(function* () {
-    const fiber = yield* run(
-      input({ git: { ...gitProbe(), version: () => Effect.never } }),
-    ).pipe(Effect.forkChild);
+    const fiber = yield* run(input({ git: { ...gitProbe(), version: () => Effect.never } })).pipe(
+      Effect.forkChild,
+    );
     yield* Effect.yieldNow;
     yield* TestClock.adjust("1500 millis");
     const result = yield* Fiber.join(fiber);
@@ -289,10 +299,9 @@ it.effect("wires the real service probes and passes a healthy root", () =>
           run: (processInput) =>
             Effect.succeed({
               exitCode: ChildProcessSpawner.ExitCode(0),
-              stdout:
-                processInput.args.includes("--version")
-                  ? "git version 2.55.0\n"
-                  : `${directory}\n${NodePath.join(directory, ".git")}\n`,
+              stdout: processInput.args.includes("--version")
+                ? "git version 2.55.0\n"
+                : `${directory}\n${NodePath.join(directory, ".git")}\n`,
               stderr: "",
               stdoutTruncated: false,
               stderrTruncated: false,

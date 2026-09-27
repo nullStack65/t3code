@@ -89,6 +89,7 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -270,6 +271,13 @@ export interface ProviderServiceLiveOptions {
     readonly code: LaunchPreflight.LaunchPreflightFindingCode;
     readonly message: string;
   }) => Effect.Effect<void, never>;
+  /**
+   * Overrides the launch-preflight runner. Tests use this to force a warning or
+   * a blocker without a broken Git install.
+   */
+  readonly launchPreflightRunner?: (
+    root: string,
+  ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
 }
 
 interface TurnAnalyticsMetadata {
@@ -522,6 +530,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
+  const runLaunchPreflight = options?.launchPreflightRunner ?? launchPreflight.run;
 
   /**
    * Runs the bounded launch preflight against the exact cwd a provider process
@@ -533,7 +542,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly threadId: ThreadId;
     readonly cwd: string;
   }) {
-    const result = yield* launchPreflight.run(input.cwd);
+    // Only probe a real directory: spawning Git in a missing path or a plain
+    // file would fail at the OS layer. The caller's own workspace read (and
+    // `ProviderWorkspaceMissingError`) handles those cases.
+    const workspaceStat = yield* fileSystem
+      .stat(input.cwd)
+      .pipe(Effect.orElseSucceed(() => undefined));
+    if (workspaceStat === undefined || workspaceStat.type !== "Directory") {
+      return;
+    }
+
+    const result = yield* runLaunchPreflight(input.cwd).pipe(
+      Effect.catchCause(() =>
+        Effect.succeed({
+          findings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+          warnings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+          blockers: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+        }),
+      ),
+    );
     for (const warning of result.warnings) {
       yield* Effect.logWarning(`launch preflight: ${warning.message}`, {
         code: warning.code,
@@ -2520,13 +2547,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   } satisfies ProviderService.ProviderService["Service"];
 });
 
+// A self-contained preflight: the Git probe uses its own `VcsProcess` so this
+// layer only needs the platform services (`FileSystem`, `Path`,
+// `ChildProcessSpawner`) already present in the server and test harnesses.
+const LaunchPreflightLive = LaunchPreflight.layer.pipe(Layer.provide(VcsProcess.layer));
+
 export const ProviderServiceLive = Layer.effect(
   ProviderService.ProviderService,
   makeProviderService(),
-).pipe(Layer.provide(LaunchPreflight.layer));
+).pipe(Layer.provide(LaunchPreflightLive));
 
 export function makeProviderServiceLive(options?: ProviderServiceLiveOptions) {
   return Layer.effect(ProviderService.ProviderService, makeProviderService(options)).pipe(
-    Layer.provide(LaunchPreflight.layer),
+    Layer.provide(LaunchPreflightLive),
   );
 }

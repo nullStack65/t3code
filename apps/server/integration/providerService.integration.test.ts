@@ -19,11 +19,13 @@ import {
   ProviderEventLoggers,
 } from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
+import { ProviderLaunchPreflightBlockedError } from "../src/provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
 } from "../src/provider/Services/ProviderService.ts";
 import * as ServerConfig from "../src/config.ts";
+import * as LaunchPreflight from "../src/environment/LaunchPreflight.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
 import { AnalyticsService } from "../src/telemetry/AnalyticsService.ts";
 import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
@@ -78,7 +80,18 @@ const makeRecordingAnalytics = Effect.gen(function* () {
   return { layer, get: Ref.get(recorded) } as const;
 });
 
-const makeIntegrationFixture = (options?: { readonly analytics?: Layer.Layer<AnalyticsService> }) =>
+const makeIntegrationFixture = (options?: {
+  readonly analytics?: Layer.Layer<AnalyticsService>;
+  readonly launchPreflightRunner?: (
+    root: string,
+  ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
+  readonly reportLaunchPreflightWarning?: (input: {
+    readonly threadId: ThreadId;
+    readonly cwd: string;
+    readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+    readonly message: string;
+  }) => Effect.Effect<void, never>;
+}) =>
   Effect.gen(function* () {
     const cwd = yield* makeWorkspaceDirectory;
     const harness = yield* makeTestProviderAdapterHarness();
@@ -100,10 +113,14 @@ const makeIntegrationFixture = (options?: { readonly analytics?: Layer.Layer<Ana
       Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
     ).pipe(Layer.provide(SqlitePersistenceMemory));
 
-    const layer = makeProviderServiceLive().pipe(
-      Layer.provide(NodeServices.layer),
-      Layer.provide(shared),
-    );
+    const layer = makeProviderServiceLive({
+      ...(options?.launchPreflightRunner !== undefined
+        ? { launchPreflightRunner: options.launchPreflightRunner }
+        : {}),
+      ...(options?.reportLaunchPreflightWarning !== undefined
+        ? { reportLaunchPreflightWarning: options.reportLaunchPreflightWarning }
+        : {}),
+    }).pipe(Layer.provide(NodeServices.layer), Layer.provide(shared));
 
     return {
       cwd,
@@ -384,6 +401,110 @@ it.live("reports runtime mode per turn and on mode transitions", () =>
           .map((entry) => [entry.properties?.from, entry.properties?.to]),
         [["approval-required", "full-access"]],
       );
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+const blockedFinding: LaunchPreflight.LaunchPreflightFinding = {
+  code: "git-startup-failed",
+  severity: "blocker",
+  message: "Git could not start; the session cannot checkpoint. Fix Git and retry.",
+};
+
+const warningFinding: LaunchPreflight.LaunchPreflightFinding = {
+  code: "shared-root-git",
+  severity: "warning",
+  message: "The shared session root is itself a Git repository.",
+};
+
+const findingResult = (
+  findings: ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+): LaunchPreflight.LaunchPreflightResult => ({
+  findings,
+  warnings: findings.filter((finding) => finding.severity === "warning"),
+  blockers: findings.filter((finding) => finding.severity === "blocker"),
+});
+
+it.live("a launch-preflight blocker prevents the new provider session from starting", () =>
+  Effect.gen(function* () {
+    const fixture = yield* makeIntegrationFixture({
+      launchPreflightRunner: () => Effect.succeed(findingResult([blockedFinding])),
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const error = yield* provider
+        .startSession(ThreadId.make("thread-preflight-blocked"), {
+          threadId: ThreadId.make("thread-preflight-blocked"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          cwd: fixture.cwd,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(error, ProviderLaunchPreflightBlockedError);
+      const sessions = yield* fixture.harness.adapter.listSessions();
+      assert.equal(sessions.length, 0);
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("a launch-preflight warning is reported and the session still starts once", () =>
+  Effect.gen(function* () {
+    const reported = yield* Ref.make<ReadonlyArray<string>>([]);
+    const fixture = yield* makeIntegrationFixture({
+      launchPreflightRunner: () => Effect.succeed(findingResult([warningFinding])),
+      reportLaunchPreflightWarning: ({ message }) =>
+        Ref.update(reported, (current) => [...current, message]),
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(ThreadId.make("thread-preflight-warned"), {
+        threadId: ThreadId.make("thread-preflight-warned"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+
+      assert.equal((session.threadId ?? "").length > 0, true);
+      assert.deepStrictEqual(yield* Ref.get(reported), [warningFinding.message]);
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("the recovery path also invokes the launch preflight", () =>
+  Effect.gen(function* () {
+    const calls = yield* Ref.make(0);
+    const fixture = yield* makeIntegrationFixture({
+      launchPreflightRunner: () =>
+        Ref.updateAndGet(calls, (count) => count + 1).pipe(
+          Effect.map((count) => findingResult(count === 1 ? [] : [blockedFinding])),
+        ),
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = ThreadId.make("thread-preflight-recovery");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+
+      // Drop the adapter session but keep the persisted binding so the next
+      // sendTurn must recover it.
+      yield* fixture.harness.adapter.stopSession(threadId);
+
+      const error = yield* provider
+        .sendTurn({ threadId, input: "recover me", attachments: [] })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(error, ProviderLaunchPreflightBlockedError);
     }).pipe(Effect.provide(fixture.layer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
