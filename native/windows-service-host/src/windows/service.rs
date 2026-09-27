@@ -15,15 +15,19 @@ use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc;
 
 use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::Security::Authentication::Identity::{
+    EXTENDED_NAME_FORMAT, GetUserNameExW, NameSamCompatible, NameUserPrincipal,
+};
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_TABLE_ENTRYW,
     SetServiceStatus, StartServiceCtrlDispatcherW,
 };
 
 use super::job::WindowsChildHost;
+use crate::account;
 use crate::config::ServiceConfig;
 use crate::control::{Control, ServiceState};
-use crate::run::{ChannelControlInput, Reporter, run};
+use crate::run::{ChannelControlInput, PublishError, Reporter, run};
 use crate::supervise::ExitCode;
 
 const SERVICE_WIN32_OWN_PROCESS: u32 = 0x0000_0010;
@@ -109,16 +113,39 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
     shared
         .status_handle
         .store(handle as isize, Ordering::SeqCst);
-    emit_status(shared);
+    if let Err(error) = emit_status(shared) {
+        append_log(
+            config.log.as_ref(),
+            &format!(
+                "could not publish the initial status ({})",
+                error.win32_error
+            ),
+        );
+        let _ = SETTLED.set(ExitCode::Unknown);
+        return;
+    }
 
     let mut host = WindowsChildHost::new();
     let mut controls = ChannelControlInput { receiver };
     let mut reporter = ScmReporter;
     let log_path = config.log.clone();
     let mut log = |message: &str| append_log(log_path.as_ref(), message);
+    // `run` publishes the single final STOPPED itself. Reporting STOPPED here as
+    // well would be a second status update after the SCM may already have
+    // released this service's context (Microsoft SetServiceStatus contract).
     let outcome = run(config, &mut host, &mut controls, &mut reporter, &mut log);
-    set_status(ServiceState::Stopped, outcome.exit, 0);
-    let _ = SETTLED.set(outcome.exit);
+    if outcome.publish_failed {
+        append_log(
+            log_path.as_ref(),
+            "a status publication failed; the SCM may not have observed the final state",
+        );
+    }
+    let settled = if outcome.publish_failed {
+        ExitCode::Unknown
+    } else {
+        outcome.exit
+    };
+    let _ = SETTLED.set(settled);
 }
 
 unsafe extern "system" fn control_handler(
@@ -133,7 +160,9 @@ unsafe extern "system" fn control_handler(
             // Unbounded channel: this never blocks the SCM thread.
             let _ = shared.sender.send(Control::from_win32(control));
         }
-        Control::Interrogate => emit_status(shared),
+        Control::Interrogate => {
+            let _ = emit_status(shared);
+        }
         Control::Other => {}
     }
     NO_ERROR
@@ -142,27 +171,32 @@ unsafe extern "system" fn control_handler(
 struct ScmReporter;
 
 impl Reporter for ScmReporter {
-    fn report(&mut self, state: ServiceState, exit: ExitCode, checkpoint: u32) {
-        set_status(state, exit, checkpoint);
+    fn report(
+        &mut self,
+        state: ServiceState,
+        exit: ExitCode,
+        checkpoint: u32,
+    ) -> Result<(), PublishError> {
+        set_status(state, exit, checkpoint)
     }
 }
 
-fn set_status(state: ServiceState, exit: ExitCode, checkpoint: u32) {
+fn set_status(state: ServiceState, exit: ExitCode, checkpoint: u32) -> Result<(), PublishError> {
     let Some(shared) = SHARED.get() else {
-        return;
+        return Err(PublishError { win32_error: 0 });
     };
     shared.state.store(state.win32_state(), Ordering::SeqCst);
     let (win32, specific) = exit.win32();
     shared.win32_exit.store(win32, Ordering::SeqCst);
     shared.specific_exit.store(specific, Ordering::SeqCst);
     shared.checkpoint.store(checkpoint, Ordering::SeqCst);
-    emit_status(shared);
+    emit_status(shared)
 }
 
-fn emit_status(shared: &Shared) {
+fn emit_status(shared: &Shared) -> Result<(), PublishError> {
     let raw = shared.status_handle.load(Ordering::SeqCst);
     if raw == 0 {
-        return;
+        return Err(PublishError { win32_error: 0 });
     }
     let state = shared.state.load(Ordering::SeqCst);
     let pending = state == ServiceState::StartPending.win32_state()
@@ -180,55 +214,58 @@ fn emit_status(shared: &Shared) {
         dwCheckPoint: shared.checkpoint.load(Ordering::SeqCst),
         dwWaitHint: if pending { WAIT_HINT_MS } else { 0 },
     };
-    unsafe { SetServiceStatus(raw as SERVICE_STATUS_HANDLE, &mut status) };
+    let accepted = unsafe { SetServiceStatus(raw as SERVICE_STATUS_HANDLE, &mut status) };
+    if accepted == 0 {
+        return Err(PublishError {
+            win32_error: unsafe { GetLastError() },
+        });
+    }
+    Ok(())
 }
 
-/// Refuse the default LocalSystem workload and enforce an explicit expected
+/// Refuse the default LocalSystem workload and enforce a qualified expected
 /// account. The account password is never here: SCM stores it in LSA and
 /// starts the process under that token.
 fn check_service_account(config: &ServiceConfig) -> Result<(), String> {
-    let account = current_user_name().ok_or_else(|| {
-        "could not read the service account; refusing to start without an identity".to_owned()
-    })?;
-    if !config.allow_local_system && account.eq_ignore_ascii_case("SYSTEM") {
+    let sam = qualified_user_name(NameSamCompatible);
+    let upn = qualified_user_name(NameUserPrincipal);
+    if sam.is_none() && upn.is_none() {
+        return Err(
+            "could not read a qualified service account identity; refusing to start".to_owned(),
+        );
+    }
+    if !config.allow_local_system && account::is_local_system(sam.as_deref()) {
         return Err(
             "refusing to run the T3 workload as LocalSystem; register the service with a dedicated account"
                 .to_owned(),
         );
     }
     if let Some(expected) = &config.expected_account {
-        let matches = account.eq_ignore_ascii_case(expected)
-            || account
-                .rsplit('\\')
-                .next()
-                .is_some_and(|name| name.eq_ignore_ascii_case(expected));
-        if !matches {
+        if !account::qualified_match(expected, sam.as_deref(), upn.as_deref()) {
+            let observed = sam.or(upn).unwrap_or_else(|| "unknown".to_owned());
             return Err(format!(
-                "service account '{account}' does not match the expected account '{expected}'"
+                "service account '{observed}' does not match the expected account '{expected}'"
             ));
         }
     }
     Ok(())
 }
 
-fn current_user_name() -> Option<String> {
+/// A qualified account name from `GetUserNameExW`. The bare-name API is not
+/// used: without a domain qualifier it cannot prove the account binding.
+fn qualified_user_name(format: EXTENDED_NAME_FORMAT) -> Option<String> {
     let mut size: u32 = 0;
     unsafe {
-        // First call sizes the buffer; the expected ERROR_INSUFFICIENT_BUFFER is
-        // not an error for this probe.
-        windows_sys::Win32::System::WindowsProgramming::GetUserNameW(
-            std::ptr::null_mut(),
-            &mut size,
-        );
+        // First call sizes the buffer; the expected ERROR_MORE_DATA is not an
+        // error for this probe.
+        GetUserNameExW(format, std::ptr::null_mut(), &mut size);
     }
     if size == 0 {
         return None;
     }
     let mut buffer = vec![0u16; size as usize];
-    let ok = unsafe {
-        windows_sys::Win32::System::WindowsProgramming::GetUserNameW(buffer.as_mut_ptr(), &mut size)
-    };
-    if ok == 0 {
+    let ok = unsafe { GetUserNameExW(format, buffer.as_mut_ptr(), &mut size) };
+    if !ok {
         return None;
     }
     let end = buffer

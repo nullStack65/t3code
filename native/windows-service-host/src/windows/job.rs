@@ -1,11 +1,13 @@
 //! Windows process-tree ownership through a job object.
 //!
 //! The child is created suspended, assigned to a job with
-//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and then resumed. Suspending closes
-//! the race where a fast child could spawn grandchildren before the job
-//! assignment and escape termination. Creating the job here (rather than
-//! putting this host in one) means only the descendants of the launcher are
-//! owned; the host stays alive to report `SERVICE_STOPPED`.
+//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, its identity captured, and then it is
+//! resumed. Suspending closes the race where a fast child could spawn
+//! grandchildren before assignment and escape termination. Every step after a
+//! successful `CreateProcessW` is checked and unwound: a failure reclaims the
+//! freshly created process rather than leaving a suspended orphan. Creating the
+//! job here (rather than putting this host in one) means only the descendants of
+//! the launcher are owned; the host stays alive to report `SERVICE_STOPPED`.
 //!
 //! `verify_identity` re-opens the PID and compares its creation time with the
 //! one recorded at spawn. A handle we already hold stays valid after the child
@@ -29,15 +31,21 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess,
-    GetProcessTimes, OpenProcess, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, WaitForSingleObject,
+    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW,
+    TerminateProcess, WaitForSingleObject,
 };
 
+use crate::admission::{AdmissionFailure, AdmissionOps, AdmissionStage, admit};
 use crate::config::{LaunchMode, ServiceConfig};
-use crate::host::{ChildHandle, ChildHost, ProcessIdentity, QueryError, SpawnError};
+use crate::host::{
+    ChildHandle, ChildHost, CleanupOutcome, ProcessIdentity, QueryError, SpawnError,
+};
 
 const GENERIC_WRITE: u32 = 0x4000_0000;
+/// Bounded wait for an explicitly terminated process to be observed as gone.
+const TERMINATE_WAIT_MS: u32 = 5_000;
 
 struct Handle(HANDLE);
 
@@ -68,6 +76,10 @@ pub struct WindowsChild {
     job: Handle,
     id: ProcessIdentity,
     stop_marker: std::path::PathBuf,
+    /// True once an explicit termination was confirmed. While false, dropping
+    /// this holder still closes a kill-on-close job, which is itself a
+    /// termination effect; `Drop` makes that effect explicit and bounded.
+    terminated: bool,
 }
 
 impl WindowsChild {
@@ -82,6 +94,21 @@ impl WindowsChild {
         let ok =
             unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
         (ok != 0).then(|| ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
+impl Drop for WindowsChild {
+    fn drop(&mut self) {
+        if !self.terminated {
+            // Releasing a kill-on-close job terminates its members. Make that
+            // implicit termination explicit and bounded here rather than
+            // pretending no termination happened. Only this job's owned members
+            // are affected; no PID or process name is matched.
+            unsafe {
+                TerminateJobObject(self.job.0, 1);
+                let _ = WaitForSingleObject(self.process.0, TERMINATE_WAIT_MS);
+            }
+        }
     }
 }
 
@@ -126,12 +153,89 @@ impl ChildHandle for WindowsChild {
         std::fs::write(&self.stop_marker, b"").map_err(|_| QueryError)
     }
 
-    fn terminate_tree(&mut self) {
-        unsafe {
-            TerminateJobObject(self.job.0, 1);
+    fn terminate_tree(&mut self) -> CleanupOutcome {
+        let terminated = unsafe { TerminateJobObject(self.job.0, 1) };
+        if terminated == 0 {
+            return CleanupOutcome::Failed;
         }
-        let _ = unsafe { WaitForSingleObject(self.process.0, 5_000) };
+        match unsafe { WaitForSingleObject(self.process.0, TERMINATE_WAIT_MS) } {
+            WAIT_OBJECT_0 => {
+                self.terminated = true;
+                CleanupOutcome::Confirmed
+            }
+            _ => CleanupOutcome::Failed,
+        }
     }
+}
+
+/// A process created suspended but not yet admitted. It owns the created
+/// process and thread handles until cleanup has been confirmed; the job is
+/// already created, so assignment is the first admission step.
+struct PendingProcess {
+    process: Handle,
+    thread: Handle,
+    job: Handle,
+    pid: u32,
+}
+
+impl AdmissionOps for PendingProcess {
+    fn assign_to_job(&mut self) -> Result<(), String> {
+        let ok = unsafe { AssignProcessToJobObject(self.job.0, self.process.0) };
+        if ok == 0 {
+            Err(format!("AssignProcessToJobObject failed ({})", unsafe {
+                GetLastError()
+            }))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn capture_identity(&mut self) -> Result<ProcessIdentity, String> {
+        match WindowsChild::creation_time(self.process.0) {
+            Some(created_at_ms) => Ok(ProcessIdentity {
+                pid: self.pid,
+                created_at_ms,
+            }),
+            None => Err(format!(
+                "GetProcessTimes failed ({}); identity is unknown, not zero",
+                unsafe { GetLastError() }
+            )),
+        }
+    }
+
+    fn resume(&mut self) -> Result<(), String> {
+        let previous = unsafe { ResumeThread(self.thread.0) };
+        if previous == u32::MAX {
+            Err(format!("ResumeThread failed ({})", unsafe {
+                GetLastError()
+            }))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn terminate_created(&mut self) -> CleanupOutcome {
+        let terminated = unsafe { TerminateProcess(self.process.0, 1) };
+        if terminated == 0 {
+            return CleanupOutcome::Failed;
+        }
+        match unsafe { WaitForSingleObject(self.process.0, TERMINATE_WAIT_MS) } {
+            WAIT_OBJECT_0 => CleanupOutcome::Confirmed,
+            _ => CleanupOutcome::Failed,
+        }
+    }
+}
+
+fn describe_admission_failure(failure: &AdmissionFailure) -> String {
+    let stage = match failure.stage {
+        AdmissionStage::AssignToJob => "AssignProcessToJobObject",
+        AdmissionStage::CaptureIdentity => "GetProcessTimes",
+        AdmissionStage::Resume => "ResumeThread",
+    };
+    format!(
+        "{stage}: {} (created-process cleanup: {:?})",
+        failure.reason, failure.cleanup
+    )
 }
 
 impl ChildHost for WindowsChildHost {
@@ -170,6 +274,10 @@ impl ChildHost for WindowsChildHost {
         }
 
         let mut command_line = build_command_line(config);
+        // Bind the native child to the selected home. Passing NULL here would
+        // inherit an ambient T3CODE_HOME (absent or pointing elsewhere); cwd is
+        // not what the pinned launcher reads.
+        let environment = crate::environment::host_environment(&config.home);
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
 
@@ -222,8 +330,8 @@ impl ChildHost for WindowsChildHost {
                 std::ptr::null(),
                 std::ptr::null(),
                 inherit as i32,
-                CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
-                std::ptr::null(),
+                CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+                environment.as_ptr() as *const core::ffi::c_void,
                 home_wide.as_ptr(),
                 &startup,
                 &mut info,
@@ -237,31 +345,27 @@ impl ChildHost for WindowsChildHost {
         }
         // The child has inherited its own copy of the log handle; close ours.
         drop(log_handle);
-        let process = Handle(info.hProcess);
-        let thread = Handle(info.hThread);
 
-        let assigned = unsafe { AssignProcessToJobObject(job.0, process.0) };
-        if assigned == 0 {
-            let error = unsafe { GetLastError() };
-            unsafe {
-                TerminateJobObject(job.0, 1);
-            }
-            return Err(SpawnError::Launch(format!(
-                "AssignProcessToJobObject failed ({error})"
-            )));
-        }
+        let mut pending = PendingProcess {
+            process: Handle(info.hProcess),
+            thread: Handle(info.hThread),
+            job,
+            pid: info.dwProcessId,
+        };
+        let id = match admit(&mut pending) {
+            Ok(id) => id,
+            Err(failure) => return Err(SpawnError::Launch(describe_admission_failure(&failure))),
+        };
 
-        unsafe { ResumeThread(thread.0) };
-
-        let created_at_ms = WindowsChild::creation_time(process.0).unwrap_or(0);
+        let process = pending.process;
+        let job = pending.job;
+        drop(pending.thread);
         Ok(WindowsChild {
             process,
             job,
-            id: ProcessIdentity {
-                pid: info.dwProcessId,
-                created_at_ms,
-            },
+            id,
             stop_marker: config.stop_marker(),
+            terminated: false,
         })
     }
 }

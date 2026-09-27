@@ -27,7 +27,13 @@ not enough. The host implements:
   supervisor loop.
 - `SetServiceStatus` with `START_PENDING`, `RUNNING`, `STOP_PENDING` and
   `STOPPED`, `dwCheckPoint`/`dwWaitHint` while pending, and
-  `SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN` only while running.
+  `SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN` only while running. A
+  successful spawn publishes the actual `RUNNING` transition: until it is
+  published the SCM stays `START_PENDING` and accepts no stop control. Exactly
+  one final `STOPPED` is published, after the child resources are released, and
+  a `SetServiceStatus` failure is propagated rather than ignored (Microsoft's
+  SetServiceStatus contract allows no later status call once the service is
+  stopped).
 - A control handler that records intent and wakes the supervisor; it never
   blocks on the child. Control handling cannot hang indefinitely.
 
@@ -47,28 +53,45 @@ the workload at an interactive user's profile.
 - `--runtime` must be the pinned `t3.exe`. The host appends `__service-launcher`
   and launches it once per service start. Remote updates replace the launcher's
   server child; they do not re-exec the host or change its command line.
-- `T3CODE_HOME` is set explicitly on the child; child stdout/stderr go to
-  `--log` when supplied.
+- The native spawn builds a Unicode environment block for `CreateProcessW` with
+  the selected `--home` as `T3CODE_HOME`, overriding an absent or conflicting
+  ambient value; cwd alone is not enough because the pinned launcher reads
+  `process.env.T3CODE_HOME`. The rest of the intended host environment is
+  preserved. Child stdout/stderr go to `--log` when supplied.
 - No credential flag is accepted. A password or token argument is refused
-  rather than forwarded. The account password is registered with SCM
-  (`sc.exe create T3Code ... obj= ".\t3service" password= "..."`) and stored by
-  LSA; the host never sees it.
+  rather than forwarded. The account password, if any, is registered with SCM
+  out of band and kept in LSA; the host never sees it and no password belongs
+  on the command line.
 - LocalSystem is refused unless `--allow-local-system` is passed explicitly.
-  `--expected-account` pins the account the process must run as.
+  `--expected-account` must be qualified (`DOMAIN\user` or `user@domain`); a
+  bare name is refused in configuration because it cannot prove the domain. The
+  running identity is read with `GetUserNameExW` (SAM and UPN forms), never the
+  ambiguous bare `GetUserNameW` name.
 
 Account constraints: use a dedicated account, ideally the virtual
 `NT SERVICE\T3Code` service SID, or a dedicated local/domain user. Do not run
 the T3 workload as LocalSystem and do not reuse an interactive user's home or
 profile. A virtual service account has no user profile or `HKCU`, so features
-that need one are unavailable (below).
+that need one are unavailable (below). Dedicated-account provisioning or reuse
+of an existing credential is not selected by this source repair; installer
+identity selection remains later work.
 
 ## Shutdown and process ownership
 
 The child is created suspended, assigned to a job object with
-`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, then resumed. Suspending closes the race
-where a fast child could spawn grandchildren before assignment. The job is
-created for the child; the host is not in it, so `TerminateJobObject` can kill
-the owned tree while the host stays alive to report `SERVICE_STOPPED`.
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, its identity captured, then resumed.
+Suspending closes the race where a fast child could spawn grandchildren before
+assignment. The job is created for the child; the host is not in it, so
+`TerminateJobObject` can kill the owned tree while the host stays alive to
+report `SERVICE_STOPPED`.
+
+Every step after `CreateProcessW` succeeds is checked and scoped: assignment to
+the job, creation-time identity capture, and `ResumeThread`. If any of them
+fails, the freshly created process is terminated explicitly — the created
+process handle is retained until that cleanup outcome is known — and the
+failure is reported together with the cleanup result. A suspended child is never
+left orphaned outside the job, and a failed creation-time query is reported as
+unknown rather than a fabricated zero identity.
 
 A stop is bounded and two-stage:
 
@@ -76,7 +99,13 @@ A stop is bounded and two-stage:
    marker and asks the launcher to stop, then reports `STOP_PENDING` with
    checkpoints.
 2. If the child has not exited by `--drain-timeout-ms` (default 30s), the job
-   tree is terminated and the service reports `STOPPED`.
+   tree is terminated and the service reports `STOPPED`. The termination outcome
+   is explicit: only a confirmed child exit is a clean stop. A refused
+   (foreign or unverified) tree and a failed or unconfirmed termination report
+   `STOPPED` with an unknown cause. Closing the kill-on-close job is itself a
+   termination effect, so it is treated as an implicit, bounded cleanup rather
+   than as evidence of a clean shutdown; the job only ever contains this host's
+   owned members, so no PID or process name is matched.
 
 This is deliberately different from a normal launcher replacement. During an
 update the launcher terminates its own server child but stays alive and starts
@@ -132,6 +161,9 @@ fallback or relies solely on the control message.
   budget lives here.
 - **Slow drain:** reports `STOP_PENDING` with checkpoints and forces the tree
   after the deadline. It never hangs.
+- **Publication failure:** if `SetServiceStatus` fails for any state, the failure
+  is surfaced (not ignored); the host abandons the run, cleans the owned child
+  once and reports an unknown cause rather than claiming a clean stop.
 - **Stale/foreign PID:** as above, verified and left alone; unknown is not
   stopped.
 
@@ -216,37 +248,74 @@ Native acceptance (not executed here; see the recipe):
 
 ## Native test recipe (unexecuted)
 
-Only an environment already reserved for disposable Windows tests may run this,
-with unique names, dummy children, a bounded runtime and verified cleanup. Do
-not run it on an active workstation or against real T3 state.
+Only an environment already reserved for disposable Windows tests may run this.
+Do not run it on an active workstation or against real T3 state. The recipe
+builds the host with the development-only `test-child` feature, runs a uniquely
+named dummy child that records its own and its grandchild's PID inside the probe
+home, and cleans up in a `finally` block. Process cleanup is proven by those
+captured PIDs, not by a process-name listing.
 
 ```powershell
-# Build (developer host, Windows target):
-cargo build --locked --release --manifest-path native/windows-service-host/Cargo.toml
-# For dummy children instead of the pinned launcher, build with the
-# development-only feature:
-# cargo build --locked --release --features test-child ...
+# Build the exact binary the recipe runs. The crate is standalone, so the binary
+# lands under native/windows-service-host/target; build WITH the test-child
+# feature so --exec exists, or the launch below will fail.
+cargo build --locked --release --features test-child `
+  --manifest-path native/windows-service-host/Cargo.toml
+$hostExe = Join-Path $PWD "native/windows-service-host/target/release/t3-windows-service-host.exe"
+if (-not (Test-Path $hostExe)) { throw "host binary not built at $hostExe" }
 
-$svc = "T3WinSvcProbe$([guid]::NewGuid().ToString('N').Substring(0,8))"
+$svc  = "T3WinSvcProbe$([guid]::NewGuid().ToString('N').Substring(0,8))"
 $root = Join-Path $env:TEMP $svc
-$home = Join-Path $root "home"; New-Item -ItemType Directory -Force $home | Out-Null
-# Dummy child: a script that ignores the stop marker and sleeps, plus a
-# grandchild, to prove tree termination.
-$dummy = Join-Path $root "dummy.cmd"
-"@echo off`r`nstart /b ping -n 600 127.0.0.1 >nul`r`nping -n 600 127.0.0.1 >nul" | Set-Content $dummy
+$home = Join-Path $root "home"
+New-Item -ItemType Directory -Force $home | Out-Null
 
-sc.exe create $svc binPath= "`"$PWD\target\release\t3-windows-service-host.exe`" --home `"$home`" --service-name $svc --exec cmd.exe --exec-arg /c --exec-arg `"$dummy`" --drain-timeout-ms 3000" `
-  obj= "NT AUTHORITY\LocalService" start= demand
-sc.exe start $svc
-sc.exe query $svc            # expect RUNNING
-sc.exe control $svc 4        # interrogate
-sc.exe stop $svc             # expect STOPPED within the drain bound
-Get-Process -Name ping -ErrorAction SilentlyContinue   # must list none for this probe
-sc.exe delete $svc
-Remove-Item -Recurse -Force $root
+# The dummy records its own PID and spawns a sleeping grandchild that records
+# its PID too, so cleanup can be checked against exactly these two processes.
+$dummy = Join-Path $root "dummy.ps1"
+@'
+$pidFile = Join-Path $env:T3CODE_HOME "dummy.pid"
+$PID | Set-Content $pidFile
+$gcFile = Join-Path $env:T3CODE_HOME "grandchild.pid"
+Start-Process powershell -WindowStyle Hidden -ArgumentList `
+  "-NoProfile","-Command","$PID | Set-Content '$gcFile'; Start-Sleep -Seconds 600"
+Start-Sleep -Seconds 600
+'@ | Set-Content $dummy
+
+# A service account cannot read the interactive user's TEMP: grant the selected
+# test account explicit access to only this probe root.
+icacls $root /grant "NT AUTHORITY\LocalService:(OI)(CI)F" /T | Out-Null
+
+$created = $false
+try {
+  sc.exe create $svc binPath= "`"$hostExe`" --home `"$home`" --service-name $svc --exec powershell.exe --exec-arg -NoProfile --exec-arg -File --exec-arg `"$dummy`" --drain-timeout-ms 3000" `
+    obj= "NT AUTHORITY\LocalService" start= demand
+  $created = $true
+  sc.exe start $svc
+  sc.exe query $svc            # expect RUNNING
+  sc.exe control $svc 4        # interrogate; must return
+  sc.exe stop $svc             # expect STOPPED within the drain bound
+
+  $probePids = @(
+    (Join-Path $home "dummy.pid"),
+    (Join-Path $home "grandchild.pid")
+  ) | Where-Object { Test-Path $_ } | ForEach-Object { [int](Get-Content $_) }
+  foreach ($probePid in $probePids) {
+    if (Get-Process -Id $probePid -ErrorAction SilentlyContinue) {
+      throw "probe-owned process $probePid survived the stop"
+    }
+  }
+} finally {
+  if ($created) {
+    sc.exe stop $svc   | Out-Null
+    sc.exe delete $svc | Out-Null
+  }
+  Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+}
 ```
 
 `--exec` exists only under `--features test-child` and is not part of the
 production child selection. Portable and cross-compiled checks prove the
-portable core, the SCM FFI's type surface and the quoting logic; they do not
-prove a real service run, job-object ownership or graceful shutdown.
+portable core, the SCM FFI's type surface, the environment/argument construction
+and the quoting logic; they do not prove a real service run, job-object
+ownership or graceful shutdown. Running this recipe on the reserved environment
+is the native gate; its absence leaves that gate unrun.

@@ -10,8 +10,11 @@
 //! stop/drain state machine are portable so they can be unit tested on any
 //! developer host that has no Windows toolchain.
 
+pub mod account;
+pub mod admission;
 pub mod config;
 pub mod control;
+pub mod environment;
 pub mod host;
 pub mod run;
 pub mod supervise;
@@ -21,4 +24,5 @@ pub mod windows;
 
 pub use config::{Invocation, LaunchMode, ServiceConfig};
 pub use control::{Control, ControlOutcome, ServiceState};
+pub use host::CleanupOutcome;
 pub use supervise::{ExitCode, IdentityVerdict, Supervisor, SupervisorAction};

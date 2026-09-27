@@ -6,13 +6,17 @@
 //! verifies that the recorded process identity is still the one this host
 //! spawned. A failed query leaves ownership unknown and is never read as a
 //! successful stop.
+//!
+//! The `Reporter` is the actual SCM/runtime status boundary, so the loop treats
+//! publication as fallible: a failed `report` is surfaced, not ignored, and the
+//! run never claims a clean stop when its cleanup could not be confirmed.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::config::ServiceConfig;
 use crate::control::{Control, ServiceState};
-use crate::host::{ChildHandle, ChildHost, SpawnError};
+use crate::host::{ChildHandle, ChildHost, CleanupOutcome, SpawnError};
 use crate::supervise::{ExitCode, IdentityVerdict, Supervisor, SupervisorAction, identity_verdict};
 
 pub trait ControlInput {
@@ -45,8 +49,20 @@ impl ControlInput for ScriptedControl {
     }
 }
 
+/// A status publication failure. `win32_error` is the `GetLastError` value the
+/// SCM reporter observed; tests use a synthetic value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishError {
+    pub win32_error: u32,
+}
+
 pub trait Reporter {
-    fn report(&mut self, state: ServiceState, exit: ExitCode, checkpoint: u32);
+    fn report(
+        &mut self,
+        state: ServiceState,
+        exit: ExitCode,
+        checkpoint: u32,
+    ) -> Result<(), PublishError>;
 }
 
 pub struct RunOutcome {
@@ -55,6 +71,9 @@ pub struct RunOutcome {
     /// True when the exit came from observing the child, not from a forced
     /// termination. Useful to keep "stop completed" honest in logs.
     pub exit_observed: bool,
+    /// True when at least one status publication failed. The failure is
+    /// surfaced here and the run does not claim a clean stop.
+    pub publish_failed: bool,
 }
 
 pub fn run<H, C, R>(
@@ -74,12 +93,14 @@ where
     let mut supervisor = Supervisor::new(config.clone());
     let mut child: Option<H::Child> = None;
     let mut exit_observed = false;
+    let mut publish_failed = false;
+    let mut aborting = false;
 
     let mut queue = supervisor.begin(now());
     loop {
         while !queue.is_empty() {
             let actions = std::mem::take(&mut queue);
-            queue = execute(
+            let (follow_up, failed) = execute(
                 actions,
                 config,
                 &mut supervisor,
@@ -89,7 +110,23 @@ where
                 now(),
                 log,
             );
+            queue = follow_up;
+            publish_failed |= failed;
         }
+
+        // A failed publication means the SCM no longer tracks our true state
+        // (a failed RUNNING report advertises no stop controls). Abandon the run
+        // once, cleaning the owned child, and report an unknown cause.
+        if publish_failed && !aborting && !supervisor.finished() {
+            aborting = true;
+            log("status publication failed; abandoning the run");
+            let cleanup = terminate_child::<H>(&mut child);
+            child = None;
+            log(&format!("abandon cleanup outcome: {cleanup:?}"));
+            queue = supervisor.on_publish_failure();
+            continue;
+        }
+
         if supervisor.finished() {
             break;
         }
@@ -119,6 +156,19 @@ where
         exit: supervisor.exit_code(),
         forced: supervisor.forced(),
         exit_observed,
+        publish_failed,
+    }
+}
+
+/// Terminate the held child if its identity is still verified-owned.
+fn terminate_child<H: ChildHost>(child: &mut Option<H::Child>) -> CleanupOutcome {
+    match child.as_mut() {
+        Some(handle) => match identity_verdict(handle.verify_identity()) {
+            IdentityVerdict::Owned => handle.terminate_tree(),
+            IdentityVerdict::Foreign => CleanupOutcome::Refused,
+            IdentityVerdict::Unknown => CleanupOutcome::Unknown,
+        },
+        None => CleanupOutcome::Confirmed,
     }
 }
 
@@ -132,15 +182,16 @@ fn execute<H: ChildHost, R: Reporter>(
     reporter: &mut R,
     now: Duration,
     log: &mut dyn FnMut(&str),
-) -> Vec<SupervisorAction> {
+) -> (Vec<SupervisorAction>, bool) {
     let mut follow_up = Vec::new();
+    let mut publish_failed = false;
     for action in actions {
         match action {
             SupervisorAction::SpawnChild => match host.spawn(config) {
                 Ok(spawned) => {
                     let identity = spawned.identity();
                     *child = Some(spawned);
-                    supervisor.on_child_spawned(identity);
+                    follow_up.extend(supervisor.on_child_spawned(identity));
                 }
                 Err(SpawnError::Config(message)) => {
                     log(&format!("refusing to launch: {message}"));
@@ -165,24 +216,30 @@ fn execute<H: ChildHost, R: Reporter>(
                         log("process identity unknown; not assuming the child stopped")
                     }
                 },
-                None => follow_up.extend(supervisor.on_forced_termination()),
+                None => {
+                    follow_up.extend(supervisor.on_forced_termination(CleanupOutcome::Confirmed))
+                }
             },
             SupervisorAction::ForceTerminateTree => {
-                if let Some(handle) = child.as_mut() {
-                    match identity_verdict(handle.verify_identity()) {
-                        IdentityVerdict::Owned => handle.terminate_tree(),
-                        _ => log("refusing to terminate an unverified process tree"),
-                    }
-                }
+                let cleanup = terminate_child::<H>(child);
+                // Releasing the held job handle is itself a termination effect
+                // for a kill-on-close job; the outcome above is what we report,
+                // not the implicit drop.
                 *child = None;
-                follow_up.extend(supervisor.on_forced_termination());
+                follow_up.extend(supervisor.on_forced_termination(cleanup));
             }
             SupervisorAction::Report { state, exit } => {
-                reporter.report(state, exit, supervisor.checkpoint());
+                if let Err(error) = reporter.report(state, exit, supervisor.checkpoint()) {
+                    log(&format!(
+                        "status publication failed (win32 {}); service state is not represented",
+                        error.win32_error
+                    ));
+                    publish_failed = true;
+                }
             }
         }
     }
-    follow_up
+    (follow_up, publish_failed)
 }
 
 #[cfg(test)]
@@ -192,6 +249,7 @@ mod tests {
     use crate::host::{ChildHandle, ProcessIdentity, QueryError, SpawnError};
     use std::collections::VecDeque;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     type Events = Arc<Mutex<Vec<String>>>;
@@ -201,7 +259,26 @@ mod tests {
         alive: bool,
         owned: bool,
         query_fails: bool,
+        graceful_kills: bool,
+        terminate_outcome: CleanupOutcome,
         events: Events,
+        unrelated_alive: Arc<AtomicBool>,
+    }
+
+    impl Drop for FakeChild {
+        fn drop(&mut self) {
+            debug_assert!(
+                self.unrelated_alive.load(Ordering::SeqCst),
+                "host cleanup must never touch an unrelated process"
+            );
+            // Closing a kill-on-close job terminates its owned members. A held
+            // child dropped while still alive is therefore still a termination
+            // effect, even when no terminate method was called.
+            if self.alive {
+                self.events.lock().unwrap().push("job-drop".to_owned());
+                self.alive = false;
+            }
+        }
     }
 
     impl ChildHandle for FakeChild {
@@ -229,22 +306,28 @@ mod tests {
         }
         fn request_graceful_stop(&mut self) -> Result<(), QueryError> {
             self.events.lock().unwrap().push("graceful".to_owned());
+            if self.graceful_kills {
+                self.alive = false;
+            }
             Ok(())
         }
-        fn terminate_tree(&mut self) {
+        fn terminate_tree(&mut self) -> CleanupOutcome {
             self.events.lock().unwrap().push("terminate".to_owned());
-            self.alive = false;
+            if self.terminate_outcome.is_clean() {
+                self.alive = false;
+            }
+            self.terminate_outcome
         }
     }
 
     struct FakeHost {
-        child: FakeChild,
+        template: FakeChild,
     }
 
     impl ChildHost for FakeHost {
         type Child = FakeChild;
         fn spawn(&mut self, _config: &ServiceConfig) -> Result<FakeChild, SpawnError> {
-            Ok(self.child.clone())
+            Ok(self.template.clone())
         }
     }
 
@@ -253,11 +336,41 @@ mod tests {
     }
 
     impl Reporter for Recorder {
-        fn report(&mut self, state: ServiceState, exit: ExitCode, _checkpoint: u32) {
+        fn report(
+            &mut self,
+            state: ServiceState,
+            exit: ExitCode,
+            _checkpoint: u32,
+        ) -> Result<(), PublishError> {
             self.events
                 .lock()
                 .unwrap()
                 .push(format!("report:{state:?}:{exit:?}"));
+            Ok(())
+        }
+    }
+
+    struct FailingReporter {
+        fail_on: ServiceState,
+        events: Events,
+    }
+
+    impl Reporter for FailingReporter {
+        fn report(
+            &mut self,
+            state: ServiceState,
+            exit: ExitCode,
+            _checkpoint: u32,
+        ) -> Result<(), PublishError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("report:{state:?}:{exit:?}"));
+            if state == self.fail_on {
+                Err(PublishError { win32_error: 1066 })
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -267,7 +380,7 @@ mod tests {
             runtime: PathBuf::new(),
             log: None,
             service_name: "t3code".to_owned(),
-            drain_timeout: Duration::from_millis(20),
+            drain_timeout: Duration::ZERO,
             restart_window: Duration::from_secs(300),
             max_restarts: 3,
             poll_interval: Duration::from_millis(1),
@@ -275,6 +388,57 @@ mod tests {
             allow_local_system: false,
             mode: LaunchMode::ServiceLauncher,
         }
+    }
+
+    fn child(options: ChildOptions, events: &Events) -> FakeChild {
+        FakeChild {
+            alive: options.alive,
+            owned: options.owned,
+            query_fails: options.query_fails,
+            graceful_kills: options.graceful_kills,
+            terminate_outcome: options.terminate_outcome,
+            events: events.clone(),
+            unrelated_alive: options.unrelated_alive,
+        }
+    }
+
+    #[derive(Clone)]
+    struct ChildOptions {
+        alive: bool,
+        owned: bool,
+        query_fails: bool,
+        graceful_kills: bool,
+        terminate_outcome: CleanupOutcome,
+        unrelated_alive: Arc<AtomicBool>,
+    }
+
+    impl Default for ChildOptions {
+        fn default() -> Self {
+            Self {
+                alive: true,
+                owned: true,
+                query_fails: false,
+                graceful_kills: false,
+                terminate_outcome: CleanupOutcome::Confirmed,
+                unrelated_alive: Arc::new(AtomicBool::new(true)),
+            }
+        }
+    }
+
+    fn run_events(options: ChildOptions, controls: Vec<Option<Control>>) -> (Events, RunOutcome) {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let mut host = FakeHost {
+            template: child(options, &events),
+        };
+        let mut controls = ScriptedControl {
+            script: VecDeque::from(controls),
+        };
+        let mut recorder = Recorder {
+            events: events.clone(),
+        };
+        let mut log = |_message: &str| {};
+        let outcome = run(&config(), &mut host, &mut controls, &mut recorder, &mut log);
+        (events, outcome)
     }
 
     fn contains(events: &Events, needle: &str) -> bool {
@@ -285,33 +449,87 @@ mod tests {
             .any(|event| event.contains(needle))
     }
 
-    fn run_with(child: FakeChild) -> (Events, RunOutcome) {
-        let events: Events = Arc::new(Mutex::new(Vec::new()));
-        let child = FakeChild {
-            events: events.clone(),
-            ..child
-        };
-        let mut host = FakeHost { child };
-        let mut controls = ScriptedControl {
-            script: VecDeque::from([Some(Control::Stop)]),
-        };
-        let mut recorder = Recorder {
-            events: events.clone(),
-        };
-        let mut log = |_message: &str| {};
-        let outcome = run(&config(), &mut host, &mut controls, &mut recorder, &mut log);
-        (events, outcome)
+    fn trace(events: &Events) -> Vec<String> {
+        events.lock().unwrap().clone()
+    }
+
+    fn stop_and_force() -> Vec<Option<Control>> {
+        vec![None, Some(Control::Stop)]
     }
 
     #[test]
-    fn foreign_pid_is_reported_stopped_but_never_terminated() {
-        let (events, _outcome) = run_with(FakeChild {
-            alive: true,
+    fn successful_spawn_publishes_running_before_stop() {
+        let (events, _outcome) = run_events(ChildOptions::default(), stop_and_force());
+        let trace = trace(&events);
+        let running = trace
+            .iter()
+            .position(|event| event == "report:Running:Clean")
+            .expect("a successful spawn must publish RUNNING");
+        let stopping = trace
+            .iter()
+            .position(|event| event == "report:StopPending:Clean")
+            .expect("a stop must publish STOP_PENDING");
+        assert!(running < stopping, "RUNNING must precede the stop");
+    }
+
+    #[test]
+    fn there_is_exactly_one_final_stopped_report() {
+        let (events, _outcome) = run_events(ChildOptions::default(), stop_and_force());
+        let trace = trace(&events);
+        let stopped = trace
+            .iter()
+            .filter(|event| event.starts_with("report:Stopped"))
+            .count();
+        assert_eq!(
+            stopped, 1,
+            "SCM requires exactly one final STOPPED: {trace:?}"
+        );
+        let last_report = trace
+            .iter()
+            .filter(|event| event.starts_with("report:"))
+            .next_back()
+            .expect("at least one report");
+        assert!(last_report.starts_with("report:Stopped"));
+    }
+
+    #[test]
+    fn graceful_child_exit_publishes_running_then_one_stopped() {
+        let options = ChildOptions {
+            graceful_kills: true,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, stop_and_force());
+        assert!(contains(&events, "report:Running:Clean"));
+        let trace = trace(&events);
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|event| event.starts_with("report:Stopped"))
+                .count(),
+            1
+        );
+        assert_eq!(outcome.exit, ExitCode::Clean);
+        assert!(!outcome.publish_failed);
+    }
+
+    #[test]
+    fn owned_tree_receives_graceful_stop_then_confirmed_termination() {
+        let (events, outcome) = run_events(ChildOptions::default(), stop_and_force());
+        assert!(contains(&events, "graceful"));
+        assert!(contains(&events, "terminate"));
+        assert!(contains(&events, "report:Stopped:Clean"));
+        assert!(outcome.forced);
+    }
+
+    #[test]
+    fn foreign_pid_is_not_terminated_and_not_reported_clean() {
+        let options = ChildOptions {
             owned: false,
-            query_fails: false,
-            events: Arc::new(Mutex::new(Vec::new())),
-        });
-        assert!(contains(&events, "report:Stopped"), "service must not hang");
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, stop_and_force());
+        assert!(contains(&events, "report:Stopped:Unknown"));
+        assert!(!outcome.publish_failed);
         assert!(
             !contains(&events, "terminate"),
             "a foreign process must not be terminated"
@@ -320,17 +538,37 @@ mod tests {
             !contains(&events, "graceful"),
             "a foreign process must not receive a stop request"
         );
+        // Dropping the still-held kill-on-close job is itself an effect, so the
+        // test records it rather than treating "no terminate call" as clean.
+        assert!(
+            contains(&events, "job-drop"),
+            "the held job drop must be observable, not hidden"
+        );
+    }
+
+    #[test]
+    fn a_refused_tree_does_not_touch_unrelated_processes() {
+        let unrelated_alive = Arc::new(AtomicBool::new(true));
+        let options = ChildOptions {
+            owned: false,
+            unrelated_alive: unrelated_alive.clone(),
+            ..ChildOptions::default()
+        };
+        let (_events, _outcome) = run_events(options, stop_and_force());
+        assert!(
+            unrelated_alive.load(Ordering::SeqCst),
+            "no unrelated process may be cleaned up"
+        );
     }
 
     #[test]
     fn query_failure_is_not_treated_as_an_owned_tree() {
-        let (events, _outcome) = run_with(FakeChild {
-            alive: true,
-            owned: true,
+        let options = ChildOptions {
             query_fails: true,
-            events: Arc::new(Mutex::new(Vec::new())),
-        });
-        assert!(contains(&events, "report:Stopped"), "service must not hang");
+            ..ChildOptions::default()
+        };
+        let (events, _outcome) = run_events(options, stop_and_force());
+        assert!(contains(&events, "report:Stopped:Unknown"));
         assert!(
             !contains(&events, "terminate"),
             "an unverifiable tree must not be terminated"
@@ -338,16 +576,51 @@ mod tests {
     }
 
     #[test]
-    fn owned_tree_receives_graceful_stop_then_bounded_termination() {
-        let (events, outcome) = run_with(FakeChild {
-            alive: true,
-            owned: true,
-            query_fails: false,
-            events: Arc::new(Mutex::new(Vec::new())),
-        });
-        assert!(contains(&events, "graceful"));
-        assert!(contains(&events, "terminate"));
-        assert!(contains(&events, "report:Stopped"));
-        assert!(outcome.forced);
+    fn failed_termination_is_not_reported_clean() {
+        let options = ChildOptions {
+            terminate_outcome: CleanupOutcome::Failed,
+            ..ChildOptions::default()
+        };
+        let (events, outcome) = run_events(options, stop_and_force());
+        assert!(contains(&events, "report:Stopped:Unknown"));
+        assert_ne!(outcome.exit, ExitCode::Clean);
+        assert!(!outcome.exit_observed, "no clean child exit was observed");
+    }
+
+    #[test]
+    fn publish_failure_is_surfaced_and_does_not_claim_clean() {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let options = ChildOptions::default();
+        let mut host = FakeHost {
+            template: child(options, &events),
+        };
+        let mut controls = ScriptedControl {
+            script: VecDeque::from(stop_and_force()),
+        };
+        let mut reporter = FailingReporter {
+            fail_on: ServiceState::Running,
+            events: events.clone(),
+        };
+        let mut log = |_message: &str| {};
+        let outcome = run(&config(), &mut host, &mut controls, &mut reporter, &mut log);
+
+        assert!(
+            outcome.publish_failed,
+            "the failed RUNNING report must surface"
+        );
+        assert_ne!(
+            outcome.exit,
+            ExitCode::Clean,
+            "no clean stop without publication"
+        );
+        let trace = trace(&events);
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|event| event.starts_with("report:Stopped"))
+                .count(),
+            1,
+            "abort must still end in exactly one STOPPED: {trace:?}"
+        );
     }
 }

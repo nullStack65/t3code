@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::config::ServiceConfig;
 use crate::control::{Control, ControlOutcome, ServiceState, handle_control};
-use crate::host::{ProcessIdentity, QueryError};
+use crate::host::{CleanupOutcome, ProcessIdentity, QueryError};
 
 /// Monotonic time since the host started.
 pub type Monotonic = Duration;
@@ -154,9 +154,17 @@ impl Supervisor {
         ]
     }
 
-    pub fn on_child_spawned(&mut self, identity: ProcessIdentity) {
+    /// The child started. The real SCM is still `START_PENDING` at this point:
+    /// the internal state change is not enough, so this returns the actual
+    /// `RUNNING` report the runner must publish. Without it the SCM never advertises
+    /// STOP/SHUTDOWN controls.
+    pub fn on_child_spawned(&mut self, identity: ProcessIdentity) -> Vec<SupervisorAction> {
         self.identity = Some(identity);
         self.state = ServiceState::Running;
+        vec![SupervisorAction::Report {
+            state: ServiceState::Running,
+            exit: ExitCode::Clean,
+        }]
     }
 
     /// The runner could not spawn the child. `fatal` marks a configuration
@@ -244,11 +252,26 @@ impl Supervisor {
         }]
     }
 
-    /// After a forced termination the runner has no exit event to feed. Finish
-    /// the stop directly.
-    pub fn on_forced_termination(&mut self) -> Vec<SupervisorAction> {
+    /// After a forced termination the runner has no exit event to feed. Finish the
+    /// stop, but only claim a clean shutdown when the cleanup was confirmed.
+    /// `Failed`, `Unknown` and `Refused` are a bounded exit without evidence, not
+    /// a clean stop.
+    pub fn on_forced_termination(&mut self, cleanup: CleanupOutcome) -> Vec<SupervisorAction> {
         self.identity = None;
-        self.finish(ExitCode::Clean)
+        let code = if cleanup.is_clean() {
+            ExitCode::Clean
+        } else {
+            ExitCode::Unknown
+        };
+        self.finish(code)
+    }
+
+    /// A status publication failed, so the SCM no longer knows the true state.
+    /// Finish with an unknown cause: even a confirmed child cleanup is not a
+    /// clean service stop when the SCM was never told the service was running.
+    pub fn on_publish_failure(&mut self) -> Vec<SupervisorAction> {
+        self.identity = None;
+        self.finish(ExitCode::Unknown)
     }
 
     fn try_restart(&mut self, now: Monotonic) -> bool {
@@ -329,9 +352,54 @@ mod tests {
         assert!(reported(&actions, ServiceState::StartPending));
         assert_eq!(spawn_count(&actions), 1);
 
-        supervisor.on_child_spawned(identity(42));
+        let actions = supervisor.on_child_spawned(identity(42));
         assert_eq!(supervisor.state(), ServiceState::Running);
         assert!(supervisor.child_identity().is_some());
+        assert!(
+            reported(&actions, ServiceState::Running),
+            "a successful spawn must publish the RUNNING transition"
+        );
+    }
+
+    #[test]
+    fn restart_publishes_running_again() {
+        let mut supervisor = Supervisor::new(config());
+        supervisor.begin(ms(0));
+        supervisor.on_child_spawned(identity(42));
+        supervisor.on_child_exited(ms(1_000), 7); // unexpected, budget allows restart
+        let actions = supervisor.on_child_spawned(identity(43));
+        assert!(reported(&actions, ServiceState::Running));
+        assert!(!supervisor.finished());
+    }
+
+    #[test]
+    fn cleanup_outcomes_map_to_honest_exit_codes() {
+        for (cleanup, expected) in [
+            (CleanupOutcome::Confirmed, ExitCode::Clean),
+            (CleanupOutcome::Failed, ExitCode::Unknown),
+            (CleanupOutcome::Unknown, ExitCode::Unknown),
+            (CleanupOutcome::Refused, ExitCode::Unknown),
+        ] {
+            let mut supervisor = Supervisor::new(config());
+            supervisor.begin(ms(0));
+            supervisor.on_child_spawned(identity(42));
+            supervisor.on_control(ms(100), Control::Stop);
+            let actions = supervisor.on_forced_termination(cleanup);
+            assert!(reported(&actions, ServiceState::Stopped));
+            assert_eq!(supervisor.exit_code(), expected, "cleanup {cleanup:?}");
+            assert!(supervisor.finished());
+        }
+    }
+
+    #[test]
+    fn a_publish_failure_finishes_with_an_unknown_cause() {
+        let mut supervisor = Supervisor::new(config());
+        supervisor.begin(ms(0));
+        supervisor.on_child_spawned(identity(42));
+        let actions = supervisor.on_publish_failure();
+        assert!(reported(&actions, ServiceState::Stopped));
+        assert_eq!(supervisor.exit_code(), ExitCode::Unknown);
+        assert!(supervisor.finished());
     }
 
     #[test]
@@ -436,7 +504,7 @@ mod tests {
         let actions = supervisor.tick(ms(deadline + 1_000));
         assert!(!actions.contains(&SupervisorAction::ForceTerminateTree));
 
-        let actions = supervisor.on_forced_termination();
+        let actions = supervisor.on_forced_termination(CleanupOutcome::Confirmed);
         assert!(reported(&actions, ServiceState::Stopped));
         assert!(supervisor.forced());
         assert_eq!(supervisor.exit_code(), ExitCode::Clean);

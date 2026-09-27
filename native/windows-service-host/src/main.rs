@@ -13,7 +13,7 @@ use std::thread;
 use t3_windows_service_host::config::{Invocation, ServiceConfig, parse};
 use t3_windows_service_host::control::{Control, ServiceState};
 use t3_windows_service_host::host::CommandChildHost;
-use t3_windows_service_host::run::{ChannelControlInput, Reporter, run};
+use t3_windows_service_host::run::{ChannelControlInput, PublishError, Reporter, run};
 use t3_windows_service_host::supervise::ExitCode;
 
 fn main() -> StdExitCode {
@@ -64,8 +64,14 @@ fn run_service(_config: ServiceConfig) -> ExitCode {
 struct ConsoleReporter;
 
 impl Reporter for ConsoleReporter {
-    fn report(&mut self, state: ServiceState, exit: ExitCode, checkpoint: u32) {
+    fn report(
+        &mut self,
+        state: ServiceState,
+        exit: ExitCode,
+        checkpoint: u32,
+    ) -> Result<(), PublishError> {
         println!("[t3-service] state={state:?} exit={exit:?} checkpoint={checkpoint}");
+        Ok(())
     }
 }
 

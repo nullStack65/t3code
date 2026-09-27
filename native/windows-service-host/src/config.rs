@@ -118,6 +118,7 @@ pub enum ConfigError {
     InvalidNumber(String),
     CredentialArgument(String),
     MissingTestChild,
+    ExpectedAccountUnqualified(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -156,6 +157,10 @@ impl std::fmt::Display for ConfigError {
             ConfigError::MissingTestChild => write!(
                 formatter,
                 "test-child mode requires --exec <program> [--exec-arg <value>]"
+            ),
+            ConfigError::ExpectedAccountUnqualified(account) => write!(
+                formatter,
+                "--expected-account '{account}' is not qualified; use DOMAIN\\user or user@domain so the account can be proven unambiguously"
             ),
         }
     }
@@ -338,6 +343,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Invocation, Con
     if service_name_set && service_name.is_empty() {
         return Err(ConfigError::EmptyServiceName);
     }
+    if let Some(expected) = &expected_account {
+        if !crate::account::is_qualified(expected) {
+            return Err(ConfigError::ExpectedAccountUnqualified(expected.clone()));
+        }
+    }
 
     #[cfg(feature = "test-child")]
     let mode = if let Some(program) = test_program {
@@ -501,6 +511,36 @@ mod tests {
         ])
         .unwrap_err();
         assert!(matches!(error, ConfigError::CredentialArgument(_)));
+    }
+
+    #[test]
+    fn refuses_an_unqualified_expected_account() {
+        let error = parse_str(&[
+            "host",
+            "--home",
+            windows_home(),
+            "--runtime",
+            windows_runtime(),
+            "--expected-account",
+            "t3service",
+        ])
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::ExpectedAccountUnqualified(_)));
+    }
+
+    #[test]
+    fn accepts_a_qualified_expected_account() {
+        let invocation = parse_str(&[
+            "host",
+            "--home",
+            windows_home(),
+            "--runtime",
+            windows_runtime(),
+            "--expected-account",
+            r"NT SERVICE\T3Code",
+        ])
+        .expect("qualified account is accepted");
+        assert!(matches!(invocation, Invocation::Service(_)));
     }
 
     #[test]

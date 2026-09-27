@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use t3_windows_service_host::config::{LaunchMode, ServiceConfig};
 use t3_windows_service_host::control::{Control, ServiceState};
 use t3_windows_service_host::host::CommandChildHost;
-use t3_windows_service_host::run::{Reporter, ScriptedControl, run};
+use t3_windows_service_host::run::{PublishError, Reporter, ScriptedControl, run};
 use t3_windows_service_host::supervise::ExitCode;
 
 #[derive(Clone)]
@@ -24,11 +24,17 @@ struct Capturing {
 }
 
 impl Reporter for Capturing {
-    fn report(&mut self, state: ServiceState, exit: ExitCode, _checkpoint: u32) {
+    fn report(
+        &mut self,
+        state: ServiceState,
+        exit: ExitCode,
+        _checkpoint: u32,
+    ) -> Result<(), PublishError> {
         self.events
             .lock()
             .unwrap()
             .push(format!("{state:?}:{exit:?}"));
+        Ok(())
     }
 }
 

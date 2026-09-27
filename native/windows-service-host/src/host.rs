@@ -31,6 +31,31 @@ pub enum SpawnError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryError;
 
+/// Outcome of an explicit termination attempt against an owned process tree.
+///
+/// `Confirmed` and `Failed` are the two outcomes of an *attempt*; `Unknown` and
+/// `Refused` mean no termination was attempted at all. A bounded supervisor exit
+/// must never map `Unknown`/`Refused`/`Failed` to a clean stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    /// Termination was attempted and the owned process was observed to exit.
+    Confirmed,
+    /// Termination was attempted but not confirmed: an API call failed or the
+    /// bounded wait timed out.
+    Failed,
+    /// Identity could not be verified, so nothing was terminated.
+    Unknown,
+    /// The recorded identity was verified as foreign; deliberately not terminated.
+    Refused,
+}
+
+impl CleanupOutcome {
+    /// A confirmed stop is the only outcome that may be reported as clean.
+    pub fn is_clean(self) -> bool {
+        matches!(self, CleanupOutcome::Confirmed)
+    }
+}
+
 pub trait ChildHandle {
     fn identity(&self) -> ProcessIdentity;
     /// `Ok(true)` means the recorded identity is still ours, `Ok(false)` means
@@ -41,7 +66,8 @@ pub trait ChildHandle {
     /// stop marker the launcher reads; the production launcher adaptation
     /// (documented in the scoped design) is what makes that marker actionable.
     fn request_graceful_stop(&mut self) -> Result<(), QueryError>;
-    fn terminate_tree(&mut self);
+    /// Force the owned tree down and report whether its exit was confirmed.
+    fn terminate_tree(&mut self) -> CleanupOutcome;
 }
 
 pub trait ChildHost {
@@ -157,9 +183,14 @@ impl ChildHandle for CommandChild {
         std::fs::write(&self.stop_marker, b"").map_err(|_| QueryError)
     }
 
-    fn terminate_tree(&mut self) {
+    fn terminate_tree(&mut self) -> CleanupOutcome {
+        // Kill first; the subsequent wait both reaps the child and confirms the
+        // exit. A failed kill of an already-exiting child still confirms via wait.
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        match self.child.wait() {
+            Ok(_) => CleanupOutcome::Confirmed,
+            Err(_) => CleanupOutcome::Failed,
+        }
     }
 }
 
