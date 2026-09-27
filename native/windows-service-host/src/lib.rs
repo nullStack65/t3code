@@ -12,6 +12,7 @@
 
 pub mod account;
 pub mod admission;
+pub mod command_line;
 pub mod config;
 pub mod control;
 pub mod environment;

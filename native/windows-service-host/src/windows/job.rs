@@ -386,41 +386,7 @@ fn wide_null(value: &Path) -> Vec<u16> {
 
 fn build_command_line(config: &ServiceConfig) -> Vec<u16> {
     let (program, args) = config.child_command();
-    let mut line = Vec::new();
-    push_quoted(
-        &mut line,
-        &program.as_os_str().encode_wide().collect::<Vec<_>>(),
-    );
-    for arg in &args {
-        line.push(b' ' as u16);
-        push_quoted(&mut line, &arg.encode_wide().collect::<Vec<_>>());
-    }
-    line.push(0);
-    line
-}
-
-/// Windows command-line quoting: backslashes are doubled before a quote, and a
-/// literal quote needs `2n + 1` backslashes in front of it.
-fn push_quoted(out: &mut Vec<u16>, value: &[u16]) {
-    out.push(b'"' as u16);
-    let mut backslashes = 0usize;
-    for &character in value {
-        if character == b'\\' as u16 {
-            backslashes += 1;
-            out.push(character);
-        } else if character == b'"' as u16 {
-            for _ in 0..backslashes + 1 {
-                out.push(b'\\' as u16);
-            }
-            out.push(character);
-            backslashes = 0;
-        } else {
-            backslashes = 0;
-            out.push(character);
-        }
-    }
-    for _ in 0..backslashes {
-        out.push(b'\\' as u16);
-    }
-    out.push(b'"' as u16);
+    let program: Vec<u16> = program.as_os_str().encode_wide().collect();
+    let args: Vec<Vec<u16>> = args.iter().map(|arg| arg.encode_wide().collect()).collect();
+    crate::command_line::build_command_line(&program, &args)
 }

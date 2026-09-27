@@ -46,6 +46,19 @@ fn unique_dir() -> PathBuf {
     std::env::temp_dir().join(format!("t3-winsvc-{}-{nanos}", std::process::id()))
 }
 
+fn read_pid_within(path: &Path, timeout: Duration) -> Option<i32> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(pid) = text.trim().parse::<i32>() {
+                return Some(pid);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
 fn write_runtime(home: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let runtime = home.join("t3.exe");
@@ -108,11 +121,8 @@ fn real_child_is_stopped_and_terminated_after_drain() {
         "child output must be redirected to the configured log"
     );
 
-    let pid: i32 = std::fs::read_to_string(home.join("child.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = read_pid_within(&home.join("child.pid"), Duration::from_millis(500))
+        .expect("the dummy child records its pid");
     let alive = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(format!("kill -0 {pid} 2>/dev/null"))
