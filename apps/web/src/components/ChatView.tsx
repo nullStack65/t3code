@@ -340,6 +340,10 @@ import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnectDelay";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
+import {
+  postStartObservationReceiptKey,
+  rememberPostStartObservationReceipt,
+} from "../state/postStartObservationReceipt";
 import { useEnvironmentQuery } from "../state/query";
 import {
   environmentServerConfigsAtom,
@@ -2116,12 +2120,9 @@ export default function ChatView(props: ChatViewProps) {
   // tool heartbeats whose provider timestamps stay pinned to the start; a
   // restarted or replayed server supplies none, so stored rows never fake
   // resumed progress.
-  // Capture the client instant the observation landed so the age is measured
-  // against the server clock. Set in an effect (never during render).
-  const [postStartReceivedAtMs, setPostStartReceivedAtMs] = useState<number | null>(null);
-  useEffect(() => {
-    setPostStartReceivedAtMs(Date.now());
-  }, [activeThreadShell?.postStartActivity]);
+  // The receipt registry pairs each distinct observation with the client
+  // instant it actually arrived, so cached navigation or a preference remount
+  // reuses the original basis instead of inventing clock skew.
   const postStartActivityAnchors = useMemo(() => {
     if (!activeThread) return null;
     const knownWait: PostStartKnownWait | null = activeThreadShell?.hasPendingApprovals
@@ -2130,6 +2131,13 @@ export default function ChatView(props: ChatViewProps) {
         ? "input"
         : null;
     const live = activeThreadShell?.postStartActivity ?? null;
+    const observedAt = live?.observedAt ?? null;
+    const receipt =
+      observedAt === null || activeThreadEnvironmentId === null || activeThreadId === null
+        ? undefined
+        : rememberPostStartObservationReceipt(
+            postStartObservationReceiptKey(activeThreadEnvironmentId, activeThreadId, observedAt),
+          );
     return derivePostStartActivityAnchors({
       activities: activeThread.activities ?? [],
       latestTurn: activeLatestTurn,
@@ -2137,16 +2145,18 @@ export default function ChatView(props: ChatViewProps) {
       knownWait,
       pendingStartedAt: activeThreadShell?.latestUserMessageAt ?? null,
       live,
-      receivedAtMs: postStartReceivedAtMs,
+      receivedAtMs: receipt?.wallMs ?? null,
+      receivedMonotonicMs: receipt?.monotonicMs ?? null,
     });
   }, [
     activeThread,
     activeLatestTurn,
+    activeThreadEnvironmentId,
+    activeThreadId,
     activeThreadShell?.hasPendingApprovals,
     activeThreadShell?.hasPendingUserInput,
     activeThreadShell?.latestUserMessageAt,
     activeThreadShell?.postStartActivity,
-    postStartReceivedAtMs,
   ]);
   // Reading a finished thread clears the sidebar's Done badge. The visit is
   // stamped at the turn's completion time — not now/updatedAt — so it clears

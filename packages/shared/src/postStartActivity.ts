@@ -89,6 +89,13 @@ export type PostStartLiveObservation = {
    * clock that may disagree. Absent on peers that predate the field.
    */
   readonly observedAt?: string | null | undefined;
+  /**
+   * The turn this live observation describes, or null while it describes the
+   * accepted pending request (session `starting`, no provider turn id yet).
+   * Carried so a client whose current turn no longer matches the cached
+   * observation cannot consume another turn's recency or tools.
+   */
+  readonly turnId?: string | null | undefined;
 };
 
 export type PostStartActivityAnchors = {
@@ -122,6 +129,19 @@ export type PostStartActivityAnchors = {
    * magnitude is an unsupported relationship, not a freshness signal.
    */
   readonly observationClockOffsetMs: number | null;
+  /**
+   * Client wall-clock instant the live observation was actually received.
+   * Paired with `receivedMonotonicMs` so elapsed time since receipt can be
+   * measured monotonically; a render, navigation or unrelated shell update is
+   * not a new receipt and must not re-date the observation.
+   */
+  readonly receivedAtMs: number | null;
+  /**
+   * Client monotonic instant at receipt. Elapsed time is computed from this
+   * baseline, so a browser wall-clock change between observations cannot
+   * fabricate a silence age.
+   */
+  readonly receivedMonotonicMs: number | null;
 };
 
 export type PostStartActivityStatus = "inactive" | "active" | "quiet" | "waiting" | "unknown";
@@ -170,6 +190,12 @@ export type DerivePostStartActivityInput = {
    * the local clock (older callers and tests).
    */
   readonly receivedAtMs?: number | null;
+  /**
+   * Client monotonic instant paired with `receivedAtMs` at the same receipt.
+   * When both are supplied the resolver measures elapsed time monotonically,
+   * so a wall-clock change cannot invent a silence age.
+   */
+  readonly receivedMonotonicMs?: number | null;
 };
 
 function parseMs(value: string | null | undefined): number | null {
@@ -353,11 +379,18 @@ function deriveOutstandingTools(
  * age, but never resurrect a call either source has seen complete. Stale live
  * evidence cannot reopen a persisted completion, and stale persisted evidence
  * cannot reopen a live completion.
+ *
+ * When the live observation supplies the clock basis, live evidence wins for a
+ * call present in both sources. Persisted rows carry provider chronology, which
+ * can sit far ahead of the server; maxing it in would let a skewed stored
+ * timestamp beat a fresh server-observed heartbeat and under-report the tool's
+ * real age.
  */
 function mergeOutstandingTools(
   persisted: ReadonlyArray<PostStartOutstandingTool>,
   live: ReadonlyArray<PostStartOutstandingTool>,
   completedToolIds: ReadonlySet<string>,
+  preferLiveTime: boolean,
 ): ReadonlyArray<PostStartOutstandingTool> {
   const byKey = new Map<string, PostStartOutstandingTool>();
   for (const tool of [...persisted, ...live]) {
@@ -365,6 +398,10 @@ function mergeOutstandingTools(
     const existing = byKey.get(tool.toolCallId);
     if (existing === undefined) {
       byKey.set(tool.toolCallId, tool);
+      continue;
+    }
+    if (preferLiveTime) {
+      byKey.set(tool.toolCallId, { ...existing, ...tool });
       continue;
     }
     const existingMs = parseMs(existing.lastObservedAt);
@@ -437,9 +474,25 @@ export function derivePostStartActivityAnchors(
   // its instants are on the server clock, so a skewed persisted provider
   // timestamp must not be maxed into the age. Estimate the server/client offset
   // from the observation's own stamp when the client passed its receipt time.
-  const observingServerClock = live != null;
-  const liveObservedAtMs = parseMs(live?.observedAt ?? null);
+  //
+  // A cached observation belonging to a different turn must not supply this
+  // turn's recency or tools: a live record naming a turn the client is not
+  // currently on (or a pending record with no turn while a turn is named) is
+  // stale evidence, not progress. A peer that omits the field entirely is
+  // treated as unknown and accepted (forward/backward compatible).
+  const liveTurnId = live?.turnId;
+  const liveMatchesCurrentTurn =
+    live != null &&
+    (liveTurnId === undefined
+      ? true
+      : liveTurnId === null
+        ? turnId === null
+        : liveTurnId === turnId);
+  const currentLive = liveMatchesCurrentTurn ? live : null;
+  const observingServerClock = currentLive != null;
+  const liveObservedAtMs = parseMs(currentLive?.observedAt ?? null);
   const receivedAtMs = input.receivedAtMs ?? null;
+  const receivedMonotonicMs = input.receivedMonotonicMs ?? null;
   const observationClockOffsetMs =
     liveObservedAtMs !== null && receivedAtMs !== null ? liveObservedAtMs - receivedAtMs : null;
 
@@ -455,6 +508,8 @@ export function derivePostStartActivityAnchors(
       knownWait: input.knownWait ?? null,
       observingServerClock,
       observationClockOffsetMs,
+      receivedAtMs,
+      receivedMonotonicMs,
     };
   }
 
@@ -470,18 +525,19 @@ export function derivePostStartActivityAnchors(
   const derived = deriveOutstandingTools(turnActivities);
   const completedToolIds = new Set<string>([
     ...derived.completedToolIds,
-    ...(live?.completedToolIds ?? []),
+    ...(currentLive?.completedToolIds ?? []),
   ]);
   const outstandingTools = mergeOutstandingTools(
     derived.tools,
-    live?.outstandingTools ?? [],
+    currentLive?.outstandingTools ?? [],
     completedToolIds,
+    observingServerClock,
   );
 
   // Prefer the server clock for activity/completion recency; fall back to the
   // persisted provider chronology only when the server has no live observation.
-  const liveLastActivity = live?.lastProviderActivityAt ?? null;
-  const liveLastCompleted = live?.lastToolCompletedAt ?? null;
+  const liveLastActivity = currentLive?.lastProviderActivityAt ?? null;
+  const liveLastCompleted = currentLive?.lastToolCompletedAt ?? null;
 
   return {
     turnId,
@@ -494,6 +550,8 @@ export function derivePostStartActivityAnchors(
     knownWait: input.knownWait ?? null,
     observingServerClock,
     observationClockOffsetMs,
+    receivedAtMs,
+    receivedMonotonicMs,
   };
 }
 
@@ -508,6 +566,12 @@ export function resolvePostStartActivity(
     readonly connection?: PostStartConnectionState;
     readonly thresholdMs?: number;
     readonly futureToleranceMs?: number;
+    /**
+     * Monotonic instant paired with `nowMs`. When the anchors carry their own
+     * receipt baseline, this lets the resolver advance the basis by measured
+     * monotonic elapsed time instead of trusting wall-clock movement.
+     */
+    readonly nowMonotonicMs?: number;
   } = {},
 ): PostStartActivityObservation {
   const thresholdMs = Math.max(0, options.thresholdMs ?? POST_START_SILENCE_THRESHOLD_MS);
@@ -517,6 +581,16 @@ export function resolvePostStartActivity(
   );
   const connection = options.connection ?? "live";
 
+  // Elapsed time since the actual receipt, measured monotonically when the
+  // anchors carry that baseline. A wall-clock change between observations
+  // cannot then fabricate silence; without the baseline, fall back to wall now.
+  const basisNowMs =
+    typeof anchors.receivedAtMs === "number" &&
+    typeof anchors.receivedMonotonicMs === "number" &&
+    typeof options.nowMonotonicMs === "number"
+      ? anchors.receivedAtMs + Math.max(0, options.nowMonotonicMs - anchors.receivedMonotonicMs)
+      : nowMs;
+
   // Measured against the server clock when the live observation supplies the
   // basis; the browser clock only supplies elapsed time on top of it. A clock
   // relationship too far off to trust is honest uncertainty, never a warning.
@@ -525,7 +599,9 @@ export function resolvePostStartActivity(
     anchors.observationClockOffsetMs !== null &&
     Math.abs(anchors.observationClockOffsetMs) > futureToleranceMs;
   const nowBasisMs =
-    anchors.observationClockOffsetMs === null ? nowMs : nowMs + anchors.observationClockOffsetMs;
+    anchors.observationClockOffsetMs === null
+      ? basisNowMs
+      : basisNowMs + anchors.observationClockOffsetMs;
 
   const lastActivityMs = parseMs(anchors.lastProviderActivityAt);
   const lastActivityAgeMs =

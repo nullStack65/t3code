@@ -17,6 +17,11 @@ import {
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironments } from "../state/environments";
+import {
+  monotonicNowMs,
+  postStartObservationReceiptKey,
+  rememberPostStartObservationReceipt,
+} from "../state/postStartObservationReceipt";
 import { environmentShell } from "../state/shell";
 import {
   hasDesktopNotifications,
@@ -43,6 +48,10 @@ export function ThreadNotificationCoordinator() {
   // saw. Keyed by `${environmentId}:${threadId}:${episodeKey}`.
   const notifiedSilenceEpisodes = useRef(new Set<string>());
   const openSilenceToasts = useRef(new Map<string, string>());
+  // Desktop silence notifications by episode key, so resumption/terminal state
+  // can close exactly the one episode's system notification without touching
+  // unrelated pending notifications.
+  const openSilenceDesktopNotifications = useRef(new Map<string, string>());
   // Threads already seen in a live snapshot. Kept on the always-mounted parent
   // so a child remount caused by both preferences being off does not re-baseline
   // and suppress a genuinely new episode.
@@ -50,6 +59,13 @@ export function ThreadNotificationCoordinator() {
   const onNotification = useCallback((environmentId: EnvironmentId, notification: Notification) => {
     pending.current.get(notification.tag)?.notification.close();
     pending.current.set(notification.tag, { environmentId, notification });
+    setNotificationBadge(pending.current.size);
+  }, []);
+  const dismissNotification = useCallback((tag: string) => {
+    const entry = pending.current.get(tag);
+    if (entry === undefined) return;
+    entry.notification.close();
+    pending.current.delete(tag);
     setNotificationBadge(pending.current.size);
   }, []);
 
@@ -115,8 +131,10 @@ export function ThreadNotificationCoordinator() {
       key={environment.environmentId}
       environmentId={environment.environmentId}
       onNotification={onNotification}
+      dismissNotification={dismissNotification}
       notifiedSilenceEpisodes={notifiedSilenceEpisodes}
       openSilenceToasts={openSilenceToasts}
+      openSilenceDesktopNotifications={openSilenceDesktopNotifications}
       hydratedThreads={hydratedThreads}
     />
   ));
@@ -125,14 +143,18 @@ export function ThreadNotificationCoordinator() {
 function EnvironmentNotifications({
   environmentId,
   onNotification,
+  dismissNotification,
   notifiedSilenceEpisodes,
   openSilenceToasts,
+  openSilenceDesktopNotifications,
   hydratedThreads,
 }: {
   environmentId: EnvironmentId;
   onNotification: (environmentId: EnvironmentId, notification: Notification) => void;
+  dismissNotification: (tag: string) => void;
   notifiedSilenceEpisodes: React.RefObject<Set<string>>;
   openSilenceToasts: React.RefObject<Map<string, string>>;
+  openSilenceDesktopNotifications: React.RefObject<Map<string, string>>;
   hydratedThreads: React.RefObject<Set<string>>;
 }) {
   const shell = useAtomValue(environmentShell.stateValueAtom(environmentId));
@@ -151,11 +173,10 @@ function EnvironmentNotifications({
   // hydration baseline for the silence signal: an already-quiet thread the user
   // did not just watch must not toast the moment notifications connect.
   // Owned by the parent so a child remount does not re-baseline.
-  // Server-clock basis: the observation stamps the server instant, and we pair
-  // it with the client instant the shell landed so ages are measured against
-  // the server clock instead of assuming the two agree.
-  const shellRef = useRef<unknown>(undefined);
-  const shellReceivedAtRef = useRef<number>(Date.now());
+  // Server-clock basis: the observation stamps the server instant; the receipt
+  // registry pairs each distinct observation with the client instant it
+  // actually landed, including its monotonic baseline, so unrelated shell
+  // updates and renders cannot re-date it.
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -295,27 +316,48 @@ function EnvironmentNotifications({
   // covers threads the user is not viewing and follows the same in-app,
   // desktop and sound modes as the attention/completion signal above.
   useEffect(() => {
-    const closeToasts = () => {
-      for (const toastId of openSilenceToasts.current.values()) toastManager.close(toastId);
-      openSilenceToasts.current.clear();
+    const prefix = `${environmentId}:`;
+    const closeEnvironmentToasts = () => {
+      for (const [key, toastId] of [...openSilenceToasts.current]) {
+        if (!key.startsWith(prefix)) continue;
+        toastManager.close(toastId);
+        openSilenceToasts.current.delete(key);
+      }
+    };
+    const closeEnvironmentDesktopNotifications = () => {
+      for (const [key, tag] of [...openSilenceDesktopNotifications.current]) {
+        if (!key.startsWith(prefix)) continue;
+        dismissNotification(tag);
+        openSilenceDesktopNotifications.current.delete(key);
+      }
     };
     if (shell.status !== "live" || Option.isNone(shell.snapshot)) {
-      closeToasts();
+      // A disconnected environment cannot be observed: end its episodes without
+      // touching another environment's open warnings or dedup memory.
+      closeEnvironmentToasts();
+      closeEnvironmentDesktopNotifications();
       return;
     }
     // Turning in-app alerts off closes any open silence toast; the episode stays
     // remembered so re-enabling cannot replay it.
     if (!inAppNotificationsEnabled) {
-      closeToasts();
+      closeEnvironmentToasts();
     }
-    if (shellRef.current !== shell) {
-      shellRef.current = shell;
-      shellReceivedAtRef.current = Date.now();
-    }
-    const receivedAtMs = shellReceivedAtRef.current;
     const seen = new Set<string>();
     for (const thread of shell.snapshot.value.threads) {
       if (thread.archivedAt !== null) continue;
+      const live = thread.postStartActivity ?? null;
+      const observedAt = live?.observedAt ?? null;
+      // Pair each distinct server observation with the client instant it
+      // actually arrived. An unrelated shell update or render reuses the same
+      // receipt instead of re-dating the observation; the monotonic baseline
+      // keeps elapsed time honest across browser wall-clock changes.
+      const receipt =
+        observedAt === null
+          ? undefined
+          : rememberPostStartObservationReceipt(
+              postStartObservationReceiptKey(environmentId, thread.id, observedAt),
+            );
       const anchors = derivePostStartActivityAnchors({
         activities: [],
         latestTurn: thread.latestTurn,
@@ -326,36 +368,48 @@ function EnvironmentNotifications({
             ? "input"
             : null,
         pendingStartedAt: thread.latestUserMessageAt,
-        live: thread.postStartActivity ?? null,
-        receivedAtMs,
+        live,
+        receivedAtMs: receipt?.wallMs ?? null,
+        receivedMonotonicMs: receipt?.monotonicMs ?? null,
       });
-      const observation = resolvePostStartActivity(anchors, nowMs);
+      const observation = resolvePostStartActivity(anchors, nowMs, {
+        nowMonotonicMs: monotonicNowMs(),
+      });
       const baselineKey = `${environmentId}:${thread.id}`;
+      // Baseline on the first live observation in any state (active, waiting or
+      // ready), not only once it is already quiet, so the first genuine
+      // active→quiet transition still notifies. A thread that is already quiet
+      // when first seen is recorded as known so hydration cannot storm.
+      if (!hydratedThreads.current.has(baselineKey)) {
+        hydratedThreads.current.add(baselineKey);
+        if (observation.status === "quiet" && observation.episodeKey !== null) {
+          notifiedSilenceEpisodes.current.add(`${baselineKey}:${observation.episodeKey}`);
+        }
+        continue;
+      }
       if (observation.status !== "quiet" || observation.episodeKey === null) continue;
       const key = `${baselineKey}:${observation.episodeKey}`;
       seen.add(key);
-      if (!hydratedThreads.current.has(baselineKey)) {
-        // First sighting: record the current episode as already known so the
-        // initial snapshot cannot storm the user, matching the existing
-        // attention/completion hydration baseline.
-        hydratedThreads.current.add(baselineKey);
-        notifiedSilenceEpisodes.current.add(key);
-        continue;
-      }
       if (notifiedSilenceEpisodes.current.has(key)) continue;
 
-      const isViewing = activeEnvironmentId === environmentId && activeThreadId === thread.id;
       const isForeground = document.visibilityState === "visible" && document.hasFocus();
+      // A selected thread is only actively viewed while T3 is foregrounded. In a
+      // hidden/unfocused window the existing away-from-T3 preferences apply.
+      const isViewing =
+        activeEnvironmentId === environmentId && activeThreadId === thread.id && isForeground;
       if (isViewing) {
         notifiedSilenceEpisodes.current.add(key);
         continue;
       }
-      if (hasNotificationSound(mode)) {
+      const soundEnabled = hasNotificationSound(mode);
+      if (soundEnabled) {
         void playNotificationSound("input", () =>
           hasNotificationSound(getClientSettings().notificationMode),
         );
       }
-      let alerted = false;
+      // Sound alone is a delivery channel too: mark the episode delivered so
+      // sound-only mode does not replay on every timer tick.
+      let alerted = soundEnabled;
       if (inAppNotificationsEnabled && isForeground) {
         const toastId = toastManager.add({
           type: "warning",
@@ -388,6 +442,7 @@ function EnvironmentNotifications({
             silent: true,
           });
           onNotification(environmentId, notification);
+          openSilenceDesktopNotifications.current.set(key, notification.tag);
           notification.addEventListener("click", () => {
             notification.close();
             window.focus();
@@ -403,18 +458,27 @@ function EnvironmentNotifications({
       }
       if (alerted) notifiedSilenceEpisodes.current.add(key);
     }
+    // End this environment's episodes that are no longer quiet (resumption,
+    // terminal state); another environment's warnings and dedup memory are
+    // untouched.
     for (const key of [...notifiedSilenceEpisodes.current]) {
-      if (seen.has(key)) continue;
+      if (!key.startsWith(prefix) || seen.has(key)) continue;
       const toastId = openSilenceToasts.current.get(key);
       if (toastId !== undefined) {
         toastManager.close(toastId);
         openSilenceToasts.current.delete(key);
+      }
+      const tag = openSilenceDesktopNotifications.current.get(key);
+      if (tag !== undefined) {
+        dismissNotification(tag);
+        openSilenceDesktopNotifications.current.delete(key);
       }
       notifiedSilenceEpisodes.current.delete(key);
     }
   }, [
     activeEnvironmentId,
     activeThreadId,
+    dismissNotification,
     environmentId,
     inAppNotificationsEnabled,
     mode,

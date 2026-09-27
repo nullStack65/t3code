@@ -33,6 +33,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 export type ThreadPostStartActivity = {
+  /** Turn this observation describes; null while the accepted request is pending. */
+  readonly turnId: string | null;
   readonly lastProviderActivityAt: string | null;
   readonly lastToolCompletedAt: string | null;
   readonly outstandingTools: ReadonlyArray<PostStartOutstandingTool>;
@@ -47,8 +49,15 @@ const TERMINAL_TOOL_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 interface ThreadObservationState {
-  /** The turn this record describes; null until a turn id is known. */
+  /** The turn this record describes; null while a request is pending. */
   turnId: string | null;
+  /**
+   * Message id of the accepted request whose provider turn is not yet named.
+   * While set, named provider traffic is rejected: a late event carrying the
+   * previous turn's id must not recreate live evidence the new request would
+   * consume.
+   */
+  pendingRequestId: string | null;
   lastProviderActivityAt: string | null;
   lastToolCompletedAt: string | null;
   readonly tools: Map<string, PostStartOutstandingTool>;
@@ -93,6 +102,14 @@ export class ThreadPostStartActivityService extends Context.Service<
     readonly beginTurn: (threadId: string, turnId: string | null) => void;
 
     /**
+     * The user's request has been accepted but the provider turn is not named
+     * yet (session `starting`, `activeTurnId` null). Reset the record to the
+     * pending request so late traffic from the previously ended turn cannot
+     * recreate live evidence the new request would consume.
+     */
+    readonly beginPendingRequest: (threadId: string, requestId: string) => void;
+
+    /**
      * Record one persisted activity row's normalized event. `observedAt` is the
      * server clock instant the event was observed, not the provider timestamp.
      * `turnId` scopes the observation to the current turn; events naming a
@@ -112,8 +129,14 @@ export class ThreadPostStartActivityService extends Context.Service<
       turnId?: string | null,
     ) => void;
 
-    /** Turn ended or session died: the observation no longer describes live work. */
-    readonly clearThread: (threadId: string) => void;
+    /**
+     * Turn ended or session died: the observation no longer describes live work.
+     * When `turnId` is supplied, a terminal event naming a different turn (a
+     * delayed completion from the previously ended turn) is ignored so it
+     * cannot erase the pending/current record this visibility surface owns.
+     * This only affects observation ownership, never execution lifecycle.
+     */
+    readonly clearThread: (threadId: string, turnId?: string | null) => void;
 
     readonly getThreadPostStartActivity: (threadId: string) => ThreadPostStartActivity | null;
   }
@@ -122,8 +145,12 @@ export class ThreadPostStartActivityService extends Context.Service<
 export function make(): ThreadPostStartActivityService["Service"] {
   const stateByThreadId = new Map<string, ThreadObservationState>();
 
-  const emptyState = (turnId: string | null): ThreadObservationState => ({
+  const emptyState = (
+    turnId: string | null,
+    pendingRequestId: string | null,
+  ): ThreadObservationState => ({
     turnId,
+    pendingRequestId,
     lastProviderActivityAt: null,
     lastToolCompletedAt: null,
     tools: new Map(),
@@ -134,6 +161,9 @@ export function make(): ThreadPostStartActivityService["Service"] {
    * Resolve the state for an observation, or null when the event belongs to a
    * turn that has been superseded. Events with no turn id are accepted as the
    * current (only) turn so providers that omit turn identity still observe.
+   * While a request is pending and unnamed, any named event belongs to some
+   * other (likely previous) turn and is rejected: it must not seed the new
+   * request's evidence.
    */
   const stateForObservation = (
     threadId: string,
@@ -141,7 +171,11 @@ export function make(): ThreadPostStartActivityService["Service"] {
   ): ThreadObservationState | null => {
     const existing = stateByThreadId.get(threadId);
     if (existing === undefined) {
-      return stateByThreadId.set(threadId, emptyState(turnId ?? null)).get(threadId)!;
+      return stateByThreadId.set(threadId, emptyState(turnId ?? null, null)).get(threadId)!;
+    }
+    if (existing.pendingRequestId !== null && existing.turnId === null) {
+      // Pending ownership: only unnamed traffic is this request's.
+      return turnId === undefined || turnId === null ? existing : null;
     }
     if (turnId === undefined || turnId === null) return existing;
     if (existing.turnId === null) {
@@ -155,8 +189,26 @@ export function make(): ThreadPostStartActivityService["Service"] {
   return {
     beginTurn: (threadId, turnId) => {
       const existing = stateByThreadId.get(threadId);
-      if (existing !== undefined && existing.turnId === turnId) return;
-      stateByThreadId.set(threadId, emptyState(turnId));
+      if (
+        existing !== undefined &&
+        existing.turnId === turnId &&
+        existing.pendingRequestId === null
+      ) {
+        return;
+      }
+      stateByThreadId.set(threadId, emptyState(turnId, null));
+    },
+
+    beginPendingRequest: (threadId, requestId) => {
+      const existing = stateByThreadId.get(threadId);
+      if (
+        existing !== undefined &&
+        existing.turnId === null &&
+        existing.pendingRequestId === requestId
+      ) {
+        return;
+      }
+      stateByThreadId.set(threadId, emptyState(null, requestId));
     },
 
     recordActivity: (threadId, observedAt, activity, turnId) => {
@@ -220,7 +272,15 @@ export function make(): ThreadPostStartActivityService["Service"] {
       state.lastProviderActivityAt = maxTimestamp(state.lastProviderActivityAt, observedAt);
     },
 
-    clearThread: (threadId) => {
+    clearThread: (threadId, turnId) => {
+      const existing = stateByThreadId.get(threadId);
+      if (existing === undefined) return;
+      if (turnId !== undefined && turnId !== null) {
+        // A pending request owns this record until its own turn is named; a
+        // terminal event from another turn must not erase it.
+        if (existing.pendingRequestId !== null && existing.turnId === null) return;
+        if (existing.turnId !== null && existing.turnId !== turnId) return;
+      }
       stateByThreadId.delete(threadId);
     },
 
@@ -228,6 +288,7 @@ export function make(): ThreadPostStartActivityService["Service"] {
       const state = stateByThreadId.get(threadId);
       if (!state) return null;
       return {
+        turnId: state.turnId,
         lastProviderActivityAt: state.lastProviderActivityAt,
         lastToolCompletedAt: state.lastToolCompletedAt,
         outstandingTools: [...state.tools.values()],

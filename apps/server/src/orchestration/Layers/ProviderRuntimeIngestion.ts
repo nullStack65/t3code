@@ -1804,13 +1804,19 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
-      if (
-        event.type === "content.delta" &&
-        event.payload.streamKind !== "assistant_text" &&
-        event.payload.streamKind !== "reasoning_text" &&
-        event.payload.streamKind !== "reasoning_summary_text"
-      ) {
-        return;
+      // Assistant/reasoning text and canonical Codex command/file output are
+      // observed as provider progress below. Other content deltas (plan text,
+      // unknown stream kinds) cannot change thread state and return before
+      // hydration.
+      if (event.type === "content.delta") {
+        const streamKind = event.payload.streamKind;
+        const isText =
+          streamKind === "assistant_text" ||
+          streamKind === "reasoning_text" ||
+          streamKind === "reasoning_summary_text";
+        const isCanonicalToolOutput =
+          streamKind === "command_output" || streamKind === "file_change_output";
+        if (!isText && !isCanonicalToolOutput) return;
       }
 
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
@@ -1903,29 +1909,59 @@ const make = Effect.gen(function* () {
         threadPostStartActivity.beginTurn(thread.id, eventTurnId ?? null);
       }
       if (observationAllowed) {
+        const streamKind = event.type === "content.delta" ? event.payload.streamKind : undefined;
         const isContentProgress =
           event.type === "content.delta" &&
           event.payload.delta.length > 0 &&
-          (event.payload.streamKind === "assistant_text" ||
-            event.payload.streamKind === "reasoning_text" ||
-            event.payload.streamKind === "reasoning_summary_text");
+          (streamKind === "assistant_text" ||
+            streamKind === "reasoning_text" ||
+            streamKind === "reasoning_summary_text");
+        // Canonical Codex command/file execution output is real progress even
+        // though it never becomes a persisted row. Observe it on the server
+        // clock and, when the event names the command/file item, advance that
+        // tool so its age keeps moving.
+        const isCanonicalToolOutput =
+          event.type === "content.delta" &&
+          event.payload.delta.length > 0 &&
+          (streamKind === "command_output" || streamKind === "file_change_output");
+        // Parent-conversation tool heartbeats (Claude `tool.progress` with no
+        // taskId, Codex MCP progress carrying only a summary) are intentionally
+        // dropped from persisted activities; observe them directly so liveness
+        // does not depend on persistence. Correlation uses the canonical event
+        // item id when present, not one provider's payload alias.
+        const heartbeatToolId = event.itemId !== undefined ? String(event.itemId) : undefined;
         const isEphemeralToolHeartbeat =
-          event.type === "tool.progress" && event.payload.toolUseId !== undefined;
+          event.type === "tool.progress" &&
+          (event.payload.toolUseId !== undefined || heartbeatToolId !== undefined);
         if (isContentProgress) {
           threadPostStartActivity.recordContentProgress(thread.id, observedAt, observationTurnId);
         }
-        if (isEphemeralToolHeartbeat) {
-          // Canonical Claude parent-conversation heartbeats carry no taskId and
-          // are intentionally dropped from persisted activities; observe them
-          // directly so their liveness does not depend on persistence.
+        if (isCanonicalToolOutput) {
           threadPostStartActivity.recordActivity(
             thread.id,
             observedAt,
-            { kind: "tool.progress", payload: event.payload },
+            {
+              kind: "tool.progress",
+              payload: heartbeatToolId !== undefined ? { toolCallId: heartbeatToolId } : {},
+            },
             observationTurnId,
           );
         }
-        if (isContentProgress || isEphemeralToolHeartbeat) {
+        if (isEphemeralToolHeartbeat) {
+          threadPostStartActivity.recordActivity(
+            thread.id,
+            observedAt,
+            {
+              kind: "tool.progress",
+              payload: {
+                ...event.payload,
+                ...(heartbeatToolId !== undefined ? { toolCallId: heartbeatToolId } : {}),
+              },
+            },
+            observationTurnId,
+          );
+        }
+        if (isContentProgress || isCanonicalToolOutput || isEphemeralToolHeartbeat) {
           yield* nudgePostStartDelivery(thread.id, event, observationTurnId, observedAt);
         }
       }
@@ -2691,12 +2727,24 @@ const make = Effect.gen(function* () {
       // not keep advertising provider progress. Only the accepted lifecycle
       // owner may clear: a delayed completion rejected for a superseded turn
       // must not erase the current turn's evidence.
-      if (event.type === "session.exited" || (isTerminalTurn && shouldApplyThreadLifecycle)) {
+      if (event.type === "session.exited") {
         threadPostStartActivity.clearThread(thread.id);
+      } else if (isTerminalTurn && shouldApplyThreadLifecycle) {
+        threadPostStartActivity.clearThread(thread.id, observationTurnId);
       }
     });
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  // The request is accepted before the provider is sent: session is `starting`
+  // with `activeTurnId` null. Anchor post-start ownership here so late traffic
+  // from the turn that just ended cannot recreate live evidence for the new
+  // request (it would otherwise look like the new request's own progress).
+  const processDomainEvent = (event: TurnStartRequestedDomainEvent) =>
+    Effect.sync(() => {
+      threadPostStartActivity.beginPendingRequest(
+        event.payload.threadId,
+        String(event.payload.messageId),
+      );
+    });
 
   // Records a mid-turn placeholder checkpoint for a provider diff. Runs on the
   // lifecycle worker, after repository detection, so the running-turn check

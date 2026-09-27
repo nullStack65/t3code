@@ -694,6 +694,13 @@ export const OrchestrationPostStartActivity = Schema.Struct({
   lastToolCompletedAt: Schema.NullOr(IsoDateTime),
   outstandingTools: Schema.Array(OrchestrationOutstandingTool),
   /**
+   * The turn this observation describes, or null while the accepted request is
+   * pending and the provider turn is not named yet. Lets a client reject a
+   * cached observation that belongs to a different turn. Optional so peers
+   * that predate the field still decode.
+   */
+  turnId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /**
    * Tool ids the server has observed as completed this turn. Carried so a
    * client can reconcile live evidence against persisted rows without
    * resurrecting a finished call from stale progress in either direction.

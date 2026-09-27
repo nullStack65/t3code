@@ -10,6 +10,7 @@ import {
 } from "@t3tools/shared/postStartActivity";
 
 import { formatDuration } from "../../session-logic";
+import { monotonicNowMs } from "../../state/postStartObservationReceipt";
 
 function formatThresholdLabel(thresholdMs: number): string {
   const minutes = Math.round(thresholdMs / 60_000);
@@ -50,7 +51,10 @@ export function PostStartActivityNotice({
     return () => window.clearInterval(id);
   }, []);
 
-  const observation = resolvePostStartActivity(anchors, nowMs, { connection });
+  const observation = resolvePostStartActivity(anchors, nowMs, {
+    connection,
+    nowMonotonicMs: monotonicNowMs(),
+  });
   const { status } = observation;
 
   if (status === "inactive") {
