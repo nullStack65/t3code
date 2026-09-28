@@ -1,10 +1,17 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as NodeChildProcess from "node:child_process";
 
-import { Launcher, readServiceState, writeServiceState } from "./serviceLauncher.ts";
+import {
+  Launcher,
+  readServiceState,
+  requestGracefulChildStop,
+  writeServiceState,
+} from "./serviceLauncher.ts";
 import {
   compareExactServiceVersions,
   decodeServiceState,
@@ -357,6 +364,60 @@ if (context.update?.status === "pending") {
       const updateId = state.update?.id;
       assert.isDefined(updateId);
       assert.isFalse(yield* fs.exists(path.join(root, "runtime", "db-backup", updateId)));
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
+  it.effect("drains the managed child over IPC before force-termination", () =>
+    Effect.gen(function* () {
+      // POSIX keeps its signal-driven finalizer path; the IPC drain is the
+      // Windows path where a signal would be a hard kill. The production helper
+      // is exercised against a real Node child at the real IPC boundary.
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-graceful-" });
+      const drainMarker = path.join(root, "drained.txt");
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in the child source.
+      const encodedDrainMarker = JSON.stringify(drainMarker);
+      const childSource =
+        `const { writeFileSync } = require("node:fs");\n` +
+        `process.on("message", (message) => {\n` +
+        `  if (message && message.type === "stop") {\n` +
+        `    setTimeout(() => {\n` +
+        `      writeFileSync(${encodedDrainMarker}, "drained");\n` +
+        `      process.send({ type: "stopped" });\n` +
+        `      process.exit(0);\n` +
+        `    }, 25);\n` +
+        `  }\n` +
+        `});\n` +
+        `setInterval(() => {}, 1_000);\n`;
+      const child = NodeChildProcess.spawn(process.execPath, ["-e", childSource], {
+        stdio: ["ignore", "ignore", "inherit", "ipc"],
+      });
+      yield* Effect.promise(() => new Promise<void>((r) => child.once("spawn", () => r())));
+      yield* Effect.promise(() => requestGracefulChildStop(child));
+      yield* Effect.promise(() => new Promise<void>((r) => child.once("exit", () => r())));
+
+      // The child ran its own drain before the helper resolved.
+      assert.isTrue(yield* fs.exists(drainMarker));
+    }),
+  );
+
+  it.effect("does not wait for a child without a live IPC channel", () =>
+    Effect.gen(function* () {
+      const child = NodeChildProcess.spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1_000);"],
+        {
+          stdio: ["ignore", "ignore", "inherit"],
+        },
+      );
+      yield* Effect.promise(() => new Promise<void>((r) => child.once("spawn", () => r())));
+      // No `ipc` stdio: the helper must return without driving a drain and the
+      // caller falls back to its bounded force-termination.
+      yield* Effect.promise(() => requestGracefulChildStop(child));
+      child.kill();
     }),
   );
 });

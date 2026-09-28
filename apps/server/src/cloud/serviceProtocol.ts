@@ -47,6 +47,12 @@ export type ServiceLauncherChildMessage =
   | {
       readonly type: "prepared";
       readonly updateId: string;
+    }
+  /** Sent once the managed child has drained its lifetime and is about to exit
+      in response to {@link ServiceLauncherParentMessage} `stop`. It is the
+      acknowledgement that a graceful stop completed, not a request to stop. */
+  | {
+      readonly type: "stopped";
     };
 
 export type ServiceLauncherParentMessage =
@@ -61,6 +67,12 @@ export type ServiceLauncherParentMessage =
   | {
       readonly type: "committed";
       readonly updateId: string;
+    }
+  /** Asks the managed child to run its own graceful shutdown and finalizers.
+      Used on platforms where a process signal is a hard kill (Windows), so the
+      launcher can join a real drain instead of terminating the child. */
+  | {
+      readonly type: "stop";
     };
 
 const SEMVER_NUMBER = "(?:0|[1-9]\\d*)";
@@ -249,7 +261,9 @@ export function decodeServiceLauncherChildMessage(
   }
   return value.type === "prepared" && typeof value.updateId === "string"
     ? { type: value.type, updateId: value.updateId }
-    : undefined;
+    : value.type === "stopped"
+      ? { type: value.type }
+      : undefined;
 }
 
 export function decodeServiceLauncherParentMessage(
@@ -264,5 +278,7 @@ export function decodeServiceLauncherParentMessage(
   }
   return value.type === "committed" && typeof value.updateId === "string"
     ? { type: value.type, updateId: value.updateId }
-    : undefined;
+    : value.type === "stop"
+      ? { type: value.type }
+      : undefined;
 }

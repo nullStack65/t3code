@@ -33,6 +33,9 @@ import {
 const HANDOFF_DELAY_MS = 2_000;
 const PREPARED_TIMEOUT_MS = 120_000;
 const TERMINATE_GRACE_MS = 5_000;
+/** Bound on how long a Windows whole-service stop waits for the managed child
+    to drain and acknowledge before it force-terminates the process. */
+const STOP_ACK_TIMEOUT_MS = 10_000;
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -258,6 +261,40 @@ function waitForExit(child: NodeChildProcess.ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
+/**
+ * Asks the managed child to run its own graceful shutdown over the existing
+ * IPC channel and waits, bounded, for the `stopped` acknowledgement or the
+ * child's own exit. Returns without forcing; the caller still terminates to
+ * guarantee the process is gone. Only meaningful where a signal is a hard kill
+ * (Windows), so POSIX keeps its existing signal-driven drain.
+ */
+export function requestGracefulChildStop(child: NodeChildProcess.ChildProcess): Promise<void> {
+  if (!child.connected || child.send === undefined) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    function finish() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      child.off("exit", onExit);
+      resolve();
+    }
+    function onMessage(value: unknown) {
+      const reply = decodeServiceLauncherChildMessage(value);
+      if (reply?.type === "stopped") finish();
+    }
+    function onExit() {
+      finish();
+    }
+    timer = setTimeout(finish, STOP_ACK_TIMEOUT_MS);
+    child.on("message", onMessage);
+    child.on("exit", onExit);
+    sendMessage(child, { type: "stop" }).catch(() => finish());
+  });
+}
+
 async function terminateChild(
   child: NodeChildProcess.ChildProcess,
   signal: NodeJS.Signals = "SIGTERM",
@@ -353,7 +390,14 @@ export class Launcher {
       this.#stopping = true;
       const child = this.#child?.process;
       this.#child = null;
-      if (child !== undefined) await terminateChild(child, signal);
+      if (child !== undefined) {
+        // Windows cannot deliver a graceful signal: request the child's own
+        // lifetime drain over IPC first, then guarantee the process is gone.
+        // POSIX keeps its existing signal-driven finalizer path.
+        // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+        if (process.platform === "win32") await requestGracefulChildStop(child);
+        await terminateChild(child, signal);
+      }
       this.#done = true;
       this.#completion.resolve();
     });
@@ -470,6 +514,11 @@ export class Launcher {
     if (this.#child !== child || this.#stopping) return;
     if (message.type === "request-update") {
       await this.#handleUpdateRequest(child, message);
+      return;
+    }
+    if (message.type === "stopped") {
+      // Owned by the dedicated whole-service stop listener in
+      // requestGracefulChildStop; a replacement handoff ignores it.
       return;
     }
     await this.#handlePrepared(child, message.updateId);

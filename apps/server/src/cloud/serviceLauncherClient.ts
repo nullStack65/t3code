@@ -251,3 +251,37 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
 });
 
 export const layer = Layer.effect(ServiceLauncherClient, make());
+
+/**
+ * Installs the managed graceful-stop handler. When the launcher owns this
+ * process it asks for a stop over the existing child IPC channel; this drives
+ * the same Effect-runtime interruption path the runtime already installs for
+ * `SIGTERM`, then acknowledges the drain from a scope finalizer so the launcher
+ * can distinguish a completed shutdown from a forced one. A server that is not
+ * launcher-managed (or that receives no stop request) is unaffected.
+ *
+ * `process.emit("SIGTERM")` is used rather than `process.kill` so the same
+ * finalizer path runs on Windows, where a process signal is a hard kill.
+ */
+export const managedShutdownLayer = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const { host, managed } = yield* resolveStartup();
+    if (!managed) return;
+    const onMessage = (...args: ReadonlyArray<unknown>) => {
+      const message = decodeServiceLauncherParentMessage(args[0]);
+      if (message?.type === "stop") process.emit("SIGTERM");
+    };
+    host.on("message", onMessage);
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        host.off("message", onMessage);
+        try {
+          host.send({ type: "stopped" });
+        } catch {
+          // The channel may already be closed; the launcher then falls back to
+          // its bounded force-termination instead of trusting this ack.
+        }
+      }),
+    );
+  }),
+);
