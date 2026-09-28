@@ -696,10 +696,25 @@ export interface BootServiceSystemdProperties {
 }
 
 /**
+ * Reads a whole field as a safe integer. A numeric prefix with trailing junk
+ * (`12junk`), a non-decimal spelling, or a value outside `Number.MAX_SAFE_INTEGER`
+ * stays unknown rather than being truncated or rounded into a misleading
+ * number. Sign and positivity are decided by the caller's domain rules.
+ */
+function parseWholeSafeInteger(text: string | undefined): number | undefined {
+  if (text === undefined) return undefined;
+  const trimmed = text.trim();
+  if (!/^-?\d+$/.test(trimmed)) return undefined;
+  const value = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+/**
  * Parses `systemctl --user show` key=value output. Missing LoadState or
  * ActiveState means the answer is unusable and must stay unknown rather than
  * defaulting to a healthy value. A malformed or nonpositive `MainPID` and a
- * malformed or negative `NRestarts` are dropped rather than coerced.
+ * malformed or negative `NRestarts` are dropped rather than coerced, including
+ * values too large to represent exactly as a safe integer.
  */
 export function parseSystemdShow(stdout: string): BootServiceSystemdProperties | undefined {
   const values = new Map<string, string>();
@@ -711,16 +726,10 @@ export function parseSystemdShow(stdout: string): BootServiceSystemdProperties |
   const loadState = values.get("LoadState");
   const activeState = values.get("ActiveState");
   if (loadState === undefined || activeState === undefined) return undefined;
-  const restartText = values.get("NRestarts");
-  const nRestarts =
-    restartText !== undefined && /^\d+$/.test(restartText)
-      ? Number.parseInt(restartText, 10)
-      : undefined;
-  const mainPidText = values.get("MainPID");
-  const mainPid =
-    mainPidText !== undefined && /^\d+$/.test(mainPidText)
-      ? Number.parseInt(mainPidText, 10)
-      : undefined;
+  const restartValue = parseWholeSafeInteger(values.get("NRestarts"));
+  const nRestarts = restartValue !== undefined && restartValue >= 0 ? restartValue : undefined;
+  const mainPidValue = parseWholeSafeInteger(values.get("MainPID"));
+  const mainPid = mainPidValue !== undefined && mainPidValue > 0 ? mainPidValue : undefined;
   const result = values.get("Result");
   return {
     loadState,
@@ -728,8 +737,8 @@ export function parseSystemdShow(stdout: string): BootServiceSystemdProperties |
     subState: values.get("SubState") ?? "",
     unitFileState: values.get("UnitFileState") ?? "",
     execStart: values.get("ExecStart") ?? "",
-    ...(mainPid !== undefined && mainPid > 0 ? { mainPid } : {}),
-    ...(nRestarts !== undefined && Number.isSafeInteger(nRestarts) ? { nRestarts } : {}),
+    ...(mainPid === undefined ? {} : { mainPid }),
+    ...(nRestarts === undefined ? {} : { nRestarts }),
     ...(result !== undefined && result !== "" ? { result } : {}),
   };
 }
@@ -744,21 +753,19 @@ export interface BootServiceLaunchdPrint {
 /**
  * `launchctl print` has no stable machine format, so only a few anchored tokens
  * are read. A response with none of them is malformed and stays unknown. A
- * `pid` is only observed when it is a positive integer; a zero or malformed
- * value is not a live process.
+ * `pid` is only observed when the whole field is a positive safe integer; a
+ * zero, a numeric prefix with trailing junk, or an unrepresentable value is not
+ * a live process. `last exit code` is read as a whole safe signed integer.
  */
 export function parseLaunchdPrint(stdout: string): BootServiceLaunchdPrint | undefined {
   if (!/(?:^|\n)[ \t]*(?:state|pid|program|last exit code)[ \t]*=/.test(stdout)) return undefined;
   const state = /(?:^|\n)[ \t]*state[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1]?.trim();
-  const pidText = /(?:^|\n)[ \t]*pid[ \t]*=[ \t]*(\d+)/.exec(stdout)?.[1];
+  const pidText = /(?:^|\n)[ \t]*pid[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1];
   const program = /(?:^|\n)[ \t]*program[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1]?.trim();
-  const lastExitText = /(?:^|\n)[ \t]*last exit code[ \t]*=[ \t]*(-?\d+)/.exec(stdout)?.[1];
-  const pidValue = pidText === undefined ? undefined : Number.parseInt(pidText, 10);
-  const pid =
-    pidValue !== undefined && Number.isSafeInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
-  const lastExitValue = lastExitText === undefined ? undefined : Number.parseInt(lastExitText, 10);
-  const lastExitCode =
-    lastExitValue !== undefined && Number.isSafeInteger(lastExitValue) ? lastExitValue : undefined;
+  const lastExitText = /(?:^|\n)[ \t]*last exit code[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1];
+  const pidValue = parseWholeSafeInteger(pidText);
+  const pid = pidValue !== undefined && pidValue > 0 ? pidValue : undefined;
+  const lastExitCode = parseWholeSafeInteger(lastExitText);
   return {
     ...(state === undefined || state === "" ? {} : { state }),
     ...(pid === undefined ? {} : { pid }),

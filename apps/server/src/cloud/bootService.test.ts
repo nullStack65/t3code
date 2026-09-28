@@ -1013,6 +1013,34 @@ it("parses only well-formed manager output and exact versions, rejecting bad cou
   expect(BootService.launchdNotFound("launchctl: input/output error")).toBe(false);
 });
 
+it("rejects a numeric prefix and unrepresentable integers in manager output", () => {
+  // `pid = 12junk` must not be truncated to 12.
+  expect(BootService.parseLaunchdPrint("\tstate = running\n\tpid = 12junk\n")?.pid).toBeUndefined();
+  // The last-exit-code field has the same suffix hazard.
+  expect(
+    BootService.parseLaunchdPrint("\tstate = running\n\tlast exit code = 7junk\n")?.lastExitCode,
+  ).toBeUndefined();
+  // An unrepresentable pid must not become an unsafe number.
+  expect(
+    BootService.parseLaunchdPrint("\tstate = running\n\tpid = 99999999999999999999\n")?.pid,
+  ).toBeUndefined();
+  // Whole fields still parse, including a signed last exit code.
+  expect(
+    BootService.parseLaunchdPrint("\tstate = running\n\tpid = 12\n\tlast exit code = -9\n"),
+  ).toMatchObject({ pid: 12, lastExitCode: -9 });
+  // systemd MainPID must be safe before it can imply a live process.
+  expect(
+    BootService.parseSystemdShow(
+      "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=99999999999999999999",
+    )?.mainPid,
+  ).toBeUndefined();
+  expect(
+    BootService.parseSystemdShow(
+      "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4242",
+    )?.mainPid,
+  ).toBe(4242);
+});
+
 it.layer(NodeServices.layer)("program path binding", (it) => {
   it.effect("binds only normalized paths inside the selected runtime tree", () =>
     Effect.gen(function* () {
