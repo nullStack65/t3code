@@ -92,6 +92,7 @@ import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
 import * as LaunchPreflightWarningInboxModule from "../../environment/LaunchPreflightWarningInbox.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { resolveLaunchPreflightConsumer } from "../launchPreflightConsumer.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -559,38 +560,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly provider?: ProviderDriverKind;
     readonly providerInstanceId?: ProviderInstanceId;
   }) {
-    // Only probe a real directory: spawning Git in a missing path or a plain
-    // file would fail at the OS layer. The caller's own workspace read (and
-    // `ProviderWorkspaceMissingError`) handles those cases. This stat is itself
-    // bounded so a stalled/cloud-offloaded path cannot hold the launch; a
-    // timeout simply skips the preflight and lets the adapter surface the
-    // filesystem problem.
-    const workspaceStat = yield* fileSystem.stat(input.cwd).pipe(
-      Effect.timeoutOption(NARROW_FS_TIMEOUT),
-      Effect.map(Option.getOrElse(() => undefined)),
-      Effect.orElseSucceed(() => undefined),
-    );
-    if (workspaceStat === undefined || workspaceStat.type !== "Directory") {
-      return;
-    }
+    // The bounded launch preflight itself verifies that the exact cwd is a real
+    // directory, warns about a stalled/denied filesystem, and skips a genuinely
+    // absent or non-directory path. The caller's own workspace read (and
+    // `ProviderWorkspaceMissingError`) owns that case, so this no longer
+    // silently drops a failed/timed-out cwd stat.
 
-    const settings = yield* serverSettings.getSettings.pipe(
-      Effect.orElseSucceed(() => undefined),
-    );
+    const settings = yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => undefined));
     const isSharedRoot = LaunchPreflight.isConfiguredSharedSessionRoot(
       pathService,
       input.cwd,
       settings?.sharedSessionRoot,
     );
-    // The selected consumer/operation determines `--sparse` applicability. T3
-    // launches OpenCode with its default config, where snapshot staging is on
-    // unless the user disabled it, and OpenCode stages with `git add --sparse`
-    // even in an ordinary repository. Other consumers only need `--sparse` in a
-    // sparse checkout, so this is never a global T3 Git requirement.
-    const consumer: LaunchPreflight.LaunchPreflightConsumer | undefined =
-      input.provider === undefined
-        ? undefined
-        : { driver: input.provider, snapshotsEnabled: true };
+    // The consumer/operation is derived from the selected production
+    // instance/runtime facts: the effective OpenCode snapshot configuration and
+    // whether an external OpenCode server owns the session. Non-OpenCode
+    // launches keep T3's own Git fallback and only need `--sparse` in a sparse
+    // checkout.
+    const consumer = resolveLaunchPreflightConsumer({
+      ...(input.provider !== undefined ? { provider: input.provider } : {}),
+      ...(input.providerInstanceId !== undefined
+        ? { providerInstanceId: input.providerInstanceId }
+        : {}),
+      ...(settings !== undefined ? { settings } : {}),
+    });
     // The provider launch resolves `git` from the same environment the adapter
     // inherits. Pass it through so the probe inspects the actual selected Git,
     // not an unrelated host default.
@@ -645,8 +638,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // stays for the next session in the same directory.
     const inbox = yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
     const inboxKey = LaunchPreflight.normalizePathKey(pathService, input.cwd);
-    const pendingWarnings =
-      LaunchPreflightWarningInboxModule.peekLaunchPreflightWarnings(inbox, inboxKey);
+    const pendingWarnings = LaunchPreflightWarningInboxModule.peekLaunchPreflightWarnings(
+      inbox,
+      inboxKey,
+    );
     const deliveredCodes = new Set<string>();
     const undelivered: Array<LaunchPreflightWarningInboxModule.PendingLaunchPreflightWarning> = [];
     for (const warning of pendingWarnings) {

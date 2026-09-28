@@ -7,11 +7,13 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationEvent,
+  type ProviderInstanceConfig,
 } from "@t3tools/contracts";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -522,8 +524,270 @@ it.live("A3: a missing configured executable fails before model work", () =>
       assert.include((error as ProviderAdapterProcessError).message, "grok");
     }).pipe(Effect.provide(providerLayer));
 
-    yield* Effect.promise(() =>
-      NodeFSP.rm(cwd, { recursive: true, force: true }),
-    );
+    yield* Effect.promise(() => NodeFSP.rm(cwd, { recursive: true, force: true }));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+// --- R3: production settings/instance construction selects the consumer ------------------------
+
+interface CapturedLaunch {
+  consumer?: LaunchPreflight.LaunchPreflightConsumer | undefined;
+  gitEnvironment?: NodeJS.ProcessEnv | undefined;
+}
+
+const captureConsumerLayer = (options: {
+  readonly cwd: string;
+  readonly registry: ReturnType<typeof makeAdapterRegistryMock>;
+  readonly providerInstances: Readonly<Record<string, ProviderInstanceConfig>>;
+  readonly captured: CapturedLaunch;
+}) => {
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(
+    Layer.provide(ProviderSessionRuntime.layer),
+  );
+  const inbox = new Map<
+    string,
+    ReadonlyArray<{
+      readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+      readonly message: string;
+    }>
+  >();
+  const shared = Layer.mergeAll(
+    directoryLayer,
+    Layer.succeed(ProviderAdapterRegistry, options.registry),
+    Layer.succeed(LaunchPreflightWarningInbox, inbox),
+    ServerConfig.layerTest(options.cwd, options.cwd).pipe(Layer.provide(NodeServices.layer)),
+    ServerSettingsService.layerTest({
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: options.providerInstances,
+    }),
+    AnalyticsService.layerTest,
+    Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+  ).pipe(Layer.provide(SqlitePersistenceMemory));
+  return makeProviderServiceLive({
+    reportLaunchPreflightWarning: () => Effect.succeed(true),
+    launchPreflightRunner: (_root, runnerOptions) => {
+      options.captured.consumer = runnerOptions?.consumer;
+      options.captured.gitEnvironment = runnerOptions?.gitEnvironment;
+      return Effect.succeed(findingResult([]));
+    },
+  }).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(shared));
+};
+
+const openCodeInstance = (overrides: {
+  readonly config?: unknown;
+  readonly environment?: ProviderInstanceConfig["environment"];
+}): ProviderInstanceConfig => ({
+  driver: ProviderDriverKind.make("opencode"),
+  enabled: true,
+  ...(overrides.config !== undefined ? { config: overrides.config } : {}),
+  ...(overrides.environment !== undefined ? { environment: overrides.environment } : {}),
+});
+
+it.live(
+  "R3: production settings select the launch consumer (local OpenCode, snapshot:false, external, fallback)",
+  () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeWorkspaceDirectory;
+      const sentinel = "envchk-e6-provider-sentinel";
+      const codexHarness = yield* makeTestProviderAdapterHarness();
+      const opencodeHarness = yield* makeTestProviderAdapterHarness({
+        provider: ProviderDriverKind.make("opencode"),
+      });
+      const registry = makeAdapterRegistryMock({
+        [ProviderDriverKind.make("codex")]: codexHarness.adapter,
+        [ProviderDriverKind.make("opencode")]: opencodeHarness.adapter,
+      });
+
+      const runCase = (input: {
+        readonly threadId: string;
+        readonly provider: ProviderDriverKind;
+        readonly providerInstanceId: ProviderInstanceId;
+        readonly providerInstances: Readonly<Record<string, ProviderInstanceConfig>>;
+      }) =>
+        Effect.gen(function* () {
+          const captured: CapturedLaunch = {};
+          const layer = captureConsumerLayer({
+            cwd,
+            registry,
+            providerInstances: input.providerInstances,
+            captured,
+          });
+          yield* Effect.gen(function* () {
+            const provider = yield* ProviderService;
+            const threadId = ThreadId.make(input.threadId);
+            yield* provider.startSession(threadId, {
+              threadId,
+              provider: input.provider,
+              providerInstanceId: input.providerInstanceId,
+              cwd,
+              runtimeMode: "full-access",
+            });
+          }).pipe(Effect.provide(layer));
+          return captured;
+        });
+
+      // 1. Default local OpenCode: snapshots are on and the selected provider
+      //    environment is threaded through unchanged.
+      const local = yield* runCase({
+        threadId: "r3-local",
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        providerInstances: {
+          opencode: openCodeInstance({
+            environment: [{ name: "ENVCHK_SENTINEL", value: sentinel, sensitive: false }],
+          }),
+        },
+      });
+      assert.deepStrictEqual(local.consumer, { driver: "opencode", snapshotsEnabled: true });
+      assert.strictEqual(local.gitEnvironment?.ENVCHK_SENTINEL, sentinel);
+
+      // 2. Effective `snapshot:false` in the selected instance's environment
+      //    suppresses the provider-specific requirement.
+      const disabled = yield* runCase({
+        threadId: "r3-disabled",
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        providerInstances: {
+          opencode: openCodeInstance({
+            environment: [
+              { name: "OPENCODE_CONFIG_CONTENT", value: '{"snapshot":false}', sensitive: false },
+              { name: "ENVCHK_SENTINEL", value: sentinel, sensitive: false },
+            ],
+          }),
+        },
+      });
+      assert.deepStrictEqual(disabled.consumer, { driver: "opencode", snapshotsEnabled: false });
+
+      // 3. External OpenCode server: the local Git is not that process's Git.
+      const external = yield* runCase({
+        threadId: "r3-external",
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        providerInstances: {
+          opencode: openCodeInstance({ config: { serverUrl: "http://127.0.0.1:4096" } }),
+        },
+      });
+      assert.deepStrictEqual(external.consumer, { driver: "opencode", snapshotsEnabled: false });
+
+      // 4. Non-OpenCode fallback: T3's own Git path only needs `--sparse` in a
+      //    sparse checkout, which the repository probe decides.
+      const fallback = yield* runCase({
+        threadId: "r3-codex",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerInstances: {
+          codex: { driver: ProviderDriverKind.make("codex"), enabled: true, config: {} },
+        },
+      });
+      assert.deepStrictEqual(fallback.consumer, { driver: "codex", snapshotsEnabled: true });
+
+      yield* Effect.promise(() => NodeFSP.rm(cwd, { recursive: true, force: true }));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+const writeSparseLessGit = (binDir: string, realGit: string): void => {
+  NodeFS.writeFileSync(
+    NodePath.join(binDir, "git"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "add" ] && [ "$2" = "-h" ]; then',
+      '  echo "usage: git add [options] [--] <pathspec>..."',
+      '  echo "    -n, --dry-run         dry run"',
+      "  exit 0",
+      "fi",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+};
+
+it.live(
+  "R3: a local OpenCode launch with default snapshots detects a controlled Git missing --sparse",
+  () =>
+    Effect.gen(function* () {
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-r3-sparse-")),
+      );
+      const repo = NodePath.join(base, "repo");
+      const providerBin = NodePath.join(base, "provider-bin");
+      yield* Effect.promise(() => NodeFSP.mkdir(repo, { recursive: true }));
+      yield* Effect.promise(() => NodeFSP.mkdir(providerBin, { recursive: true }));
+      const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+      writeSparseLessGit(providerBin, realGit);
+      const git = (args: ReadonlyArray<string>) =>
+        Effect.promise(async () => {
+          NodeChildProcess.execFileSync(realGit, args, { cwd: repo });
+        });
+      yield* git(["init", "-q"]);
+      yield* git(["config", "user.name", "Test"]);
+      yield* git(["config", "user.email", "test@test.com"]);
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(repo, "file.txt"), "hello\n"));
+      yield* git(["add", "."]);
+      yield* git(["commit", "-q", "-m", "initial"]);
+
+      const harness = yield* makeTestProviderAdapterHarness({
+        provider: ProviderDriverKind.make("opencode"),
+      });
+      const registry = makeAdapterRegistryMock({
+        [ProviderDriverKind.make("opencode")]: harness.adapter,
+      });
+      const reported = yield* Ref.make<
+        ReadonlyArray<{ readonly code: string; readonly message: string }>
+      >([]);
+      const inbox = new Map<
+        string,
+        ReadonlyArray<{
+          readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+          readonly message: string;
+        }>
+      >();
+      const shared = Layer.mergeAll(
+        ProviderSessionDirectoryLive.pipe(Layer.provide(ProviderSessionRuntime.layer)),
+        Layer.succeed(ProviderAdapterRegistry, registry),
+        Layer.succeed(LaunchPreflightWarningInbox, inbox),
+        ServerConfig.layerTest(repo, repo).pipe(Layer.provide(NodeServices.layer)),
+        ServerSettingsService.layerTest({
+          ...DEFAULT_SERVER_SETTINGS,
+          // No OPENCODE_CONFIG_CONTENT: OpenCode's default snapshots are on. The
+          // selected instance environment resolves the controlled sparse-less Git.
+          providerInstances: {
+            [ProviderInstanceId.make("opencode")]: {
+              driver: ProviderDriverKind.make("opencode"),
+              enabled: true,
+              environment: [{ name: "PATH", value: providerBin, sensitive: false }],
+            },
+          },
+        }),
+        AnalyticsService.layerTest,
+        Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+      ).pipe(Layer.provide(SqlitePersistenceMemory));
+      // The real preflight runner runs, so the production-derived consumer and the
+      // selected provider environment are what the capability probe inspects.
+      const providerLayer = makeProviderServiceLive({
+        reportLaunchPreflightWarning: ({ code, message }) =>
+          Ref.update(reported, (current) => [...current, { code, message }]).pipe(Effect.as(true)),
+      }).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(shared));
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = ThreadId.make("r3-sparse");
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: ProviderDriverKind.make("opencode"),
+          providerInstanceId: ProviderInstanceId.make("opencode"),
+          cwd: repo,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(providerLayer));
+
+      const warnings = yield* Ref.get(reported);
+      const sparseWarning = warnings.find(
+        (warning) => warning.code === "git-sparse-add-unsupported",
+      );
+      assert.isDefined(sparseWarning, "no git-sparse-add-unsupported warning was reported");
+      assert.include(sparseWarning?.message ?? "", "OpenCode");
+      assert.include(sparseWarning?.message ?? "", "--sparse");
+
+      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
