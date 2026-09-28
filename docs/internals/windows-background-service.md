@@ -1,8 +1,9 @@
 # Windows background service
 
-Status: prototype source only. Windows background support stays disabled and
-unqualified until this host, the launcher control adaptation, the BootService
-adapter, packaged artifacts and a real SCM run are joined and tested.
+Status: source assembled, native gate unrun. The host, the launcher control
+adaptation and the BootService SCM adapter are implemented; Windows background
+support stays disabled and unqualified until packaged artifacts and a real SCM
+run are joined and tested.
 
 The implementation is a [small Rust SCM host](../../native/windows-service-host/src/main.rs).
 The rest of T3's background service is platform-neutral: [BootService](../../apps/server/src/cloud/bootService.ts)
@@ -145,31 +146,34 @@ contains this host's assigned members; a stale or foreign PID is never the
 target. Only owned members and confirmed-empty job accounting may be reported as
 a clean stop.
 
-## Required launcher control (not implemented here)
+## Launcher control (implemented)
 
-`serviceLauncher.ts` is owned by its current writer and is not edited by this
-slice. Two small adaptations are required before the host can stop gracefully:
+The host delivers control to the launcher over a private, per-instance request
+file the launcher watches, not by assuming a Node IPC channel appears on its
+own. On `SERVICE_CONTROL_STOP`/`SHUTDOWN` the host writes
+`<home>/runtime/.service-control.json` containing
+`{ protocol, type: "stop", instance, requestId }` and passes the same
+per-instance token to the launcher in `T3_SERVICE_LAUNCHER_INSTANCE`. The
+launcher (`serviceLauncher.ts`) reads the file, ignores a request whose token is
+not its own (stale or foreign), consumes it before acting, and runs its real
+`Launcher.stop`, which drives the child's drain over the child IPC channel it
+already opened. The file is not the cleanup marker: `.service-stopping` remains
+a separate cleanup hint, and the host writes it only as a fallback, not as
+evidence that control was delivered.
 
-- **A parent control channel.** Spawn the launcher with an IPC channel and have
-  `Launcher.run()` treat a `{ "type": "stop" }` message from its parent (the
-  host) like a `SIGTERM`: call `this.stop("SIGTERM")`, which writes the stop
-  marker before it terminates the child. This belongs next to the existing
-  `serviceProtocol.ts` messages as an additive type. The host already restores
-  `T3CODE_HOME` and starts `t3.exe __service-launcher`; it only needs to be
-  given the channel.
-- **Graceful child shutdown on Windows.** Windows has no POSIX signals. Node's
-  `child.kill("SIGTERM")` calls `TerminateProcess`, so the server child cannot
-  read the stop marker in its shutdown finalizer. The launcher must deliver a
-  graceful shutdown over the child IPC channel it already opens, then fall back
-  to `terminateChild` after its own grace period.
+- **A parent control channel** is therefore the per-instance request file, not a
+  fabricated Node IPC frame. A future owner may replace it with a real inherited
+  pipe; the JSON request shape is the stable seam. The host still starts
+  `t3.exe __service-launcher`; it only needs to write the request and the token.
+- **Graceful child shutdown on Windows** is implemented in the launcher: a
+  `{ "type": "stop", requestId }` IPC message asks the child to drain, and the
+  launcher waits for the child's real exit (bounded) before any force
+  fallback. An acknowledgement is advisory and request-bound; it never
+  authorizes a kill on its own.
 
-Until both land, the host's stop degrades to writing the marker and then
-force-terminating the job after the drain. That is honest, bounded, and still
-correct for the service tree, but it is not graceful server shutdown.
-
-Because the launcher is not adapted yet, the host writes the stop marker
-directly. A later integration owner should decide whether the host keeps that
-fallback or relies solely on the control message.
+The host's stop remains bounded and two-stage as above. Its fallback when no
+launcher reads the channel is to write the marker and force-terminate the job
+after the drain deadline, which stays correct for the service tree.
 
 ## Honest failure states
 
@@ -221,27 +225,31 @@ fallback or relies solely on the control message.
 
 ## Integration boundary
 
-A later single integration owner joins these parts; this slice writes only
-`native/windows-service-host/**` and this document.
+The host, launcher control and BootService SCM adapter are now joined in source.
+Packaging and the native SCM run remain the open gates.
 
-Adapter (`apps/server/src/cloud/bootService.ts`, owned by R6-T3-STATUS):
+Adapter (`apps/server/src/cloud/bootService.ts`, pure rules in
+`windowsBootService.ts`):
 
-- Add `"scm"` to the manager union and a `windowsManager(...)` sibling of
-  `systemdManager`/`launchdManager`. `render` produces the host command
-  (`hostPath`, `--home`, `--runtime <activeVersion>/t3.exe`, `--log`,
-  `--service-name`, optional `--expected-account`). The steps are `sc.exe
+- `"scm"` is in the manager union and `windowsManager(...)` renders the host
+  command (`hostPath`, `--home`, `--runtime <activeVersion>/t3.exe`, `--log`,
+  `--service-name`, optional `--expected-account`). Steps are `sc.exe
 create/start/stop/delete/config` with `obj=` and the account, not a unit file.
-- `selectBootServiceManager` returns it for `platform === "win32"` when the home
-  and account are known, instead of `undefined`.
-- `BootServiceStatus` learns the SCM state; installation, registration and
-  observed running state stay separate, as they already are for Linux.
+- `selectBootServiceManager` returns it for `platform === "win32"` only when the
+  home and a qualified account are known; otherwise it returns `undefined` and
+  the CLI reports the service unsupported rather than defaulting to LocalSystem.
+- `BootServiceStatus` reports the SCM state; registration, start type and
+  observed running state stay separate, as they are for Linux. Install/restart/
+  uninstall refuse a foreign registration and a missing helper or account.
 
-Launcher (`apps/server/src/serviceLauncher.ts`, `serviceProtocol.ts`): the two
-adaptations above.
+Launcher (`apps/server/src/serviceLauncher.ts`, `serviceProtocol.ts`):
+`ServiceLauncherControlRequest` plus the request/ack ids; see
+[Launcher control](#launcher-control-implemented).
 
 Packaging (`packaging/**`, root workspaces, release workflows): compile the host
 and ship it beside the pinned runtime. Root Cargo/package workspaces and the
-release pipeline are outside this slice.
+release pipeline are outside this slice. Until the helper ships, the adapter
+reports `service-helper-missing` and refuses to install.
 
 CI (`.github/workflows/ci.yml`): the `Rust` job hardcodes the native crate list
 (`resource-monitor kde-snap-shot hyprland-snap-shot`). Add `windows-service-host`

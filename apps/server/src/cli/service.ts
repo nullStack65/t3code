@@ -73,7 +73,7 @@ export function formatServiceStatus(
     return JSON.stringify({ ...status, cliVersion }, null, 2);
   }
   if (!status.supported) {
-    return "T3 Code service\n  Status: unavailable on this machine\n  Supported on: Linux with systemd, macOS with launchd";
+    return "T3 Code service\n  Status: unavailable on this machine\n  Supported on: Linux with systemd, macOS with launchd, and Windows with the T3 service host and an explicit service account";
   }
   if (!status.installed) {
     return "T3 Code service\n  Status: not installed\n  Next: Run `t3 service install`.";

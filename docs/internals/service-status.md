@@ -11,15 +11,15 @@ and [formatServiceStatus](https://github.com/nullStack65/t3code/blob/main/apps/s
 
 The contract keeps these observations separate, and each one may be `unknown`:
 
-| Field                   | Meaning                                                                                                                                                                                                           | Not a claim about                                                                                                                |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `supported` / `manager` | This host can run a service, and which manager.                                                                                                                                                                   | Whether one is installed.                                                                                                        |
-| `installed`             | The unit/plist file for this fixed per-user name exists.                                                                                                                                                          | Whether the manager has loaded it.                                                                                               |
-| `enabled`               | Manager's own registration state (`systemd UnitFileState`, launchd `print-disabled`).                                                                                                                             | Running state.                                                                                                                   |
-| `running`               | Manager-observed job state: `running`, `stopped`, `transitioning`, `not-loaded`, `unknown`.                                                                                                                       | The server answering, or the expected artifact.                                                                                  |
-| `current`               | Identity only: unit/plist matches this CLI, the pinned runtime is present, the launcher state file names this version and no update is pending.                                                                   | Running, enabled, or healthy.                                                                                                    |
-| `installedVersion`      | Version recorded in the launcher state file.                                                                                                                                                                      | The process that is actually running.                                                                                            |
-| `configuredVersion`     | Version parsed from the program path the manager is _configured_ to launch (launchd `program`, systemd `ExecStart`), only when that path normalizes inside the selected base directory's `runtime/versions` tree. | That the server answers, is authenticated, or that a foreign-home path is this service; that the running server is this version. |
+| Field                   | Meaning                                                                                                                                                                                                                                               | Not a claim about                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `supported` / `manager` | This host can run a service, and which manager (`systemd`, `launchd`, `scm`, or `unsupported`).                                                                                                                                                       | Whether one is installed.                                                                                                        |
+| `installed`             | The fixed-name unit/plist file exists, or (Windows) an SCM registration is present.                                                                                                                                                                   | Whether the manager has loaded it, or that the registration is this home's.                                                      |
+| `enabled`               | Manager's own registration state (`systemd UnitFileState`, launchd `print-disabled`, SCM `START_TYPE`).                                                                                                                                               | Running state.                                                                                                                   |
+| `running`               | Manager-observed job state: `running`, `stopped`, `transitioning`, `not-loaded`, `unknown`.                                                                                                                                                           | The server answering, or the expected artifact.                                                                                  |
+| `current`               | Identity only: unit/plist or SCM registration matches this CLI, the pinned runtime is present, the launcher state file names this version and no update is pending.                                                                                   | Running, enabled, or healthy.                                                                                                    |
+| `installedVersion`      | Version recorded in the launcher state file.                                                                                                                                                                                                          | The process that is actually running.                                                                                            |
+| `configuredVersion`     | Version parsed from the program path the manager is _configured_ to launch (launchd `program`, systemd `ExecStart`, SCM `BINARY_PATH_NAME` `--runtime`), only when that path normalizes inside the selected base directory's `runtime/versions` tree. | That the server answers, is authenticated, or that a foreign-home path is this service; that the running server is this version. |
 
 A launcher state file records intent; the manager records what it is configured
 to launch; the server answering is a third, separate gate. `current: true` with
@@ -100,6 +100,28 @@ launchd throttling (`ThrottleInterval`) is not a finite restart budget, so the
 contract never reports a launchd restart count. `restartCount` is populated
 from systemd `NRestarts` only, where it is a monotonic count since the unit
 last started — not a rate and not by itself a problem.
+
+## Windows SCM observations
+
+Windows has no unit file: the service is an SCM registration whose `ImagePath`
+is the T3-owned `t3-windows-service-host.exe` plus the explicit `--home`,
+`--runtime`, `--log`, `--service-name` and `--expected-account`. The probe is
+bounded and read-only, using `sc.exe queryex` and `sc.exe qc`:
+
+- Only the SCM's own `ERROR_SERVICE_DOES_NOT_EXIST` (1060) is absence
+  (`service-not-registered`). Any other nonzero result, a timeout, or
+  unparseable output stays `unknown` (`manager-query-failed` /
+  `manager-timeout` / `manager-output-malformed`); a failed query is never
+  absence and never healthy.
+- `running` comes from the `STATE` token (`RUNNING` / `STOPPED` /
+  `*_PENDING`); `enabled` comes from `START_TYPE` (`AUTO_START` vs
+  `DEMAND_START`/`DISABLED`).
+- A registration is this installation's own only when its normalized
+  `BINARY_PATH_NAME` equals this adapter's rendering for the selected home,
+  helper, runtime, log and account. A different binding is
+  `windows-service-foreign-registration`, and install/restart/uninstall refuse
+  to overwrite or delete it. `install` also refuses when the account is not
+  qualified or the helper is not installed beside the runtime.
 
 ## Deliberately out of scope
 
