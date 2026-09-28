@@ -157,6 +157,10 @@ const normalizeForCompare = (path: Path.Path, value: string): string => {
     : resolved;
 };
 
+/** Normalizes a path into a stable key for exact-root comparisons. */
+export const normalizePathKey = (path: Path.Path, value: string): string =>
+  normalizeForCompare(path, value);
+
 const samePath = (path: Path.Path, a: string | null, b: string): boolean =>
   a !== null && normalizeForCompare(path, a) === normalizeForCompare(path, b);
 

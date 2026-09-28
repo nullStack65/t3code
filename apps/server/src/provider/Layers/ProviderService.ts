@@ -89,6 +89,7 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
+import * as LaunchPreflightWarningInboxModule from "../../environment/LaunchPreflightWarningInbox.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -585,7 +586,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
       ),
     );
-    for (const warning of result.warnings) {
+    // Deliver any warnings the startup preflight could only log (no thread
+    // existed yet) to this first affected session, through the same transport.
+    const inbox = yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
+    const pendingWarnings = LaunchPreflightWarningInboxModule.takeLaunchPreflightWarnings(
+      inbox,
+      LaunchPreflight.normalizePathKey(pathService, input.cwd),
+    );
+    const deliveredCodes = new Set<string>();
+    for (const warning of [...pendingWarnings, ...result.warnings]) {
+      if (deliveredCodes.has(warning.code)) continue;
+      deliveredCodes.add(warning.code);
       yield* Effect.logWarning(`launch preflight: ${warning.message}`, {
         code: warning.code,
         threadId: input.threadId,

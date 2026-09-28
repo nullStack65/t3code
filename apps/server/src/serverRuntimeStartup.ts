@@ -35,6 +35,7 @@ import * as Scope from "effect/Scope";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as LaunchPreflight from "./environment/LaunchPreflight.ts";
+import * as LaunchPreflightWarningInboxModule from "./environment/LaunchPreflightWarningInbox.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -990,6 +991,18 @@ export const make = (options?: StartupOptions) =>
                       cwd: serverConfig.cwd,
                     }),
                   { discard: true },
+                );
+                // No thread exists yet, so carry these to the first provider
+                // session in this directory, which delivers them through the
+                // existing user-visible warning transport.
+                const inbox = yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
+                LaunchPreflightWarningInboxModule.recordLaunchPreflightWarnings(
+                  inbox,
+                  LaunchPreflight.normalizePathKey(pathService, serverConfig.cwd),
+                  result.warnings.map((warning) => ({
+                    code: warning.code,
+                    message: warning.message,
+                  })),
                 );
                 yield* Effect.forEach(
                   result.blockers,

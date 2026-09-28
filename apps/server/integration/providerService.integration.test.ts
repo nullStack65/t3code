@@ -38,6 +38,7 @@ import {
 } from "../src/provider/Services/ProviderService.ts";
 import * as ServerConfig from "../src/config.ts";
 import * as LaunchPreflight from "../src/environment/LaunchPreflight.ts";
+import { LaunchPreflightWarningInbox } from "../src/environment/LaunchPreflightWarningInbox.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
 import { execScriptSource, writeFakeCli } from "../src/testUtils/fakeCli.ts";
 import { AnalyticsService } from "../src/telemetry/AnalyticsService.ts";
@@ -102,6 +103,11 @@ const makeIntegrationFixture = (options?: {
   readonly settings?: Parameters<typeof ServerSettingsService.layerTest>[0];
   /** Configure the workspace directory itself as the shared session root. */
   readonly sharedSessionRootIsWorkspace?: boolean;
+  /** Pre-seed the pre-thread startup warning inbox for the workspace cwd. */
+  readonly pendingWarnings?: ReadonlyArray<{
+    readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+    readonly message: string;
+  }>;
   readonly launchPreflightRunner?: (
     root: string,
     options?: { readonly isSharedRoot?: boolean },
@@ -116,6 +122,17 @@ const makeIntegrationFixture = (options?: {
   Effect.gen(function* () {
     const cwd = yield* makeWorkspaceDirectory;
     const harness = yield* makeTestProviderAdapterHarness();
+    const pathService = yield* Path.Path;
+    const inbox = new Map<
+      string,
+      ReadonlyArray<{
+        readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+        readonly message: string;
+      }>
+    >();
+    if (options?.pendingWarnings !== undefined) {
+      inbox.set(LaunchPreflight.normalizePathKey(pathService, cwd), options.pendingWarnings);
+    }
 
     // A real adapter whose configured executable is the caller's path, so a
     // launch exercises the actual platform spawn/error path (not a mock).
@@ -144,6 +161,7 @@ const makeIntegrationFixture = (options?: {
     const shared = Layer.mergeAll(
       directoryLayer,
       Layer.succeed(ProviderAdapterRegistry, registry),
+      Layer.succeed(LaunchPreflightWarningInbox, inbox),
       ServerConfig.layerTest(options?.serverConfigCwd ?? cwd, cwd).pipe(
         Layer.provide(NodeServices.layer),
       ),
@@ -582,6 +600,31 @@ it.live("a configured shared session root applies independently of the backend c
     }).pipe(Effect.provide(fixture.layer));
 
     assert.deepStrictEqual(seen, [true, false]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("pre-thread startup warnings reach the first affected session", () =>
+  Effect.gen(function* () {
+    const reported = yield* Ref.make<ReadonlyArray<string>>([]);
+    const fixture = yield* makeIntegrationFixture({
+      launchPreflightRunner: () => Effect.succeed(findingResult([])),
+      reportLaunchPreflightWarning: ({ message }) =>
+        Ref.update(reported, (current) => [...current, message]),
+      pendingWarnings: [{ code: "shared-root-git", message: "startup umbrella warning" }],
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      yield* provider.startSession(ThreadId.make("thread-startup-warning"), {
+        threadId: ThreadId.make("thread-startup-warning"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.deepStrictEqual(yield* Ref.get(reported), ["startup umbrella warning"]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
