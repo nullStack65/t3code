@@ -48,6 +48,15 @@ expressed. Until the owner supplies them, CI cannot execute here; do not read a
 queued job as a result, and do not add an unmatched label to make the queue look
 intentional.
 
+The failure is fail-closed, not a queue. With neither variable set the run
+cannot schedule its `authorize` job, so it concludes `failure` at startup with
+every dependent job skipped and no runner allocated — PR #12 run `36424904599`
+versus the pre-repair run `36415749632`, which queued indefinitely on Blacksmith
+labels. When a Linux label **is** declared but missing from
+`T3CODE_AUTHORIZED_RUNNERS`, the job schedules and the guard exits with
+`RUNNER_NOT_AUTHORIZED` (or `CAPACITY_NOT_CONFIGURED` when a required variable is
+empty) and prints the exact prerequisite.
+
 To admit capacity, the repository owner must:
 
 1. Register at least one self-hosted runner **to `nullStack65/t3code`**. A

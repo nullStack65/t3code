@@ -9,8 +9,9 @@ name: CI
 #   T3CODE_MACOS_X64_RUNNER    the admitted Intel macOS validation label
 # The `authorize` jobs validate the declared label against the authorized list
 # before any checkout or install, so source never executes on unauthorized
-# capacity. When capacity is not declared the run fails closed with
-# CAPACITY_NOT_CONFIGURED rather than waiting on an unmatched label. External
+# capacity. When capacity is not declared the run fails closed — an unschedulable
+# startup, or the guard's CAPACITY_NOT_CONFIGURED/RUNNER_NOT_AUTHORIZED once a
+# label is declared — rather than waiting on an unmatched label. External
 # pull requests are never scheduled on self-hosted capacity. See
 # docs/internals/fork-ci.md.
 #
