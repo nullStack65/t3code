@@ -110,14 +110,18 @@ const makeIntegrationFixture = (options?: {
   }>;
   readonly launchPreflightRunner?: (
     root: string,
-    options?: { readonly isSharedRoot?: boolean },
+    options?: {
+      readonly isSharedRoot?: boolean;
+      readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
+      readonly gitEnvironment?: NodeJS.ProcessEnv;
+    },
   ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
   readonly reportLaunchPreflightWarning?: (input: {
     readonly threadId: ThreadId;
     readonly cwd: string;
     readonly code: LaunchPreflight.LaunchPreflightFindingCode;
     readonly message: string;
-  }) => Effect.Effect<void, never>;
+  }) => Effect.Effect<boolean, never>;
 }) =>
   Effect.gen(function* () {
     const cwd = yield* makeWorkspaceDirectory;
@@ -516,7 +520,7 @@ it.live("a launch-preflight warning is reported and the session still starts onc
     const fixture = yield* makeIntegrationFixture({
       launchPreflightRunner: () => Effect.succeed(findingResult([warningFinding])),
       reportLaunchPreflightWarning: ({ message }) =>
-        Ref.update(reported, (current) => [...current, message]),
+        Ref.update(reported, (current) => [...current, message]).pipe(Effect.as(true)),
     });
 
     yield* Effect.gen(function* () {
@@ -609,7 +613,7 @@ it.live("pre-thread startup warnings reach the first affected session", () =>
     const fixture = yield* makeIntegrationFixture({
       launchPreflightRunner: () => Effect.succeed(findingResult([])),
       reportLaunchPreflightWarning: ({ message }) =>
-        Ref.update(reported, (current) => [...current, message]),
+        Ref.update(reported, (current) => [...current, message]).pipe(Effect.as(true)),
       pendingWarnings: [{ code: "shared-root-git", message: "startup umbrella warning" }],
     });
 
@@ -755,7 +759,7 @@ it.live("a real configured dummy provider executable launches exactly once and w
       grokBinaryPath: wrapperPath,
       launchPreflightRunner: () => Effect.succeed(findingResult([warningFinding])),
       reportLaunchPreflightWarning: ({ message }) =>
-        Ref.update(reported, (current) => [...current, message]),
+        Ref.update(reported, (current) => [...current, message]).pipe(Effect.as(true)),
     });
 
     yield* Effect.gen(function* () {

@@ -4,15 +4,12 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
-  CommandId,
   EnvironmentHttpApi,
-  EventId,
   ProviderDriverKind,
   type RepositoryIdentity,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
-import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -122,6 +119,7 @@ import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
+import { makeLaunchPreflightWarningReporter } from "./environment/launchPreflightReporter.ts";
 import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -282,25 +280,10 @@ const ProviderLayerLive = Layer.unwrap(
     const orchestrationEngine = yield* OrchestrationEngineService;
     const crypto = yield* Crypto.Crypto;
     return makeProviderServiceLive({
-      reportLaunchPreflightWarning: ({ threadId, cwd, code, message }) =>
-        Effect.gen(function* () {
-          const createdAt = DateTime.formatIso(yield* DateTime.now);
-          yield* orchestrationEngine.dispatch({
-            type: "thread.activity.append",
-            commandId: CommandId.make(yield* crypto.randomUUIDv4),
-            threadId,
-            activity: {
-              id: EventId.make(yield* crypto.randomUUIDv4),
-              tone: "error",
-              kind: "launch.preflight",
-              summary: message,
-              payload: { code, cwd },
-              turnId: null,
-              createdAt,
-            },
-            createdAt,
-          });
-        }).pipe(Effect.catchCause(() => Effect.void)),
+      reportLaunchPreflightWarning: makeLaunchPreflightWarningReporter(
+        orchestrationEngine,
+        crypto,
+      ),
     });
   }),
 ).pipe(

@@ -39,7 +39,7 @@ const gitProbe = (
 ): LaunchPreflight.LaunchPreflightGitProbe => ({
   version: () => Effect.succeed("2.55.0"),
   resolveIdentity: () => Effect.succeed(identity()),
-  probeSparseAdd: () => Effect.succeed("not-sparse"),
+  probeSparseAdd: () => Effect.succeed("not-required"),
   ...overrides,
 });
 
@@ -48,9 +48,13 @@ const input = (options: {
   readonly isSharedRoot?: boolean;
   readonly git?: LaunchPreflight.LaunchPreflightGitProbe;
   readonly files?: Partial<LaunchPreflight.LaunchPreflightFileProbe>;
+  readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
+  readonly gitEnvironment?: NodeJS.ProcessEnv;
 }): LaunchPreflight.LaunchPreflightInput => ({
   root: options.root ?? "/session-root",
   ...(options.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+  ...(options.consumer !== undefined ? { consumer: options.consumer } : {}),
+  ...(options.gitEnvironment !== undefined ? { gitEnvironment: options.gitEnvironment } : {}),
   git: options.git ?? gitProbe(),
   files: {
     exists: () => Effect.succeed(false),
@@ -296,7 +300,7 @@ it.effect("does not warn about git add --sparse when the repository is not spars
         git: gitProbe({
           resolveIdentity: () =>
             Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
-          probeSparseAdd: () => Effect.succeed("not-sparse"),
+          probeSparseAdd: () => Effect.succeed("not-required"),
         }),
         files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
       }),
@@ -696,11 +700,145 @@ it.live("F3: the real probe reports git add --sparse support only for a sparse c
     yield* git(["commit", "-m", "initial"]);
 
     const probe = yield* makeRealGitProbe;
-    assert.strictEqual(yield* probe.probeSparseAdd(repo), "not-sparse");
+    assert.strictEqual(yield* probe.probeSparseAdd(repo), "not-required");
+    // A selected OpenCode consumer requires `--sparse` even in an ordinary
+    // repository, so the capability is probed there too.
+    assert.strictEqual(
+      yield* probe.probeSparseAdd(repo, { requiredByConsumer: true }),
+      "supported",
+    );
 
     yield* git(["sparse-checkout", "set", "src"]);
     assert.strictEqual(yield* probe.probeSparseAdd(repo), "supported");
 
     yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
   }).pipe(Effect.provide(E3VcsLayer)),
+);
+
+// --- A1/A2: consumer-driven `--sparse` applicability and the final launch env ----------------
+
+/**
+ * A `git` wrapper that lacks `git add --sparse`. It reports an `add -h` usage
+ * without `--sparse` (the exact thing the probe reads), delegates every other
+ * invocation to the real Git, and records its own path plus the harmless
+ * environment sentinel it inherited. This models a provider environment whose
+ * resolved Git is older than the host's.
+ */
+const writeSparseLessGit = (binDir: string, realGit: string, recordPath: string) => {
+  NodeFS.writeFileSync(
+    NodePath.join(binDir, "git"),
+    [
+      "#!/bin/sh",
+      `printf '%s|%s\\n' "$0" "$ENVCHK_SENTINEL" >> "${recordPath}"`,
+      'if [ "$1" = "add" ] && [ "$2" = "-h" ]; then',
+      '  echo "usage: git add [options] [--] <pathspec>..."',
+      '  echo "    -n, --dry-run         dry run"',
+      '  echo "    -v, --verbose         be verbose"',
+      "  exit 0",
+      "fi",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+};
+
+const ordinaryGitConsumer: LaunchPreflight.LaunchPreflightConsumer = {
+  driver: "opencode",
+  snapshotsEnabled: true,
+};
+
+const makeOrdinaryRepo = (repo: string, realGit: string) =>
+  Effect.gen(function* () {
+    yield* Effect.promise(() => NodeFSP.mkdir(repo, { recursive: true }));
+    const git = (args: ReadonlyArray<string>) =>
+      Effect.promise(async () => {
+        NodeChildProcess.execFileSync(realGit, args, { cwd: repo });
+      });
+    yield* git(["init"]);
+    yield* git(["config", "user.name", "Test"]);
+    yield* git(["config", "user.email", "test@test.com"]);
+    yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(repo, "file.txt"), "hello\n"));
+    yield* git(["add", "."]);
+    yield* git(["commit", "-m", "initial"]);
+  });
+
+it.live(
+  "A1/A2: ordinary OpenCode repo resolves the selected provider Git and warns on missing --sparse",
+  () =>
+    Effect.gen(function* () {
+      const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-v5-consumer-")),
+      );
+      const repo = NodePath.join(base, "repo");
+      const providerBin = NodePath.join(base, "provider-bin");
+      const recordPath = NodePath.join(base, "record.log");
+      const sentinel = "envchk-provider-sentinel";
+      yield* Effect.promise(() => NodeFSP.mkdir(providerBin, { recursive: true }));
+      writeSparseLessGit(providerBin, realGit, recordPath);
+      yield* makeOrdinaryRepo(repo, realGit);
+
+      const preflight = yield* LaunchPreflight.LaunchPreflight;
+
+      // Host/default PATH resolves a capable Git: the ordinary repo passes even
+      // for the OpenCode consumer.
+      const healthy = yield* preflight.run(repo, { consumer: ordinaryGitConsumer });
+      assert.deepStrictEqual(healthy.findings, []);
+
+      // The selected provider environment resolves the controlled Git that
+      // lacks `--sparse`; the ordinary (non-sparse) checkout still warns.
+      const providerEnvironment: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${providerBin}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+        ENVCHK_SENTINEL: sentinel,
+      };
+      const warned = yield* preflight.run(repo, {
+        consumer: ordinaryGitConsumer,
+        gitEnvironment: providerEnvironment,
+      });
+      assert.deepStrictEqual(codes(warned), ["git-sparse-add-unsupported"]);
+      assert.deepStrictEqual(severities(warned), ["warning"]);
+      const message = warned.warnings[0]?.message ?? "";
+      assert.include(message, "OpenCode");
+      assert.include(message, "--sparse");
+
+      // The selected executable and the harmless environment sentinel are the
+      // ones from the provider environment, not the host default.
+      const recorded = (yield* Effect.promise(() => NodeFSP.readFile(recordPath, "utf8"))).trim();
+      const recordLines = recorded.split("\n");
+      assert.isTrue(recordLines.length > 0);
+      for (const line of recordLines) {
+        const [executable, recordedSentinel] = line.split("|");
+        assert.strictEqual(executable, NodePath.join(providerBin, "git"));
+        assert.strictEqual(recordedSentinel, sentinel);
+      }
+
+      // Snapshot-disabled control: the same Git is not required by the consumer
+      // (OpenCode snapshot staging off), so an ordinary checkout is silent.
+      const disabled = yield* preflight.run(repo, {
+        consumer: { driver: "opencode", snapshotsEnabled: false },
+        gitEnvironment: providerEnvironment,
+      });
+      assert.deepStrictEqual(disabled.findings, []);
+
+      // Non-OpenCode control: no provider-specific Git requirement is applied
+      // globally to T3 sessions.
+      const otherConsumer = yield* preflight.run(repo, {
+        consumer: { driver: "codex", snapshotsEnabled: true },
+        gitEnvironment: providerEnvironment,
+      });
+      assert.deepStrictEqual(otherConsumer.findings, []);
+
+      // Non-Git control: a plain directory has no repository to checkpoint.
+      const plain = NodePath.join(base, "plain");
+      yield* Effect.promise(() => NodeFSP.mkdir(plain, { recursive: true }));
+      const nonGit = yield* preflight.run(plain, {
+        consumer: ordinaryGitConsumer,
+        gitEnvironment: providerEnvironment,
+      });
+      assert.deepStrictEqual(nonGit.findings, []);
+
+      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+    }).pipe(Effect.provide(E3PreflightLayer)),
 );

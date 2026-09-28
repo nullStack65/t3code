@@ -91,6 +91,7 @@ import * as ProjectionSnapshotQuery from "../../orchestration/Services/Projectio
 import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
 import * as LaunchPreflightWarningInboxModule from "../../environment/LaunchPreflightWarningInbox.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -268,21 +269,29 @@ export interface ProviderServiceLiveOptions {
   /**
    * Sink for launch-preflight warnings, so they reach the user instead of only
    * the server log. The composition root wires this to an existing
-   * user-visible transport (a thread activity append). Failures are swallowed.
+   * user-visible transport (a thread activity append). It returns whether the
+   * notice was actually delivered; a failed delivery leaves a pending startup
+   * notice in the inbox instead of silently discarding it.
    */
   readonly reportLaunchPreflightWarning?: (input: {
     readonly threadId: ThreadId;
     readonly cwd: string;
     readonly code: LaunchPreflight.LaunchPreflightFindingCode;
     readonly message: string;
-  }) => Effect.Effect<void, never>;
+  }) => Effect.Effect<boolean, never>;
   /**
    * Overrides the launch-preflight runner. Tests use this to force a warning or
-   * a blocker without a broken Git install.
+   * a blocker without a broken Git install. The options carry the selected
+   * consumer/operation and the exact environment the provider launch resolves
+   * `git` with.
    */
   readonly launchPreflightRunner?: (
     root: string,
-    options?: { readonly isSharedRoot?: boolean },
+    options?: {
+      readonly isSharedRoot?: boolean;
+      readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
+      readonly gitEnvironment?: NodeJS.ProcessEnv;
+    },
   ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
 }
 
@@ -538,15 +547,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
   const runLaunchPreflight = options?.launchPreflightRunner ?? launchPreflight.run;
 
-  // Shared-inbox intent is an explicit, exact-root opt-in from settings. The
-  // backend's own cwd is an ordinary provider working directory, so equality
-  // with it (or with any folder name/breadth/Git presence) never declares a
-  // shared root. A configured shared root applies regardless of backend cwd.
-  const configuredSharedRoot: Effect.Effect<string | undefined> = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.sharedSessionRoot),
-    Effect.orElseSucceed(() => undefined),
-  );
-
   /**
    * Runs the bounded launch preflight against the exact cwd a provider process
    * is about to start in, before the caller's own workspace read. Warnings are
@@ -556,6 +556,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const guardProviderLaunch = Effect.fn("ProviderService.guardProviderLaunch")(function* (input: {
     readonly threadId: ThreadId;
     readonly cwd: string;
+    readonly provider?: ProviderDriverKind;
+    readonly providerInstanceId?: ProviderInstanceId;
   }) {
     // Only probe a real directory: spawning Git in a missing path or a plain
     // file would fail at the OS layer. The caller's own workspace read (and
@@ -572,12 +574,39 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return;
     }
 
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
     const isSharedRoot = LaunchPreflight.isConfiguredSharedSessionRoot(
       pathService,
       input.cwd,
-      yield* configuredSharedRoot,
+      settings?.sharedSessionRoot,
     );
-    const result = yield* runLaunchPreflight(input.cwd, { isSharedRoot }).pipe(
+    // The selected consumer/operation determines `--sparse` applicability. T3
+    // launches OpenCode with its default config, where snapshot staging is on
+    // unless the user disabled it, and OpenCode stages with `git add --sparse`
+    // even in an ordinary repository. Other consumers only need `--sparse` in a
+    // sparse checkout, so this is never a global T3 Git requirement.
+    const consumer: LaunchPreflight.LaunchPreflightConsumer | undefined =
+      input.provider === undefined
+        ? undefined
+        : { driver: input.provider, snapshotsEnabled: true };
+    // The provider launch resolves `git` from the same environment the adapter
+    // inherits. Pass it through so the probe inspects the actual selected Git,
+    // not an unrelated host default.
+    const instanceEnvironment =
+      input.providerInstanceId === undefined
+        ? undefined
+        : settings?.providerInstances[input.providerInstanceId]?.environment;
+    const gitEnvironment =
+      instanceEnvironment === undefined || instanceEnvironment.length === 0
+        ? undefined
+        : mergeProviderInstanceEnvironment(instanceEnvironment);
+    const result = yield* runLaunchPreflight(input.cwd, {
+      isSharedRoot,
+      ...(consumer !== undefined ? { consumer } : {}),
+      ...(gitEnvironment !== undefined ? { gitEnvironment } : {}),
+    }).pipe(
       Effect.catchCause(() =>
         Effect.succeed({
           findings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
@@ -586,33 +615,54 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
       ),
     );
-    // Deliver any warnings the startup preflight could only log (no thread
-    // existed yet) to this first affected session, through the same transport.
+
+    const report = options?.reportLaunchPreflightWarning;
+    const deliverWarning = (warning: {
+      readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+      readonly message: string;
+    }) =>
+      Effect.gen(function* () {
+        yield* Effect.logWarning(`launch preflight: ${warning.message}`, {
+          code: warning.code,
+          threadId: input.threadId,
+          cwd: input.cwd,
+        });
+        if (report === undefined) {
+          // The startup phase already logged this; the log is the delivery.
+          return true;
+        }
+        return yield* report({
+          threadId: input.threadId,
+          cwd: input.cwd,
+          code: warning.code,
+          message: warning.message,
+        }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+      });
+
+    // Deliver warnings the startup preflight could only log (no thread existed
+    // yet) to this first affected session through the same transport. Remove a
+    // pending notice only after it was actually delivered; anything undelivered
+    // stays for the next session in the same directory.
     const inbox = yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
-    const pendingWarnings = LaunchPreflightWarningInboxModule.takeLaunchPreflightWarnings(
-      inbox,
-      LaunchPreflight.normalizePathKey(pathService, input.cwd),
-    );
+    const inboxKey = LaunchPreflight.normalizePathKey(pathService, input.cwd);
+    const pendingWarnings =
+      LaunchPreflightWarningInboxModule.peekLaunchPreflightWarnings(inbox, inboxKey);
     const deliveredCodes = new Set<string>();
-    for (const warning of [...pendingWarnings, ...result.warnings]) {
+    const undelivered: Array<LaunchPreflightWarningInboxModule.PendingLaunchPreflightWarning> = [];
+    for (const warning of pendingWarnings) {
+      if (deliveredCodes.has(warning.code)) continue;
+      const delivered = yield* deliverWarning(warning);
+      if (delivered) deliveredCodes.add(warning.code);
+      else undelivered.push(warning);
+    }
+    LaunchPreflightWarningInboxModule.clearLaunchPreflightWarnings(inbox, inboxKey, undelivered);
+
+    for (const warning of result.warnings) {
       if (deliveredCodes.has(warning.code)) continue;
       deliveredCodes.add(warning.code);
-      yield* Effect.logWarning(`launch preflight: ${warning.message}`, {
-        code: warning.code,
-        threadId: input.threadId,
-        cwd: input.cwd,
-      });
-      if (options?.reportLaunchPreflightWarning) {
-        yield* options
-          .reportLaunchPreflightWarning({
-            threadId: input.threadId,
-            cwd: input.cwd,
-            code: warning.code,
-            message: warning.message,
-          })
-          .pipe(Effect.catchCause(() => Effect.void));
-      }
+      yield* deliverWarning(warning);
     }
+
     const blocker = result.blockers[0];
     if (blocker !== undefined) {
       yield* Effect.logError(`launch preflight blocked provider launch: ${blocker.message}`, {
@@ -628,7 +678,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             code: blocker.code,
             message: blocker.message,
           })
-          .pipe(Effect.catchCause(() => Effect.void));
+          .pipe(Effect.catchCause(() => Effect.succeed(false)));
       }
       return yield* new ProviderLaunchPreflightBlockedError({
         threadId: input.threadId,
@@ -1426,6 +1476,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* guardProviderLaunch({
           threadId: input.binding.threadId,
           cwd: persistedCwd,
+          provider: input.binding.provider,
+          providerInstanceId: bindingInstanceId,
         });
       }
 
@@ -1645,7 +1697,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         if (effectiveCwd !== undefined) {
-          yield* guardProviderLaunch({ threadId, cwd: effectiveCwd });
+          yield* guardProviderLaunch({
+            threadId,
+            cwd: effectiveCwd,
+            provider: resolvedProvider,
+            providerInstanceId: resolvedInstanceId,
+          });
           // Fail fast with an actionable error when the workspace folder is
           // gone (e.g. moved, deleted, or replaced by a plain file).
           // Otherwise every adapter surfaces this as a misleading "failed to
