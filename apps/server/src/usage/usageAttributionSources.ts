@@ -21,6 +21,17 @@
 import type { ThreadPullRequestLinkSource, UsageProviderKind } from "@t3tools/contracts";
 
 import type { AttributionPullRequestLink, AttributionThreadBinding } from "./usageAttribution.ts";
+import {
+  isRouteEventKind,
+  normalizeEscalationReason,
+  normalizeProviderInstanceKey,
+  normalizeRouteSelection,
+  normalizeTaskStratum,
+  readOptionalString,
+  type PersistedProviderSessionHistoryRow,
+  type PersistedRouteEventRow,
+  type RouteEventMetadata,
+} from "./routeMetadata.ts";
 
 /**
  * Allowlisted `provider_session_runtime` row. This is the shape the repository
@@ -111,11 +122,20 @@ export interface AttributionLinkExtraction {
 export interface AttributionSnapshotExtraction {
   /** Read cutoff; associations are as of this instant. */
   readonly cutoffMs: number;
+  /**
+   * Every binding the projection should consider: the current cursor plus the
+   * durable history, so a session the cursor no longer points at still binds.
+   */
   readonly bindings: readonly AttributionThreadBinding[];
   readonly nativeSessions: readonly ExtractedNativeSession[];
+  /** Append-only native-session identity history, including unmeasured providers. */
+  readonly history: readonly ExtractedSessionHistory[];
   readonly links: readonly AttributionPullRequestLink[];
+  readonly routeEvents: readonly RouteEventMetadata[];
   readonly diagnostics: {
     readonly bindings: AttributionBindingDiagnostics;
+    readonly history: AttributionHistoryDiagnostics;
+    readonly routeEvents: AttributionRouteEventDiagnostics;
     readonly links: AttributionLinkDiagnostics;
   };
 }
@@ -335,6 +355,231 @@ function addSessionThread(
   index.set(key, threads);
 }
 
+const HISTORY_ORIGINS = new Set(["runtimeCursor", "importedTranscript"]);
+
+/**
+ * One durable native-session identity read from `provider_session_history`.
+ * Unlike the current cursor, every row survives a resume/model switch, so a
+ * thread's earlier sessions stay attributable.
+ */
+export interface ExtractedSessionHistory {
+  readonly threadId: string;
+  readonly providerName: string;
+  readonly adapterKey: string;
+  readonly providerInstanceId: string | null;
+  readonly nativeSessionId: string;
+  readonly parentNativeSessionId: string | null;
+  readonly source: "runtimeCursor" | "importedTranscript" | "unknown";
+  readonly firstSeenAt: string;
+  readonly lastSeenAt: string;
+  readonly usageProvider: UsageProviderKind | null;
+}
+
+export interface AttributionHistoryDiagnostics {
+  readonly rows: number;
+  readonly sessions: number;
+  readonly bindings: number;
+  readonly withParent: number;
+  /** Rows whose canonical identity repeated an earlier row and were merged. */
+  readonly duplicatesDropped: number;
+  /** Merged duplicate rows that disagreed on a non-null field (kept-first). */
+  readonly conflictingDuplicates: number;
+  /** Durable identities for a provider T3 does not scan for usage. */
+  readonly unsupportedProviderBindings: number;
+  readonly malformed: number;
+}
+
+export interface AttributionHistoryExtraction {
+  readonly history: readonly ExtractedSessionHistory[];
+  /** Only identities for providers with a scanned usage source. */
+  readonly bindings: readonly AttributionThreadBinding[];
+  readonly diagnostics: AttributionHistoryDiagnostics;
+}
+
+/**
+ * Reads the append-only session history. Every row is an identity that
+ * contributed to the thread, including providers T3 cannot measure yet
+ * (exposed as history with `usageProvider: null`, never as a fabricated zero).
+ */
+export function extractAttributionHistory(
+  rows: readonly PersistedProviderSessionHistoryRow[],
+): AttributionHistoryExtraction {
+  const history: ExtractedSessionHistory[] = [];
+  const bindings: AttributionThreadBinding[] = [];
+  const diagnostics = {
+    rows: rows.length,
+    sessions: 0,
+    bindings: 0,
+    withParent: 0,
+    duplicatesDropped: 0,
+    conflictingDuplicates: 0,
+    unsupportedProviderBindings: 0,
+    malformed: 0,
+  };
+  // Canonical identity is exactly what the table's unique key is: thread,
+  // provider, normalized provider instance, native session. A join that
+  // repeats a row must not become a second report, and two instances that
+  // share a native session id must stay distinct.
+  const byIdentity = new Map<string, number>();
+
+  for (const row of rows) {
+    const threadId = readOptionalString(row.threadId);
+    const providerName = readOptionalString(row.providerName);
+    const adapterKey = readOptionalString(row.adapterKey);
+    const nativeSessionId = readOptionalString(row.nativeSessionId);
+    if (
+      threadId === null ||
+      providerName === null ||
+      adapterKey === null ||
+      nativeSessionId === null
+    ) {
+      diagnostics.malformed += 1;
+      continue;
+    }
+    const identity = `${threadId}\u0000${providerName}\u0000${normalizeProviderInstanceKey(
+      row.providerInstanceId,
+    )}\u0000${nativeSessionId}`;
+    const existingIndex = byIdentity.get(identity);
+    if (existingIndex !== undefined) {
+      const existing = history[existingIndex]!;
+      diagnostics.duplicatesDropped += 1;
+      // Merge only monotonically: never let a duplicate erase a known value.
+      if (adapterKey !== existing.adapterKey) diagnostics.conflictingDuplicates += 1;
+      const parentNativeSessionId = readOptionalString(row.parentNativeSessionId);
+      if (existing.parentNativeSessionId === null && parentNativeSessionId !== null) {
+        diagnostics.withParent += 1;
+        history[existingIndex] = { ...existing, parentNativeSessionId };
+      }
+      const firstSeenAt = readOptionalString(row.firstSeenAt) ?? row.lastSeenAt;
+      history[existingIndex] = {
+        ...history[existingIndex]!,
+        firstSeenAt:
+          firstSeenAt < history[existingIndex]!.firstSeenAt
+            ? firstSeenAt
+            : history[existingIndex]!.firstSeenAt,
+        lastSeenAt:
+          row.lastSeenAt > history[existingIndex]!.lastSeenAt
+            ? row.lastSeenAt
+            : history[existingIndex]!.lastSeenAt,
+      };
+      continue;
+    }
+
+    const usageProvider = usageProviderOf(providerName, adapterKey);
+    const parentNativeSessionId = readOptionalString(row.parentNativeSessionId);
+    diagnostics.sessions += 1;
+    if (parentNativeSessionId !== null) diagnostics.withParent += 1;
+    byIdentity.set(identity, history.length);
+    history.push({
+      threadId,
+      providerName,
+      adapterKey,
+      providerInstanceId: readOptionalString(row.providerInstanceId),
+      nativeSessionId,
+      parentNativeSessionId,
+      source: HISTORY_ORIGINS.has(row.origin)
+        ? (row.origin as ExtractedSessionHistory["source"])
+        : "unknown",
+      firstSeenAt: readOptionalString(row.firstSeenAt) ?? row.lastSeenAt,
+      lastSeenAt: row.lastSeenAt,
+      usageProvider,
+    });
+    if (usageProvider === null) {
+      diagnostics.unsupportedProviderBindings += 1;
+      continue;
+    }
+    diagnostics.bindings += 1;
+    bindings.push({
+      threadId,
+      provider: usageProvider,
+      providerInstanceId: readOptionalString(row.providerInstanceId),
+      nativeSessionId,
+      origin: "sessionHistory",
+    });
+  }
+
+  return { history, bindings, diagnostics };
+}
+
+export interface AttributionRouteEventDiagnostics {
+  readonly rows: number;
+  readonly events: number;
+  /** Events with a classified kind (canary, fallback, review, escalation). */
+  readonly declared: number;
+  /** Automatic "what was requested" records with no classified kind. */
+  readonly requests: number;
+  /** Request records whose stored selection disagreed with a later observation. */
+  readonly conflictingSelections: number;
+  readonly malformed: number;
+}
+
+export interface AttributionRouteEventExtraction {
+  readonly events: readonly RouteEventMetadata[];
+  readonly diagnostics: AttributionRouteEventDiagnostics;
+}
+
+/**
+ * Reads the allowlisted fields of `thread_route_events`. Content never crosses
+ * this seam: only ids, the requested selection, stratum, cohort, and reason.
+ */
+export function extractAttributionRouteEvents(
+  rows: readonly PersistedRouteEventRow[],
+): AttributionRouteEventExtraction {
+  const events: RouteEventMetadata[] = [];
+  const diagnostics = {
+    rows: rows.length,
+    events: 0,
+    declared: 0,
+    requests: 0,
+    conflictingSelections: 0,
+    malformed: 0,
+  };
+
+  for (const row of rows) {
+    const eventId = readOptionalString(row.eventId);
+    const threadId = readOptionalString(row.threadId);
+    const recordedAt = readOptionalString(row.recordedAt);
+    const rawKind = row.routeEventKind;
+    // A non-null kind that is not one of the known kinds is a malformed row,
+    // not an unknown-but-valid one.
+    if (rawKind !== null && rawKind !== undefined && !isRouteEventKind(rawKind)) {
+      diagnostics.malformed += 1;
+      continue;
+    }
+    if (eventId === null || threadId === null || recordedAt === null) {
+      diagnostics.malformed += 1;
+      continue;
+    }
+    const requested = normalizeRouteSelection({
+      provider: row.requestedProvider,
+      model: row.requestedModel,
+      effort: row.requestedEffort,
+    });
+    const kind = isRouteEventKind(rawKind) ? rawKind : null;
+    const selectionConflict = row.selectionConflict === 1;
+    diagnostics.events += 1;
+    if (kind === null) diagnostics.requests += 1;
+    else diagnostics.declared += 1;
+    if (selectionConflict) diagnostics.conflictingSelections += 1;
+    events.push({
+      eventId,
+      threadId,
+      nativeSessionId: readOptionalString(row.nativeSessionId),
+      kind,
+      taskStratum: normalizeTaskStratum(row.taskStratum),
+      experimentId: readOptionalString(row.experimentId),
+      managerId: readOptionalString(row.managerId),
+      agentId: readOptionalString(row.agentId),
+      requested,
+      reason: normalizeEscalationReason(row.escalationReason),
+      selectionConflict,
+      recordedAt,
+    });
+  }
+
+  return { events, diagnostics };
+}
+
 /** Reads thread → PR links from persisted projection rows, dropping payloads. */
 export function extractAttributionLinks(
   rows: readonly PersistedThreadPullRequestRow[],
@@ -379,15 +624,26 @@ export function extractAttributionLinks(
 export function extractAttributionSnapshot(input: {
   readonly cutoffMs: number;
   readonly runtimeRows: readonly PersistedProviderSessionRuntimeRow[];
+  readonly historyRows?: readonly PersistedProviderSessionHistoryRow[];
   readonly linkRows: readonly PersistedThreadPullRequestRow[];
+  readonly routeEventRows?: readonly PersistedRouteEventRow[];
 }): AttributionSnapshotExtraction {
   const bindings = extractAttributionBindings(input.runtimeRows);
+  const history = extractAttributionHistory(input.historyRows ?? []);
+  const routeEvents = extractAttributionRouteEvents(input.routeEventRows ?? []);
   const links = extractAttributionLinks(input.linkRows);
   return {
     cutoffMs: input.cutoffMs,
-    bindings: bindings.bindings,
+    bindings: [...bindings.bindings, ...history.bindings],
     nativeSessions: bindings.nativeSessions,
+    history: history.history,
     links: links.links,
-    diagnostics: { bindings: bindings.diagnostics, links: links.diagnostics },
+    routeEvents: routeEvents.events,
+    diagnostics: {
+      bindings: bindings.diagnostics,
+      history: history.diagnostics,
+      routeEvents: routeEvents.diagnostics,
+      links: links.diagnostics,
+    },
   };
 }
