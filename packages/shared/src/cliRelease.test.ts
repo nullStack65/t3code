@@ -9,6 +9,7 @@ import {
   cliReleaseIndexPageUrl,
   newestCliReleaseVersion,
   parseChecksums,
+  resolveCliReleaseRepository,
 } from "./cliRelease.ts";
 
 describe("cliRelease", () => {
@@ -33,10 +34,29 @@ describe("cliRelease", () => {
 
   it("resolves download URLs under the tagged release, honoring a mirror", () => {
     expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/download/v1.2.3",
+      "https://github.com/nullStack65/t3code/releases/download/v1.2.3",
     );
     expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
       "https://mirror.example/t3/v1.2.3",
+    );
+    expect(cliReleaseDownloadBaseUrl("1.2.3", undefined, "example-org/fork")).toBe(
+      "https://github.com/example-org/fork/releases/download/v1.2.3",
+    );
+  });
+
+  it("defaults the release repository to the fork and honors an override", () => {
+    // The shipped default must never be upstream, or a fork install would
+    // discover and download official `pingdotgg` builds.
+    expect(resolveCliReleaseRepository({})).toBe("nullStack65/t3code");
+    expect(resolveCliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "example-org/fork" })).toBe(
+      "example-org/fork",
+    );
+    // A blank or malformed override must not silently redirect to nothing.
+    expect(resolveCliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "   " })).toBe(
+      "nullStack65/t3code",
+    );
+    expect(resolveCliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "not-a-repo" })).toBe(
+      "nullStack65/t3code",
     );
   });
 
@@ -87,8 +107,11 @@ describe("cliRelease", () => {
 
   it("pages through the release index at the largest page GitHub allows", () => {
     expect(cliReleaseIndexPageUrl(1)).toBe(
-      "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
+      "https://api.github.com/repos/nullStack65/t3code/releases?per_page=100&page=1",
     );
     expect(cliReleaseIndexPageUrl(3)).toContain("page=3");
+    expect(cliReleaseIndexPageUrl(2, "example-org/fork")).toBe(
+      "https://api.github.com/repos/example-org/fork/releases?per_page=100&page=2",
+    );
   });
 });

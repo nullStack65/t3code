@@ -5,10 +5,31 @@
  * platform key, so a rename here is a release-breaking change.
  */
 
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+/**
+ * The repository this build resolves its own releases from. This is a fork, so
+ * the default must never be upstream: an install that fell back to
+ * `pingdotgg/t3code` would silently update onto an official build and lose the
+ * fork. `T3CODE_RELEASE_REPOSITORY` overrides it for mirrors and tests; unlike
+ * `T3CODE_RELEASE_BASE_URL` it also retargets the release-index lookup that
+ * `t3 update` and the install scripts use to discover a version.
+ */
+export const CLI_RELEASE_REPOSITORY = "nullStack65/t3code";
+export const CLI_RELEASE_REPOSITORY_ENV = "T3CODE_RELEASE_REPOSITORY";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 /** Overrides the download origin for mirrors and air-gapped installs. */
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
+
+const REPOSITORY_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+
+/** The `owner/repo` this build downloads and discovers releases from. */
+export function resolveCliReleaseRepository(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const override = env[CLI_RELEASE_REPOSITORY_ENV]?.trim();
+  return override !== undefined && override !== "" && REPOSITORY_PATTERN.test(override)
+    ? override
+    : CLI_RELEASE_REPOSITORY;
+}
 
 /**
  * The archives a release attaches. Kept in step with the build_linux_cli
@@ -54,14 +75,17 @@ export function cliArchiveFileName(version: string, platformKey: CliArchivePlatf
   return `t3-${version}-${platformKey}.${platformKey.startsWith("win32") ? "zip" : "tar.gz"}`;
 }
 
-const CLI_RELEASE_DEFAULT_BASE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases/download`;
+const CLI_RELEASE_DEFAULT_BASE_URL = (repository: string) =>
+  `https://github.com/${repository}/releases/download`;
 
 /** Directory that `releases/download/<tag>/<asset>` lives under. */
 export function cliReleaseDownloadBaseUrl(
   version: string,
-  baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
+  baseUrl: string | undefined = undefined,
+  repository: string = resolveCliReleaseRepository(),
 ): string {
-  return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
+  const origin = baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL(repository);
+  return `${origin.replace(/\/+$/, "")}/v${version}`;
 }
 
 /**
@@ -97,8 +121,11 @@ export function cliReleaseChannelOf(version: string): CliReleaseChannel {
  * until a channel match turns up; a busy nightly train can push the newest
  * preview or stable release past any single page.
  */
-export function cliReleaseIndexPageUrl(page: number): string {
-  return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases?per_page=100&page=${page}`;
+export function cliReleaseIndexPageUrl(
+  page: number,
+  repository: string = resolveCliReleaseRepository(),
+): string {
+  return `https://api.github.com/repos/${repository}/releases?per_page=100&page=${page}`;
 }
 
 /**
