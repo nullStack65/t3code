@@ -22,9 +22,17 @@
 #   0  ADMITTED               every required role is declared and authorized
 #   2  CAPACITY_NOT_CONFIGURED a required runner variable or the authorized list
 #                             is unset or empty
-#   3  UNTRUSTED_FORK         an external pull request; never routed onto
-#                             self-hosted capacity
+#   3  UNTRUSTED_FORK         an external or unidentified pull request; never
+#                             routed onto self-hosted capacity
 #   4  RUNNER_NOT_AUTHORIZED  a declared label is absent from the authorized list
+#   5  UNTRUSTED_CONTEXT      an unknown event or an unidentified repository;
+#                             nothing can be trusted, so refuse
+#
+# The workflow does not require this file to exist at the pull request base: on
+# first introduction the base tree predates it, so the workflow carries an
+# equivalent bootstrap (see `.github/workflows/ci.yml`). This script stays the
+# single policy definition and `fork-ci-routing.test.py` cross-checks the
+# bootstrap against it.
 set -euo pipefail
 
 EVENT_NAME="${EVENT_NAME:-}"
@@ -62,13 +70,29 @@ runner_var() {
   esac
 }
 
-# 1. Trust. A pull request whose head repository is not this repository carries
-#    unreviewed code and must never be scheduled on privileged self-hosted
-#    capacity. The workflow's job-level guard also blocks this before a runner
-#    is even allocated; this check keeps the policy honest if that changes.
-if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != "$REPOSITORY" ]; then
+# 0. Context. Only the two events this workflow is wired to are routable, and an
+#    unidentified repository cannot be verified. Refuse anything else instead of
+#    falling through to admission.
+case "$EVENT_NAME" in
+  pull_request | push) ;;
+  *)
+    fail UNTRUSTED_CONTEXT \
+      "unsupported event '$EVENT_NAME'; only pull_request and push are routed" 5
+    ;;
+esac
+if [ -z "$REPOSITORY" ]; then
+  fail UNTRUSTED_CONTEXT \
+    "repository identity is empty; the event origin cannot be verified" 5
+fi
+
+# 1. Trust. A pull request must come from this repository. An empty head
+#    repository is unidentified, which is not the same as trusted, so it is
+#    rejected too. The workflow's job-level guard also blocks external PRs
+#    before a runner is even allocated; this check keeps the policy honest if
+#    that changes.
+if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$REPOSITORY" ]; then
   fail UNTRUSTED_FORK \
-    "pull request head '$HEAD_REPO' is not '$REPOSITORY'; external PR code is never routed to self-hosted runner capacity" 3
+    "pull request head '$HEAD_REPO' is not '$REPOSITORY'; external or unidentified PR code is never routed to self-hosted runner capacity" 3
 fi
 
 # 2. Owner-declared admission. An absent declaration is unknown capacity, not
