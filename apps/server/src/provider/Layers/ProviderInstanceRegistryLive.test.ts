@@ -104,6 +104,7 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   homePath: "",
   shadowHomePath: "",
   launchArgs: "",
+  resumeFailurePolicy: "fallback-to-new-thread",
   customModels: [],
   ...overrides,
 });
