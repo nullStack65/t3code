@@ -58,6 +58,7 @@ const input = (options: {
   git: options.git ?? gitProbe(),
   files: {
     exists: () => Effect.succeed(false),
+    stat: () => Effect.succeed({ type: "directory" }),
     realPath: (target) => Effect.succeed(target),
     readFirstBytes: () => Effect.succeed(16),
     ...options.files,
@@ -352,7 +353,7 @@ it.effect("flags a slow root read and bounds it instead of holding the launch", 
   }),
 );
 
-it.effect("resolves within the total budget even when the first probe hangs", () =>
+it.effect("reports an incomplete preflight instead of clean when checks hang", () =>
   Effect.gen(function* () {
     const fiber = yield* run(
       input({
@@ -366,7 +367,172 @@ it.effect("resolves within the total budget even when the first probe hangs", ()
     yield* TestClock.adjust("5 seconds");
     const result = yield* Fiber.join(fiber);
 
+    // A hung metadata/existence check is not absence: the preflight is not
+    // clean, it returns its bounded findings, and it still completes.
+    assert.isTrue(result.findings.length > 0);
+    assert.isTrue(result.findings.every((finding) => finding.severity === "warning"));
+    assert.isTrue(codes(result).includes("root-read-slow"));
+  }),
+);
+
+// --- R1 regression: incomplete checks warn, genuine absence stays quiet ------
+
+it.effect("R1: a hung initial cwd stat warns and returns within its budget", () =>
+  Effect.gen(function* () {
+    const fiber = yield* run(input({ files: { stat: () => Effect.never } })).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust("500 millis");
+    const result = yield* Fiber.join(fiber);
+
+    assert.deepStrictEqual(codes(result), ["root-read-slow"]);
+    assert.deepStrictEqual(severities(result), ["warning"]);
+    assert.include(result.warnings[0]?.message ?? "", "did not finish in time");
+  }),
+);
+
+it.effect("R1: a failed initial cwd stat warns instead of silently skipping", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({ files: { stat: () => Effect.fail(probeError("failed", "denied")) } }),
+    );
+
+    assert.deepStrictEqual(codes(result), ["root-read-failed"]);
+    assert.deepStrictEqual(severities(result), ["warning"]);
+  }),
+);
+
+it.effect("R1: a hung candidate metadata check warns instead of reading as absent", () =>
+  Effect.gen(function* () {
+    const fiber = yield* run(input({ files: { exists: () => Effect.never } })).pipe(
+      Effect.forkChild,
+    );
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust("1500 millis");
+    const result = yield* Fiber.join(fiber);
+
+    assert.isTrue(codes(result).includes("root-read-slow"));
+    assert.isTrue(result.findings.length > 0);
+  }),
+);
+
+it.effect(
+  "R1: a required capability probe that hangs after healthy identity warns as incomplete",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* run(
+        input({
+          root: "/repo",
+          git: gitProbe({
+            resolveIdentity: () =>
+              Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+            probeSparseAdd: () => Effect.never,
+          }),
+          consumer: { driver: "opencode", snapshotsEnabled: true },
+          files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+        }),
+      ).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("1500 millis");
+      const result = yield* Fiber.join(fiber);
+
+      assert.deepStrictEqual(codes(result), ["git-probe-timed-out"]);
+    }),
+);
+
+it.effect("R1: a required capability probe failure warns as incomplete, never unsupported", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          probeSparseAdd: () => Effect.fail(probeError("failed")),
+        }),
+        consumer: { driver: "opencode", snapshotsEnabled: true },
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
+    assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
+    assert.notInclude(codes(result), "git-sparse-add-unsupported");
+  }),
+);
+
+it.effect("R1: genuinely absent optional files stay quiet", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
     assert.deepStrictEqual(result.findings, []);
+  }),
+);
+
+// --- R2 regression: equivalent physical paths share identity handling --------
+
+it.effect("R2: alias spellings of the same physical root give local-metadata guidance", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/var/folders/x/shared",
+        isSharedRoot: true,
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(
+              identity({
+                state: "ok",
+                topLevel: "/private/var/folders/x/shared",
+                commonDir: "/var/folders/x/shared/.git",
+              }),
+            ),
+        }),
+        files: {
+          exists: (target) => Effect.succeed(target.endsWith(".git")),
+          realPath: (target) =>
+            Effect.succeed(target.startsWith("/var/") ? `/private${target}` : target),
+        },
+      }),
+    );
+
+    assert.deepStrictEqual(codes(result), ["shared-root-git"]);
+    const message = result.warnings[0]?.message ?? "";
+    assert.include(message, "Move or retire");
+    assert.notInclude(message, "different repository");
+  }),
+);
+
+it.effect("R2: failed canonicalization does not assert an external repository", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/Documents",
+        isSharedRoot: true,
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(
+              identity({ state: "ok", topLevel: "/Documents", commonDir: "/Documents/.git" }),
+            ),
+        }),
+        files: {
+          exists: (target) => Effect.succeed(target === "/Documents/.git"),
+          realPath: () => Effect.succeed(null),
+        },
+      }),
+    );
+
+    assert.deepStrictEqual(codes(result), ["shared-root-git"]);
+    const message = result.warnings[0]?.message ?? "";
+    assert.notInclude(message, "different repository");
+    assert.notInclude(message, "Move or retire");
+    assert.include(message, "could not be fully resolved");
   }),
 );
 

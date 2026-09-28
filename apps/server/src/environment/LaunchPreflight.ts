@@ -134,9 +134,8 @@ export interface LaunchPreflightConsumer {
 }
 
 /** Whether the selected consumer/operation stages with `git add --sparse`. */
-export const consumerUsesSparseAdd = (
-  consumer: LaunchPreflightConsumer | undefined,
-): boolean => consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled;
+export const consumerUsesSparseAdd = (consumer: LaunchPreflightConsumer | undefined): boolean =>
+  consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled;
 
 export interface LaunchPreflightRepoIdentity {
   readonly state: "ok" | "not-a-repository" | "failed";
@@ -147,8 +146,22 @@ export interface LaunchPreflightRepoIdentity {
   readonly detail: string;
 }
 
+export type LaunchPreflightFsEntryType = "directory" | "file" | "other" | "missing";
+
+export interface LaunchPreflightFsEntry {
+  readonly type: LaunchPreflightFsEntryType;
+}
+
 export interface LaunchPreflightFileProbe {
   readonly exists: (target: string) => Effect.Effect<boolean>;
+  /**
+   * Bounded-type stat. Genuine absence is the observable `"missing"` state, so
+   * callers can keep it distinct from a denied/stalled metadata read. Any other
+   * stat error is a `LaunchPreflightProbeError`.
+   */
+  readonly stat: (
+    target: string,
+  ) => Effect.Effect<LaunchPreflightFsEntry, LaunchPreflightProbeError>;
   /**
    * Canonicalizes a path (resolving symlinks) so exact root identity compares
    * correctly across `/var` ↔ `/private/var` style aliases. Returns null when it
@@ -248,11 +261,21 @@ export const runLaunchPreflight = (
     const add = (finding: LaunchPreflightFinding) =>
       Ref.update(collected, (current) => [...current, finding]);
 
-    const existsBounded = (target: string) =>
+    type ExistsOutcome =
+      | { readonly state: "present" }
+      | { readonly state: "absent" }
+      | { readonly state: "unknown"; readonly reason: "timeout" | "failed" };
+
+    const existsOutcome = (target: string): Effect.Effect<ExistsOutcome> =>
       input.files.exists(target).pipe(
+        Effect.map((present): ExistsOutcome =>
+          present ? { state: "present" } : { state: "absent" },
+        ),
+        Effect.catch(() => Effect.succeed({ state: "unknown", reason: "failed" } as const)),
         Effect.timeoutOption(NARROW_FS_TIMEOUT),
-        Effect.map(Option.getOrElse(() => false)),
-        Effect.orElseSucceed(() => false),
+        Effect.map(
+          Option.getOrElse((): ExistsOutcome => ({ state: "unknown", reason: "timeout" })),
+        ),
       );
 
     const realPathBounded = (target: string) =>
@@ -262,14 +285,67 @@ export const runLaunchPreflight = (
         Effect.orElseSucceed(() => null),
       );
 
+    // One actionable warning shape for an incomplete filesystem metadata check.
+    // Genuine absence never reaches here: only timeout/permission/other failure.
+    const rootMetadataWarning = (
+      target: string,
+      reason: "timeout" | "failed",
+    ): LaunchPreflightFinding =>
+      reason === "timeout"
+        ? {
+            code: "root-read-slow",
+            severity: "warning",
+            message:
+              `Inspecting ${target} under the session root did not finish in time. The filesystem may ` +
+              'be stalled or cloud-offloaded; use "Keep Downloaded" on the folder before starting ' +
+              "sessions.",
+          }
+        : {
+            code: "root-read-failed",
+            severity: "warning",
+            message:
+              `Could not inspect ${target} under the session root. The filesystem denied or failed ` +
+              "the metadata read. Sessions may fail to read the workspace.",
+          };
+
     const explore = Effect.gen(function* () {
-      // Canonicalize the configured root once so identity comparison is not
-      // confused by macOS `/var` ↔ `/private/var` aliases.
-      const canonicalRoot = (yield* realPathBounded(input.root)) ?? input.root;
+      // Bound the initial session-cwd check here so a stalled, denied or
+      // cloud-offloaded path produces one actionable warning instead of being
+      // silently treated as clean. Genuine absence or a plain file stays
+      // distinct: the caller's own workspace read (and
+      // `ProviderWorkspaceMissingError`) reports that.
+      const rootStatOutcome = yield* input.files.stat(input.root).pipe(
+        Effect.map((entry) => ({ _tag: "ok" as const, entry })),
+        Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
+        Effect.timeoutOption(NARROW_FS_TIMEOUT),
+        Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
+      );
+      if (rootStatOutcome._tag === "timeout") {
+        yield* add(rootMetadataWarning(input.root, "timeout"));
+        return;
+      }
+      if (rootStatOutcome._tag === "error") {
+        yield* add(rootMetadataWarning(input.root, "failed"));
+        return;
+      }
+      if (rootStatOutcome.entry.type !== "directory") {
+        return;
+      }
+
+      // Canonicalize the configured root so identity comparison is not confused
+      // by macOS `/var` ↔ `/private/var` aliases. `null` means canonicalization
+      // failed: identity must then stay unknown, never affirmative external.
+      const canonicalRoot = yield* realPathBounded(input.root);
 
       // Only a real `.git` entry counts as repository evidence. A retired marker
-      // such as `.git.macfix-m1-retired` is a different path and is ignored.
-      const rootGitMarker = yield* existsBounded(path.join(input.root, ".git"));
+      // such as `.git.macfix-m1-retired` is a different path and is ignored. An
+      // incomplete metadata check is not absence: warn about it.
+      const rootGitMarkerPath = path.join(input.root, ".git");
+      const rootGitMarkerOutcome = yield* existsOutcome(rootGitMarkerPath);
+      if (rootGitMarkerOutcome.state === "unknown") {
+        yield* add(rootMetadataWarning(rootGitMarkerPath, rootGitMarkerOutcome.reason));
+      }
+      const rootGitMarker = rootGitMarkerOutcome.state === "present";
 
       const gitOutcome = yield* input.git.version(input.root, input.gitEnvironment).pipe(
         Effect.map((version) => ({ _tag: "ok" as const, version })),
@@ -296,11 +372,11 @@ export const runLaunchPreflight = (
         const identityOutcome = yield* input.git
           .resolveIdentity(input.root, input.gitEnvironment)
           .pipe(
-          Effect.map((identity) => ({ _tag: "ok" as const, identity })),
-          Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
-          Effect.timeoutOption(GIT_PROBE_TIMEOUT),
-          Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
-        );
+            Effect.map((identity) => ({ _tag: "ok" as const, identity })),
+            Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
+            Effect.timeoutOption(GIT_PROBE_TIMEOUT),
+            Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
+          );
 
         if (identityOutcome._tag === "ok") {
           const identity = identityOutcome.identity;
@@ -310,11 +386,27 @@ export const runLaunchPreflight = (
               // top level. `topLevel === root` is what makes a shared root an
               // umbrella; a nested repository selected as the session cwd has a
               // different top level and stays an ordinary repository session.
-              const rootIsRepository = samePath(path, identity.topLevel, canonicalRoot);
+              // Compare canonical forms when both resolve; otherwise fall back
+              // to the raw spellings so a canonicalization failure cannot by
+              // itself invent an umbrella.
+              const topLevelCanonical =
+                identity.topLevel !== null ? yield* realPathBounded(identity.topLevel) : null;
+              const rootIsRepository =
+                identity.topLevel !== null && canonicalRoot !== null && topLevelCanonical !== null
+                  ? samePath(path, topLevelCanonical, canonicalRoot)
+                  : samePath(path, identity.topLevel, input.root);
               effectiveRootRepository = rootIsRepository || rootGitMarker;
               inGitWorkTree = true;
               if (isSharedRoot && rootIsRepository) {
-                const commonUnderRoot = isInside(path, identity.commonDir, canonicalRoot);
+                // Canonicalize the (already invocation-cwd-resolved) common dir
+                // before comparing, so `/var` ↔ `/private/var` alias spellings of
+                // the same physical root give the local-metadata guidance.
+                const commonDirCanonical =
+                  identity.commonDir !== null ? yield* realPathBounded(identity.commonDir) : null;
+                const commonUnderRoot =
+                  canonicalRoot !== null && commonDirCanonical !== null
+                    ? isInside(path, commonDirCanonical, canonicalRoot)
+                    : null;
                 yield* add({
                   code: "shared-root-git",
                   severity: "warning",
@@ -322,9 +414,11 @@ export const runLaunchPreflight = (
                     `The shared session root ${input.root} is itself a Git repository ` +
                     `(top-level ${identity.topLevel ?? input.root}). Projects beneath it would share that ` +
                     "repository." +
-                    (commonUnderRoot
+                    (commonUnderRoot === true
                       ? ` Move or retire ${path.join(input.root, ".git")} if that is unintended.`
-                      : " Its Git identity points at a different repository; no change to this root is implied."),
+                      : commonUnderRoot === false
+                        ? " Its Git identity points at a different repository; no change to this root is implied."
+                        : " Its Git identity could not be fully resolved, so T3 Code cannot confirm whether this root's own repository metadata is in use; no change to this root is implied."),
                 });
               }
               break;
@@ -392,6 +486,27 @@ export const runLaunchPreflight = (
                 "checkpoint may record excluded files as deleted. Install a newer Git to keep sparse " +
                 "checkpoints accurate; the session can still start.",
           });
+        } else if (requiredByConsumer && sparseOutcome._tag === "timeout") {
+          // The capability is relevant to the selected launch and could not be
+          // confirmed. Report it as incomplete rather than silently clean; never
+          // mislabel an unknown capability as unsupported, and never block.
+          yield* add({
+            code: "git-probe-timed-out",
+            severity: "warning",
+            message:
+              "The Git `add --sparse` capability probe did not finish in time, so the selected OpenCode " +
+              "launch could not be confirmed to support `git add --sparse`. Snapshots may be incomplete; " +
+              "the session can still start. Check the Git install and the session-root filesystem.",
+          });
+        } else if (requiredByConsumer && sparseOutcome._tag === "error") {
+          yield* add({
+            code: "git-probe-failed",
+            severity: "warning",
+            message:
+              `The Git \`add --sparse\` capability probe failed (${sparseOutcome.error.detail}), so the ` +
+              "selected OpenCode launch could not be confirmed to support `git add --sparse`. Snapshots " +
+              "may be incomplete; the session can still start.",
+          });
         }
       } else if (gitOutcome._tag === "timeout" || gitOutcome.error.reason === "timeout") {
         yield* add({
@@ -423,8 +538,16 @@ export const runLaunchPreflight = (
       let readTarget: string | undefined;
       for (const relativePath of READ_PROBE_CANDIDATES) {
         const candidate = path.join(input.root, relativePath);
-        if (yield* existsBounded(candidate)) {
+        const outcome = yield* existsOutcome(candidate);
+        if (outcome.state === "present") {
           readTarget = candidate;
+          break;
+        }
+        if (outcome.state === "unknown") {
+          // A denied or stalled metadata read is not absence. Report it once and
+          // stop scanning further optional candidates; missing optional files
+          // stay silent.
+          yield* add(rootMetadataWarning(candidate, outcome.reason));
           break;
         }
       }
@@ -460,9 +583,18 @@ export const runLaunchPreflight = (
     });
 
     // The whole exploration shares one wall-clock budget. Findings already
-    // collected survive a mid-probe timeout; a probe that cannot be interrupted
-    // is still individually bounded above.
-    yield* explore.pipe(Effect.timeoutOption(TOTAL_PROBE_BUDGET));
+    // collected survive a mid-probe timeout, so an incomplete preflight is never
+    // reported clean; each probe is still individually bounded above.
+    const completed = Option.isSome(yield* explore.pipe(Effect.timeoutOption(TOTAL_PROBE_BUDGET)));
+    if (!completed) {
+      yield* add({
+        code: "git-probe-timed-out",
+        severity: "warning",
+        message:
+          "The launch preflight did not finish within its budget, so its checks are incomplete. " +
+          "The session can still start; check the Git install and the session-root filesystem.",
+      });
+    }
 
     const findings = yield* Ref.get(collected);
     return {
@@ -622,6 +754,19 @@ export const make = Effect.gen(function* () {
 
   const files: LaunchPreflightFileProbe = {
     exists: (target) => fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false)),
+    stat: (target) =>
+      fileSystem.stat(target).pipe(
+        Effect.map((entry): LaunchPreflightFsEntry => ({
+          type: entry.type === "Directory" ? "directory" : entry.type === "File" ? "file" : "other",
+        })),
+        Effect.catchIf(
+          (cause) => cause.reason._tag === "NotFound",
+          () => Effect.succeed({ type: "missing" } satisfies LaunchPreflightFsEntry),
+        ),
+        Effect.mapError(
+          (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
+        ),
+      ),
     realPath: (target) => fileSystem.realPath(target).pipe(Effect.orElseSucceed(() => null)),
     readFirstBytes: (target, maxBytes) =>
       fileSystem.stream(target, { bytesToRead: maxBytes }).pipe(
