@@ -1,5 +1,31 @@
 name: CI
 
+# Fork validation routing. Upstream schedules Blacksmith labels that this fork
+# has no installation for, so those jobs queue forever. Every substantive job
+# here instead runs on owner-admitted self-hosted capacity declared through the
+# same repository variables the landed fork-release pipeline uses:
+#   T3CODE_AUTHORIZED_RUNNERS  comma-separated labels this fork may use
+#   T3CODE_LINUX_RUNNER        the admitted Linux validation label
+#   T3CODE_MACOS_X64_RUNNER    the admitted Intel macOS validation label
+# The `authorize` jobs validate the declared label against the authorized list
+# before any checkout or install, so source never executes on unauthorized
+# capacity. When capacity is not declared the run fails closed — an unschedulable
+# startup, or the guard's CAPACITY_NOT_CONFIGURED/RUNNER_NOT_AUTHORIZED once a
+# label is declared — rather than waiting on an unmatched label. External
+# pull requests are never scheduled on self-hosted capacity. See
+# docs/internals/fork-ci.md.
+#
+# The admission step is a small explicit bootstrap in this workflow. On the pull
+# request that first introduces the routing guard, the guard does not exist at
+# the PR base, so the bootstrap runs the identical policy inline instead of
+# trying to load a missing file. Once the guard is on the default branch the
+# bootstrap runs the checked-out guard from the trusted ref. Actions are pinned
+# to immutable commit SHAs and every source checkout disables persisted
+# credentials.
+#
+# Incremental upstream behavior is preserved: the same jobs, check names, test
+# commands and coverage. Only the runner target, host-portability of setup and
+# the security pins changed.
 on:
   pull_request:
   push:
@@ -14,14 +40,98 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Admission runs first and owns the trust decision. Job-level `if` is
+  # evaluated before a runner is allocated, so untrusted external PRs are
+  # skipped instead of being scheduled on self-hosted capacity. Every other job
+  # needs this one, so a skipped or failed admission also skips them.
+  authorize:
+    name: Authorize fork CI runners
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted routing guard
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/scripts/fork-ci-routing.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Assert admitted Linux validation capacity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          AUTHORIZED: ${{ vars.T3CODE_AUTHORIZED_RUNNERS }}
+          T3CODE_LINUX_RUNNER: ${{ vars.T3CODE_LINUX_RUNNER }}
+          REQUIRED_ROLES: linux
+        run: |
+          # >>> fork-ci-bootstrap >>>
+          set -euo pipefail
+          # First-introduction bootstrap. The routing guard is introduced by the change
+          # that also adds this workflow, so it does not exist at the pull request base.
+          # Run the checked-out trusted guard when it is present; otherwise enforce the
+          # identical admission policy inline instead of silently executing unmerged
+          # guard source. `.github/scripts/fork-ci-routing.test.py` runs this exact block.
+          guard=".github/scripts/fork-ci-routing.sh"
+          if [ -f "$guard" ]; then
+            exec bash "$guard"
+          fi
+
+          EVENT_NAME="${EVENT_NAME:-}"
+          HEAD_REPO="${HEAD_REPO:-}"
+          REPOSITORY="${REPOSITORY:-}"
+          AUTHORIZED="${AUTHORIZED:-}"
+          REQUIRED_ROLES="${REQUIRED_ROLES:-linux}"
+
+          fail() {
+            printf '%s: %s\n' "$1" "$2" >&2
+            exit "$3"
+          }
+
+          case "$EVENT_NAME" in
+            pull_request | push) ;;
+            *) fail UNTRUSTED_CONTEXT "unsupported event '$EVENT_NAME'; only pull_request and push are routed" 5 ;;
+          esac
+          [ -n "$REPOSITORY" ] || fail UNTRUSTED_CONTEXT "repository identity is empty; the event origin cannot be verified" 5
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$REPOSITORY" ]; then
+            fail UNTRUSTED_FORK "pull request head '$HEAD_REPO' is not '$REPOSITORY'; external or unidentified PR code is never routed to self-hosted runner capacity" 3
+          fi
+
+          [ -n "$AUTHORIZED" ] || fail CAPACITY_NOT_CONFIGURED "repository variable T3CODE_AUTHORIZED_RUNNERS is unset or empty; set it to the comma-separated self-hosted runner labels this fork may use" 2
+
+          admitted=""
+          for role in $REQUIRED_ROLES; do
+            case "$role" in
+              linux) var=T3CODE_LINUX_RUNNER; label="${T3CODE_LINUX_RUNNER:-}" ;;
+              macos) var=T3CODE_MACOS_X64_RUNNER; label="${T3CODE_MACOS_X64_RUNNER:-}" ;;
+              *) fail CAPACITY_NOT_CONFIGURED "unknown required role '$role'" 2 ;;
+            esac
+            [ -n "$label" ] || fail CAPACITY_NOT_CONFIGURED "repository variable $var is unset or empty; no admitted $role validation capacity is declared" 2
+            found=""
+            IFS=','
+            for candidate in $AUTHORIZED; do
+              candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+              if [ "$candidate" = "$label" ]; then found=1; break; fi
+            done
+            unset IFS
+            [ -n "$found" ] || fail RUNNER_NOT_AUTHORIZED "declared $role runner '$label' is not listed in T3CODE_AUTHORIZED_RUNNERS" 4
+            admitted="$admitted $role=$label"
+          done
+          printf 'ADMITTED%s\n' "$admitted"
+          # <<< fork-ci-bootstrap <<<
+
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
@@ -36,7 +146,7 @@ jobs:
           fi
 
       - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
         with:
           node-version-file: package.json
           cache: true
@@ -58,12 +168,22 @@ jobs:
       - name: Typecheck
         run: vpr typecheck
 
-      - uses: ./.github/actions/setup-apt-mirrors
-
-      - name: Install browser secret helper build libraries
+      - name: Verify browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+          # The admitted image must already carry these. CI never mutates host
+          # packages: a missing prerequisite is an image defect that fails here
+          # with the exact packages to provision, rather than a silent
+          # `sudo apt-get` on whatever host happened to be selected.
+          missing=""
+          for pkg in libsecret-1-dev pkg-config; do
+            if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+              missing="${missing:+$missing }$pkg"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            printf '::error::admitted runner image is missing required build libraries: %s. Provision them in the runner image; CI does not change host packages.\n' "$missing" >&2
+            exit 1
+          fi
 
       - name: Build desktop pipeline
         run: vp run build:desktop
@@ -78,19 +198,21 @@ jobs:
   # limit stays at the default 4 so peak load per runner is unchanged.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
         with:
           node-version-file: package.json
           cache: true
@@ -99,18 +221,31 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
-      - uses: ./.github/actions/setup-apt-mirrors
-
-      - name: Install browser secret helper build libraries
+      - name: Verify browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+          # The admitted image must already carry these. CI never mutates host
+          # packages: a missing prerequisite is an image defect that fails here
+          # with the exact packages to provision, rather than a silent
+          # `sudo apt-get` on whatever host happened to be selected.
+          missing=""
+          for pkg in libsecret-1-dev pkg-config; do
+            if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+              missing="${missing:+$missing }$pkg"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            printf '::error::admitted runner image is missing required build libraries: %s. Provision them in the runner image; CI does not change host packages.\n' "$missing" >&2
+            exit 1
+          fi
 
       - name: Test preview artifact validation
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
 
       - name: Test nightly release checks
         run: node --test .github/scripts/check-nightly-release.test.cjs
+
+      - name: Test fork CI routing guards
+        run: python3 -B .github/scripts/fork-ci-routing.test.py
 
       - name: Test
         run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' test
@@ -121,7 +256,8 @@ jobs:
   # isolation that flag buys is preserved exactly.
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -129,15 +265,16 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
         with:
           node-version-file: package.json
           cache: true
@@ -177,7 +314,7 @@ jobs:
 
       - name: Upload thread transfer result
         if: always() && steps.transfer_budget.outputs.present == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: thread-transfer-results
           path: ${{ runner.temp }}/thread-transfer-result.json
@@ -188,41 +325,61 @@ jobs:
   # for checks that take under 3s, on the critical path of every PR.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
 
+      # Discover crates instead of hardcoding them, so a new native crate is
+      # checked the moment it lands rather than only after a second CI edit
+      # (see docs/internals/fork-ci.md for the #10 windows-service-host wiring).
       - name: Check Rust formatting
         run: |
-          for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
-            cargo fmt --manifest-path "native/$crate/Cargo.toml" -- --check
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(native/*/Cargo.toml)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error::No native/*/Cargo.toml crates were discovered" >&2
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            cargo fmt --manifest-path "$manifest" -- --check
           done
 
       - name: Test Rust crates
         run: |
-          for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
-            cargo test --locked --manifest-path "native/$crate/Cargo.toml"
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(native/*/Cargo.toml)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error::No native/*/Cargo.toml crates were discovered" >&2
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            cargo test --locked --manifest-path "$manifest"
           done
 
-  # The static analysis below needs a macOS runner, which bills ~6.7x a Linux
-  # minute, so gate it on the native sources it actually lints instead of paying
-  # for it on every push. Detection is API-only (no checkout) and fails open: if
-  # the diff cannot be resolved, the lint runs.
+  # The static analysis below needs a macOS runner, so gate it on the native
+  # sources it actually lints instead of paying for it on every push. Detection
+  # is API-only (no checkout) and fails open: if the diff cannot be resolved,
+  # the lint runs.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -294,25 +451,109 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # macOS capacity is validated separately, and only when the macOS job will
+  # actually run, so a fork with Linux-only capacity is not blocked on every PR.
+  # The gate itself runs on admitted Linux capacity.
+  authorize_macos:
+    name: Authorize fork macOS validation capacity
+    needs: [authorize, mobile_native_changes]
+    if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' && needs.authorize.result == 'success' && needs.mobile_native_changes.result == 'success' }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted routing guard
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/scripts/fork-ci-routing.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Assert admitted macOS validation capacity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          AUTHORIZED: ${{ vars.T3CODE_AUTHORIZED_RUNNERS }}
+          T3CODE_MACOS_X64_RUNNER: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
+          REQUIRED_ROLES: macos
+        run: |
+          # >>> fork-ci-bootstrap >>>
+          set -euo pipefail
+          # First-introduction bootstrap. The routing guard is introduced by the change
+          # that also adds this workflow, so it does not exist at the pull request base.
+          # Run the checked-out trusted guard when it is present; otherwise enforce the
+          # identical admission policy inline instead of silently executing unmerged
+          # guard source. `.github/scripts/fork-ci-routing.test.py` runs this exact block.
+          guard=".github/scripts/fork-ci-routing.sh"
+          if [ -f "$guard" ]; then
+            exec bash "$guard"
+          fi
+
+          EVENT_NAME="${EVENT_NAME:-}"
+          HEAD_REPO="${HEAD_REPO:-}"
+          REPOSITORY="${REPOSITORY:-}"
+          AUTHORIZED="${AUTHORIZED:-}"
+          REQUIRED_ROLES="${REQUIRED_ROLES:-linux}"
+
+          fail() {
+            printf '%s: %s\n' "$1" "$2" >&2
+            exit "$3"
+          }
+
+          case "$EVENT_NAME" in
+            pull_request | push) ;;
+            *) fail UNTRUSTED_CONTEXT "unsupported event '$EVENT_NAME'; only pull_request and push are routed" 5 ;;
+          esac
+          [ -n "$REPOSITORY" ] || fail UNTRUSTED_CONTEXT "repository identity is empty; the event origin cannot be verified" 5
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HEAD_REPO" != "$REPOSITORY" ]; then
+            fail UNTRUSTED_FORK "pull request head '$HEAD_REPO' is not '$REPOSITORY'; external or unidentified PR code is never routed to self-hosted runner capacity" 3
+          fi
+
+          [ -n "$AUTHORIZED" ] || fail CAPACITY_NOT_CONFIGURED "repository variable T3CODE_AUTHORIZED_RUNNERS is unset or empty; set it to the comma-separated self-hosted runner labels this fork may use" 2
+
+          admitted=""
+          for role in $REQUIRED_ROLES; do
+            case "$role" in
+              linux) var=T3CODE_LINUX_RUNNER; label="${T3CODE_LINUX_RUNNER:-}" ;;
+              macos) var=T3CODE_MACOS_X64_RUNNER; label="${T3CODE_MACOS_X64_RUNNER:-}" ;;
+              *) fail CAPACITY_NOT_CONFIGURED "unknown required role '$role'" 2 ;;
+            esac
+            [ -n "$label" ] || fail CAPACITY_NOT_CONFIGURED "repository variable $var is unset or empty; no admitted $role validation capacity is declared" 2
+            found=""
+            IFS=','
+            for candidate in $AUTHORIZED; do
+              candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+              if [ "$candidate" = "$label" ]; then found=1; break; fi
+            done
+            unset IFS
+            [ -n "$found" ] || fail RUNNER_NOT_AUTHORIZED "declared $role runner '$label' is not listed in T3CODE_AUTHORIZED_RUNNERS" 4
+            admitted="$admitted $role=$label"
+          done
+          printf 'ADMITTED%s\n' "$admitted"
+          # <<< fork-ci-bootstrap <<<
+
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
-    needs: mobile_native_changes
+    needs: [authorize, mobile_native_changes, authorize_macos]
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
-    # output empty, and that must run the lint rather than silently skip it.
-    if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    # output empty, and that must run the lint rather than silently skip it. The
+    # authorize results keep a failed or skipped admission from being bypassed.
+    if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' && needs.authorize.result == 'success' && needs.authorize_macos.result == 'success' }}
+    runs-on: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
         with:
           node-version-file: package.json
           cache: true
@@ -328,19 +569,21 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
         with:
           node-version-file: package.json
           cache: true
