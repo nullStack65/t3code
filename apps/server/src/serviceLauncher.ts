@@ -355,10 +355,23 @@ export interface LauncherControlOptions {
   readonly pollIntervalMs?: number;
 }
 
+export interface LauncherOptions {
+  /** Private host control channel; absent keeps the signal-only path. */
+  readonly control?: LauncherControlOptions;
+  /**
+   * How the pinned runtime entry is executed. A production runtime is a native
+   * executable run directly; the tests stand one up as a Node script, which
+   * Windows cannot exec through an OS shebang, so the interpreter is explicit
+   * rather than left to the platform.
+   */
+  readonly runtimeInterpreter?: string;
+}
+
 export class Launcher {
   readonly #baseDir: string;
   readonly #statePath: string;
   readonly #control: LauncherControlOptions | undefined;
+  readonly #runtimeInterpreter: string | undefined;
   #state: ServiceState;
   #child: ManagedChild | null = null;
   #timer: NodeJS.Timeout | undefined;
@@ -370,11 +383,12 @@ export class Launcher {
   #requestCounter = 0;
   readonly #completion = Promise.withResolvers<void>();
 
-  constructor(baseDir: string, state: ServiceState, control?: LauncherControlOptions) {
+  constructor(baseDir: string, state: ServiceState, options: LauncherOptions = {}) {
     this.#baseDir = baseDir;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
-    this.#control = control;
+    this.#control = options.control;
+    this.#runtimeInterpreter = options.runtimeInterpreter;
   }
 
   async run(): Promise<void> {
@@ -560,7 +574,14 @@ export class Launcher {
       ...(update === undefined ? {} : { update }),
     };
     const spawnArguments = runtimeSpawnArguments(paths);
-    const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
+    // Run through the interpreter when one is injected (tests on Windows);
+    // production spawns the native executable directly.
+    const command = this.#runtimeInterpreter ?? spawnArguments.command;
+    const args =
+      this.#runtimeInterpreter === undefined
+        ? spawnArguments.args
+        : [spawnArguments.command, ...spawnArguments.args];
+    const child = NodeChildProcess.spawn(command, args, {
       env: { ...process.env, [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });
@@ -778,6 +799,6 @@ export async function main(): Promise<void> {
   await new Launcher(
     baseDir,
     state,
-    instance === undefined || instance === "" ? undefined : { instance },
+    instance === undefined || instance === "" ? {} : { control: { instance } },
   ).run();
 }

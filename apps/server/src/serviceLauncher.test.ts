@@ -2,14 +2,17 @@
 // @effect-diagnostics globalTimers:off
 // @effect-diagnostics globalDateInEffect:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 
 import {
   Launcher,
+  type LauncherControlOptions,
   readServiceState,
   requestGracefulChildStop,
   writeServiceState,
@@ -86,9 +89,11 @@ it("rejects contradictory service state", () => {
   );
 });
 
-// A pinned runtime is an executable at <versionDir>/t3. The tests stand one up
-// as a Node shebang script so the launcher spawns it the way it spawns the
-// real single-executable, IPC channel included.
+// A pinned runtime is an executable at <versionDir>/t3 (or t3.exe on Windows).
+// The tests stand one up as a Node script so the launcher spawns it the way it
+// spawns the real single-executable, IPC channel included. The script is not a
+// native Windows executable, so the OS cannot honor its shebang there; on
+// Windows the launcher runs it through the injected Node interpreter instead.
 const writeFakeRuntime = (
   fs: FileSystem.FileSystem,
   path: Path.Path,
@@ -96,7 +101,8 @@ const writeFakeRuntime = (
   childSource: string,
 ) =>
   Effect.gen(function* () {
-    const entryPath = path.join(versionDir, "t3");
+    const platform = yield* HostProcessPlatform;
+    const entryPath = path.join(versionDir, platform === "win32" ? "t3.exe" : "t3");
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
     yield* fs.chmod(entryPath, 0o755);
@@ -105,6 +111,19 @@ const writeFakeRuntime = (
       `${path.basename(versionDir)}\n`,
     );
     return entryPath;
+  });
+
+// The test runtime is a script rather than the production native executable, so
+// Windows needs an explicit interpreter. POSIX keeps the launcher's direct-exec
+// path, so no platform-specific behavior is baked into the launcher itself.
+const launcherOptions = (control?: LauncherControlOptions) =>
+  Effect.gen(function* () {
+    const platform = yield* HostProcessPlatform;
+    if (platform !== "win32") return control === undefined ? {} : { control };
+    return {
+      ...(control === undefined ? {} : { control }),
+      runtimeInterpreter: process.execPath,
+    };
   });
 
 it.layer(NodeServices.layer)("service state persistence", (it) => {
@@ -148,6 +167,7 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
           const launcher = new Launcher(
             root,
             yield* Effect.promise(() => readServiceState(statePath)),
+            yield* launcherOptions(),
           );
           const running = launcher.run();
           yield* Effect.promise(() => launcher.stop("SIGTERM"));
@@ -187,7 +207,11 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        yield* launcherOptions(),
+      );
       const running = launcher.run();
       const stopping = launcher.stop("SIGTERM");
       // An explicit stop leaves the marker that tells a child shutting down
@@ -239,7 +263,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        yield* launcherOptions(),
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -290,7 +318,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        yield* launcherOptions(),
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -350,7 +382,11 @@ if (context.update?.status === "pending") {
         }),
       );
 
-      const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)));
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        yield* launcherOptions(),
+      );
       yield* Effect.promise(() =>
         launcher.run().then(
           () => Promise.reject(new Error("launcher unexpectedly completed")),
@@ -469,6 +505,61 @@ it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
   );
 });
 
+it.layer(NodeServices.layer)("pinned runtime launch seam", (it) => {
+  it.effect("runs a scripted runtime through the injected interpreter", () =>
+    Effect.gen(function* () {
+      // Windows cannot exec the script fixture through its shebang, so the
+      // launcher runs it through an interpreter there. The same seam runs here
+      // on every host, proving the Windows launch path drives the real
+      // Launcher transitions rather than a launcher duplicate.
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-runner-" });
+      const statePath = path.join(root, "runtime", "service-state.json");
+      const readyMarker = path.join(root, "child-ready.txt");
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
+      const encodedReadyMarker = JSON.stringify(readyMarker);
+      const childSource =
+        `const { writeFileSync } = require("node:fs");\n` +
+        `writeFileSync(${encodedReadyMarker}, "ready");\n` +
+        `setInterval(() => {}, 1_000);\n`;
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        childSource,
+      );
+      yield* Effect.promise(() =>
+        writeServiceState(statePath, {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+        }),
+      );
+
+      const launcher = new Launcher(
+        root,
+        yield* Effect.promise(() => readServiceState(statePath)),
+        { runtimeInterpreter: process.execPath },
+      );
+      const running = launcher.run();
+      // Wait for the interpreter-launched child to report readiness, bounded.
+      yield* Effect.promise(async () => {
+        for (let attempt = 0; attempt < 250; attempt += 1) {
+          if (NodeFS.existsSync(readyMarker)) return;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      });
+      yield* Effect.promise(() => launcher.stop("SIGTERM"));
+      yield* Effect.promise(() => running);
+
+      // The interpreter-launched child actually started and was stopped by the
+      // same production transition, not left behind.
+      assert.isTrue(yield* fs.exists(readyMarker));
+      assert.isTrue(yield* fs.exists(path.join(root, "runtime", SERVICE_STOP_MARKER_FILE)));
+    }),
+  );
+});
+
 it.layer(NodeServices.layer)("host control channel", (it) => {
   const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -498,10 +589,11 @@ it.layer(NodeServices.layer)("host control channel", (it) => {
         activeVersion: "1.0.0",
       }),
     );
-    const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)), {
-      instance,
-      pollIntervalMs: 20,
-    });
+    const launcher = new Launcher(
+      root,
+      yield* Effect.promise(() => readServiceState(statePath)),
+      yield* launcherOptions({ instance, pollIntervalMs: 20 }),
+    );
     return {
       fs,
       root,
