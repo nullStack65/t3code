@@ -2,6 +2,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as References from "effect/References";
 import * as Terminal from "effect/Terminal";
 import { Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
@@ -66,7 +67,11 @@ export const reconcileService = Effect.fn("cli.service.reconcile")(function* (op
 export function formatServiceStatus(
   status: BootService.BootServiceStatus,
   cliVersion: string,
+  options?: { readonly json?: boolean },
 ): string {
+  if (options?.json) {
+    return JSON.stringify({ ...status, cliVersion }, null, 2);
+  }
   if (!status.supported) {
     return "T3 Code service\n  Status: unavailable on this machine\n  Supported on: Linux with systemd, macOS with launchd";
   }
@@ -77,6 +82,8 @@ export function formatServiceStatus(
   const problems = (status.problems ?? []).map(
     (problem) => `  [${problem}] ${BootService.formatBootServiceProblem(problem)}`,
   );
+  const observationLines = formatServiceObservation(status);
+  const warning = formatServiceObservationWarning(status);
   if (
     !status.current &&
     status.installedVersion !== undefined &&
@@ -87,7 +94,9 @@ export function formatServiceStatus(
       `  Status: installed · t3@${installedVersion} (newer than this t3@${cliVersion} CLI)`,
       `  Unit: ${status.unitPath}`,
       `  Logs: ${status.logPath}`,
+      ...observationLines,
       ...problems,
+      ...warning,
       `  Next: Run \`t3 update ${installedVersion}\` to match it, or pass \`--allow-downgrade\` to \`t3 service install\` explicitly.`,
     ].join("\n");
   }
@@ -96,19 +105,87 @@ export function formatServiceStatus(
     `  Status: ${status.current ? `installed · t3@${installedVersion}` : "needs an update or repair"}`,
     `  Unit: ${status.unitPath}`,
     `  Logs: ${status.logPath}`,
+    ...observationLines,
     ...problems,
+    ...warning,
     ...(status.current ? [] : ["  Next: Run `t3 service install` to repair it."]),
   ].join("\n");
+}
+
+/** Manager observation lines. Additive: absent when no live observation exists. */
+function formatServiceObservation(status: BootService.BootServiceStatus): ReadonlyArray<string> {
+  const observation = status.observation;
+  if (observation === undefined) return [];
+  const running =
+    observation.running === "running"
+      ? "running"
+      : observation.running === "stopped"
+        ? "stopped"
+        : observation.running === "transitioning"
+          ? "changing state"
+          : observation.running === "not-loaded"
+            ? "not loaded"
+            : "unknown";
+  const configured =
+    observation.configuredVersion !== undefined
+      ? `t3@${observation.configuredVersion}`
+      : observation.configuredProgramPath;
+  const rawState =
+    observation.state === undefined
+      ? undefined
+      : observation.subState === undefined
+        ? observation.state
+        : `${observation.state}/${observation.subState}`;
+  return [
+    `  Manager: ${observation.manager} · running ${running}`,
+    `  Enabled: ${observation.enabled}`,
+    ...(configured === undefined ? [] : [`  Configured launcher: ${configured}`]),
+    ...(rawState === undefined ? [] : [`  Manager state: ${rawState}`]),
+    ...(observation.restartCount === undefined
+      ? []
+      : [`  Restarts (systemd, monotonic since start): ${observation.restartCount}`]),
+    ...(observation.lastResult === undefined ? [] : [`  Last result: ${observation.lastResult}`]),
+    ...(observation.detail === undefined ? [] : [`  Manager detail: ${observation.detail}`]),
+    `  Observed: ${observation.observedAt} (${observation.source})`,
+  ];
+}
+
+/**
+ * A non-running manager observation must not read as healthy, but a state file
+ * and `current` cannot prove the server answers either. Keep both claims
+ * separate and say which one the note is based on.
+ */
+function formatServiceObservationWarning(
+  status: BootService.BootServiceStatus,
+): ReadonlyArray<string> {
+  const observation = status.observation;
+  if (observation === undefined || observation.running === "running") return [];
+  return [
+    `  Note: the service manager reports the job as '${observation.running}'; that is a manager observation, not application health.`,
+  ];
 }
 
 const runServiceCommand = Effect.fn("cli.service.run")(function* <A, E>(
   flags: { readonly baseDir: Parameters<typeof resolveCliAuthConfig>[0]["baseDir"] },
   run: Effect.Effect<A, E, BootService.BootService>,
+  options?: { readonly quietLogs?: boolean },
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel);
-  return yield* run.pipe(Effect.provide(bootServiceLayer(config)));
+  const minimumLogLevel = options?.quietLogs ? "Error" : config.logLevel;
+  return yield* run.pipe(
+    Effect.provide(
+      bootServiceLayer(config).pipe(
+        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+      ),
+    ),
+  );
 });
+
+const jsonFlag = Flag.Boolean("json").pipe(
+  Flag.withDescription("Emit JSON instead of human-readable output."),
+  Flag.withDefault(false),
+);
 
 const serviceReconcileFlags = {
   ...projectLocationFlags,
@@ -201,15 +278,20 @@ const serviceUninstallCommand = Command.make("uninstall", projectLocationFlags).
   ),
 );
 
-const serviceStatusCommand = Command.make("status", projectLocationFlags).pipe(
+const serviceStatusCommand = Command.make("status", {
+  ...projectLocationFlags,
+  json: jsonFlag,
+}).pipe(
   Command.withDescription("Show whether the T3 Code background service is installed."),
   Command.withHandler((flags) =>
     runServiceCommand(
       flags,
       Effect.gen(function* () {
         const service = yield* BootService.BootService;
-        yield* Console.log(formatServiceStatus(yield* service.status, packageJson.version));
+        const status = yield* service.status;
+        yield* Console.log(formatServiceStatus(status, packageJson.version, { json: flags.json }));
       }),
+      { quietLogs: flags.json },
     ),
   ),
 );
