@@ -2,6 +2,9 @@ import { expect, it } from "@effect/vitest";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+
+import packageJson from "../../package.json" with { type: "json" };
 
 import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
@@ -134,5 +137,55 @@ it.effect("rejects contradictory trial context instead of leaving activation clo
     });
     const error = yield* makeClient(host, "1.1.0").pipe(Effect.flip);
     expect(error.message).toBe("The service launcher supplied invalid startup context.");
+  }),
+);
+
+const buildShutdownLayer = (host: FakeLauncherProcess) =>
+  Layer.build(
+    ServiceLauncherClient.managedShutdownLayer.pipe(
+      Layer.provide(Layer.succeed(ServiceLauncherClient.ServiceLauncherHostProcess, host)),
+      Layer.provide(Layer.succeed(HostProcessEnvironment, host.env)),
+    ),
+  );
+
+it.effect("drives the managed drain and echoes the requested stop id", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: packageJson.version,
+    });
+    const signals: string[] = [];
+    const onSigterm = () => signals.push("SIGTERM");
+    process.on("SIGTERM", onSigterm);
+    try {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* buildShutdownLayer(host);
+          host.emit({ type: "stop", requestId: "req-1" });
+          yield* Effect.yieldNow;
+          // The stop request drives the same interruption path SIGTERM uses.
+          expect(signals).toEqual(["SIGTERM"]);
+          // Nothing is acknowledged before the scope actually drains.
+          expect(host.sent).toEqual([]);
+        }),
+      );
+    } finally {
+      process.off("SIGTERM", onSigterm);
+    }
+    // The acknowledgement carries the request's id, proving it belongs to the
+    // shutdown that was requested.
+    expect(host.sent).toEqual([{ type: "stopped", requestId: "req-1" }]);
+  }),
+);
+
+it.effect("never acknowledges a stop that was not requested", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: packageJson.version,
+    });
+    yield* Effect.scoped(buildShutdownLayer(host));
+    // An unrelated scope closure must not emit a false completed-drain signal.
+    expect(host.sent).toEqual([]);
   }),
 );

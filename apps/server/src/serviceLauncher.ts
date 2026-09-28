@@ -22,8 +22,11 @@ import {
   compareExactServiceVersions,
   decodeServiceLauncherChildMessage,
   isExactServiceVersion,
+  parseServiceLauncherControlRequest,
   parseServiceState,
+  SERVICE_CONTROL_REQUEST_FILE,
   SERVICE_LAUNCHER_CONTEXT_ENV,
+  SERVICE_LAUNCHER_INSTANCE_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_STATE_FILE,
   SERVICE_RESTART_PENDING_FILE,
@@ -36,6 +39,9 @@ const TERMINATE_GRACE_MS = 5_000;
 /** Bound on how long a Windows whole-service stop waits for the managed child
     to drain and acknowledge before it force-terminates the process. */
 const STOP_ACK_TIMEOUT_MS = 10_000;
+/** How often a managed launcher looks for a host control request. Bounded and
+    cheap; a file read is ~microseconds and the timer is cleared at exit. */
+const CONTROL_POLL_MS = 200;
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -262,36 +268,62 @@ function waitForExit(child: NodeChildProcess.ChildProcess): Promise<void> {
 }
 
 /**
- * Asks the managed child to run its own graceful shutdown over the existing
- * IPC channel and waits, bounded, for the `stopped` acknowledgement or the
- * child's own exit. Returns without forcing; the caller still terminates to
- * guarantee the process is gone. Only meaningful where a signal is a hard kill
- * (Windows), so POSIX keeps its existing signal-driven drain.
+ * How a bounded request for a child's own drain ended. The caller keeps these
+ * distinct because they call for different actions: `exited` needs no force,
+ * `timed-out` and `channel-unavailable` still need the bounded force fallback.
  */
-export function requestGracefulChildStop(child: NodeChildProcess.ChildProcess): Promise<void> {
-  if (!child.connected || child.send === undefined) return Promise.resolve();
-  return new Promise<void>((resolve) => {
+export type GracefulStopOutcome =
+  | { readonly status: "exited"; readonly acknowledged: boolean }
+  | { readonly status: "timed-out"; readonly acknowledged: boolean }
+  | { readonly status: "channel-unavailable" };
+
+/**
+ * Asks the managed child to run its own graceful shutdown over the existing IPC
+ * channel and waits, bounded, for the child to actually exit. An
+ * acknowledgement is recorded but never used as proof of a completed drain: it
+ * can be emitted from a scope finalizer that runs before every other resource
+ * has drained, so acting on it would authorize an unnecessary hard kill. The
+ * child's own exit is the truth; the caller still force-terminates when the
+ * bound expires, so the process is never left running. Only meaningful where a
+ * signal is a hard kill (Windows); POSIX keeps its signal-driven path.
+ */
+export function requestGracefulChildStop(
+  child: NodeChildProcess.ChildProcess,
+  requestId: string,
+): Promise<GracefulStopOutcome> {
+  if (!child.connected || child.send === undefined) {
+    return Promise.resolve({ status: "channel-unavailable" });
+  }
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ status: "exited", acknowledged: false });
+  }
+  return new Promise<GracefulStopOutcome>((resolve) => {
     let settled = false;
+    let acknowledged = false;
     let timer: NodeJS.Timeout;
-    function finish() {
+    function finish(outcome: GracefulStopOutcome) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.off("message", onMessage);
       child.off("exit", onExit);
-      resolve();
+      resolve(outcome);
     }
     function onMessage(value: unknown) {
       const reply = decodeServiceLauncherChildMessage(value);
-      if (reply?.type === "stopped") finish();
+      // Only the acknowledgement for this exact request counts; one emitted
+      // during an unrelated scope closure must not be read as this drain.
+      if (reply?.type === "stopped" && reply.requestId === requestId) acknowledged = true;
     }
     function onExit() {
-      finish();
+      finish({ status: "exited", acknowledged });
     }
-    timer = setTimeout(finish, STOP_ACK_TIMEOUT_MS);
+    timer = setTimeout(() => finish({ status: "timed-out", acknowledged }), STOP_ACK_TIMEOUT_MS);
     child.on("message", onMessage);
     child.on("exit", onExit);
-    sendMessage(child, { type: "stop" }).catch(() => finish());
+    sendMessage(child, { type: "stop", requestId }).catch(() =>
+      finish({ status: "channel-unavailable" }),
+    );
   });
 }
 
@@ -313,23 +345,36 @@ const stopMarkerPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_STOP_MARKER_FILE);
 const restartPendingPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
+const controlRequestPath = (baseDir: string) =>
+  NodePath.join(baseDir, "runtime", SERVICE_CONTROL_REQUEST_FILE);
+
+export interface LauncherControlOptions {
+  /** Per-instance token the host passed at spawn; binds requests to this run. */
+  readonly instance: string;
+  /** Overridable for tests; production uses {@link CONTROL_POLL_MS}. */
+  readonly pollIntervalMs?: number;
+}
 
 export class Launcher {
   readonly #baseDir: string;
   readonly #statePath: string;
+  readonly #control: LauncherControlOptions | undefined;
   #state: ServiceState;
   #child: ManagedChild | null = null;
   #timer: NodeJS.Timeout | undefined;
+  #controlTimer: NodeJS.Timeout | undefined;
   #transitions: Promise<void> = Promise.resolve();
   #stopRequested = false;
   #stopping = false;
   #done = false;
+  #requestCounter = 0;
   readonly #completion = Promise.withResolvers<void>();
 
-  constructor(baseDir: string, state: ServiceState) {
+  constructor(baseDir: string, state: ServiceState, control?: LauncherControlOptions) {
     this.#baseDir = baseDir;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
+    this.#control = control;
   }
 
   async run(): Promise<void> {
@@ -337,13 +382,48 @@ export class Launcher {
     const onSigint = () => void this.stop("SIGINT");
     process.once("SIGTERM", onSigterm);
     process.once("SIGINT", onSigint);
+    if (this.#control !== undefined) this.#startControlPolling();
     try {
       this.#enqueue(() => this.#recover());
       await this.#completion.promise;
     } finally {
       process.off("SIGTERM", onSigterm);
       process.off("SIGINT", onSigint);
+      clearInterval(this.#controlTimer);
+      this.#controlTimer = undefined;
     }
+  }
+
+  /**
+   * Watches the private control request the host owns. A request is bound to
+   * this launch by its instance token; a request with any other token is stale
+   * (from a previous launch or another home) and is consumed without effect. The
+   * file is removed before the stop begins so a repeated or concurrent request
+   * cannot start a second stop.
+   */
+  #startControlPolling(): void {
+    const poll = () => {
+      void this.#consumeControlRequest();
+    };
+    void this.#consumeControlRequest();
+    this.#controlTimer = setInterval(poll, this.#control?.pollIntervalMs ?? CONTROL_POLL_MS);
+  }
+
+  async #consumeControlRequest(): Promise<void> {
+    const requestPath = controlRequestPath(this.#baseDir);
+    let contents: string;
+    try {
+      contents = await NodeFSP.readFile(requestPath, "utf8");
+    } catch {
+      return;
+    }
+    await NodeFSP.rm(requestPath, { force: true }).catch(() => undefined);
+    const request = parseServiceLauncherControlRequest(contents);
+    if (request === undefined || request.instance !== this.#control?.instance) {
+      // Stale, foreign or malformed: already consumed above, act on nothing.
+      return;
+    }
+    void this.stop("SIGTERM");
   }
 
   #enqueue(transition: () => Promise<void>): void {
@@ -392,11 +472,21 @@ export class Launcher {
       this.#child = null;
       if (child !== undefined) {
         // Windows cannot deliver a graceful signal: request the child's own
-        // lifetime drain over IPC first, then guarantee the process is gone.
+        // lifetime drain over IPC first and wait, bounded, for its actual exit.
+        // Only a non-exit (timeout or an unavailable channel) still needs the
+        // force fallback; an early acknowledgement by itself never does.
         // POSIX keeps its existing signal-driven finalizer path.
         // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
-        if (process.platform === "win32") await requestGracefulChildStop(child);
-        await terminateChild(child, signal);
+        if (process.platform === "win32") {
+          this.#requestCounter += 1;
+          const outcome = await requestGracefulChildStop(
+            child,
+            `${String(process.pid)}-${String(this.#requestCounter)}`,
+          );
+          if (outcome.status !== "exited") await terminateChild(child, signal);
+        } else {
+          await terminateChild(child, signal);
+        }
       }
       this.#done = true;
       this.#completion.resolve();
@@ -682,5 +772,12 @@ export async function main(): Promise<void> {
   }
   const statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
   const state = await readServiceState(statePath);
-  await new Launcher(baseDir, state).run();
+  // Only a host that passed an instance token gets a control reader; a manual
+  // or development launcher keeps its signal-only path.
+  const instance = process.env[SERVICE_LAUNCHER_INSTANCE_ENV]?.trim();
+  await new Launcher(
+    baseDir,
+    state,
+    instance === undefined || instance === "" ? undefined : { instance },
+  ).run();
 }

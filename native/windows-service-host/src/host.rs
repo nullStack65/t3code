@@ -67,9 +67,10 @@ pub trait ChildHandle {
     /// the PID belongs to another process, and `Err` means the query failed.
     fn verify_identity(&mut self) -> Result<bool, QueryError>;
     fn try_wait(&mut self) -> Result<Option<i32>, QueryError>;
-    /// Ask the launcher to stop its server child. The portable host writes the
-    /// stop marker the launcher reads; the production launcher adaptation
-    /// (documented in the scoped design) is what makes that marker actionable.
+    /// Ask the launcher to stop its server child. The host writes a private,
+    /// per-instance control request the launcher watches and acts on; the
+    /// launcher then runs its real stop path and drives the child's drain. The
+    /// stop marker is written too, as a cleanup fallback only.
     fn request_graceful_stop(&mut self) -> Result<(), QueryError>;
     /// Force the owned tree down and report whether its exit was confirmed.
     fn terminate_tree(&mut self) -> CleanupOutcome;
@@ -89,12 +90,14 @@ pub trait ChildHost {
 #[derive(Debug)]
 pub struct CommandChildHost {
     stop_marker: PathBuf,
+    control_request: PathBuf,
 }
 
 impl CommandChildHost {
     pub fn new(config: &ServiceConfig) -> Self {
         Self {
             stop_marker: config.stop_marker(),
+            control_request: config.control_request(),
         }
     }
 }
@@ -103,6 +106,9 @@ pub struct CommandChild {
     child: Child,
     id: ProcessIdentity,
     stop_marker: PathBuf,
+    control_request: PathBuf,
+    instance: String,
+    request_counter: u64,
 }
 
 impl ChildHost for CommandChildHost {
@@ -118,10 +124,17 @@ impl ChildHost for CommandChildHost {
             )));
         }
         let (program, args) = config.child_command();
+        // A fresh instance token binds any control request to this launch.
+        let instance = crate::launcher_control::instance_token(
+            std::process::id(),
+            crate::launcher_control::now_nanos(),
+            0,
+        );
         let mut command = Command::new(&program);
         command
             .args(&args)
             .env("T3CODE_HOME", &config.home)
+            .env(crate::launcher_control::INSTANCE_ENV, &instance)
             .stdin(Stdio::null());
         if config.home.is_dir() {
             command.current_dir(&config.home);
@@ -159,6 +172,9 @@ impl ChildHost for CommandChildHost {
             child,
             id,
             stop_marker: self.stop_marker.clone(),
+            control_request: self.control_request.clone(),
+            instance,
+            request_counter: 0,
         })
     }
 }
@@ -187,6 +203,20 @@ impl ChildHandle for CommandChild {
     }
 
     fn request_graceful_stop(&mut self) -> Result<(), QueryError> {
+        // Delivered control: a private request file the launcher watches, binds
+        // to this launch's instance token, consumes and acts on.
+        self.request_counter = self.request_counter.wrapping_add(1);
+        let request = crate::launcher_control::stop_request(
+            &self.instance,
+            &crate::launcher_control::request_id(&self.instance, self.request_counter),
+        );
+        if let Some(parent) = self.control_request.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| QueryError)?;
+        }
+        std::fs::write(&self.control_request, request.as_bytes()).map_err(|_| QueryError)?;
+        // Cleanup fallback: redundant once the launcher runs its real stop, and
+        // the existing recovery semantics for a launcher that cannot read the
+        // channel. It is not, on its own, delivered control.
         if let Some(parent) = self.stop_marker.parent() {
             std::fs::create_dir_all(parent).map_err(|_| QueryError)?;
         }
@@ -243,6 +273,7 @@ mod tests {
     fn rejects_a_missing_home_for_the_service_launcher() {
         let mut host = CommandChildHost {
             stop_marker: PathBuf::from(".t3-test-stop-marker"),
+            control_request: PathBuf::from(".t3-test-control-request"),
         };
         let scoped = ServiceConfig {
             home: PathBuf::from("does-not-exist-t3-home"),

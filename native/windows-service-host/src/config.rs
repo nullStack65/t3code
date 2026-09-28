@@ -92,6 +92,14 @@ impl ServiceConfig {
     pub fn stop_marker(&self) -> PathBuf {
         self.home.join("runtime").join(".service-stopping")
     }
+
+    /// Path of the private control request the launcher watches. Matches
+    /// `SERVICE_CONTROL_REQUEST_FILE` in the server's `serviceProtocol.ts`.
+    pub fn control_request(&self) -> PathBuf {
+        self.home
+            .join("runtime")
+            .join(crate::launcher_control::CONTROL_REQUEST_FILE)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

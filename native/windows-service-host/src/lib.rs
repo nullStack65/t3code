@@ -17,6 +17,7 @@ pub mod config;
 pub mod control;
 pub mod environment;
 pub mod host;
+pub mod launcher_control;
 pub mod run;
 pub mod supervise;
 

@@ -256,9 +256,17 @@ export const layer = Layer.effect(ServiceLauncherClient, make());
  * Installs the managed graceful-stop handler. When the launcher owns this
  * process it asks for a stop over the existing child IPC channel; this drives
  * the same Effect-runtime interruption path the runtime already installs for
- * `SIGTERM`, then acknowledges the drain from a scope finalizer so the launcher
- * can distinguish a completed shutdown from a forced one. A server that is not
- * launcher-managed (or that receives no stop request) is unaffected.
+ * `SIGTERM`, then acknowledges the drain so the launcher can tell a requested
+ * drain from a forced one. A server that is not launcher-managed (or that
+ * receives no stop request) is unaffected.
+ *
+ * The acknowledgement is tied to the exact stop request: it carries the
+ * request's id and is only ever sent when a stop was actually requested. An
+ * unrelated scope closure therefore cannot emit a `stopped` message that the
+ * launcher would read as the requested drain completing. The launcher treats
+ * the acknowledgement as an early hint and still waits for the child's real
+ * exit, so an acknowledgement that races another finalizer cannot authorize a
+ * hard kill on its own.
  *
  * `process.emit("SIGTERM")` is used rather than `process.kill` so the same
  * finalizer path runs on Windows, where a process signal is a hard kill.
@@ -267,16 +275,21 @@ export const managedShutdownLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const { host, managed } = yield* resolveStartup();
     if (!managed) return;
+    let requestedStopId: string | undefined;
     const onMessage = (...args: ReadonlyArray<unknown>) => {
       const message = decodeServiceLauncherParentMessage(args[0]);
-      if (message?.type === "stop") process.emit("SIGTERM");
+      if (message?.type !== "stop" || requestedStopId === message.requestId) return;
+      requestedStopId = message.requestId;
+      process.emit("SIGTERM");
     };
     host.on("message", onMessage);
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
         host.off("message", onMessage);
+        // Only acknowledge a stop that was actually requested, echoing its id.
+        if (requestedStopId === undefined) return;
         try {
-          host.send({ type: "stopped" });
+          host.send({ type: "stopped", requestId: requestedStopId });
         } catch {
           // The channel may already be closed; the launcher then falls back to
           // its bounded force-termination instead of trusting this ack.

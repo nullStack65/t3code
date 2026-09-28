@@ -80,6 +80,9 @@ pub struct WindowsChild {
     job: Handle,
     id: ProcessIdentity,
     stop_marker: std::path::PathBuf,
+    control_request: std::path::PathBuf,
+    instance: String,
+    request_counter: u64,
     /// True once an explicit termination was confirmed. While false, dropping
     /// this holder still closes a kill-on-close job, which is itself a
     /// termination effect; `Drop` makes that effect explicit and bounded.
@@ -215,6 +218,19 @@ impl ChildHandle for WindowsChild {
     }
 
     fn request_graceful_stop(&mut self) -> Result<(), QueryError> {
+        // Delivered control: a private request file the launcher watches, binds
+        // to this launch's instance token, consumes and acts on. The launcher
+        // then runs its real stop path over the child IPC channel.
+        self.request_counter = self.request_counter.wrapping_add(1);
+        let request = crate::launcher_control::stop_request(
+            &self.instance,
+            &crate::launcher_control::request_id(&self.instance, self.request_counter),
+        );
+        if let Some(parent) = self.control_request.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| QueryError)?;
+        }
+        std::fs::write(&self.control_request, request.as_bytes()).map_err(|_| QueryError)?;
+        // Cleanup fallback only; not evidence that control was delivered.
         if let Some(parent) = self.stop_marker.parent() {
             std::fs::create_dir_all(parent).map_err(|_| QueryError)?;
         }
@@ -324,10 +340,19 @@ impl ChildHost for WindowsChildHost {
         }
 
         let mut command_line = build_command_line(config);
+        // A fresh instance token binds any control request to this launch.
+        let instance = crate::launcher_control::instance_token(
+            std::process::id(),
+            crate::launcher_control::now_nanos(),
+            0,
+        );
         // Bind the native child to the selected home. Passing NULL here would
         // inherit an ambient T3CODE_HOME (absent or pointing elsewhere); cwd is
         // not what the pinned launcher reads.
-        let environment = crate::environment::host_environment(&config.home);
+        let environment = crate::environment::host_environment_with(
+            &config.home,
+            &[(crate::launcher_control::INSTANCE_ENV, instance.as_str())],
+        );
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
 
@@ -419,6 +444,9 @@ impl ChildHost for WindowsChildHost {
             job,
             id,
             stop_marker: config.stop_marker(),
+            control_request: config.control_request(),
+            instance,
+            request_counter: 0,
             terminated: false,
         })
     }

@@ -48,7 +48,18 @@ pub fn build_environment_block(ambient: &[(OsString, OsString)], home: &Path) ->
 /// The production launch request's environment: the host's ambient environment
 /// with the selected home overriding any absent/conflicting `T3CODE_HOME`.
 pub fn host_environment(home: &Path) -> Vec<u16> {
-    let ambient: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    host_environment_with(home, &[])
+}
+
+/// As [`host_environment`], also setting `extra` variables (for example the
+/// per-instance control token). Each extra name replaces any ambient entry with
+/// the same name case-insensitively.
+pub fn host_environment_with(home: &Path, extra: &[(&str, &str)]) -> Vec<u16> {
+    let mut ambient: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    for (name, value) in extra {
+        ambient.retain(|(existing, _)| !existing.to_string_lossy().eq_ignore_ascii_case(name));
+        ambient.push((OsString::from(name), OsString::from(value)));
+    }
     build_environment_block(&ambient, home)
 }
 

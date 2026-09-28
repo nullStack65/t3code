@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalTimers:off
+// @effect-diagnostics globalDateInEffect:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -16,6 +18,7 @@ import {
   compareExactServiceVersions,
   decodeServiceState,
   isExactServiceVersion,
+  SERVICE_CONTROL_REQUEST_FILE,
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
@@ -369,7 +372,7 @@ if (context.update?.status === "pending") {
 });
 
 it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
-  it.effect("drains the managed child over IPC before force-termination", () =>
+  it.effect("waits for the managed child's own exit before force-termination", () =>
     Effect.gen(function* () {
       // POSIX keeps its signal-driven finalizer path; the IPC drain is the
       // Windows path where a signal would be a hard kill. The production helper
@@ -386,7 +389,7 @@ it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
         `  if (message && message.type === "stop") {\n` +
         `    setTimeout(() => {\n` +
         `      writeFileSync(${encodedDrainMarker}, "drained");\n` +
-        `      process.send({ type: "stopped" });\n` +
+        `      process.send({ type: "stopped", requestId: message.requestId });\n` +
         `      process.exit(0);\n` +
         `    }, 25);\n` +
         `  }\n` +
@@ -396,11 +399,54 @@ it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
         stdio: ["ignore", "ignore", "inherit", "ipc"],
       });
       yield* Effect.promise(() => new Promise<void>((r) => child.once("spawn", () => r())));
-      yield* Effect.promise(() => requestGracefulChildStop(child));
-      yield* Effect.promise(() => new Promise<void>((r) => child.once("exit", () => r())));
+      const outcome = yield* Effect.promise(() => requestGracefulChildStop(child, "req-1"));
 
-      // The child ran its own drain before the helper resolved.
+      // The child ran its own drain before the helper resolved, and the helper
+      // only resolved on the real exit, not the earlier acknowledgement.
+      assert.deepEqual(outcome, { status: "exited", acknowledged: true });
       assert.isTrue(yield* fs.exists(drainMarker));
+    }),
+  );
+
+  it.effect("does not resolve on an early acknowledgement while resources still drain", () =>
+    Effect.gen(function* () {
+      const childSource =
+        `process.on("message", (message) => {\n` +
+        `  if (message && message.type === "stop") {\n` +
+        `    process.send({ type: "stopped", requestId: message.requestId });\n` +
+        `    setTimeout(() => process.exit(0), 300);\n` +
+        `  }\n` +
+        `});\n` +
+        `setInterval(() => {}, 1_000);\n`;
+      const child = NodeChildProcess.spawn(process.execPath, ["-e", childSource], {
+        stdio: ["ignore", "ignore", "inherit", "ipc"],
+      });
+      yield* Effect.promise(() => new Promise<void>((r) => child.once("spawn", () => r())));
+      const started = Date.now();
+      const outcome = yield* Effect.promise(() => requestGracefulChildStop(child, "req-1"));
+      // The acknowledgement arrived almost immediately, but the helper waited
+      // for the exit ~300 ms later instead of authorizing a force kill.
+      assert.deepEqual(outcome, { status: "exited", acknowledged: true });
+      assert.isAtLeast(Date.now() - started, 250);
+    }),
+  );
+
+  it.effect("ignores an acknowledgement for a different request", () =>
+    Effect.gen(function* () {
+      const childSource =
+        `process.on("message", (message) => {\n` +
+        `  if (message && message.type === "stop") {\n` +
+        `    process.send({ type: "stopped", requestId: "some-other-request" });\n` +
+        `    setTimeout(() => process.exit(0), 50);\n` +
+        `  }\n` +
+        `});\n` +
+        `setInterval(() => {}, 1_000);\n`;
+      const child = NodeChildProcess.spawn(process.execPath, ["-e", childSource], {
+        stdio: ["ignore", "ignore", "inherit", "ipc"],
+      });
+      yield* Effect.promise(() => new Promise<void>((r) => child.once("spawn", () => r())));
+      const outcome = yield* Effect.promise(() => requestGracefulChildStop(child, "req-1"));
+      assert.deepEqual(outcome, { status: "exited", acknowledged: false });
     }),
   );
 
@@ -414,10 +460,112 @@ it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
         },
       );
       yield* Effect.promise(() => new Promise<void>((r) => child.once("spawn", () => r())));
-      // No `ipc` stdio: the helper must return without driving a drain and the
-      // caller falls back to its bounded force-termination.
-      yield* Effect.promise(() => requestGracefulChildStop(child));
+      // No `ipc` stdio: the helper must report an unavailable channel without
+      // driving a drain so the caller falls back to force-termination.
+      const outcome = yield* Effect.promise(() => requestGracefulChildStop(child, "req-1"));
+      assert.deepEqual(outcome, { status: "channel-unavailable" });
       child.kill();
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("host control channel", (it) => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const controlPathOf = (path: Path.Path, root: string) =>
+    path.join(root, "runtime", SERVICE_CONTROL_REQUEST_FILE);
+
+  const stopRequest = (instance: string, requestId: string) =>
+    JSON.stringify({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      type: "stop",
+      instance,
+      requestId,
+    });
+
+  const standUp = Effect.fn("test.stand_up_controlled_launcher")(function* (
+    instance: string,
+    childSource = "setInterval(() => {}, 1_000);\n",
+  ) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-launcher-control-" });
+    const statePath = path.join(root, "runtime", "service-state.json");
+    yield* writeFakeRuntime(fs, path, path.join(root, "runtime", "versions", "1.0.0"), childSource);
+    yield* Effect.promise(() =>
+      writeServiceState(statePath, {
+        protocol: SERVICE_LAUNCHER_PROTOCOL,
+        activeVersion: "1.0.0",
+      }),
+    );
+    const launcher = new Launcher(root, yield* Effect.promise(() => readServiceState(statePath)), {
+      instance,
+      pollIntervalMs: 20,
+    });
+    return {
+      fs,
+      root,
+      launcher,
+      controlPath: controlPathOf(path, root),
+      stopMarkerPath: path.join(root, "runtime", SERVICE_STOP_MARKER_FILE),
+    };
+  });
+
+  it.effect("delivers a host stop request to the production stop path", () =>
+    Effect.gen(function* () {
+      const { fs, launcher, controlPath, stopMarkerPath } = yield* standUp("instance-a");
+      const running = launcher.run();
+      yield* Effect.promise(() => delay(150));
+      yield* fs.writeFileString(controlPath, stopRequest("instance-a", "req-1"));
+      yield* Effect.promise(() => running);
+
+      assert.isTrue(yield* fs.exists(stopMarkerPath));
+      // The request is consumed before the stop runs, so it cannot fire twice.
+      assert.isFalse(yield* fs.exists(controlPath));
+    }),
+  );
+
+  it.effect("consumes a request written before the launcher starts (stop during startup)", () =>
+    Effect.gen(function* () {
+      const { fs, launcher, controlPath } = yield* standUp("instance-a");
+      yield* fs.writeFileString(controlPath, stopRequest("instance-a", "req-1"));
+      // No delay: the request is already present when run() begins.
+      yield* Effect.promise(() => launcher.run());
+      assert.isFalse(yield* fs.exists(controlPath));
+    }),
+  );
+
+  it.effect("never acts on a stale request bound to another instance", () =>
+    Effect.gen(function* () {
+      const { fs, launcher, controlPath } = yield* standUp("instance-a");
+      const running = launcher.run();
+      yield* Effect.promise(() => delay(150));
+      yield* fs.writeFileString(controlPath, stopRequest("instance-from-a-previous-run", "req-1"));
+
+      let settled = false;
+      void running.then(() => {
+        settled = true;
+      });
+      yield* Effect.promise(() => delay(150));
+      assert.isFalse(settled);
+      // Consumed without effect, so it cannot linger for a later launcher.
+      assert.isFalse(yield* fs.exists(controlPath));
+
+      yield* Effect.promise(() => launcher.stop("SIGTERM"));
+      yield* Effect.promise(() => running);
+    }),
+  );
+
+  it.effect("treats repeated stop requests and repeated stop calls as one shutdown", () =>
+    Effect.gen(function* () {
+      const { fs, launcher, controlPath } = yield* standUp("instance-a");
+      const running = launcher.run();
+      yield* Effect.promise(() => delay(150));
+      yield* fs.writeFileString(controlPath, stopRequest("instance-a", "req-1"));
+      yield* Effect.promise(() => delay(5));
+      yield* fs.writeFileString(controlPath, stopRequest("instance-a", "req-2"));
+      yield* Effect.promise(() => launcher.stop("SIGTERM"));
+      yield* Effect.promise(() => running);
     }),
   );
 });
