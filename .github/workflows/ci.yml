@@ -1,5 +1,22 @@
 name: CI
 
+# Fork validation routing. Upstream schedules Blacksmith labels that this fork
+# has no installation for, so those jobs queue forever. Every substantive job
+# here instead runs on owner-admitted self-hosted capacity declared through the
+# same repository variables the landed fork-release pipeline uses:
+#   T3CODE_AUTHORIZED_RUNNERS  comma-separated labels this fork may use
+#   T3CODE_LINUX_RUNNER        the admitted Linux validation label
+#   T3CODE_MACOS_X64_RUNNER    the admitted Intel macOS validation label
+# The `authorize` jobs validate the declared label against the authorized list
+# before any checkout or install, so source never executes on unauthorized
+# capacity. When capacity is not declared the run fails closed with
+# CAPACITY_NOT_CONFIGURED rather than waiting on an unmatched label. External
+# pull requests are never scheduled on self-hosted capacity. See
+# docs/internals/fork-ci.md.
+#
+# Incremental upstream behavior is preserved: the same jobs, check names, test
+# commands and coverage. Only the runner target and host-portability of setup
+# changed.
 on:
   pull_request:
   push:
@@ -14,9 +31,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Admission runs first and owns the trust decision. Job-level `if` is
+  # evaluated before a runner is allocated, so untrusted external PRs are
+  # skipped instead of being scheduled on self-hosted capacity. Every other job
+  # needs this one, so a skipped or failed admission also skips them.
+  authorize:
+    name: Authorize fork CI runners
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted routing guard
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/scripts/fork-ci-routing.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Assert admitted Linux validation capacity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          AUTHORIZED: ${{ vars.T3CODE_AUTHORIZED_RUNNERS }}
+          T3CODE_LINUX_RUNNER: ${{ vars.T3CODE_LINUX_RUNNER }}
+          REQUIRED_ROLES: linux
+        run: bash .github/scripts/fork-ci-routing.sh
+
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -58,12 +104,14 @@ jobs:
       - name: Typecheck
         run: vpr typecheck
 
-      - uses: ./.github/actions/setup-apt-mirrors
-
-      - name: Install browser secret helper build libraries
+      - name: Ensure browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+          # The admitted image is expected to carry these; install only the
+          # missing packages and never rewrite the host's apt sources.
+          if ! dpkg -s libsecret-1-dev pkg-config >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libsecret-1-dev pkg-config
+          fi
 
       - name: Build desktop pipeline
         run: vp run build:desktop
@@ -78,7 +126,8 @@ jobs:
   # limit stays at the default 4 so peak load per runner is unchanged.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -99,18 +148,23 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
-      - uses: ./.github/actions/setup-apt-mirrors
-
-      - name: Install browser secret helper build libraries
+      - name: Ensure browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+          # The admitted image is expected to carry these; install only the
+          # missing packages and never rewrite the host's apt sources.
+          if ! dpkg -s libsecret-1-dev pkg-config >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libsecret-1-dev pkg-config
+          fi
 
       - name: Test preview artifact validation
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
 
       - name: Test nightly release checks
         run: node --test .github/scripts/check-nightly-release.test.cjs
+
+      - name: Test fork CI routing guards
+        run: python3 -B .github/scripts/fork-ci-routing.test.py
 
       - name: Test
         run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' test
@@ -121,7 +175,8 @@ jobs:
   # isolation that flag buys is preserved exactly.
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -188,7 +243,8 @@ jobs:
   # for checks that take under 3s, on the critical path of every PR.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -204,25 +260,43 @@ jobs:
         with:
           components: rustfmt
 
+      # Discover crates instead of hardcoding them, so a new native crate is
+      # checked the moment it lands rather than only after a second CI edit
+      # (see docs/internals/fork-ci.md for the #10 windows-service-host wiring).
       - name: Check Rust formatting
         run: |
-          for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
-            cargo fmt --manifest-path "native/$crate/Cargo.toml" -- --check
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(native/*/Cargo.toml)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error::No native/*/Cargo.toml crates were discovered" >&2
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            cargo fmt --manifest-path "$manifest" -- --check
           done
 
       - name: Test Rust crates
         run: |
-          for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
-            cargo test --locked --manifest-path "native/$crate/Cargo.toml"
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(native/*/Cargo.toml)
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            echo "::error::No native/*/Cargo.toml crates were discovered" >&2
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            cargo test --locked --manifest-path "$manifest"
           done
 
-  # The static analysis below needs a macOS runner, which bills ~6.7x a Linux
-  # minute, so gate it on the native sources it actually lints instead of paying
-  # for it on every push. Detection is API-only (no checkout) and fails open: if
-  # the diff cannot be resolved, the lint runs.
+  # The static analysis below needs a macOS runner, so gate it on the native
+  # sources it actually lints instead of paying for it on every push. Detection
+  # is API-only (no checkout) and fails open: if the diff cannot be resolved,
+  # the lint runs.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -294,13 +368,42 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # macOS capacity is validated separately, and only when the macOS job will
+  # actually run, so a fork with Linux-only capacity is not blocked on every PR.
+  # The gate itself runs on admitted Linux capacity.
+  authorize_macos:
+    name: Authorize fork macOS validation capacity
+    needs: [authorize, mobile_native_changes]
+    if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' && needs.authorize.result == 'success' && needs.mobile_native_changes.result == 'success' }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted routing guard
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/scripts/fork-ci-routing.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Assert admitted macOS validation capacity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          AUTHORIZED: ${{ vars.T3CODE_AUTHORIZED_RUNNERS }}
+          T3CODE_MACOS_X64_RUNNER: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
+          REQUIRED_ROLES: macos
+        run: bash .github/scripts/fork-ci-routing.sh
+
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
-    needs: mobile_native_changes
+    needs: [authorize, mobile_native_changes, authorize_macos]
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
-    # output empty, and that must run the lint rather than silently skip it.
-    if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    # output empty, and that must run the lint rather than silently skip it. The
+    # authorize results keep a failed or skipped admission from being bypassed.
+    if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' && needs.authorize.result == 'success' && needs.authorize_macos.result == 'success' }}
+    runs-on: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -328,7 +431,8 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
     timeout-minutes: 10
     steps:
       - name: Checkout
