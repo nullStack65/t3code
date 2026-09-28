@@ -607,6 +607,58 @@ it.live("a configured shared session root applies independently of the backend c
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.live("the launch preflight inspects the selected provider environment", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const providerBin = yield* fs.makeTempDirectory();
+    const sentinel = "envchk-integration-sentinel";
+    const captured: Array<{
+      readonly consumer?: LaunchPreflight.LaunchPreflightConsumer | undefined;
+      readonly gitEnvironment?: NodeJS.ProcessEnv | undefined;
+    }> = [];
+    const fixture = yield* makeIntegrationFixture({
+      settings: {
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: "codex",
+            environment: [
+              { name: "PATH", value: providerBin },
+              { name: "ENVCHK_SENTINEL", value: sentinel },
+            ],
+          },
+        },
+      },
+      launchPreflightRunner: (_root, options) => {
+        captured.push({ consumer: options?.consumer, gitEnvironment: options?.gitEnvironment });
+        return Effect.succeed(findingResult([]));
+      },
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      yield* provider.startSession(ThreadId.make("thread-provider-env"), {
+        threadId: ThreadId.make("thread-provider-env"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.strictEqual(captured.length, 1);
+    // The selected consumer is passed to the preflight.
+    assert.strictEqual(captured[0]?.consumer?.driver, "codex");
+    // The launch environment is the selected provider environment layered over
+    // the host: the sentinel and PATH come from the instance (replacement),
+    // while unrelated host variables are inherited.
+    const environment = captured[0]?.gitEnvironment;
+    assert.isDefined(environment);
+    assert.strictEqual(environment?.ENVCHK_SENTINEL, sentinel);
+    assert.strictEqual(environment?.PATH, providerBin);
+    assert.strictEqual(environment?.HOME, process.env.HOME);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live("pre-thread startup warnings reach the first affected session", () =>
   Effect.gen(function* () {
     const reported = yield* Ref.make<ReadonlyArray<string>>([]);
