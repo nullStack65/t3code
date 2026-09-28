@@ -1,0 +1,989 @@
+name: Fork release
+
+# Fork-only release entry point. It builds one immutable source SHA into the
+# fork's required artifacts and, only when explicitly told to, promotes an
+# already-qualified candidate to a GitHub Release on `nullStack65/t3code`.
+#
+# Runner capacity is an explicit, authorized input, never a silent hosted
+# default: every runner label must be declared in the repository variable
+# `T3CODE_AUTHORIZED_RUNNERS` or preflight fails closed. When no authorized
+# runner exists, assemble and verify the same candidate on an authorized
+# Windows/WSL or Intel macOS machine with `scripts/build-fork-candidate.ts`.
+#
+# Required initial targets:
+#   - Windows x64 NSIS installer, with the matching Linux x64 CLI archive
+#     embedded as its WSL runtime.
+#   - Intel macOS x64 DMG.
+#   - Linux x64 self-contained runtime archive.
+#   - Windows x64 self-contained CLI archive (the Windows install/update path).
+#   - Apple Silicon macOS only behind `include_macos_arm64`, reported untested.
+#
+# Publication promotes the frozen candidate artifact by id; it never rebuilds
+# and never overwrites an existing release or tag.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Immutable source SHA to build (full 40-char commit)."
+        required: true
+        type: string
+      version:
+        description: "Fork release version (plain X.Y.Z, e.g. 0.0.43)."
+        required: true
+        type: string
+      upstream_base:
+        description: "Upstream version this fork build is based on (e.g. 0.0.42)."
+        required: true
+        type: string
+      publish:
+        description: "Promote a qualified candidate. Off builds/verifies a candidate only."
+        required: false
+        default: false
+        type: boolean
+      candidate_run_id:
+        description: "Run id of the qualifying candidate to promote. Required when publish is true."
+        required: false
+        default: ""
+        type: string
+      upload_receipts:
+        description: "Import native acceptance receipts for a qualified candidate."
+        required: false
+        default: false
+        type: boolean
+      receipts_source_run_id:
+        description: "Run id of the qualified candidate the imported receipts bind to. Required when upload_receipts is true."
+        required: false
+        default: ""
+        type: string
+      receipt_run_id:
+        description: "Run id holding fork-release-native-receipts to promote with. Defaults to candidate_run_id."
+        required: false
+        default: ""
+        type: string
+      include_macos_arm64:
+        description: "Also build the Apple Silicon macOS DMG (untested by default)."
+        required: false
+        default: false
+        type: boolean
+
+# Trusted runner selection. Labels come from repository variables set by the
+# owner, never from a caller-supplied input, so a dispatch cannot schedule or
+# execute source on an arbitrary runner. If a variable is unset the job runs on
+# a deliberately unmatched label, causing a safe queue rather than an
+# unauthorized run; the `authorize` job reports the exact missing variable.
+# `T3CODE_AUTHORIZED_RUNNERS` must list every label below or `authorize` fails.
+env:
+  T3CODE_LINUX_RUNNER: ${{ vars.T3CODE_LINUX_RUNNER }}
+  T3CODE_WINDOWS_RUNNER: ${{ vars.T3CODE_WINDOWS_RUNNER }}
+  T3CODE_MACOS_X64_RUNNER: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
+  T3CODE_MACOS_ARM64_RUNNER: ${{ vars.T3CODE_MACOS_ARM64_RUNNER }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  # Authorization runs FIRST, on a fixed owner-configured Linux label, before
+  # any build job is scheduled. Every later job `needs: [authorize]`, so a
+  # dispatch cannot execute source on an arbitrary caller-supplied runner. The
+  # labels themselves come from repository variables, not workflow inputs.
+  authorize:
+    name: Authorize runner capacity
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 5
+    steps:
+      - name: Assert authorized runner capacity
+        shell: bash
+        env:
+          AUTHORIZED: ${{ vars.T3CODE_AUTHORIZED_RUNNERS }}
+          LINUX_RUNNER: ${{ vars.T3CODE_LINUX_RUNNER }}
+          WINDOWS_RUNNER: ${{ vars.T3CODE_WINDOWS_RUNNER }}
+          MACOS_X64_RUNNER: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
+          MACOS_ARM64_RUNNER: ${{ vars.T3CODE_MACOS_ARM64_RUNNER }}
+          INCLUDE_ARM64: ${{ inputs.include_macos_arm64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUTHORIZED:-}" ]; then
+            echo "::error::No authorized runner capacity is declared. Set the repository variable T3CODE_AUTHORIZED_RUNNERS to the comma-separated labels this fork may use, or build a candidate with scripts/build-fork-candidate.ts on an authorized machine."
+            exit 1
+          fi
+          IFS=',' read -ra allowed <<< "$AUTHORIZED"
+          check() {
+            local label="$1" role="$2" candidate
+            [ -n "$label" ] || { echo "::error::$role runner variable (vars.T3CODE_*_RUNNER) is unset"; exit 1; }
+            for candidate in "${allowed[@]}"; do
+              candidate="$(echo "$candidate" | xargs)"
+              [ "$candidate" = "$label" ] && return 0
+            done
+            echo "::error::$role runner '$label' is not declared in T3CODE_AUTHORIZED_RUNNERS"
+            exit 1
+          }
+          check "$LINUX_RUNNER" Linux
+          check "$WINDOWS_RUNNER" Windows
+          check "$MACOS_X64_RUNNER" "Intel macOS"
+          if [ "$INCLUDE_ARM64" = "true" ]; then check "$MACOS_ARM64_RUNNER" "Apple Silicon macOS"; fi
+          echo "Authorized runner capacity confirmed."
+
+  preflight:
+    name: Preflight
+    needs: [authorize]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.source.outputs.sha }}
+      head_sha: ${{ steps.source.outputs.head_sha }}
+      workflow_sha: ${{ steps.source.outputs.workflow_sha }}
+      source_mode: ${{ steps.source.outputs.source_mode }}
+      channel: ${{ steps.meta.outputs.channel }}
+      relay_url: ${{ steps.public_config.outputs.relay_url }}
+      clerk_publishable_key: ${{ steps.public_config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.public_config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.public_config.outputs.clerk_cli_oauth_client_id }}
+    steps:
+      # Bootstrap only enough of the selected commit to read package.json and
+      # the dependency-free selection script. This runs BEFORE `vp install`, so
+      # it must not import workspace/Effect packages.
+      - name: Bootstrap the release commit
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ inputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            || git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git checkout --detach "$CHECKOUT_REF"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      # Fetch the requested SHA and main, check out the explicit SHA (never
+      # FETCH_HEAD), assert HEAD equals it, and apply the ancestry policy.
+      # Runs before any install; the selector uses only Node built-ins.
+      - id: source
+        name: Select and verify the exact source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/select-release-source.ts \
+            --repo-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            --sha "${{ inputs.sha }}" \
+            --main-ref main \
+            --mode public \
+            --github-output
+
+      - name: Install release dependencies
+        run: vp install --filter=@t3tools/scripts...
+
+      # Validate the version against the fork's own version line: plain X.Y.Z,
+      # newer than the upstream base, and newer than every published fork
+      # release. Preview/nightly identifiers are rejected so they can never be
+      # discovered as an update.
+      - id: meta
+        name: Validate fork release version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          UPSTREAM_BASE: ${{ inputs.upstream_base }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          existing="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName --jq '[.[].tagName | sub("^v"; "")] | join(",")')"
+          echo "Existing fork releases: ${existing:-<none>}"
+          node scripts/fork-release-version.ts \
+            --upstream-base "$UPSTREAM_BASE" \
+            --existing "$existing" \
+            --version "$RELEASE_VERSION" \
+            --github-output
+          channel="$(node -e 'const v=process.env.RELEASE_VERSION;const m=/-([a-z]+)\.\d{8}\.\d+$/.exec(v);process.stdout.write(m?m[1]:"stable")')"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      # Public T3 Connect identifiers, identical to `.env.example` and
+      # overridable by repository variables. These are not secrets; they keep
+      # existing installs' pairing and relay state working across the upgrade.
+      - id: public_config
+        name: Resolve public T3 Connect configuration
+        shell: bash
+        env:
+          RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
+          CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+          CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+          CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          {
+            echo "relay_url=${RELAY_URL:-https://relay.t3.codes}"
+            echo "clerk_publishable_key=${CLERK_PUBLISHABLE_KEY:-pk_live_Y2xlcmsudDMuY29kZXMk}"
+            echo "clerk_jwt_template=${CLERK_JWT_TEMPLATE:-t3-relay}"
+            echo "clerk_cli_oauth_client_id=${CLERK_CLI_OAUTH_CLIENT_ID:-hzxSgY2cH10sDU2r}"
+          } >> "$GITHUB_OUTPUT"
+
+  bundle:
+    name: Build JS bundle
+    needs: [preflight]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 30
+    env:
+      T3CODE_RELEASE_BUILD: "1"
+      T3CODE_SOURCE_SHA: ${{ needs.preflight.outputs.sha }}
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.preflight.outputs.relay_url }}
+    steps:
+      - name: Bootstrap the release commit
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.preflight.outputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            || git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git checkout --detach "$CHECKOUT_REF"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Select and verify the exact source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/select-release-source.ts \
+            --repo-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            --sha "${{ needs.preflight.outputs.sha }}" \
+            --main-ref main \
+            --mode public
+
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Align package versions to the fork release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        run: vp run build:desktop
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  cli_linux_x64:
+    name: Linux x64 runtime archive
+    needs: [preflight, bundle]
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 30
+    env:
+      T3CODE_RELEASE_BUILD: "1"
+      T3CODE_SOURCE_SHA: ${{ needs.preflight.outputs.sha }}
+    steps:
+      - name: Bootstrap the release commit
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.preflight.outputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            || git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git checkout --detach "$CHECKOUT_REF"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Select and verify the exact source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/select-release-source.ts \
+            --repo-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            --sha "${{ needs.preflight.outputs.sha }}" \
+            --main-ref main \
+            --mode public
+
+      - name: Install CLI dependencies
+        run: vp install --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Align package versions to the fork release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      # The helper is rebuilt from this SHA rather than copied from any
+      # installed app, so the archive's runtime matches its own source.
+      - name: Build resource monitor
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml
+
+      - name: Stage resource monitor for the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          mkdir -p "$target_dir"
+          cp native/resource-monitor/target/release/t3-resource-monitor "$target_dir/t3-resource-monitor"
+
+      # The single-executable is built with the Node pinned in
+      # apps/server/vite.config.ts (SEA_NODE_VERSION). We do not merely *assert*
+      # an ambient host version: vp installs the exact pinned Node and the build
+      # runs under it, then the effective version is logged from a real probe.
+      # Keep SEA_NODE_VERSION and this version in step.
+      - name: Build CLI single-executable under the pinned SEA Node
+        shell: bash
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: |
+          set -euo pipefail
+          echo "vp toolchain (before):"
+          vp toolchain || true
+          # Build, under the pinned Node, with evidence of the effective version.
+          vp run --filter t3 exec -- node --version
+          vp run --filter t3 exec -- node -e '
+            const [major, minor] = process.versions.node.split(".").map(Number);
+            if (major < 25 || (major === 25 && minor < 7)) {
+              console.error(`::error::the SEA build needs Node >= 25.7 for --build-sea, got ${process.versions.node}`);
+              process.exit(1);
+            }
+            console.log(`SEA host Node OK: ${process.versions.node}`);
+          '
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build CLI archive
+        shell: bash
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: |
+          set -euo pipefail
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch x64 \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test CLI archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "${{ needs.preflight.outputs.version }}"
+
+      - name: Verify archive provenance
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/verify-cli"
+          mkdir -p "$tmp"
+          tar -xzf release-cli/*.tar.gz -C "$tmp"
+          info="$(find "$tmp" -name t3code-build-info.json -print -quit)"
+          test -n "$info" || { echo "::error::CLI archive is missing t3code-build-info.json"; exit 1; }
+          node -e '
+            const fs = require("node:fs");
+            const info = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const expected = {
+              repository: "nullStack65/t3code",
+              sourceSha: process.env.RELEASE_SHA,
+              version: process.env.RELEASE_VERSION,
+              arch: "x64",
+            };
+            for (const [key, value] of Object.entries(expected)) {
+              if (info[key] !== value) {
+                console.error(`::error::CLI archive ${key} is ${info[key]}, expected ${value}`);
+                process.exit(1);
+              }
+            }
+            console.log("CLI archive provenance verified:", info);
+          ' "$info"
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-linux-x64
+          path: release-cli/*
+          if-no-files-found: error
+
+  desktop_win_x64:
+    name: Desktop Windows x64
+    needs: [preflight, bundle, cli_linux_x64]
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
+      release_channel: ${{ needs.preflight.outputs.channel }}
+      clerk_publishable_key: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.preflight.outputs.relay_url }}
+      label: Windows x64
+      runner: ${{ vars.T3CODE_WINDOWS_RUNNER }}
+      platform: win
+      target: nsis
+      arch: x64
+      rust_target: x86_64-pc-windows-msvc
+      resource_key: win32-x64
+      # The Windows installer embeds the Linux WSL runtime; the Windows CLI
+      # archive is built here too so the Windows install/update path has a real
+      # asset instead of a predictable 404.
+      cli_archive: true
+      relay_client_tracing: false
+
+  desktop_mac_x64:
+    name: Desktop macOS x64
+    needs: [preflight, bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
+      release_channel: ${{ needs.preflight.outputs.channel }}
+      clerk_publishable_key: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.preflight.outputs.relay_url }}
+      label: macOS x64
+      runner: ${{ vars.T3CODE_MACOS_X64_RUNNER }}
+      platform: mac
+      target: dmg
+      arch: x64
+      rust_target: x86_64-apple-darwin
+      resource_key: darwin-x64
+      cli_archive: false
+      relay_client_tracing: false
+
+  desktop_mac_arm64:
+    name: Desktop macOS arm64
+    if: ${{ inputs.include_macos_arm64 }}
+    needs: [preflight, bundle]
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
+      release_channel: ${{ needs.preflight.outputs.channel }}
+      clerk_publishable_key: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.preflight.outputs.relay_url }}
+      label: macOS arm64
+      runner: ${{ vars.T3CODE_MACOS_ARM64_RUNNER }}
+      platform: mac
+      target: dmg
+      arch: arm64
+      rust_target: aarch64-apple-darwin
+      resource_key: darwin-arm64
+      cli_archive: false
+      relay_client_tracing: false
+
+  qualify:
+    name: Qualify candidate
+    needs:
+      [authorize, preflight, desktop_win_x64, desktop_mac_x64, desktop_mac_arm64, cli_linux_x64]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.desktop_win_x64.result == 'success' && needs.desktop_mac_x64.result == 'success' && needs.cli_linux_x64.result == 'success' && (inputs.include_macos_arm64 == false || needs.desktop_mac_arm64.result == 'success') }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 20
+    steps:
+      - name: Bootstrap the release commit
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.preflight.outputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            || git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git checkout --detach "$CHECKOUT_REF"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Select and verify the exact source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/select-release-source.ts \
+            --repo-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            --sha "${{ needs.preflight.outputs.sha }}" \
+            --main-ref main \
+            --mode public
+
+      - name: Install verification dependencies
+        run: vp install --filter=@t3tools/scripts...
+
+      - name: Install archive extraction tools
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: candidate
+
+      - name: Download CLI archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: candidate
+
+      # No updater manifest is attached for the first release: Windows
+      # automatic update is not advertised until an N -> N+1 acceptance test
+      # passes, and unsigned macOS cannot apply a Squirrel.Mac update at all.
+      # Installs update by downloading the new artifact.
+      - name: Drop updater manifests and builder metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd candidate
+          shopt -s nullglob
+          rm -f *.yml *.blockmap builder-debug.yml
+
+      - name: Assert the required artifact set exists
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          INCLUDE_ARM64: ${{ inputs.include_macos_arm64 }}
+        run: |
+          set -euo pipefail
+          cd candidate
+          shopt -s nullglob
+          fail=0
+          check() { [[ -e "$1" ]] || { echo "::error::missing required artifact: $1"; fail=1; }; }
+          check "T3-Code-${RELEASE_VERSION}-x64.exe"
+          check "T3-Code-${RELEASE_VERSION}-x64.dmg"
+          check "t3-${RELEASE_VERSION}-linux-x64.tar.gz"
+          check "t3-${RELEASE_VERSION}-win32-x64.zip"
+          if [[ "$INCLUDE_ARM64" == "true" ]]; then
+            check "T3-Code-${RELEASE_VERSION}-arm64.dmg"
+          fi
+          (( fail == 0 )) || exit 1
+          echo "Required artifact set present."
+          ls -la
+
+      # The bytes a Linux user downloads must carry this source's provenance.
+      - name: Verify the standalone Linux runtime archive
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/qualify-cli"
+          mkdir -p "$tmp"
+          tar -xzf "candidate/t3-${RELEASE_VERSION}-linux-x64.tar.gz" -C "$tmp"
+          stem="t3-${RELEASE_VERSION}-linux-x64"
+          test -x "$tmp/$stem/t3"
+          test -d "$tmp/$stem/client"
+          test -f "$tmp/$stem/node_modules/node-pty/build/Release/pty.node"
+          test ! -e "$tmp/$stem/bin.mjs"
+          node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const stem = process.argv[1];
+            const info = JSON.parse(fs.readFileSync(path.join(stem, "t3code-build-info.json"), "utf8"));
+            const expected = {
+              repository: "nullStack65/t3code",
+              sourceSha: process.env.RELEASE_SHA,
+              version: process.env.RELEASE_VERSION,
+              arch: "x64",
+              platform: "linux",
+            };
+            for (const [key, value] of Object.entries(expected)) {
+              if (info[key] !== value) {
+                console.error(`::error::Linux runtime ${key} is ${info[key]}, expected ${value}`);
+                process.exit(1);
+              }
+            }
+            console.log("Linux runtime provenance verified:", info);
+          ' "$tmp/$stem"
+
+      # The WSL runtime embedded in the Windows installer must be the exact
+      # standalone archive, with matching source/version/architecture.
+      - name: Verify the embedded WSL runtime
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-windows-installer.ts \
+            --installer "candidate/T3-Code-${RELEASE_VERSION}-x64.exe" \
+            --standalone-archive "candidate/t3-${RELEASE_VERSION}-linux-x64.tar.gz" \
+            --repository "nullStack65/t3code" \
+            --sha "$RELEASE_SHA" \
+            --version "$RELEASE_VERSION" \
+            --arch x64
+
+      # Freeze the candidate: manifest + checksums from the exact distributed
+      # bytes. Required packaged inspection is fail-closed: every component this
+      # Linux runner cannot open itself (notably the macOS DMG) must be covered
+      # by a digest-bound native inspection dropped into `candidate/`.
+      - name: Freeze candidate manifest and checksums
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+          INCLUDE_ARM64: ${{ inputs.include_macos_arm64 }}
+        run: |
+          set -euo pipefail
+          args=(
+            --candidate-dir candidate
+            --version "$RELEASE_VERSION"
+            --sha "$RELEASE_SHA"
+            --repository "nullStack65/t3code"
+            --channel "${{ needs.preflight.outputs.channel }}"
+            --write-manifest
+            --write-checksums
+          )
+          if [[ "$INCLUDE_ARM64" == "true" ]]; then args+=(--include-macos-arm64); fi
+          shopt -s nullglob
+          evidence=(candidate/fork-inspection-evidence*.json)
+          if (( ${#evidence[@]} > 0 )); then
+            args+=(--inspection-evidence "$(IFS=,; echo "${evidence[*]}")")
+          fi
+          node scripts/verify-fork-candidate.ts "${args[@]}"
+
+      # A machine-readable record of the frozen bytes, keyed by the immutable
+      # workflow run id, so a later promotion/receipt step can bind to it.
+      - name: Record the frozen candidate identity
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+            const manifest = JSON.parse(fs.readFileSync("candidate/fork-release-manifest.json", "utf8"));
+            const digest = crypto.createHash("sha256").update(fs.readFileSync("candidate/fork-release-manifest.json")).digest("hex");
+            const identity = {
+              runId: process.env.GITHUB_RUN_ID,
+              runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+              repository: manifest.repository,
+              version: manifest.version,
+              sourceSha: manifest.sourceSha,
+              manifestSha256: digest,
+              assets: manifest.assets,
+              createdAt: new Date().toISOString(),
+            };
+            fs.writeFileSync("candidate/candidate-identity.json", JSON.stringify(identity, null, 2) + "\n");
+            console.log("Candidate identity:", identity.manifestSha256);
+          '
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-release-candidate
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # A real, repeatable receipt upload path. Native machines produce a receipt
+  # JSON and a caller dispatches this job with `upload_receipts: true`, naming
+  # the candidate run whose identity the receipts are bound to. The job verifies
+  # each receipt binds to that candidate's manifest digest and source SHA before
+  # uploading `fork-release-native-receipts` on *this* run. Promotion then reads
+  # this run's receipt artifact (see `receipt_run_id`), never a completed build
+  # run that has no mechanism to receive one.
+  receipts:
+    name: Import native acceptance receipts
+    needs: [authorize, preflight, qualify]
+    if: ${{ !cancelled() && needs.qualify.result == 'success' && inputs.upload_receipts && inputs.receipts_source_run_id != '' }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Cross-run artifact retrieval needs Actions read.
+      actions: read
+    steps:
+      - name: Bootstrap the release commit
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            || git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git checkout --detach "$CHECKOUT_REF"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Install verification dependencies
+        run: vp install --filter=@t3tools/scripts...
+
+      - name: Download the candidate identity to bind receipts to
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.receipts_source_run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name fork-release-candidate \
+            --dir candidate
+
+      # The operator-supplied receipts file is committed/attached out of band.
+      # This job never invents one; it fails closed when the file is absent.
+      - name: Validate and stage native receipts
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test -f fork-native-receipts.json || {
+            echo "::error::fork-native-receipts.json was not provided; native acceptance must be recorded before import"
+            exit 1
+          }
+          mkdir -p receipts
+          node scripts/verify-fork-candidate.ts \
+            --candidate-dir candidate \
+            --version "$RELEASE_VERSION" \
+            --sha "$RELEASE_SHA" \
+            --repository "nullStack65/t3code" \
+            --native-receipts fork-native-receipts.json \
+            --require-native-receipts
+          cp fork-native-receipts.json receipts/fork-native-receipts.json
+
+      - name: Upload native acceptance receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-release-native-receipts
+          path: receipts/fork-native-receipts.json
+          if-no-files-found: error
+
+  publish:
+    name: Promote qualified candidate
+    needs: [authorize, preflight, qualify]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.qualify.result == 'success' && inputs.publish && inputs.candidate_run_id != '' }}
+    runs-on: ${{ vars.T3CODE_LINUX_RUNNER }}
+    timeout-minutes: 20
+    # Publication is the only job with write access and it runs in a named
+    # environment so it can require manual approval. The job-level concurrency
+    # group serializes stable publication across runs, so an older concurrent
+    # build cannot overwrite the latest-release pointer.
+    permissions:
+      contents: write
+      # Cross-run `gh run download` of the frozen candidate and its receipts
+      # requires Actions read.
+      actions: read
+    environment:
+      name: fork-release
+    concurrency:
+      group: fork-release-publish
+      cancel-in-progress: false
+    steps:
+      - name: Bootstrap the release commit
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.preflight.outputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            || git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git checkout --detach "$CHECKOUT_REF"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Install verification dependencies
+        run: vp install --filter=@t3tools/scripts...
+
+      # Promotion consumes the already-frozen candidate; it never rebuilds.
+      - name: Download the qualified candidate by run id
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name fork-release-candidate \
+            --dir candidate
+
+      - name: Bind the downloaded candidate to its recorded identity
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+            const identity = JSON.parse(fs.readFileSync("candidate/candidate-identity.json", "utf8"));
+            if (identity.sourceSha !== process.env.RELEASE_SHA) {
+              console.error(`::error::candidate identity sourceSha ${identity.sourceSha} != ${process.env.RELEASE_SHA}`);
+              process.exit(1);
+            }
+            if (identity.version !== process.env.RELEASE_VERSION) {
+              console.error(`::error::candidate identity version ${identity.version} != ${process.env.RELEASE_VERSION}`);
+              process.exit(1);
+            }
+            const digest = crypto.createHash("sha256").update(fs.readFileSync("candidate/fork-release-manifest.json")).digest("hex");
+            if (digest !== identity.manifestSha256) {
+              console.error(`::error::downloaded manifest digest ${digest} does not match frozen identity ${identity.manifestSha256}`);
+              process.exit(1);
+            }
+            console.log("Candidate bound to frozen identity:", identity.manifestSha256);
+          '
+
+      - name: Download native acceptance receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECEIPT_RUN_ID: ${{ inputs.receipt_run_id != '' && inputs.receipt_run_id || inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          if ! gh run download "$RECEIPT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name fork-release-native-receipts \
+            --dir receipts; then
+            echo "::error::no fork-release-native-receipts artifact on run $RECEIPT_RUN_ID; run the 'Import native acceptance receipts' job first"
+            exit 1
+          fi
+
+      # The environment name is not evidence of an approval gate. Assert the
+      # *required reviewer* rule specifically, not merely that any protection
+      # rule exists: a timer or branch restriction is not an approval.
+      - name: Assert the publication requires reviewer approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          json="$(gh api "repos/$GITHUB_REPOSITORY/environments/fork-release" 2>/dev/null || echo "")"
+          if [ -z "$json" ]; then
+            echo "::error::environment 'fork-release' does not exist; configure it with required reviewers before publishing"
+            exit 1
+          fi
+          reviewers="$(printf '%s' "$json" | node -e '
+            let raw = "";
+            process.stdin.on("data", (c) => (raw += c));
+            process.stdin.on("end", () => {
+              const env = JSON.parse(raw);
+              const rule = (env.protection_rules ?? []).find((r) => r.type === "required_reviewers");
+              const count = rule?.reviewers?.length ?? 0;
+              process.stdout.write(String(count));
+            });
+          ')"
+          if [ "${reviewers:-0}" = "0" ]; then
+            echo "::error::environment 'fork-release' has no required-reviewer approval rule; a timer or branch restriction is not an approval gate"
+            exit 1
+          fi
+          echo "Publication requires approval from $reviewers reviewer(s)."
+
+      - name: Verify promotion and create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+          INCLUDE_ARM64: ${{ inputs.include_macos_arm64 }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+
+          release_exists=false
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then release_exists=true; fi
+          tag_exists=false
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then tag_exists=true; fi
+          latest="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName --jq '[.[].tagName | sub("^v"; "")] | join(",")')"
+
+          args=(
+            --candidate-dir candidate
+            --version "$RELEASE_VERSION"
+            --sha "$RELEASE_SHA"
+            --repository "nullStack65/t3code"
+            --native-receipts receipts/fork-native-receipts.json
+            --promote
+            --tag-target "$RELEASE_SHA"
+            --latest-version "$latest"
+            --authorization-gate-exists true
+          )
+          [[ "$release_exists" == "true" ]] && args+=(--release-exists)
+          [[ "$tag_exists" == "true" ]] && args+=(--tag-exists)
+          if [[ "$INCLUDE_ARM64" == "true" ]]; then args+=(--include-macos-arm64); fi
+          node scripts/verify-fork-candidate.ts "${args[@]}"
+
+          notes="$(mktemp)"
+          {
+            echo "Fork build of T3 Code \`${RELEASE_SHA}\` (upstream base \`${{ inputs.upstream_base }}\`)."
+            echo
+            echo "Repository: \`nullStack65/t3code\`. Fork version \`${RELEASE_VERSION}\` is the fork's own increasing line, independent of the upstream base version."
+            echo
+            echo "Installs update by downloading the new artifact; automatic desktop update is not advertised for this release."
+            echo
+            echo "Assets are checksummed in \`SHA256SUMS\`."
+          } > "$notes"
+
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_SHA" \
+            --title "T3 Code (fork) v${RELEASE_VERSION}" \
+            --notes-file "$notes" \
+            --latest \
+            candidate/*
