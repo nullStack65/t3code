@@ -23,6 +23,7 @@ import {
   ensurePinnedRuntimeInstalled,
   pinnedRuntimeCommand,
   pinnedRuntimePaths,
+  pinnedRuntimeVersionsDir,
   PinnedRuntimeInstallError,
 } from "./pinnedRuntime.ts";
 import {
@@ -512,14 +513,24 @@ export type BootServiceError =
  * not require a bump. The contract is documented in
  * `docs/internals/service-status.md`.
  */
-export const BOOT_SERVICE_STATUS_SCHEMA_VERSION = 1;
+export const BOOT_SERVICE_STATUS_SCHEMA_VERSION = 2;
 
 export type BootServiceManagerKind = "systemd" | "launchd" | "unsupported";
 
 /** `unknown` is the honest answer whenever the manager did not answer. */
 export type BootServiceEnabledState = "enabled" | "disabled" | "unknown";
 
-export type BootServiceRunningState = "running" | "stopped" | "not-loaded" | "unknown";
+/**
+ * `transitioning` covers manager states that are neither a live job nor a
+ * proven stop (systemd `activating`/`deactivating`). A transitional unit is
+ * never reported as stopped.
+ */
+export type BootServiceRunningState =
+  | "running"
+  | "stopped"
+  | "transitioning"
+  | "not-loaded"
+  | "unknown";
 
 /**
  * A bounded, read-only observation of the service manager. It is deliberately
@@ -536,13 +547,27 @@ export interface BootServiceManagerObservation {
   readonly reachable: boolean;
   readonly enabled: BootServiceEnabledState;
   readonly running: BootServiceRunningState;
+  /** Raw manager activity token, preserved verbatim (systemd `ActiveState`, launchd `state`). */
+  readonly state?: string;
+  /** Raw manager sub-state when the manager exposes one (systemd `SubState`). */
+  readonly subState?: string;
+  /** The manager's main process id, only when it is a valid positive integer. */
+  readonly processId?: number;
   /**
-   * Version parsed from the artifact the manager reports as launched. Only set
-   * when the manager itself exposes the launched program path (launchd
-   * `program`, systemd `ExecStart`). Reading the launcher state file never
-   * sets this: that file records intent, not the running process.
+   * The program path the manager is *configured* to launch (systemd
+   * `ExecStart`, launchd `program`). This is configuration, not proof of the
+   * running server: T3 keeps its launcher executable while it swaps the server
+   * child during an update, so the configured launcher and the running server
+   * can be different versions. It is reported whether or not it binds to the
+   * selected base dir; only a bound path yields `configuredVersion`.
    */
-  readonly runningVersion?: string;
+  readonly configuredProgramPath?: string;
+  /**
+   * Version parsed from `configuredProgramPath` when that path is inside the
+   * selected base dir's runtime tree. This names the configured launcher, not
+   * the running server; a different-home path never produces it.
+   */
+  readonly configuredVersion?: string;
   /**
    * `systemd NRestarts`: monotonic since the unit last (re)started. launchd has
    * no equivalent, so this is never set on macOS; launchd throttling is not a
@@ -581,8 +606,15 @@ export interface BootServiceStatus {
    * server of the machine it ran on.
    */
   readonly installedBaseDir?: string;
-  /** Version parsed from the manager's launched program path, when exposed. */
-  readonly runningVersion?: string;
+  /**
+   * Version of the launch program the manager is configured to run, when the
+   * manager exposes that path and it binds to the selected base dir. This is
+   * configuration, not proof of the running server: T3 retains its launcher
+   * executable while replacing the server child, so the configured launcher
+   * and the running server can differ. There is deliberately no observed
+   * running-server version here until a bounded probe can prove one.
+   */
+  readonly configuredVersion?: string;
   readonly observation?: BootServiceManagerObservation;
   readonly problems?: ReadonlyArray<BootServiceProblem>;
   readonly unitPath: string;
@@ -596,18 +628,40 @@ export function bootServiceVersionFromProgramPath(programPath: string): string |
   return version !== undefined && isExactServiceVersion(version) ? version : undefined;
 }
 
+export interface BootServiceProgramBinding {
+  /** Whether the normalized program path really lives under the selected base dir's runtime tree. */
+  readonly contained: boolean;
+  /** Version parsed from the contained path's first runtime-tree segment, when exact. */
+  readonly version?: string;
+}
+
 /**
  * A manager-reported program only identifies *this* installation when it lives
- * under the selected T3 home's runtime tree. A stale unit, or a home other than
- * the one this CLI is bound to, is divergence to report, not a version of this
- * service.
+ * under the selected T3 home's `runtime/versions` tree. The check normalizes
+ * both paths through the platform `Path` helpers and rejects anything whose
+ * relative path escapes that tree, so a lexical prefix or a `..` segment
+ * under it is not mistaken for containment. A stale unit, or a home other than
+ * the one this CLI is bound to, stays unbound rather than being promoted to
+ * this service's identity.
  */
-export function bootServiceProgramInBaseDir(
+export function bindBootServiceProgramPath(
   programPath: string,
   baseDir: string,
-  separator: string,
-): boolean {
-  return programPath.startsWith(`${baseDir}${separator}runtime${separator}versions${separator}`);
+  path: Path.Path,
+): BootServiceProgramBinding {
+  const versionsDir = path.resolve(pinnedRuntimeVersionsDir(path, baseDir));
+  const relative = path.relative(versionsDir, path.resolve(programPath));
+  const escaped =
+    relative === "" ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`);
+  if (escaped) return { contained: false };
+  const [segment = ""] = relative.split(path.sep);
+  return {
+    contained: true,
+    ...(isExactServiceVersion(segment) ? { version: segment } : {}),
+  };
 }
 
 /**
@@ -620,12 +674,23 @@ export function launchdPermissionDenied(stderr: string): boolean {
   return /\b(operation not permitted|permission denied|not privileged|eperm)\b/i.test(stderr);
 }
 
+/**
+ * The established "this job/domain does not exist" outcomes. Any other nonzero
+ * launchctl failure is an unexpected query error, not evidence of absence.
+ */
+export function launchdNotFound(stderr: string): boolean {
+  return /\b(could not find|not find|no such (?:process|service|domain)|service not found|domain not found)\b/i.test(
+    stderr,
+  );
+}
+
 export interface BootServiceSystemdProperties {
   readonly loadState: string;
   readonly activeState: string;
   readonly subState: string;
   readonly unitFileState: string;
   readonly execStart: string;
+  readonly mainPid?: number;
   readonly nRestarts?: number;
   readonly result?: string;
 }
@@ -633,7 +698,8 @@ export interface BootServiceSystemdProperties {
 /**
  * Parses `systemctl --user show` key=value output. Missing LoadState or
  * ActiveState means the answer is unusable and must stay unknown rather than
- * defaulting to a healthy value.
+ * defaulting to a healthy value. A malformed or nonpositive `MainPID` and a
+ * malformed or negative `NRestarts` are dropped rather than coerced.
  */
 export function parseSystemdShow(stdout: string): BootServiceSystemdProperties | undefined {
   const values = new Map<string, string>();
@@ -646,7 +712,15 @@ export function parseSystemdShow(stdout: string): BootServiceSystemdProperties |
   const activeState = values.get("ActiveState");
   if (loadState === undefined || activeState === undefined) return undefined;
   const restartText = values.get("NRestarts");
-  const nRestarts = restartText === undefined ? undefined : Number.parseInt(restartText, 10);
+  const nRestarts =
+    restartText !== undefined && /^\d+$/.test(restartText)
+      ? Number.parseInt(restartText, 10)
+      : undefined;
+  const mainPidText = values.get("MainPID");
+  const mainPid =
+    mainPidText !== undefined && /^\d+$/.test(mainPidText)
+      ? Number.parseInt(mainPidText, 10)
+      : undefined;
   const result = values.get("Result");
   return {
     loadState,
@@ -654,7 +728,8 @@ export function parseSystemdShow(stdout: string): BootServiceSystemdProperties |
     subState: values.get("SubState") ?? "",
     unitFileState: values.get("UnitFileState") ?? "",
     execStart: values.get("ExecStart") ?? "",
-    ...(nRestarts !== undefined && Number.isFinite(nRestarts) ? { nRestarts } : {}),
+    ...(mainPid !== undefined && mainPid > 0 ? { mainPid } : {}),
+    ...(nRestarts !== undefined && Number.isSafeInteger(nRestarts) ? { nRestarts } : {}),
     ...(result !== undefined && result !== "" ? { result } : {}),
   };
 }
@@ -668,7 +743,9 @@ export interface BootServiceLaunchdPrint {
 
 /**
  * `launchctl print` has no stable machine format, so only a few anchored tokens
- * are read. A response with none of them is malformed and stays unknown.
+ * are read. A response with none of them is malformed and stays unknown. A
+ * `pid` is only observed when it is a positive integer; a zero or malformed
+ * value is not a live process.
  */
 export function parseLaunchdPrint(stdout: string): BootServiceLaunchdPrint | undefined {
   if (!/(?:^|\n)[ \t]*(?:state|pid|program|last exit code)[ \t]*=/.test(stdout)) return undefined;
@@ -676,8 +753,12 @@ export function parseLaunchdPrint(stdout: string): BootServiceLaunchdPrint | und
   const pidText = /(?:^|\n)[ \t]*pid[ \t]*=[ \t]*(\d+)/.exec(stdout)?.[1];
   const program = /(?:^|\n)[ \t]*program[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1]?.trim();
   const lastExitText = /(?:^|\n)[ \t]*last exit code[ \t]*=[ \t]*(-?\d+)/.exec(stdout)?.[1];
-  const pid = pidText === undefined ? undefined : Number.parseInt(pidText, 10);
-  const lastExitCode = lastExitText === undefined ? undefined : Number.parseInt(lastExitText, 10);
+  const pidValue = pidText === undefined ? undefined : Number.parseInt(pidText, 10);
+  const pid =
+    pidValue !== undefined && Number.isSafeInteger(pidValue) && pidValue > 0 ? pidValue : undefined;
+  const lastExitValue = lastExitText === undefined ? undefined : Number.parseInt(lastExitText, 10);
+  const lastExitCode =
+    lastExitValue !== undefined && Number.isSafeInteger(lastExitValue) ? lastExitValue : undefined;
   return {
     ...(state === undefined || state === "" ? {} : { state }),
     ...(pid === undefined ? {} : { pid }),
@@ -938,7 +1019,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       "--user",
       "show",
       BOOT_SERVICE_UNIT_FILE,
-      "--property=LoadState,ActiveState,SubState,UnitFileState,ExecStart,NRestarts,Result",
+      "--property=LoadState,ActiveState,SubState,MainPID,UnitFileState,ExecStart,NRestarts,Result",
     ]);
     if (Option.isNone(result)) {
       return unknownObservation({
@@ -977,13 +1058,15 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     const running: BootServiceRunningState =
       parsed.loadState === "not-found"
         ? "not-loaded"
-        : parsed.activeState === "active" || parsed.activeState === "reloading"
-          ? "running"
-          : parsed.activeState === "inactive" ||
-              parsed.activeState === "failed" ||
-              parsed.activeState === "deactivating"
-            ? "stopped"
-            : "unknown";
+        : parsed.activeState === "activating" || parsed.activeState === "deactivating"
+          ? "transitioning"
+          : parsed.activeState === "active" || parsed.activeState === "reloading"
+            ? parsed.subState === "running" && parsed.mainPid !== undefined
+              ? "running"
+              : "unknown"
+            : parsed.activeState === "inactive" || parsed.activeState === "failed"
+              ? "stopped"
+              : "unknown";
     const enabled: BootServiceEnabledState =
       parsed.unitFileState === "enabled"
         ? "enabled"
@@ -993,16 +1076,13 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           ? "disabled"
           : "unknown";
     const programPath = /path=([^;]+?)\s*(?:;|})/.exec(parsed.execStart)?.[1];
-    const programInBaseDir =
-      programPath === undefined ||
-      bootServiceProgramInBaseDir(programPath, input.baseDir, path.sep);
-    const runningVersion =
-      programPath === undefined || !programInBaseDir
+    const binding =
+      programPath === undefined
         ? undefined
-        : bootServiceVersionFromProgramPath(programPath);
+        : bindBootServiceProgramPath(programPath, input.baseDir, path);
     const detail =
-      programPath !== undefined && !programInBaseDir
-        ? "running-from-different-home"
+      binding !== undefined && !binding.contained
+        ? "configured-from-different-home"
         : running === "unknown"
           ? "manager-state-unknown"
           : undefined;
@@ -1013,7 +1093,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       reachable: true,
       enabled,
       running,
-      ...(runningVersion === undefined ? {} : { runningVersion }),
+      ...(parsed.activeState === "" ? {} : { state: parsed.activeState }),
+      ...(parsed.subState === "" ? {} : { subState: parsed.subState }),
+      ...(parsed.mainPid === undefined ? {} : { processId: parsed.mainPid }),
+      ...(programPath === undefined ? {} : { configuredProgramPath: programPath }),
+      ...(binding?.version === undefined ? {} : { configuredVersion: binding.version }),
       ...(parsed.nRestarts === undefined ? {} : { restartCount: parsed.nRestarts }),
       ...(parsed.result === undefined ? {} : { lastResult: parsed.result }),
       ...(detail === undefined ? {} : { detail }),
@@ -1053,13 +1137,25 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       });
     }
     if (domain.value.code !== 0 || domain.value.stdout.trim() === "") {
-      const permission = launchdPermissionDenied(domain.value.stderr);
+      if (launchdPermissionDenied(domain.value.stderr)) {
+        return unknownObservation({
+          manager: "launchd",
+          source: domainSource,
+          observedAt,
+          detail: "manager-permission-denied",
+          reachable: true,
+        });
+      }
+      // A zero-code answer, or an explicit "could not find", is an absent domain.
+      // Any other nonzero result is an unexpected query failure and is not
+      // evidence that the domain is missing.
+      const absentDomain = domain.value.code === 0 || launchdNotFound(domain.value.stderr);
       return unknownObservation({
         manager: "launchd",
         source: domainSource,
         observedAt,
-        detail: permission ? "manager-permission-denied" : "gui-login-domain-unavailable",
-        reachable: permission,
+        detail: absentDomain ? "gui-login-domain-unavailable" : "manager-query-failed",
+        reachable: !absentDomain,
       });
     }
     const disabledResult = yield* probeManager("launchctl", ["print-disabled", domainTarget]);
@@ -1106,15 +1202,26 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           reachable: true,
         });
       }
-      return {
-        manager: "launchd",
-        source: jobSource,
-        observedAt,
-        reachable: true,
-        enabled,
-        running: "not-loaded",
-        detail: "launch-agent-not-loaded",
-      } satisfies BootServiceManagerObservation;
+      // A genuine "could not find service" is a not-loaded job. Any other
+      // nonzero result is an unexpected query failure: unknown, not absence.
+      return launchdNotFound(job.value.stderr)
+        ? ({
+            manager: "launchd",
+            source: jobSource,
+            observedAt,
+            reachable: true,
+            enabled,
+            running: "not-loaded",
+            detail: "launch-agent-not-loaded",
+          } satisfies BootServiceManagerObservation)
+        : unknownObservation({
+            manager: "launchd",
+            source: jobSource,
+            observedAt,
+            detail: "manager-query-failed",
+            enabled,
+            reachable: true,
+          });
     }
     const parsed = parseLaunchdPrint(job.value.stdout);
     if (parsed === undefined) {
@@ -1133,16 +1240,13 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         : parsed.state === "not running" || parsed.state === "waiting" || parsed.state === "exited"
           ? "stopped"
           : "unknown";
-    const programInBaseDir =
-      parsed.program === undefined ||
-      bootServiceProgramInBaseDir(parsed.program, input.baseDir, path.sep);
-    const runningVersion =
-      parsed.program === undefined || !programInBaseDir
+    const binding =
+      parsed.program === undefined
         ? undefined
-        : bootServiceVersionFromProgramPath(parsed.program);
+        : bindBootServiceProgramPath(parsed.program, input.baseDir, path);
     const detail =
-      parsed.program !== undefined && !programInBaseDir
-        ? "running-from-different-home"
+      binding !== undefined && !binding.contained
+        ? "configured-from-different-home"
         : running === "unknown"
           ? "manager-state-unknown"
           : undefined;
@@ -1153,7 +1257,10 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       reachable: true,
       enabled,
       running,
-      ...(runningVersion === undefined ? {} : { runningVersion }),
+      ...(parsed.state === undefined ? {} : { state: parsed.state }),
+      ...(parsed.pid === undefined ? {} : { processId: parsed.pid }),
+      ...(parsed.program === undefined ? {} : { configuredProgramPath: parsed.program }),
+      ...(binding?.version === undefined ? {} : { configuredVersion: binding.version }),
       ...(parsed.lastExitCode === undefined ? {} : { lastResult: String(parsed.lastExitCode) }),
       ...(detail === undefined ? {} : { detail }),
     } satisfies BootServiceManagerObservation;
@@ -1439,9 +1546,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       running: observation.running,
       ...(installedVersion === undefined ? {} : { installedVersion }),
       ...(installedBaseDir === undefined ? {} : { installedBaseDir }),
-      ...(observation.runningVersion === undefined
+      ...(observation.configuredVersion === undefined
         ? {}
-        : { runningVersion: observation.runningVersion }),
+        : { configuredVersion: observation.configuredVersion }),
       observation,
       problems,
       current:

@@ -18,6 +18,8 @@ run these commands on the machine that will host T3 Code:
 
 `t3 service status` also reports what the service manager itself observes — whether the
 job is registered, enabled, and running — separately from whether T3 is set up correctly.
+A manager-reported version is the launch program the service is configured to run, not proof
+of the server process that is actually running, so status never presents it as one.
 Pass `--json` for a stable, machine-readable version of the same status.
 
 Uninstalling the service leaves your projects, threads, and settings intact.

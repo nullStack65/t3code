@@ -121,14 +121,26 @@ function formatServiceObservation(status: BootService.BootServiceStatus): Readon
       ? "running"
       : observation.running === "stopped"
         ? "stopped"
-        : observation.running === "not-loaded"
-          ? "not loaded"
-          : "unknown";
-  const identity =
-    observation.runningVersion === undefined ? "" : ` · t3@${observation.runningVersion}`;
+        : observation.running === "transitioning"
+          ? "changing state"
+          : observation.running === "not-loaded"
+            ? "not loaded"
+            : "unknown";
+  const configured =
+    observation.configuredVersion !== undefined
+      ? `t3@${observation.configuredVersion}`
+      : observation.configuredProgramPath;
+  const rawState =
+    observation.state === undefined
+      ? undefined
+      : observation.subState === undefined
+        ? observation.state
+        : `${observation.state}/${observation.subState}`;
   return [
-    `  Manager: ${observation.manager} · running ${running}${identity}`,
+    `  Manager: ${observation.manager} · running ${running}`,
     `  Enabled: ${observation.enabled}`,
+    ...(configured === undefined ? [] : [`  Configured launcher: ${configured}`]),
+    ...(rawState === undefined ? [] : [`  Manager state: ${rawState}`]),
     ...(observation.restartCount === undefined
       ? []
       : [`  Restarts (systemd, monotonic since start): ${observation.restartCount}`]),

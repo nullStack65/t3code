@@ -30,6 +30,7 @@ const status = {
   enabled: "enabled",
   running: "running",
   current: true,
+  configuredVersion: "0.0.29",
   unitPath: "/home/me/.config/systemd/user/t3code.service",
   logPath: "/home/me/.t3/userdata/logs/boot-service.log",
   observedAt: "2026-09-26T00:00:00.000Z",
@@ -107,7 +108,11 @@ const observation = {
   reachable: true,
   enabled: "enabled",
   running: "running",
-  runningVersion: "0.0.29",
+  state: "active",
+  subState: "running",
+  processId: 4321,
+  configuredProgramPath: "/home/me/.t3/runtime/versions/0.0.29/t3",
+  configuredVersion: "0.0.29",
   restartCount: 0,
   lastResult: "success",
 } satisfies BootService.BootServiceManagerObservation;
@@ -118,23 +123,34 @@ it("emits the versioned machine-readable status contract with --json", () => {
   ) as Record<string, unknown>;
 
   expect(parsed.schemaVersion).toBe(BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION);
+  expect(parsed.schemaVersion).toBe(2);
   expect(parsed.manager).toBe("systemd");
   expect(parsed.running).toBe("running");
   expect(parsed.cliVersion).toBe("0.0.29");
   expect(parsed.unitPath).toBe(status.unitPath);
-  expect((parsed.observation as Record<string, unknown>).runningVersion).toBe("0.0.29");
+  // Configured launch metadata is separate and there is no observed running
+  // server version in this contract.
+  expect(parsed.configuredVersion).toBe("0.0.29");
+  expect("runningVersion" in parsed).toBe(false);
+  const observationJson = parsed.observation as Record<string, unknown>;
+  expect(observationJson.configuredVersion).toBe("0.0.29");
+  expect(observationJson.configuredProgramPath).toBe("/home/me/.t3/runtime/versions/0.0.29/t3");
+  expect("runningVersion" in observationJson).toBe(false);
 });
 
 it("keeps human status output and adds manager observation lines", () => {
   const output = formatServiceStatus({ ...status, observation }, "0.0.29");
 
   expect(output).toContain("Status: installed · t3@0.0.29");
-  expect(output).toContain("Manager: systemd · running running · t3@0.0.29");
+  expect(output).toContain("Manager: systemd · running running");
+  expect(output).toContain("Configured launcher: t3@0.0.29");
+  expect(output).toContain("Manager state: active/running");
   expect(output).toContain("Enabled: enabled");
   expect(output).toContain(
     "Observed: 2026-09-26T00:00:00.000Z (systemctl --user show t3code.service)",
   );
   expect(output).not.toContain("Note:");
+  expect(output).not.toContain("t3@0.0.29 (running)");
 });
 
 it("does not report a non-running manager observation as healthy", () => {
@@ -150,6 +166,47 @@ it("does not report a non-running manager observation as healthy", () => {
   expect(output).toContain("Manager: systemd · running not loaded");
   expect(output).toContain("Manager detail: launch-agent-not-loaded");
   expect(output).toContain("that is a manager observation, not application health");
+});
+
+it("reports a transitioning manager state without calling it stopped or healthy", () => {
+  const output = formatServiceStatus(
+    {
+      ...status,
+      running: "transitioning",
+      observation: {
+        ...observation,
+        running: "transitioning",
+        state: "deactivating",
+        subState: "stop-sigterm",
+      },
+    },
+    "0.0.29",
+  );
+
+  expect(output).toContain("Manager: systemd · running changing state");
+  expect(output).toContain("Manager state: deactivating/stop-sigterm");
+  expect(output).toContain("that is a manager observation, not application health");
+  expect(output).not.toContain("running stopped");
+});
+
+it("shows the configured program path when it carries no exact version", () => {
+  const {
+    configuredVersion: _configuredVersion,
+    configuredProgramPath: _configuredProgramPath,
+    ...observationWithoutBinding
+  } = observation;
+  const output = formatServiceStatus(
+    {
+      ...status,
+      observation: {
+        ...observationWithoutBinding,
+        configuredProgramPath: "/home/me/.t3/runtime/versions/nightly/t3",
+      },
+    },
+    "0.0.29",
+  );
+
+  expect(output).toContain("Configured launcher: /home/me/.t3/runtime/versions/nightly/t3");
 });
 
 const newerServiceStatus = { ...status, current: false, installedVersion: "999.0.0" };

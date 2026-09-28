@@ -156,12 +156,19 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     enabled: boolean;
     active: boolean;
     systemdShow: string | undefined;
+    systemdActiveState: string | undefined;
+    systemdSubState: string | undefined;
+    systemdMainPid: string | undefined;
+    systemdNRestarts: string | undefined;
+    systemdResult: string | undefined;
     systemdExecStartPath: string | undefined;
     launchdDomainPresent: boolean;
     launchdDomainStderr: string;
-    launchdJob: "running" | "stopped" | "not-loaded" | "malformed" | "permission";
+    launchdJob: "running" | "stopped" | "not-loaded" | "malformed" | "permission" | "unexpected";
     launchdJobStderr: string;
+    launchdNotFoundStderr: string;
     launchdProgramPath: string | undefined;
+    launchdPid: string | undefined;
     launchdDisabled: boolean;
   } = {
     failCommand: undefined,
@@ -170,12 +177,20 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     enabled: true,
     active: true,
     systemdShow: undefined,
+    systemdActiveState: undefined,
+    systemdSubState: undefined,
+    systemdMainPid: undefined,
+    systemdNRestarts: undefined,
+    systemdResult: undefined,
     systemdExecStartPath: undefined,
     launchdDomainPresent: true,
-    launchdDomainStderr: "",
+    launchdDomainStderr: "Could not find domain for user gui: 501",
     launchdJob: "running",
     launchdJobStderr: "Operation not permitted",
+    launchdNotFoundStderr:
+      'Could not find service "com.t3tools.t3code.service" in domain for user gui: 501',
     launchdProgramPath: undefined,
+    launchdPid: undefined,
     launchdDisabled: false,
   };
   const runner = ProcessRunner.ProcessRunner.of({
@@ -239,12 +254,15 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
           control.systemdShow ??
             [
               "LoadState=loaded",
-              `ActiveState=${control.active ? "active" : "inactive"}`,
-              `SubState=${control.active ? "running" : "dead"}`,
+              `ActiveState=${
+                control.systemdActiveState ?? (control.active ? "active" : "inactive")
+              }`,
+              `SubState=${control.systemdSubState ?? (control.active ? "running" : "dead")}`,
+              `MainPID=${control.systemdMainPid ?? (control.active ? "4321" : "0")}`,
               `UnitFileState=${control.enabled ? "enabled" : "disabled"}`,
               `ExecStart={ path=${control.systemdExecStartPath ?? runtime.entryPath} ; argv[]=${runtime.entryPath} __service-launcher ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(never) ; status=0/0 }`,
-              "NRestarts=0",
-              "Result=success",
+              `NRestarts=${control.systemdNRestarts ?? "0"}`,
+              `Result=${control.systemdResult ?? "success"}`,
             ].join("\n"),
         );
       }
@@ -262,12 +280,15 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
         input.args[0] === "print" &&
         input.args[1] === "gui/501/com.t3tools.t3code.service"
       ) {
-        if (control.launchdJob === "not-loaded") return status("", 1);
+        if (control.launchdJob === "not-loaded")
+          return status("", 1, control.launchdNotFoundStderr);
         if (control.launchdJob === "permission") return status("", 1, control.launchdJobStderr);
+        if (control.launchdJob === "unexpected")
+          return status("", 1, "launchctl: input/output error");
         if (control.launchdJob === "malformed") return ok("this is not launchctl output\n");
         const state =
           control.launchdJob === "running"
-            ? "state = running\n\n\tpid = 4321\n"
+            ? `state = running\n\n\tpid = ${control.launchdPid ?? "4321"}\n`
             : "state = not running\n";
         return ok(
           `gui/501/com.t3tools.t3code.service = {\n\tactive count = ${
@@ -945,17 +966,32 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   );
 });
 
-it("parses only well-formed manager output and exact versions", () => {
+it("parses only well-formed manager output and exact versions, rejecting bad counters and PIDs", () => {
   expect(BootService.parseSystemdShow("no anchors here")).toBeUndefined();
   expect(BootService.parseSystemdShow("LoadState=loaded\nActiveState=active")).toMatchObject({
     loadState: "loaded",
     activeState: "active",
   });
+  expect(
+    BootService.parseSystemdShow("LoadState=loaded\nActiveState=active\nMainPID=0\nNRestarts=-1")
+      ?.mainPid,
+  ).toBeUndefined();
+  expect(
+    BootService.parseSystemdShow("LoadState=loaded\nActiveState=active\nMainPID=abc\nNRestarts=12x")
+      ?.nRestarts,
+  ).toBeUndefined();
+  expect(
+    BootService.parseSystemdShow("LoadState=loaded\nActiveState=active\nMainPID=42\nNRestarts=5"),
+  ).toMatchObject({ mainPid: 42, nRestarts: 5 });
   expect(BootService.parseLaunchdPrint("this is not launchctl output")).toBeUndefined();
   expect(BootService.parseLaunchdPrint("\tstate = running\n\tpid = 12\n")).toMatchObject({
     state: "running",
     pid: 12,
   });
+  expect(BootService.parseLaunchdPrint("\tstate = running\n\tpid = 0\n")).toMatchObject({
+    state: "running",
+  });
+  expect(BootService.parseLaunchdPrint("\tstate = running\n\tpid = 0\n")?.pid).toBeUndefined();
   expect(
     BootService.parseLaunchdDisabled(
       'disabled services = {\n\t"com.t3tools.t3code.service" => true\n}',
@@ -971,27 +1007,43 @@ it("parses only well-formed manager output and exact versions", () => {
   expect(BootService.bootServiceVersionFromProgramPath("/usr/bin/node")).toBeUndefined();
   expect(BootService.launchdPermissionDenied("Operation not permitted")).toBe(true);
   expect(BootService.launchdPermissionDenied("Could not find service")).toBe(false);
-  expect(
-    BootService.bootServiceProgramInBaseDir(
-      "/home/x/.t3/runtime/versions/1.2.3/t3",
-      "/home/x/.t3",
-      "/",
-    ),
-  ).toBe(true);
-  expect(
-    BootService.bootServiceProgramInBaseDir(
-      "/other/.t3/runtime/versions/1.2.3/t3",
-      "/home/x/.t3",
-      "/",
-    ),
-  ).toBe(false);
+  expect(BootService.launchdNotFound("Could not find service in domain for user gui: 501")).toBe(
+    true,
+  );
+  expect(BootService.launchdNotFound("launchctl: input/output error")).toBe(false);
+});
+
+it.layer(NodeServices.layer)("program path binding", (it) => {
+  it.effect("binds only normalized paths inside the selected runtime tree", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const baseDir = "/home/x/.t3";
+      const bind = (programPath: string) =>
+        BootService.bindBootServiceProgramPath(programPath, baseDir, path);
+
+      expect(bind("/home/x/.t3/runtime/versions/1.2.3/t3")).toMatchObject({
+        contained: true,
+        version: "1.2.3",
+      });
+      // A sibling directory that only shares the textual prefix is not this home.
+      expect(bind("/home/x/.t3-escape/runtime/versions/1.2.3/t3").contained).toBe(false);
+      // `..` beneath the textual prefix escapes the runtime tree.
+      expect(bind("/home/x/.t3/runtime/versions/../../evil/t3").contained).toBe(false);
+      expect(bind("/other/.t3/runtime/versions/1.2.3/t3").contained).toBe(false);
+      // A runtime path with no exact version segment binds without a version.
+      expect(bind("/home/x/.t3/runtime/versions/nightly/t3")).toMatchObject({
+        contained: true,
+      });
+      expect(bind("/home/x/.t3/runtime/versions/nightly/t3").version).toBeUndefined();
+    }),
+  );
 });
 
 const SYSTEMD_SHOW_PROPERTY =
-  "systemctl --user show t3code.service --property=LoadState,ActiveState,SubState,UnitFileState,ExecStart,NRestarts,Result";
+  "systemctl --user show t3code.service --property=LoadState,ActiveState,SubState,MainPID,UnitFileState,ExecStart,NRestarts,Result";
 
 it.layer(NodeServices.layer)("boot service status observations", (it) => {
-  it.effect("separates identity from a stopped Linux manager state", () =>
+  it.effect("separates configured launcher identity from a stopped Linux manager state", () =>
     Effect.gen(function* () {
       const { service, control } = yield* makeHarness();
       yield* service.install();
@@ -1008,11 +1060,65 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
         running: "stopped",
         current: false,
         installedVersion: "1.2.3",
-        runningVersion: "1.2.3",
+        configuredVersion: "1.2.3",
       });
+      // A stopped unit still has a versioned ExecStart. That is configured
+      // launch metadata, not a running server: no observed running identity.
+      expect("runningVersion" in status).toBe(false);
+      expect(status.observation).toMatchObject({
+        state: "inactive",
+        subState: "dead",
+        configuredVersion: "1.2.3",
+      });
+      expect(status.observation?.processId).toBeUndefined();
       expect(status.problems).toContain("service-stopped");
       expect(status.observation?.restartCount).toBe(0);
       expect(status.observation?.source).toBe("systemctl --user show t3code.service");
+    }),
+  );
+
+  it.effect("does not infer a running identity from a changed configured version", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { service, home, control } = yield* makeHarness();
+      yield* service.install();
+      control.systemdActiveState = "unknown";
+      control.systemdMainPid = "0";
+      control.systemdExecStartPath = path.join(home, ".t3", "runtime", "versions", "1.2.4", "t3");
+
+      const status = yield* service.status;
+
+      // The configured path moved to 1.2.4 with no process proof, so the
+      // observed running identity stays absent and the service is not running.
+      expect(status.installedVersion).toBe("1.2.3");
+      expect(status.configuredVersion).toBe("1.2.4");
+      expect("runningVersion" in status).toBe(false);
+      expect(status.running).toBe("unknown");
+    }),
+  );
+
+  it.effect("keeps launcher and server identities separate during a version handoff", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { service, fs, home, statePath, control } = yield* makeHarness();
+      yield* service.install();
+      // The launcher executable stays on 1.2.3 while the selected server child
+      // is 1.2.4; the manager only exposes the launcher's configured path.
+      yield* fs.writeFileString(
+        statePath,
+        `{"protocol":${SERVICE_LAUNCHER_PROTOCOL},"activeVersion":"1.2.4"}`,
+      );
+      control.systemdActiveState = "active";
+      control.systemdSubState = "running";
+      control.systemdMainPid = "4321";
+      control.systemdExecStartPath = path.join(home, ".t3", "runtime", "versions", "1.2.3", "t3");
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("running");
+      expect(status.installedVersion).toBe("1.2.4");
+      expect(status.configuredVersion).toBe("1.2.3");
+      expect("runningVersion" in status).toBe(false);
     }),
   );
 
@@ -1080,7 +1186,8 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
 
       expect(status).toMatchObject({ running: "stopped", enabled: "enabled" });
       expect(status.observation?.detail).toBeUndefined();
-      expect(status.runningVersion).toBe("1.2.3");
+      expect(status.configuredVersion).toBe("1.2.3");
+      expect("runningVersion" in status).toBe(false);
     }),
   );
 
@@ -1113,7 +1220,7 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
     }),
   );
 
-  it.effect("does not let the launcher state file prove the running artifact", () =>
+  it.effect("does not let the launcher state file prove the observed running identity", () =>
     Effect.gen(function* () {
       const { service, fs, statePath, runtime } = yield* makeHarness();
       yield* service.install();
@@ -1124,11 +1231,12 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
 
       const status = yield* service.status;
 
-      // The state file claims 1.2.4 and the manager reports the installed
-      // runtime path at 1.2.3: installed/current identity and observed running
-      // identity are different claims.
+      // The state file claims 1.2.4 and the configured launcher path is 1.2.3:
+      // installed identity and configured-launcher identity are different
+      // claims, and neither is a proven running server.
       expect(status.installedVersion).toBe("1.2.4");
-      expect(status.runningVersion).toBe("1.2.3");
+      expect(status.configuredVersion).toBe("1.2.3");
+      expect("runningVersion" in status).toBe(false);
       expect(runtime.entryPath).toContain("versions/1.2.3");
       expect(status.current).toBe(false);
     }),
@@ -1204,7 +1312,7 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
     }),
   );
 
-  it.effect("does not publish a running version from a different T3 home", () =>
+  it.effect("never promotes a launchd program from a different T3 home", () =>
     Effect.gen(function* () {
       const { service, control } = yield* makeHarness("darwin");
       yield* service.install();
@@ -1213,16 +1321,18 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
       const status = yield* service.status;
 
       expect(status.running).toBe("running");
-      expect(status.runningVersion).toBeUndefined();
+      expect(status.configuredVersion).toBeUndefined();
+      expect("runningVersion" in status).toBe(false);
       expect(status.observation).toMatchObject({
         reachable: true,
         running: "running",
-        detail: "running-from-different-home",
+        configuredProgramPath: "/Volumes/other/.t3/runtime/versions/9.9.9/t3",
+        detail: "configured-from-different-home",
       });
     }),
   );
 
-  it.effect("does not publish a running version when systemd points at a different home", () =>
+  it.effect("never promotes a systemd program from a different T3 home", () =>
     Effect.gen(function* () {
       const { service, control } = yield* makeHarness();
       yield* service.install();
@@ -1231,8 +1341,160 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
       const status = yield* service.status;
 
       expect(status.running).toBe("running");
-      expect(status.runningVersion).toBeUndefined();
-      expect(status.observation?.detail).toBe("running-from-different-home");
+      expect(status.configuredVersion).toBeUndefined();
+      expect(status.observation?.detail).toBe("configured-from-different-home");
+    }),
+  );
+
+  it.effect("does not bind a lexical escape beneath the base dir prefix", () =>
+    Effect.gen(function* () {
+      const { service, home, control } = yield* makeHarness();
+      yield* service.install();
+      // Literal `..` segments under the textual prefix: kept unnormalized so the
+      // configured path is not mistaken for a contained runtime.
+      control.systemdExecStartPath = `${home}/.t3/runtime/versions/../../evil/t3`;
+
+      const status = yield* service.status;
+
+      expect(status.configuredVersion).toBeUndefined();
+      expect(status.observation?.configuredProgramPath).toContain("..");
+      expect(status.observation?.detail).toBe("configured-from-different-home");
+    }),
+  );
+
+  it.effect("does not map a deactivating unit with a live process to stopped", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+      control.active = false;
+      control.systemdActiveState = "deactivating";
+      control.systemdSubState = "stop-sigterm";
+      control.systemdMainPid = "4321";
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("transitioning");
+      expect(status.observation).toMatchObject({
+        state: "deactivating",
+        subState: "stop-sigterm",
+        processId: 4321,
+      });
+    }),
+  );
+
+  it.effect("does not call an active unit with no live process running", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+      control.systemdActiveState = "active";
+      control.systemdSubState = "exited";
+      control.systemdMainPid = "0";
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("unknown");
+      expect(status.observation?.processId).toBeUndefined();
+      expect(status.observation?.detail).toBe("manager-state-unknown");
+    }),
+  );
+
+  it.effect("rejects a zero or malformed PID as process evidence", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+
+      for (const mainPid of ["0", "abc"]) {
+        control.systemdActiveState = "active";
+        control.systemdSubState = "running";
+        control.systemdMainPid = mainPid;
+        const status = yield* service.status;
+        expect(status.running).toBe("unknown");
+        expect(status.observation?.processId).toBeUndefined();
+      }
+    }),
+  );
+
+  it.effect("rejects a zero launchd PID as a live process", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdJob = "running";
+      control.launchdPid = "0";
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("unknown");
+      expect(status.observation?.processId).toBeUndefined();
+    }),
+  );
+
+  it.effect("drops a malformed restart counter instead of inventing a count", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness();
+      yield* service.install();
+
+      for (const nRestarts of ["-1", "12x", "abc"]) {
+        control.systemdNRestarts = nRestarts;
+        const status = yield* service.status;
+        expect(status.observation?.restartCount).toBeUndefined();
+      }
+      control.systemdNRestarts = "7";
+      expect((yield* service.status).observation?.restartCount).toBe(7);
+    }),
+  );
+
+  it.effect("keeps an unexpected launchctl job failure unknown, not not-loaded", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdJob = "unexpected";
+
+      const status = yield* service.status;
+
+      expect(status.running).toBe("unknown");
+      expect(status.observation).toMatchObject({
+        reachable: true,
+        running: "unknown",
+        detail: "manager-query-failed",
+      });
+    }),
+  );
+
+  it.effect("keeps an unexpected launchctl domain failure unknown, not missing", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+      control.launchdDomainPresent = false;
+      control.launchdDomainStderr = "launchctl: input/output error";
+
+      const status = yield* service.status;
+
+      expect(status.observation).toMatchObject({
+        reachable: true,
+        running: "unknown",
+        detail: "manager-query-failed",
+      });
+    }),
+  );
+
+  it.effect("preserves timeout and permission behavior on launchd probes", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install();
+
+      control.timedOutCommand = "launchctl print gui/501";
+      expect((yield* service.status).observation).toMatchObject({
+        running: "unknown",
+        detail: "manager-timeout",
+      });
+      control.timedOutCommand = undefined;
+
+      control.launchdJob = "permission";
+      expect((yield* service.status).observation).toMatchObject({
+        reachable: true,
+        running: "unknown",
+        detail: "manager-permission-denied",
+      });
     }),
   );
 });
