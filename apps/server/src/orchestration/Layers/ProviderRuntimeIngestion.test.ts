@@ -1833,8 +1833,9 @@ describe("ProviderRuntimeIngestion", () => {
       (thread) => thread.session?.status === "starting" && thread.session?.activeTurnId === null,
     );
 
-    // Ended-turn A traffic, including a delayed completion, arrives while B is
-    // starting with no provider turn id.
+    // Ended-turn A content and tool traffic arrives while B is starting with no
+    // provider turn id. B must stay anchored to its own pending request: A's
+    // activity must not become B's recency and A's tool must not appear.
     harness.advanceClock(4 * 60_000);
     harness.emit({
       type: "content.delta",
@@ -1854,6 +1855,18 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-a"),
       payload: { toolCallId: "stale-a-tool", title: "Stale" },
     });
+    await harness.drain();
+
+    const duringWindow = await harness.readThreadShell();
+    // B keeps its own pending record: no A tools and no A activity timestamp,
+    // so its silence is anchored to its own request time (the +11m check from
+    // the review must not see a one-minute A age or A's tool).
+    expect(duringWindow.postStartActivity?.turnId ?? null).toBeNull();
+    expect(duringWindow.postStartActivity?.outstandingTools ?? []).toEqual([]);
+    expect(duringWindow.postStartActivity?.lastProviderActivityAt ?? null).toBeNull();
+
+    // A delayed completion for the ended turn still must not erase B's pending
+    // ownership, so B remains anchored after it too.
     harness.emit({
       type: "turn.completed",
       eventId: asEventId("evt-pending-a-late-completed"),
@@ -1866,8 +1879,6 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.drain();
 
     const shell = await harness.readThreadShell();
-    // B keeps its own pending record: no A tools and no A activity timestamp,
-    // so its silence is anchored to its own request time.
     expect(shell.postStartActivity?.turnId ?? null).toBeNull();
     expect(shell.postStartActivity?.outstandingTools ?? []).toEqual([]);
     expect(shell.postStartActivity?.lastProviderActivityAt ?? null).toBeNull();

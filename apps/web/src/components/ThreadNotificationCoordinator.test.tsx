@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
   },
   environments: ["env-1"] as string[],
   threadsByEnv: {} as Record<string, ReadonlyArray<Record<string, unknown>>>,
+  envLive: {} as Record<string, boolean>,
   toastCounter: 0,
   add: vi.fn(
     (_toast: { title: string; description: string; actionProps: { onClick: () => void } }) =>
@@ -41,7 +42,9 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: (environmentId: string) => {
-    if (!state.live) return { status: "disconnected", snapshot: Option.none() };
+    if (!state.live || state.envLive[environmentId] === false) {
+      return { status: "disconnected", snapshot: Option.none() };
+    }
     const threads = state.threadsByEnv[environmentId] ?? [
       {
         id: "thread-1",
@@ -162,6 +165,7 @@ beforeEach(() => {
     postStartActivity: null,
     environments: ["env-1"],
     threadsByEnv: {},
+    envLive: {},
     toastCounter: 0,
   });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -574,5 +578,72 @@ describe("thread notifications", () => {
       "No recent provider activity",
       expect.objectContaining({ tag: "env-1:thread-1:silence" }),
     );
+  });
+
+  it("closes the desktop silence notification when the turn reaches terminal state", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = false;
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 0 })];
+    await render();
+
+    state.threadsByEnv["env-1"] = [observedThread({ lastActivityAgoMs: 6 * MIN })];
+    await render();
+    const sent = state.notification.mock.results.map(
+      (result) => result.value as { tag: string; close: ReturnType<typeof vi.fn> },
+    );
+    const silence = sent.find((notification) => notification.tag === "env-1:thread-1:silence");
+    expect(silence).toBeDefined();
+
+    // The turn finishes rather than resuming: the warning is closed.
+    state.threadsByEnv["env-1"] = [
+      {
+        ...observedThread({ lastActivityAgoMs: 6 * MIN }),
+        session: { status: "ready", activeTurnId: null },
+        latestTurn: { turnId: "turn-1", state: "completed", completedAt: agoIso(0) },
+      },
+    ];
+    await render();
+    expect(silence!.close).toHaveBeenCalled();
+  });
+
+  it("closes only the disconnected environment's live warnings", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = true;
+    state.environments = ["env-1", "env-2"];
+    const a = observedThread({ id: "thread-a", title: "Thread A", lastActivityAgoMs: 0 });
+    const b = observedThread({ id: "thread-b", title: "Thread B", lastActivityAgoMs: 0 });
+    state.threadsByEnv["env-1"] = [a];
+    state.threadsByEnv["env-2"] = [b];
+    await render();
+
+    const quiet = (thread: typeof a) => ({
+      ...thread,
+      postStartActivity: {
+        ...thread.postStartActivity,
+        lastProviderActivityAt: agoIso(6 * MIN),
+      },
+    });
+    state.threadsByEnv["env-1"] = [quiet(a)];
+    state.threadsByEnv["env-2"] = [quiet(b)];
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(2);
+    const toastA = state.add.mock.calls[0]?.[0];
+    const toastB = state.add.mock.calls[1]?.[0];
+    const idFor = (description: string) => {
+      const index = state.add.mock.calls.findIndex((call) => call[0]?.description === description);
+      return state.add.mock.results[index]?.value;
+    };
+    expect(toastA?.description).toBe("Thread A");
+    expect(toastB?.description).toBe("Thread B");
+    const idA = idFor("Thread A");
+    const idB = idFor("Thread B");
+
+    // env-2 disconnects: its warning closes; env-1's live warning stays.
+    state.envLive["env-2"] = false;
+    await render();
+    expect(state.close).toHaveBeenCalledWith(idB);
+    expect(state.close).not.toHaveBeenCalledWith(idA);
   });
 });
