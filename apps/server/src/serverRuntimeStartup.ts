@@ -909,6 +909,7 @@ export const make = (options?: StartupOptions) =>
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
     const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
+    const pathService = yield* Path.Path;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
     const crypto = yield* Crypto.Crypto;
@@ -965,36 +966,49 @@ export const make = (options?: StartupOptions) =>
       yield* Effect.logDebug("startup phase: running launch preflight");
       yield* runStartupPhase(
         "launch.preflight",
-        launchPreflight.run(serverConfig.cwd, { isSharedRoot: true }).pipe(
-          Effect.tap((result) =>
-            Effect.gen(function* () {
-              yield* Effect.forEach(
-                result.warnings,
-                (warning) =>
-                  Effect.logWarning(`launch preflight: ${warning.message}`, {
-                    code: warning.code,
-                    severity: warning.severity,
-                    cwd: serverConfig.cwd,
-                  }),
-                { discard: true },
-              );
-              yield* Effect.forEach(
-                result.blockers,
-                (blocker) =>
-                  Effect.logError(`launch preflight: ${blocker.message}`, {
-                    code: blocker.code,
-                    severity: blocker.severity,
-                    cwd: serverConfig.cwd,
-                  }),
-                { discard: true },
-              );
-            }),
-          ),
-          Effect.asVoid,
-          Effect.catchCause((cause) =>
-            Effect.logWarning("launch preflight failed to run", { cause }),
-          ),
-        ),
+        Effect.gen(function* () {
+          // Shared-inbox intent comes only from the explicit setting; the
+          // server's own cwd is an ordinary working directory.
+          const sharedSessionRoot = yield* serverSettings.getSettings.pipe(
+            Effect.map((settings) => settings.sharedSessionRoot),
+            Effect.orElseSucceed(() => undefined),
+          );
+          const isSharedRoot = LaunchPreflight.isConfiguredSharedSessionRoot(
+            pathService,
+            serverConfig.cwd,
+            sharedSessionRoot,
+          );
+          return yield* launchPreflight.run(serverConfig.cwd, { isSharedRoot }).pipe(
+            Effect.tap((result) =>
+              Effect.gen(function* () {
+                yield* Effect.forEach(
+                  result.warnings,
+                  (warning) =>
+                    Effect.logWarning(`launch preflight: ${warning.message}`, {
+                      code: warning.code,
+                      severity: warning.severity,
+                      cwd: serverConfig.cwd,
+                    }),
+                  { discard: true },
+                );
+                yield* Effect.forEach(
+                  result.blockers,
+                  (blocker) =>
+                    Effect.logError(`launch preflight: ${blocker.message}`, {
+                      code: blocker.code,
+                      severity: blocker.severity,
+                      cwd: serverConfig.cwd,
+                    }),
+                  { discard: true },
+                );
+              }),
+            ),
+            Effect.asVoid,
+            Effect.catchCause((cause) =>
+              Effect.logWarning("launch preflight failed to run", { cause }),
+            ),
+          );
+        }),
       );
 
       yield* Effect.logDebug("startup phase: parking orchestration roots at activation");

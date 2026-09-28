@@ -537,23 +537,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
   const runLaunchPreflight = options?.launchPreflightRunner ?? launchPreflight.run;
 
-  // A launch cwd is a shared root only when it is exactly the configured
-  // `ServerConfig.cwd`. A nested repository selected as the session cwd has a
-  // different path and stays an ordinary repository session.
-  const normalizeResolved = (candidate: string): string => {
-    let resolved: string;
-    try {
-      resolved = pathService.resolve(candidate);
-    } catch {
-      resolved = candidate;
-    }
-    return resolved.length > 1 && resolved.endsWith(pathService.sep)
-      ? resolved.slice(0, -pathService.sep.length)
-      : resolved;
-  };
-  const configuredSharedRoot = normalizeResolved(serverConfig.cwd);
-  const isConfiguredSharedRoot = (cwd: string): boolean =>
-    normalizeResolved(cwd) === configuredSharedRoot;
+  // Shared-inbox intent is an explicit, exact-root opt-in from settings. The
+  // backend's own cwd is an ordinary provider working directory, so equality
+  // with it (or with any folder name/breadth/Git presence) never declares a
+  // shared root. A configured shared root applies regardless of backend cwd.
+  const configuredSharedRoot: Effect.Effect<string | undefined> = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.sharedSessionRoot),
+    Effect.orElseSucceed(() => undefined),
+  );
 
   /**
    * Runs the bounded launch preflight against the exact cwd a provider process
@@ -580,7 +571,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return;
     }
 
-    const isSharedRoot = isConfiguredSharedRoot(input.cwd);
+    const isSharedRoot = LaunchPreflight.isConfiguredSharedSessionRoot(
+      pathService,
+      input.cwd,
+      yield* configuredSharedRoot,
+    );
     const result = yield* runLaunchPreflight(input.cwd, { isSharedRoot }).pipe(
       Effect.catchCause(() =>
         Effect.succeed({

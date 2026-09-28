@@ -98,6 +98,10 @@ const makeRecordingAnalytics = Effect.gen(function* () {
 const makeIntegrationFixture = (options?: {
   readonly analytics?: Layer.Layer<AnalyticsService>;
   readonly grokBinaryPath?: string;
+  readonly serverConfigCwd?: string;
+  readonly settings?: Parameters<typeof ServerSettingsService.layerTest>[0];
+  /** Configure the workspace directory itself as the shared session root. */
+  readonly sharedSessionRootIsWorkspace?: boolean;
   readonly launchPreflightRunner?: (
     root: string,
     options?: { readonly isSharedRoot?: boolean },
@@ -140,8 +144,13 @@ const makeIntegrationFixture = (options?: {
     const shared = Layer.mergeAll(
       directoryLayer,
       Layer.succeed(ProviderAdapterRegistry, registry),
-      ServerConfig.layerTest(cwd, cwd).pipe(Layer.provide(NodeServices.layer)),
-      ServerSettingsService.layerTest(DEFAULT_SERVER_SETTINGS),
+      ServerConfig.layerTest(options?.serverConfigCwd ?? cwd, cwd).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+      ServerSettingsService.layerTest({
+        ...(options?.settings ?? DEFAULT_SERVER_SETTINGS),
+        ...(options?.sharedSessionRootIsWorkspace ? { sharedSessionRoot: cwd } : {}),
+      }),
       options?.analytics ?? AnalyticsService.layerTest,
       Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
     ).pipe(Layer.provide(SqlitePersistenceMemory));
@@ -506,6 +515,73 @@ it.live("a launch-preflight warning is reported and the session still starts onc
       assert.equal(fixture.harness.getStartCount(), 1);
       assert.deepStrictEqual(yield* Ref.get(reported), [warningFinding.message]);
     }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("the same repository at the server cwd is ordinary by default", () =>
+  Effect.gen(function* () {
+    const seen: Array<boolean | undefined> = [];
+    const fixture = yield* makeIntegrationFixture({
+      launchPreflightRunner: (_root, options) => {
+        seen.push(options?.isSharedRoot);
+        return Effect.succeed(findingResult([]));
+      },
+    });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      yield* provider.startSession(ThreadId.make("thread-shared-default"), {
+        threadId: ThreadId.make("thread-shared-default"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.deepStrictEqual(seen, [false]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("a configured shared session root applies independently of the backend cwd", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const otherBackendCwd = yield* fs.makeTempDirectory();
+    const seen: Array<boolean | undefined> = [];
+    const fixture = yield* makeIntegrationFixture({
+      serverConfigCwd: otherBackendCwd,
+      sharedSessionRootIsWorkspace: true,
+      launchPreflightRunner: (_root, options) => {
+        seen.push(options?.isSharedRoot);
+        return Effect.succeed(findingResult([]));
+      },
+    });
+    const nested = path.join(fixture.cwd, "nested");
+    yield* fs.makeDirectory(nested, { recursive: true });
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      // The configured shared root is treated as shared even though the
+      // backend cwd is a different directory.
+      yield* provider.startSession(ThreadId.make("thread-shared-root"), {
+        threadId: ThreadId.make("thread-shared-root"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+      // A nested repository selected as the session cwd stays ordinary.
+      yield* provider.startSession(ThreadId.make("thread-shared-nested"), {
+        threadId: ThreadId.make("thread-shared-nested"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: nested,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.deepStrictEqual(seen, [true, false]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

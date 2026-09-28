@@ -1220,6 +1220,17 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /**
+   * The one directory this environment treats as a shared session inbox. It is
+   * an explicit, exact-root opt-in: provider sessions whose cwd resolves to
+   * this directory (and only this directory) are checked for an accidental
+   * umbrella repository, and a configured shared root is honored regardless of
+   * the backend's own working directory. Empty means ordinary — every
+   * repository session, including the server's own cwd, is treated as a normal
+   * working directory. Never inferred from a folder name, breadth, child
+   * repositories or the mere presence of Git.
+   */
+  sharedSessionRoot: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({
@@ -1520,6 +1531,7 @@ export const ServerSettingsPatch = Schema.Struct({
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   worktreeSubmodules: Schema.optionalKey(Schema.NullOr(WorktreeSubmodules)),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
+  sharedSessionRoot: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   generateThreadTitles: Schema.optionalKey(Schema.Boolean),
   sourceControlWritingStyle: Schema.optionalKey(

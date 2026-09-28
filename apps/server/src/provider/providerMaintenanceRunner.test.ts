@@ -887,7 +887,7 @@ describe("providerMaintenanceRunner", () => {
             PATHEXT: ".COM;.EXE;.BAT;.CMD",
           }),
           Layer.succeed(SpawnExecutableResolution, (command) =>
-            command === "npm" ? "C:\\fake\\npm\\npm.cmd" : undefined,
+            Effect.succeed(command === "npm" ? "C:\\fake\\npm\\npm.cmd" : undefined),
           ),
           latestVersionHttpClient("0.0.0"),
           Layer.succeed(

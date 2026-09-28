@@ -85,9 +85,8 @@ const testLayer = (input: {
   return Layer.mergeAll(
     ExternalLauncher.layer.pipe(Layer.provide(Layer.merge(NodeServices.layer, spawnerLayer))),
     Layer.succeed(HostProcessPlatform, input.platform),
-    Layer.succeed(
-      SpawnExecutableResolution,
-      (command) => input.resolveExecutable?.(command) ?? command,
+    Layer.succeed(SpawnExecutableResolution, (command) =>
+      Effect.succeed(input.resolveExecutable?.(command) ?? command),
     ),
     ConfigProvider.layer(ConfigProvider.fromEnv({ env: input.env ?? {} })),
   );

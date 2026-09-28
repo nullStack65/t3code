@@ -11,6 +11,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -38,7 +39,7 @@ const gitProbe = (
 ): LaunchPreflight.LaunchPreflightGitProbe => ({
   version: () => Effect.succeed("2.55.0"),
   resolveIdentity: () => Effect.succeed(identity()),
-  probeIndexFastPath: () => Effect.succeed("supported"),
+  probeSparseAdd: () => Effect.succeed("not-sparse"),
   ...overrides,
 });
 
@@ -248,41 +249,60 @@ it.effect("blocks when Git cannot start and the session root is a repository", (
   }),
 );
 
-it.effect("warns but never blocks when Git lacks --path-format, even at a repository root", () =>
+it.effect("never blocks or warns about the harmless missing --path-format fast path", () =>
   Effect.gen(function* () {
     const result = yield* run(
       input({
         root: "/repo",
-        isSharedRoot: true,
+        isSharedRoot: false,
         git: gitProbe({
           resolveIdentity: () =>
             Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
-          probeIndexFastPath: () => Effect.succeed("unsupported"),
         }),
         files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
       }),
     );
 
     assert.deepStrictEqual(result.blockers, []);
-    assert.include(codes(result), "git-index-fast-path-unavailable");
-    const message = result.findings.find(
-      (f) => f.code === "git-index-fast-path-unavailable",
-    )?.message;
-    assert.notInclude(message ?? "", "2.31.0");
-    assert.include(message ?? "", "still");
+    assert.deepStrictEqual(result.findings, []);
   }),
 );
 
-it.effect("warns when the resolved Git lacks --path-format but the root is not a repository", () =>
+it.effect("warns when a sparse checkout's resolved Git lacks git add --sparse", () =>
   Effect.gen(function* () {
     const result = yield* run(
       input({
-        git: gitProbe({ probeIndexFastPath: () => Effect.succeed("unsupported") }),
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          probeSparseAdd: () => Effect.succeed("unsupported"),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
       }),
     );
 
-    assert.deepStrictEqual(codes(result), ["git-index-fast-path-unavailable"]);
+    assert.deepStrictEqual(codes(result), ["git-sparse-add-unsupported"]);
     assert.deepStrictEqual(severities(result), ["warning"]);
+    assert.include(result.warnings[0]?.message ?? "", "--sparse");
+  }),
+);
+
+it.effect("does not warn about git add --sparse when the repository is not sparse", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          probeSparseAdd: () => Effect.succeed("not-sparse"),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
+    assert.deepStrictEqual(result.findings, []);
   }),
 );
 
@@ -466,15 +486,12 @@ it.effect(
         }),
         () =>
           Effect.gen(function* () {
-            // 1. The launch preflight proceeds: no blocker, at most warnings.
+            // 1. The launch preflight proceeds with no finding at all: a Git
+            //    without `--path-format` is a harmless optional fallback.
             const preflight = yield* LaunchPreflight.LaunchPreflight;
             const result = yield* preflight.run(repo, { isSharedRoot: false });
             assert.deepStrictEqual(result.blockers, []);
-            assert.ok(
-              result.findings.every((finding) => finding.severity === "warning"),
-              "expected only warnings from the rejecting Git fixture",
-            );
-            assert.include(codes(result), "git-index-fast-path-unavailable");
+            assert.deepStrictEqual(result.findings, []);
 
             // 2. An ordinary checkpoint succeeds through the temporary-index fallback.
             const driver = yield* GitVcsDriver.makeVcsDriverShape();
@@ -510,50 +527,180 @@ it.effect(
 
 // --- R3 regression: real wall-clock bound and cleanup for a hung resolved Git -------------------
 
-it.live("R3: a hung resolved Git is bounded by wall-clock and the child is cleaned up", () =>
-  Effect.gen(function* () {
-    const base = yield* Effect.promise(() =>
-      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e3-hung-git-")),
-    );
-    const binDir = NodePath.join(base, "bin");
-    const marker = NodePath.join(base, "finished");
-    yield* Effect.promise(() => NodeFSP.mkdir(binDir, { recursive: true }));
-    NodeFS.writeFileSync(NodePath.join(binDir, "git"), `#!/bin/sh\nsleep 30\ntouch "${marker}"\n`, {
-      mode: 0o755,
-    });
+it.live(
+  "R3: a hung resolved Git is bounded by wall-clock and the owned processes are cleaned up",
+  () =>
+    Effect.gen(function* () {
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e3-hung-git-")),
+      );
+      const binDir = NodePath.join(base, "bin");
+      const marker = NodePath.join(base, "finished");
+      const childPidFile = NodePath.join(base, "child.pid");
+      const grandchildPidFile = NodePath.join(base, "grandchild.pid");
+      yield* Effect.promise(() => NodeFSP.mkdir(binDir, { recursive: true }));
+      // The owned fixture records its own PID and the PID of a descendant it
+      // spawns, then sleeps. Cleanup must terminate both, not just leave the
+      // post-sleep marker unwritten.
+      NodeFS.writeFileSync(
+        NodePath.join(binDir, "git"),
+        [
+          "#!/bin/sh",
+          `echo $$ > "${childPidFile}"`,
+          "sleep 30 &",
+          `echo $! > "${grandchildPidFile}"`,
+          "wait",
+          `touch "${marker}"`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
 
-    const startedAt = yield* Clock.currentTimeMillis;
-    yield* Effect.acquireUseRelease(
-      Effect.sync(() => {
-        const previous = process.env.PATH;
-        process.env.PATH = `${binDir}${NodePath.delimiter}${previous ?? ""}`;
-        return previous;
-      }),
-      () =>
-        Effect.gen(function* () {
-          const preflight = yield* LaunchPreflight.LaunchPreflight;
-          const result = yield* preflight.run(base, { isSharedRoot: false });
-          const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
-          assert.include(codes(result), "git-probe-timed-out");
-          assert.isBelow(elapsedMs, 3000, `preflight took ${elapsedMs}ms`);
+      const isAlive = (pid: number): boolean => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const readPid = (file: string) =>
+        Effect.promise(() => NodeFSP.readFile(file, "utf8").then((raw) => Number(raw.trim())));
 
-          // The hung wrapper must have been terminated, not left sleeping.
-          yield* Effect.sleep("400 millis");
-          const finished = yield* Effect.promise(() =>
-            NodeFSP.readFile(marker, "utf8").then(
-              () => true,
-              () => false,
-            ),
-          );
-          assert.isFalse(finished, "hung git wrapper was not cleaned up");
-        }),
-      (previous) =>
+      const startedAt = yield* Clock.currentTimeMillis;
+      yield* Effect.acquireUseRelease(
         Effect.sync(() => {
-          if (previous === undefined) delete process.env.PATH;
-          else process.env.PATH = previous;
+          const previous = process.env.PATH;
+          process.env.PATH = `${binDir}${NodePath.delimiter}${previous ?? ""}`;
+          return previous;
         }),
-    ).pipe(Effect.provide(E3PreflightLayer));
+        () =>
+          Effect.gen(function* () {
+            const preflight = yield* LaunchPreflight.LaunchPreflight;
+            const result = yield* preflight.run(base, { isSharedRoot: false });
+            const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
+            assert.include(codes(result), "git-probe-timed-out");
+            assert.isBelow(elapsedMs, 3000, `preflight took ${elapsedMs}ms`);
+
+            const childPid = yield* readPid(childPidFile);
+            const grandchildPid = yield* readPid(grandchildPidFile);
+            assert.isTrue(Number.isInteger(childPid) && childPid > 0);
+            assert.isTrue(Number.isInteger(grandchildPid) && grandchildPid > 0);
+
+            // The hung wrapper and its descendant must have been terminated, not
+            // left sleeping. Only the fixture's own captured PIDs are observed.
+            yield* Effect.sleep("400 millis");
+            assert.isFalse(isAlive(childPid), `owned child ${childPid} was not cleaned up`);
+            assert.isFalse(
+              isAlive(grandchildPid),
+              `owned descendant ${grandchildPid} was not cleaned up`,
+            );
+            const finished = yield* Effect.promise(() =>
+              NodeFSP.readFile(marker, "utf8").then(
+                () => true,
+                () => false,
+              ),
+            );
+            assert.isFalse(finished, "hung git wrapper was not cleaned up");
+          }),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.PATH;
+            else process.env.PATH = previous;
+          }),
+      ).pipe(Effect.provide(E3PreflightLayer));
+
+      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+    }).pipe(Effect.scoped),
+);
+
+// --- F1 regression: relative `--git-common-dir` resolves against the invocation cwd -------------
+
+const makeRealGitProbe = Effect.gen(function* () {
+  const vcsProcess = yield* VcsProcess.VcsProcess;
+  const path = yield* Path.Path;
+  return LaunchPreflight.makeGitProbe(vcsProcess, path);
+});
+
+const realpath = (target: string) => Effect.promise(() => NodeFSP.realpath(target));
+
+it.live("F1: git identity resolves relative common dirs against the invocation cwd", () =>
+  Effect.gen(function* () {
+    const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+    const base = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e4-identity-")),
+    );
+    const repo = NodePath.join(base, "repo");
+    const sub = NodePath.join(repo, "sub");
+    const worktree = NodePath.join(base, "linked-worktree");
+    const git = (cwd: string, args: ReadonlyArray<string>) =>
+      Effect.promise(async () => {
+        NodeChildProcess.execFileSync(realGit, args, { cwd });
+      });
+
+    yield* Effect.promise(() => NodeFSP.mkdir(sub, { recursive: true }));
+    yield* git(repo, ["init"]);
+    yield* git(repo, ["config", "user.name", "Test"]);
+    yield* git(repo, ["config", "user.email", "test@test.com"]);
+    yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(repo, "file.txt"), "hello\n"));
+    yield* git(repo, ["add", "."]);
+    yield* git(repo, ["commit", "-m", "initial"]);
+    yield* git(repo, ["worktree", "add", worktree, "-b", "linked"]);
+
+    const probe = yield* makeRealGitProbe;
+    const repoReal = yield* realpath(repo);
+
+    // 1. Root is the repository root: common dir is `<repo>/.git`.
+    const rootIdentity = yield* probe.resolveIdentity(repo);
+    assert.strictEqual(rootIdentity.state, "ok");
+    assert.strictEqual(yield* realpath(rootIdentity.commonDir ?? ""), `${repoReal}/.git`);
+
+    // 2. Root is a subdirectory: plain `git rev-parse --git-common-dir` returns
+    //    a relative `../.git`; it must resolve to `<repo>/.git`, not outside.
+    const subIdentity = yield* probe.resolveIdentity(sub);
+    assert.strictEqual(subIdentity.state, "ok");
+    assert.strictEqual(yield* realpath(subIdentity.topLevel ?? ""), repoReal);
+    assert.strictEqual(yield* realpath(subIdentity.commonDir ?? ""), `${repoReal}/.git`);
+
+    // 3. Root is a linked worktree: the common dir points back at the main
+    //    repository, and its top level is the worktree itself.
+    const worktreeIdentity = yield* probe.resolveIdentity(worktree);
+    assert.strictEqual(worktreeIdentity.state, "ok");
+    assert.strictEqual(yield* realpath(worktreeIdentity.commonDir ?? ""), `${repoReal}/.git`);
+    assert.strictEqual(yield* realpath(worktreeIdentity.topLevel ?? ""), yield* realpath(worktree));
 
     yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
-  }).pipe(Effect.scoped),
+  }).pipe(Effect.provide(E3VcsLayer)),
+);
+
+it.live("F3: the real probe reports git add --sparse support only for a sparse checkout", () =>
+  Effect.gen(function* () {
+    const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+    const base = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e4-sparse-")),
+    );
+    const repo = NodePath.join(base, "repo");
+    const git = (args: ReadonlyArray<string>) =>
+      Effect.promise(async () => {
+        NodeChildProcess.execFileSync(realGit, args, { cwd: repo });
+      });
+
+    yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(repo, "src"), { recursive: true }));
+    yield* git(["init"]);
+    yield* git(["config", "user.name", "Test"]);
+    yield* git(["config", "user.email", "test@test.com"]);
+    yield* Effect.promise(() =>
+      NodeFSP.writeFile(NodePath.join(repo, "src", "file.txt"), "hello\n"),
+    );
+    yield* git(["add", "."]);
+    yield* git(["commit", "-m", "initial"]);
+
+    const probe = yield* makeRealGitProbe;
+    assert.strictEqual(yield* probe.probeSparseAdd(repo), "not-sparse");
+
+    yield* git(["sparse-checkout", "set", "src"]);
+    assert.strictEqual(yield* probe.probeSparseAdd(repo), "supported");
+
+    yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+  }).pipe(Effect.provide(E3VcsLayer)),
 );

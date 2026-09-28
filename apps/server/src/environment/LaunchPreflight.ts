@@ -49,7 +49,7 @@ const READ_PROBE_CANDIDATES = ["AGENTS.md", "package.json", "README.md", ".git/H
 export type LaunchPreflightFindingCode =
   | "git-startup-failed"
   | "git-probe-timed-out"
-  | "git-index-fast-path-unavailable"
+  | "git-sparse-add-unsupported"
   | "git-probe-failed"
   | "shared-root-git"
   | "root-read-slow"
@@ -89,16 +89,22 @@ export interface LaunchPreflightGitProbe {
     root: string,
   ) => Effect.Effect<LaunchPreflightRepoIdentity, LaunchPreflightProbeError>;
   /**
-   * Probes the optional `rev-parse --path-format=absolute` convenience used by
-   * the checkpoint index-reuse fast path. `unsupported` only means the faster
-   * path is unavailable — the fallback still checkpoints — so it never blocks.
+   * Probes the real capability the checkpoint path needs in a sparse
+   * checkout: `git add --sparse`. Only meaningful when the root repository is
+   * actually sparse — in an ordinary repository `--sparse` is never used, so
+   * its absence is not actionable. Read-only: it inspects config and `git add
+   * -h`, never stages anything. The optional `rev-parse --path-format` fast
+   * path is deliberately not probed or warned about: its absence is a harmless
+   * optimization fallback handled inside `GitVcsDriver`.
    */
-  readonly probeIndexFastPath: (
+  readonly probeSparseAdd: (
     root: string,
-  ) => Effect.Effect<LaunchPreflightIndexFastPath, LaunchPreflightProbeError>;
+  ) => Effect.Effect<LaunchPreflightSparseCapability, LaunchPreflightProbeError>;
 }
 
-export type LaunchPreflightIndexFastPath = "supported" | "unsupported" | "unknown";
+export type LaunchPreflightSparseCapability =
+  /** The root is not a sparse checkout, so `git add --sparse` is not required. */
+  "not-sparse" | "supported" | "unsupported" | "unknown";
 
 export interface LaunchPreflightRepoIdentity {
   readonly state: "ok" | "not-a-repository" | "failed";
@@ -153,6 +159,22 @@ const normalizeForCompare = (path: Path.Path, value: string): string => {
 
 const samePath = (path: Path.Path, a: string | null, b: string): boolean =>
   a !== null && normalizeForCompare(path, a) === normalizeForCompare(path, b);
+
+/**
+ * Whether `cwd` is exactly the deliberately configured shared session root.
+ * This is the only source of shared-inbox intent: equality with an ordinary
+ * working directory (including `ServerConfig.cwd`) never declares one. An
+ * unset or empty setting means every session is ordinary.
+ */
+export const isConfiguredSharedSessionRoot = (
+  path: Path.Path,
+  cwd: string,
+  configuredRoot: string | undefined,
+): boolean => {
+  const trimmed = configuredRoot?.trim() ?? "";
+  if (trimmed.length === 0) return false;
+  return normalizeForCompare(path, cwd) === normalizeForCompare(path, trimmed);
+};
 
 const isInside = (path: Path.Path, child: string | null, parent: string): boolean => {
   if (child === null) return false;
@@ -284,23 +306,25 @@ export const runLaunchPreflight = (
           });
         }
 
-        // The optional index-reuse fast path is probed for context only. Its
-        // absence is handled by GitVcsDriver's temporary-index fallback and must
-        // never block a launch.
-        const fastPathOutcome = yield* input.git.probeIndexFastPath(input.root).pipe(
+        // The real capability the checkpoint path needs in a sparse checkout is
+        // `git add --sparse`. Probe it read-only and only report it when the
+        // repository is actually sparse; the optional `--path-format` fast path
+        // is never probed or warned about (see the interface comment).
+        const sparseOutcome = yield* input.git.probeSparseAdd(input.root).pipe(
           Effect.map((state) => ({ _tag: "ok" as const, state })),
           Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
           Effect.timeoutOption(GIT_PROBE_TIMEOUT),
           Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
         );
-        if (fastPathOutcome._tag === "ok" && fastPathOutcome.state === "unsupported") {
+        if (sparseOutcome._tag === "ok" && sparseOutcome.state === "unsupported") {
           yield* add({
-            code: "git-index-fast-path-unavailable",
+            code: "git-sparse-add-unsupported",
             severity: "warning",
             message:
-              "The Git this launch resolves does not support `git rev-parse --path-format`. T3 Code will " +
-              "rebuild the temporary checkpoint index instead of reusing the on-disk index; sessions still " +
-              "run and checkpoint. A newer Git restores the faster path only.",
+              "This is a sparse Git checkout, but the Git this launch resolves does not support " +
+              "`git add --sparse`. T3 Code cannot tell which files the sparse rules exclude, so a " +
+              "checkpoint may record excluded files as deleted. Install a newer Git to keep sparse " +
+              "checkpoints accurate; the session can still start.",
           });
         }
       } else if (gitOutcome._tag === "timeout" || gitOutcome.error.reason === "timeout") {
@@ -402,12 +426,11 @@ export class LaunchPreflight extends Context.Service<
   }
 >()("t3/environment/LaunchPreflight") {}
 
-/** @public Service construction is part of the canonical Effect module API. */
-export const make = Effect.gen(function* () {
-  const vcsProcess = yield* VcsProcess.VcsProcess;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-
+/** Builds the production Git probe from the shared bounded VCS process runner. */
+export const makeGitProbe = (
+  vcsProcess: VcsProcess.VcsProcess["Service"],
+  path: Path.Path,
+): LaunchPreflightGitProbe => {
   const runGit = (
     operation: string,
     root: string,
@@ -426,7 +449,7 @@ export const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError(classifyGitProbeError));
 
-  const git: LaunchPreflightGitProbe = {
+  return {
     version: (root) =>
       runGit("launch-preflight.git-version", root, ["--version"], false).pipe(
         Effect.map((result) => parseGitVersion(result.stdout) ?? parseGitVersion(result.stderr)),
@@ -464,11 +487,16 @@ export const make = Effect.gen(function* () {
           true,
         );
         const rawCommonDir = Number(commonResult.exitCode) === 0 ? commonResult.stdout.trim() : "";
+        // Plain `git rev-parse --git-common-dir` prints a path relative to the
+        // directory Git actually ran in (the invocation cwd), e.g. `repo/sub`
+        // yields `../.git`. Resolve against the exact invocation cwd `root`,
+        // not the top level, or an ordinary subdirectory launch would resolve
+        // to a path outside the repository. Absolute output is untouched.
         const commonDir =
           rawCommonDir.length > 0
             ? path.isAbsolute(rawCommonDir)
               ? rawCommonDir
-              : path.resolve(topLevel.length > 0 ? topLevel : root, rawCommonDir)
+              : path.resolve(root, rawCommonDir)
             : null;
         return {
           state: "ok",
@@ -477,23 +505,38 @@ export const make = Effect.gen(function* () {
           detail: "",
         } satisfies LaunchPreflightRepoIdentity;
       }),
-    probeIndexFastPath: (root) =>
-      runGit(
-        "launch-preflight.git-index-fast-path",
-        root,
-        ["rev-parse", "--path-format=absolute", "--git-path", "index"],
-        true,
-      ).pipe(
-        Effect.map((result): LaunchPreflightIndexFastPath => {
-          if (Number(result.exitCode) === 0) return "supported";
-          const stderr = result.stderr.trim();
-          if (/unknown option|usage: git rev-parse|path-format/i.test(stderr)) {
-            return "unsupported";
-          }
-          return "unknown";
-        }),
-      ),
+    probeSparseAdd: (root) =>
+      Effect.gen(function* () {
+        // Read-only: is the root repository actually a sparse checkout?
+        const sparseConfig = yield* runGit(
+          "launch-preflight.git-sparse-config",
+          root,
+          ["config", "--bool", "core.sparseCheckout"],
+          true,
+        );
+        if (Number(sparseConfig.exitCode) !== 0 || sparseConfig.stdout.trim() !== "true") {
+          return "not-sparse" satisfies LaunchPreflightSparseCapability;
+        }
+        // Read-only usage probe; `git add -h` never stages a file.
+        const help = yield* runGit(
+          "launch-preflight.git-sparse-add-help",
+          root,
+          ["add", "-h"],
+          true,
+        );
+        return /--(?:\[no-\])?sparse\b/.test(`${help.stdout}${help.stderr}`)
+          ? ("supported" satisfies LaunchPreflightSparseCapability)
+          : ("unsupported" satisfies LaunchPreflightSparseCapability);
+      }),
   };
+};
+
+/** @public Service construction is part of the canonical Effect module API. */
+export const make = Effect.gen(function* () {
+  const vcsProcess = yield* VcsProcess.VcsProcess;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const git = makeGitProbe(vcsProcess, path);
 
   const files: LaunchPreflightFileProbe = {
     exists: (target) => fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false)),

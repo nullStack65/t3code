@@ -18,7 +18,7 @@ function withWindowsResolution(input: {
   return <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
       Effect.provideService(HostProcessPlatform, "win32"),
-      Effect.provideService(SpawnExecutableResolution, () => input.resolvedCommand),
+      Effect.provideService(SpawnExecutableResolution, () => Effect.succeed(input.resolvedCommand)),
       Effect.provideService(ClaudeExecutableFileCheck, (filePath) => existing.has(filePath)),
     );
 }
@@ -29,9 +29,9 @@ describe("resolveClaudeSdkExecutablePath", () => {
       expect(
         yield* resolveClaudeSdkExecutablePath("claude", {}).pipe(
           Effect.provideService(HostProcessPlatform, "darwin"),
-          Effect.provideService(SpawnExecutableResolution, () => {
-            throw new Error("must not resolve on non-Windows platforms");
-          }),
+          Effect.provideService(SpawnExecutableResolution, () =>
+            Effect.die("must not resolve on non-Windows platforms"),
+          ),
         ),
       ).toBe("claude");
     }),
