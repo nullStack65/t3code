@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off -- The delayed-drain regression closes an Effect scope around a real timer.
 import { expect, it } from "@effect/vitest";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
