@@ -45,6 +45,8 @@ import {
   scServiceDoesNotExist,
   WINDOWS_BOOT_SERVICE_NAME,
   windowsRegistrationMatchesOurBinding,
+  windowsRegistrationOwnedByUs,
+  windowsRuntimeFromImagePath,
   windowsServiceHelperPath,
   windowsServiceProgram,
   windowsServiceSteps,
@@ -436,14 +438,12 @@ function selectBootServiceManager(input: {
       environmentPath: input.environmentPath,
     });
   }
-  // Windows is only selectable once the explicit account, home, helper and
-  // runtime are all known. Missing prerequisites leave the manager undefined so
-  // install/status refuse rather than defaulting to LocalSystem.
-  if (
-    input.platform === "win32" &&
-    input.windows !== undefined &&
-    isQualifiedWindowsAccount(input.windows.account)
-  ) {
+  // Windows is selectable for read-only observation whenever the home, helper
+  // and runtime are known, even without an install account: status must be able
+  // to observe an installed service the caller has no credentials to mutate.
+  // Mutation still refuses a missing/unqualified account in
+  // `requireWindowsBinding`, so the adapter never defaults to LocalSystem.
+  if (input.platform === "win32" && input.windows !== undefined) {
     return windowsManager(input.windows);
   }
   return undefined;
@@ -1376,10 +1376,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (result.value.timedOut) {
       return unknownObservation({ manager: "scm", source, observedAt, detail: "manager-timeout" });
     }
-    if (
-      result.value.code !== 0 &&
-      scServiceDoesNotExist(result.value.code, result.value.stdout, result.value.stderr)
-    ) {
+    if (result.value.code !== 0 && scServiceDoesNotExist(result.value.code)) {
       return {
         manager: "scm",
         source,
@@ -1423,14 +1420,17 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
             ? "disabled"
             : "unknown";
     const runtimeFromImage =
-      qc?.binaryPathName === undefined
-        ? undefined
-        : /--runtime\s+"?([^"\s]+)"?/.exec(qc.binaryPathName)?.[1];
+      qc?.binaryPathName === undefined ? undefined : windowsRuntimeFromImagePath(qc.binaryPathName);
     const bound =
       runtimeFromImage === undefined
         ? undefined
         : bindBootServiceProgramPath(runtimeFromImage, input.baseDir, path);
-    const running = scRunningState(parsed.state);
+    const running =
+      parsed.state !== undefined && scRunningState(parsed.state) === "running"
+        ? parsed.processId === undefined
+          ? "unknown"
+          : "running"
+        : scRunningState(parsed.state);
     return {
       manager: "scm",
       source,
@@ -1490,7 +1490,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         return { kind: "unreachable" as const };
       }
       if (result.value.code !== 0) {
-        return scServiceDoesNotExist(result.value.code, result.value.stdout, result.value.stderr)
+        return scServiceDoesNotExist(result.value.code)
           ? { kind: "absent" as const }
           : { kind: "unreachable" as const };
       }
@@ -1837,11 +1837,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       } satisfies BootServiceStatus;
     }
     if (detectedManager.kind === "scm") {
-      const binding = yield* requireWindowsBinding.pipe(
-        Effect.catchTag("BootServicePrerequisiteError", () =>
-          Effect.succeed(undefined as WindowsBootServiceBinding | undefined),
-        ),
-      );
+      // Read-only observation needs no install credentials: the SCM is queried
+      // by fixed service name. A missing install account must not make an
+      // installed service unobservable or the platform look unsupported; it only
+      // blocks mutation, which still enforces `requireWindowsBinding`.
+      const binding = windowsBinding;
       if (binding === undefined) {
         return {
           schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
@@ -1891,8 +1891,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         : undefined;
       const state = Option.isSome(stateText) ? parseServiceState(stateText.value) : undefined;
       const bound =
-        inspection.kind === "registered" &&
-        windowsRegistrationMatchesOurBinding(inspection.qc, binding);
+        inspection.kind === "registered" && windowsRegistrationOwnedByUs(inspection.qc, binding);
       const problems: BootServiceProblem[] = [];
       if (queryFailed) problems.push("windows-service-unreachable");
       else if (!bound) problems.push("windows-service-foreign-registration");
@@ -1916,6 +1915,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         current:
           problems.length === 0 &&
           bound &&
+          observation.configuredVersion === input.cliVersion &&
           runtimeEntryExists &&
           Option.isSome(runtimeSentinel) &&
           runtimeSentinel.value.trim() === input.cliVersion &&

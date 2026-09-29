@@ -1,6 +1,7 @@
 import * as Duration from "effect/Duration";
 import type * as Path from "effect/Path";
 
+import { isExactServiceVersion } from "./serviceProtocol.ts";
 import type { BootServiceStep } from "./bootService.ts";
 
 /**
@@ -48,9 +49,120 @@ export function isQualifiedWindowsAccount(account: string | undefined): boolean 
   return /^[^@\s]+@[^@\s]+$/.test(trimmed);
 }
 
-/** Quotes one argument for a Windows command line sc.exe will re-parse. */
+/**
+ * Quotes one argument for a Windows command line sc.exe will re-parse. This
+ * implements the reverse of {@link parseWindowsCommandLine}: a run of
+ * backslashes is doubled when it precedes a closing quote, `"` is escaped as
+ * `2n + 1` backslashes plus the quote, and a trailing run of backslashes is
+ * doubled before the closing quote. An argument that needs no quoting is left
+ * bare; one that contains whitespace or a quote is quoted and escaped. An empty
+ * argument renders as `""`.
+ */
 export function quoteWindowsArgument(value: string): string {
-  return /[\s"]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+  if (value === "") return '""';
+  if (!/[\s"]/.test(value)) return value;
+  let result = '"';
+  let backslashes = 0;
+  for (const character of value) {
+    if (character === "\\") {
+      backslashes += 1;
+      result += character;
+    } else if (character === '"') {
+      result += `${"\\".repeat(backslashes + 1)}"`;
+      backslashes = 0;
+    } else {
+      backslashes = 0;
+      result += character;
+    }
+  }
+  return `${result}${"\\".repeat(backslashes)}"`;
+}
+
+/**
+ * Splits a Windows command line back into its arguments using the same rule
+ * set `quoteWindowsArgument` emits: whitespace outside quotes separates
+ * arguments, a quote escapes a literal quote only when preceded by an odd run
+ * of backslashes (an even run leaves the quote as a delimiter), and runs of
+ * backslashes collapse by pairs. This is a bounded command-line splitter, not a
+ * shell parser: it never expands, globs or interprets anything. It preserves
+ * argument boundaries and inner whitespace losslessly, so a quoted path with
+ * spaces can be compared exactly.
+ */
+export function parseWindowsCommandLine(commandLine: string): ReadonlyArray<string> {
+  const args: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let started = false;
+  let index = 0;
+  while (index < commandLine.length) {
+    const character = commandLine[index] ?? "";
+    if (!inQuotes && (character === " " || character === "\t")) {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (character === "\\") {
+      let count = 0;
+      while (index < commandLine.length && commandLine[index] === "\\") {
+        count += 1;
+        index += 1;
+      }
+      if (index < commandLine.length && commandLine[index] === '"') {
+        current += "\\".repeat(Math.floor(count / 2));
+        if (count % 2 === 1) {
+          current += '"';
+        } else {
+          inQuotes = !inQuotes;
+        }
+        index += 1;
+      } else {
+        current += "\\".repeat(count);
+      }
+      started = true;
+      continue;
+    }
+    if (character === '"') {
+      inQuotes = !inQuotes;
+      started = true;
+      index += 1;
+      continue;
+    }
+    current += character;
+    started = true;
+    index += 1;
+  }
+  if (started) args.push(current);
+  return args;
+}
+
+/** Case-insensitive equality for Windows paths and account names. */
+function sameWindowsToken(left: string, right: string): boolean {
+  return left.localeCompare(right, undefined, { sensitivity: "accent" }) === 0;
+}
+
+/** The value of a `--flag value` pair in an already-split argv, if present. */
+function optionValue(args: ReadonlyArray<string>, flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  return index >= 0 && index + 1 < args.length ? args[index + 1] : undefined;
+}
+
+/**
+ * Whether a registered `--runtime` path lives under `<home>/runtime/versions/`
+ * for any exact version. Any version tree under the same home is owned; this is
+ * what lets an owned older runtime be upgraded rather than refused as foreign.
+ */
+export function windowsRuntimeBelongsToHome(runtimePath: string, homeDir: string): boolean {
+  const normalize = (value: string) =>
+    value.replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase();
+  const versionsPrefix = `${normalize(homeDir)}\\runtime\\versions`;
+  const runtime = normalize(runtimePath);
+  if (!runtime.startsWith(`${versionsPrefix}\\`)) return false;
+  const [version = ""] = runtime.slice(versionsPrefix.length + 1).split("\\");
+  return version !== "" && isExactServiceVersion(version);
 }
 
 /** The host's argv without shell quoting; `program` in a plan. */
@@ -161,7 +273,9 @@ export function parseScQuery(stdout: string): ScQuery | undefined {
     ...(stateLine === null || stateLine[2] === undefined
       ? {}
       : { state: stateLine[2].trim(), ...(stateCode === undefined ? {} : { stateCode }) }),
-    ...(processId === undefined || !Number.isSafeInteger(processId) ? {} : { processId }),
+    ...(processId === undefined || !Number.isSafeInteger(processId) || processId <= 0
+      ? {}
+      : { processId }),
   };
 }
 
@@ -188,14 +302,15 @@ export function parseScQc(stdout: string): ScQc | undefined {
   };
 }
 
-/** `ERROR_SERVICE_DOES_NOT_EXIST` (1060) is the only absence the SCM reports. */
-export function scServiceDoesNotExist(
-  code: number | null,
-  stdout: string,
-  stderr: string,
-): boolean {
-  if (code === 1060) return true;
-  return /\b1060\b|does not exist as an installed service/i.test(`${stdout}\n${stderr}`);
+/**
+ * `ERROR_SERVICE_DOES_NOT_EXIST` (1060) is the only absence the SCM reports.
+ * Only the authoritative numeric result code establishes absence: a localized
+ * or incidental `1060` inside unrelated stdout/stderr, an access-denied
+ * failure, or an unavailable code is unknown, never permission to create or
+ * delete a registration.
+ */
+export function scServiceDoesNotExist(code: number | null): boolean {
+  return code === 1060;
 }
 
 /** Manager `sc.exe` state tokens mapped to the shared running state. */
@@ -219,26 +334,62 @@ export function scRunningState(
 }
 
 /**
- * Whether an existing `sc.exe` registration is this adapter's own: it must bind
- * the exact helper binary and the exact home/runtime/log/service-name. A
- * registration whose `ImagePath` names another home, helper or account is
- * foreign and is never overwritten or deleted by install/restart/uninstall.
+ * Whether an existing `sc.exe` registration is this adapter's own. Ownership is
+ * bound to the exact native account (`SERVICE_START_NAME`), the exact helper
+ * binary, home, log and service name, and only requires the registered runtime
+ * to live under this home's runtime tree. The desired runtime version is *not*
+ * part of ownership: an owned older runtime can be upgraded by an ordinary
+ * install rather than being refused as a foreign registration. Argument
+ * boundaries and inner whitespace are compared losslessly through
+ * {@link parseWindowsCommandLine}; a changed account or a genuinely different
+ * home never matches. A registration whose `ImagePath` names another home,
+ * helper or account is foreign and is never overwritten or deleted by
+ * install/restart/uninstall.
+ */
+export function windowsRegistrationOwnedByUs(
+  qc: ScQc,
+  binding: WindowsBootServiceBinding,
+): boolean {
+  if (qc.binaryPathName === undefined) return false;
+  const args = parseWindowsCommandLine(qc.binaryPathName);
+  const program = args[0];
+  if (program === undefined || !sameWindowsToken(program, binding.hostPath)) return false;
+  const home = optionValue(args, "--home");
+  if (home === undefined || !sameWindowsToken(home, binding.homeDir)) return false;
+  const serviceName = optionValue(args, "--service-name");
+  if (serviceName === undefined || !sameWindowsToken(serviceName, binding.serviceName))
+    return false;
+  const log = optionValue(args, "--log");
+  if (log === undefined || !sameWindowsToken(log, binding.logPath)) return false;
+  const runtime = optionValue(args, "--runtime");
+  if (runtime === undefined || !windowsRuntimeBelongsToHome(runtime, binding.homeDir)) return false;
+  if (binding.account !== undefined) {
+    if (qc.serviceStartName === undefined) return false;
+    if (!sameWindowsToken(qc.serviceStartName, binding.account)) return false;
+    const expectedAccount = optionValue(args, "--expected-account");
+    if (expectedAccount !== undefined && !sameWindowsToken(expectedAccount, binding.account)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Strict identity for read-only status: the registration is ours *and* its
+ * configured runtime is exactly the desired one. This never gates mutation —
+ * install/restart/uninstall use {@link windowsRegistrationOwnedByUs} so an
+ * owned older runtime can be upgraded.
  */
 export function windowsRegistrationMatchesOurBinding(
   qc: ScQc,
   binding: WindowsBootServiceBinding,
 ): boolean {
-  if (qc.binaryPathName === undefined) return false;
-  const expected = renderWindowsServiceImagePath(binding);
-  return normalizeWindowsImagePath(qc.binaryPathName) === normalizeWindowsImagePath(expected);
+  if (!windowsRegistrationOwnedByUs(qc, binding) || qc.binaryPathName === undefined) return false;
+  const runtime = optionValue(parseWindowsCommandLine(qc.binaryPathName), "--runtime");
+  return runtime !== undefined && sameWindowsToken(runtime, binding.runtimePath);
 }
 
-/** Collapses whitespace and normalizes an outer pair of quotes for comparison. */
-export function normalizeWindowsImagePath(value: string): string {
-  const trimmed = value.trim();
-  const unquoted =
-    trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length > 1
-      ? trimmed.slice(1, -1)
-      : trimmed;
-  return unquoted.replaceAll(/\s+/g, " ").trim();
+/** The registered runtime path from a `qc` image path, split losslessly. */
+export function windowsRuntimeFromImagePath(binaryPathName: string): string | undefined {
+  return optionValue(parseWindowsCommandLine(binaryPathName), "--runtime");
 }
