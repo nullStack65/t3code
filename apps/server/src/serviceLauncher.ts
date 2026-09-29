@@ -365,6 +365,12 @@ export interface LauncherOptions {
    * rather than left to the platform.
    */
   readonly runtimeInterpreter?: string;
+  /**
+   * Force the IPC drain path that Windows uses for a whole-service stop (a
+   * process signal there is a hard kill). Defaults to the host platform; the
+   * override lets that production branch be exercised on another host.
+   */
+  readonly gracefulIpcStop?: boolean;
 }
 
 export class Launcher {
@@ -372,6 +378,7 @@ export class Launcher {
   readonly #statePath: string;
   readonly #control: LauncherControlOptions | undefined;
   readonly #runtimeInterpreter: string | undefined;
+  readonly #gracefulIpcStop: boolean;
   #state: ServiceState;
   #child: ManagedChild | null = null;
   #timer: NodeJS.Timeout | undefined;
@@ -380,6 +387,7 @@ export class Launcher {
   #stopRequested = false;
   #stopping = false;
   #done = false;
+  #consumingControl = false;
   #requestCounter = 0;
   readonly #completion = Promise.withResolvers<void>();
 
@@ -389,6 +397,8 @@ export class Launcher {
     this.#state = state;
     this.#control = options.control;
     this.#runtimeInterpreter = options.runtimeInterpreter;
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+    this.#gracefulIpcStop = options.gracefulIpcStop ?? process.platform === "win32";
   }
 
   async run(): Promise<void> {
@@ -411,9 +421,13 @@ export class Launcher {
   /**
    * Watches the private control request the host owns. A request is bound to
    * this launch by its instance token; a request with any other token is stale
-   * (from a previous launch or another home) and is consumed without effect. The
-   * file is removed before the stop begins so a repeated or concurrent request
-   * cannot start a second stop.
+   * (from a previous launch or another home) and is consumed without effect.
+   *
+   * Delivery is claim-based: a single consumer renames the request to a private
+   * claim path before decoding it, so overlapping polls cannot both act on one
+   * request, a request written while a poll is in flight is never deleted
+   * unread, and the rename publishes complete contents (the host writes
+   * atomically). A claimed request is removed after decoding.
    */
   #startControlPolling(): void {
     const poll = () => {
@@ -424,20 +438,35 @@ export class Launcher {
   }
 
   async #consumeControlRequest(): Promise<void> {
-    const requestPath = controlRequestPath(this.#baseDir);
-    let contents: string;
+    if (this.#consumingControl) return;
+    this.#consumingControl = true;
     try {
-      contents = await NodeFSP.readFile(requestPath, "utf8");
-    } catch {
-      return;
+      const requestPath = controlRequestPath(this.#baseDir);
+      const claimPath = `${requestPath}.claim-${NodeCrypto.randomUUID()}`;
+      try {
+        // Atomic claim: exactly one consumer wins; a missing file means no
+        // request is pending.
+        await NodeFSP.rename(requestPath, claimPath);
+      } catch {
+        return;
+      }
+      let contents: string;
+      try {
+        contents = await NodeFSP.readFile(claimPath, "utf8");
+      } catch {
+        return;
+      } finally {
+        await NodeFSP.rm(claimPath, { force: true }).catch(() => undefined);
+      }
+      const request = parseServiceLauncherControlRequest(contents);
+      if (request === undefined || request.instance !== this.#control?.instance) {
+        // Stale, foreign or malformed: claimed and removed, act on nothing.
+        return;
+      }
+      void this.stop("SIGTERM");
+    } finally {
+      this.#consumingControl = false;
     }
-    await NodeFSP.rm(requestPath, { force: true }).catch(() => undefined);
-    const request = parseServiceLauncherControlRequest(contents);
-    if (request === undefined || request.instance !== this.#control?.instance) {
-      // Stale, foreign or malformed: already consumed above, act on nothing.
-      return;
-    }
-    void this.stop("SIGTERM");
   }
 
   #enqueue(transition: () => Promise<void>): void {
@@ -490,8 +519,7 @@ export class Launcher {
         // Only a non-exit (timeout or an unavailable channel) still needs the
         // force fallback; an early acknowledgement by itself never does.
         // POSIX keeps its existing signal-driven finalizer path.
-        // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
-        if (process.platform === "win32") {
+        if (this.#gracefulIpcStop) {
           this.#requestCounter += 1;
           const outcome = await requestGracefulChildStop(
             child,

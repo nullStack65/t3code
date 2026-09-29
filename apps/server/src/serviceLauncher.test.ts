@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalTimers:off
 // @effect-diagnostics globalDateInEffect:off
+// @effect-diagnostics preferSchemaOverJson:off -- Builds a fake child source from string fragments.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, it } from "@effect/vitest";
@@ -9,6 +10,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
+import * as NodeURL from "node:url";
+
+import packageJson from "../package.json" with { type: "json" };
 
 import {
   Launcher,
@@ -502,6 +507,92 @@ it.layer(NodeServices.layer)("whole-service graceful stop over IPC", (it) => {
       assert.deepEqual(outcome, { status: "channel-unavailable" });
       child.kill();
     }),
+  );
+
+  it.effect(
+    "drains the real managed shutdown layer, with a delayed finalizer, through the launcher",
+    () =>
+      Effect.gen(function* () {
+        // The launcher's IPC drain branch is Windows-only in production. This
+        // drives that exact production transition on this host and runs a child
+        // that loads the *real* `managedShutdownLayer` from the server source,
+        // then adds a delayed application finalizer. The launcher must wait for
+        // the real exit (after the delayed finalizer), never an early hint.
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "t3-service-launcher-realdrain-",
+        });
+        const statePath = path.join(root, "runtime", "service-state.json");
+        const readyMarker = path.join(root, "child-ready.txt");
+        const drainMarker = path.join(root, "drained.txt");
+        const clientModule = new URL("./cloud/serviceLauncherClient.ts", import.meta.url).href;
+        const require = NodeModule.createRequire(import.meta.url);
+        const effectModule = NodeURL.pathToFileURL(require.resolve("effect/Effect")).href;
+        const fiberModule = NodeURL.pathToFileURL(require.resolve("effect/Fiber")).href;
+        const layerModule = NodeURL.pathToFileURL(require.resolve("effect/Layer")).href;
+        const childSource =
+          `const { writeFileSync } = require("node:fs");\n` +
+          `(async () => {\n` +
+          `  const client = await import(${JSON.stringify(clientModule)});\n` +
+          `  const Effect = await import(${JSON.stringify(effectModule)});\n` +
+          `  const Fiber = await import(${JSON.stringify(fiberModule)});\n` +
+          `  const Layer = await import(${JSON.stringify(layerModule)});\n` +
+          `  const program = Effect.scoped(Effect.gen(function* () {\n` +
+          `    yield* Layer.build(client.managedShutdownLayer);\n` +
+          `    yield* Effect.addFinalizer(() => Effect.promise(() => new Promise((resolve) => setTimeout(() => {\n` +
+          `      writeFileSync(${JSON.stringify(drainMarker)}, "drained");\n` +
+          `      resolve();\n` +
+          `    }, 300))));\n` +
+          `    yield* Effect.never;\n` +
+          `  }));\n` +
+          `  const fiber = Effect.runFork(program);\n` +
+          `  process.on("SIGTERM", () => { Effect.runFork(Fiber.interrupt(fiber)); });\n` +
+          `  writeFileSync(${JSON.stringify(readyMarker)}, "ready");\n` +
+          `})();\n`;
+        yield* writeFakeRuntime(
+          fs,
+          path,
+          path.join(root, "runtime", "versions", packageJson.version),
+          childSource,
+        );
+        yield* Effect.promise(() =>
+          writeServiceState(statePath, {
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: packageJson.version,
+          }),
+        );
+        const launcher = new Launcher(
+          root,
+          yield* Effect.promise(() => readServiceState(statePath)),
+          {
+            control: { instance: "instance-a", pollIntervalMs: 20 },
+            gracefulIpcStop: true,
+          },
+        );
+        const running = launcher.run();
+        yield* Effect.promise(async () => {
+          for (let attempt = 0; attempt < 500; attempt += 1) {
+            if (NodeFS.existsSync(readyMarker)) return;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        });
+        yield* fs.writeFileString(
+          path.join(root, "runtime", SERVICE_CONTROL_REQUEST_FILE),
+          JSON.stringify({
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            type: "stop",
+            instance: "instance-a",
+            requestId: "req-real",
+          }),
+        );
+        yield* Effect.promise(() => running);
+
+        // The real layer's message handler drove the child's own finalizer, which
+        // wrote the marker after its delay, before the process actually exited.
+        assert.isTrue(yield* fs.exists(drainMarker));
+        assert.isTrue(yield* fs.exists(path.join(root, "runtime", SERVICE_STOP_MARKER_FILE)));
+      }),
   );
 });
 
