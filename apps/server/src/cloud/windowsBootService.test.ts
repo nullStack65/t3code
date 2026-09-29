@@ -279,6 +279,7 @@ const makeHarness = Effect.fn("test.make_windows_boot_service_harness")(function
       logsDir: path.join(baseDir, "userdata", "logs"),
       cliVersion,
       host: { execPath: helperPath },
+      windowsTransitionTimeoutMs: 300,
     }).pipe(
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
       Effect.provide(
@@ -335,6 +336,47 @@ it.layer(NodeServices.layer)("windows SCM boot service", (it) => {
         "BootServicePrerequisiteError",
       );
       expect(yield* fs.exists(statePath)).toBe(false);
+    }),
+  );
+
+  it.effect("install(start=false) registers without activating", () =>
+    Effect.gen(function* () {
+      const { makeService, control, commands, statePath, fs } = yield* makeHarness({
+        account: "DOMAIN\\svc",
+      });
+      const service = yield* makeService();
+      yield* service.install({ start: false });
+      // A fresh install still creates the registration so a later start runs
+      // this version; it must not start the service.
+      expect(control.registered).toBe(true);
+      expect(commands.some((command) => command.startsWith("sc.exe create T3Code "))).toBe(true);
+      expect(commands.some((command) => command.startsWith("sc.exe start T3Code"))).toBe(false);
+      expect(commands.some((command) => command.startsWith("sc.exe stop T3Code"))).toBe(false);
+      expect((yield* fs.readFileString(statePath)).length).toBeGreaterThan(0);
+    }),
+  );
+
+  it.effect("does not delete or report uninstall success over a failed stop", () =>
+    Effect.gen(function* () {
+      const { makeService, control, commands } = yield* makeHarness({ account: "DOMAIN\\svc" });
+      const service = yield* makeService();
+      yield* service.install();
+      commands.length = 0;
+      control.failQueryAfterStop = true;
+      const error = yield* service.uninstall.pipe(Effect.flip);
+      expect(error).toMatchObject({ _tag: "BootServiceCommandError" });
+      expect(commands.some((command) => command.startsWith("sc.exe delete T3Code"))).toBe(false);
+    }),
+  );
+
+  it.effect("does not report uninstall success while deletion is still pending", () =>
+    Effect.gen(function* () {
+      const { makeService, control } = yield* makeHarness({ account: "DOMAIN\\svc" });
+      const service = yield* makeService();
+      yield* service.install();
+      control.deletePending = true;
+      const error = yield* service.uninstall.pipe(Effect.flip);
+      expect(error).toMatchObject({ _tag: "BootServiceCommandError" });
     }),
   );
 
