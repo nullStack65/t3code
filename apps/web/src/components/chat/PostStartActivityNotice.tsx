@@ -10,7 +10,7 @@ import {
 } from "@t3tools/shared/postStartActivity";
 
 import { formatDuration } from "../../session-logic";
-import { monotonicNowMs } from "../../state/postStartObservationReceipt";
+import { monotonicNowMs } from "@t3tools/client-runtime/state/post-start-observation-receipt";
 
 function formatThresholdLabel(thresholdMs: number): string {
   const minutes = Math.round(thresholdMs / 60_000);

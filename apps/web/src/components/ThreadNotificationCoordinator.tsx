@@ -19,9 +19,8 @@ import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironments } from "../state/environments";
 import {
   monotonicNowMs,
-  postStartObservationReceiptKey,
-  rememberPostStartObservationReceipt,
-} from "../state/postStartObservationReceipt";
+  resolvePostStartObservationReceipt,
+} from "@t3tools/client-runtime/state/post-start-observation-receipt";
 import { environmentShell } from "../state/shell";
 import {
   hasDesktopNotifications,
@@ -349,15 +348,14 @@ function EnvironmentNotifications({
       const live = thread.postStartActivity ?? null;
       const observedAt = live?.observedAt ?? null;
       // Pair each distinct server observation with the client instant it
-      // actually arrived. An unrelated shell update or render reuses the same
-      // receipt instead of re-dating the observation; the monotonic baseline
-      // keeps elapsed time honest across browser wall-clock changes.
+      // actually arrived. The shell state records that at acceptance; an
+      // unrelated shell update or render reuses the same receipt instead of
+      // re-dating the observation, and the monotonic baseline keeps elapsed
+      // time honest across browser wall-clock changes.
       const receipt =
         observedAt === null
-          ? undefined
-          : rememberPostStartObservationReceipt(
-              postStartObservationReceiptKey(environmentId, thread.id, observedAt),
-            );
+          ? null
+          : resolvePostStartObservationReceipt(environmentId, thread.id, observedAt);
       const anchors = derivePostStartActivityAnchors({
         activities: [],
         latestTurn: thread.latestTurn,
@@ -383,7 +381,12 @@ function EnvironmentNotifications({
       if (!hydratedThreads.current.has(baselineKey)) {
         hydratedThreads.current.add(baselineKey);
         if (observation.status === "quiet" && observation.episodeKey !== null) {
-          notifiedSilenceEpisodes.current.add(`${baselineKey}:${observation.episodeKey}`);
+          const key = `${baselineKey}:${observation.episodeKey}`;
+          notifiedSilenceEpisodes.current.add(key);
+          // Mark the hydration baseline as still-current too, so the episode
+          // cleanup below cannot delete the suppression in this same evaluation
+          // and re-alert on the next unchanged one.
+          seen.add(key);
         }
         continue;
       }

@@ -340,10 +340,7 @@ import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnectDelay";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
-import {
-  postStartObservationReceiptKey,
-  rememberPostStartObservationReceipt,
-} from "../state/postStartObservationReceipt";
+import { resolvePostStartObservationReceipt } from "@t3tools/client-runtime/state/post-start-observation-receipt";
 import { useEnvironmentQuery } from "../state/query";
 import {
   environmentServerConfigsAtom,
@@ -2134,10 +2131,8 @@ export default function ChatView(props: ChatViewProps) {
     const observedAt = live?.observedAt ?? null;
     const receipt =
       observedAt === null || activeThreadEnvironmentId === null || activeThreadId === null
-        ? undefined
-        : rememberPostStartObservationReceipt(
-            postStartObservationReceiptKey(activeThreadEnvironmentId, activeThreadId, observedAt),
-          );
+        ? null
+        : resolvePostStartObservationReceipt(activeThreadEnvironmentId, activeThreadId, observedAt);
     return derivePostStartActivityAnchors({
       activities: activeThread.activities ?? [],
       latestTurn: activeLatestTurn,
