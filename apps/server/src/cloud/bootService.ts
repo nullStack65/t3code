@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDateInEffect:off globalTimersInEffect:off -- The bounded SCM transition poll must advance on the real wall clock even under a test clock.
 import {
   HostProcessArchitecture,
   HostProcessExecutablePath,
@@ -245,7 +246,6 @@ const WINDOWS_TRANSITION_TIMEOUT_MS = 30_000;
  */
 const realDelay = (ms: number): Effect.Effect<void> =>
   Effect.callback<void, never>((resume) => {
-    // @effect-diagnostics-next-line globalTimers:off
     const timer = setTimeout(() => resume(Effect.void), ms);
     return Effect.sync(() => clearTimeout(timer));
   });
