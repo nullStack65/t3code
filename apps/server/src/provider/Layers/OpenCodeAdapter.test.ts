@@ -125,6 +125,7 @@ const runtimeMock = {
       | null,
     missingSessionIds: new Set<string>(),
     transientErrorSessionIds: new Set<string>(),
+    malformedSessionIds: new Set<string>(),
     sessionDirectoryById: new Map<string, string>(),
     sessionParentById: new Map<string, string>(),
     pendingPermissions: [] as Array<PermissionRequest>,
@@ -184,6 +185,7 @@ const runtimeMock = {
     this.state.sessionGetImplementation = null;
     this.state.missingSessionIds.clear();
     this.state.transientErrorSessionIds.clear();
+    this.state.malformedSessionIds.clear();
     this.state.sessionDirectoryById.clear();
     this.state.sessionParentById.clear();
     this.state.pendingPermissions = [];
@@ -273,6 +275,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             throw new Error(`Session not found: ${sessionID}`, {
               cause: { status: 404, body: { name: "NotFoundError" } },
             });
+          }
+          if (runtimeMock.state.malformedSessionIds.has(sessionID)) {
+            // A 2xx response whose payload is unusable (no session payload).
+            return {};
           }
           const directory = runtimeMock.state.sessionDirectoryById.get(sessionID);
           const parentID = runtimeMock.state.sessionParentById.get(sessionID);
@@ -1150,22 +1156,57 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(compacted, true);
     }),
   );
-  it.effect("falls back to a fresh session when the persisted session is gone", () =>
+  it.effect(
+    "fails a requested continuation when the persisted session is gone instead of starting fresh",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-stale");
+        runtimeMock.state.missingSessionIds.add("ses_stale");
+
+        const exit = yield* Effect.exit(
+          adapter.startSession({
+            provider: ProviderDriverKind.make("opencode"),
+            threadId,
+            runtimeMode: "full-access",
+            resumeCursor: { schemaVersion: 1, sessionId: "ses_stale" },
+          }),
+        );
+
+        // A requested resume whose native session is confirmed absent must
+        // fail visibly: the durable continuation is not silently replaced by a
+        // fresh empty session, and no new native session is created.
+        NodeAssert.equal(Exit.isFailure(exit), true);
+        NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_stale"]);
+        NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
+
+        // No session is left registered for the thread, so a follow-up cannot
+        // be routed to an invented empty session.
+        const followUp = yield* Effect.exit(
+          adapter.sendTurn({
+            threadId,
+            input: "continue",
+            attachments: [],
+          }),
+        );
+        NodeAssert.equal(Exit.isFailure(followUp), true);
+      }),
+  );
+
+  it.effect("keeps the old behavior explicit: no resume id still starts a new session", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
-      const threadId = asThreadId("thread-opencode-stale");
-      runtimeMock.state.missingSessionIds.add("ses_stale");
+      const threadId = asThreadId("thread-opencode-intentional-new");
 
       const session = yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
         runtimeMode: "full-access",
-        resumeCursor: { schemaVersion: 1, sessionId: "ses_stale" },
       });
 
-      // get probed the stale id, found nothing, then created a new session and
-      // emitted a fresh cursor rather than wedging the thread.
-      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_stale"]);
+      // An intentionally new thread (no resume cursor) is unaffected: no
+      // probe, one create, and a fresh durable cursor.
+      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, []);
       NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, ["http://127.0.0.1:9999"]);
       NodeAssert.deepEqual(session.resumeCursor, {
         schemaVersion: 1,
@@ -1173,6 +1214,29 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       });
 
       yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("fails a requested continuation when session.get returns an unusable payload", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-malformed");
+      // A 2xx response with no session payload: absent evidence must not be
+      // read as a fresh start for a requested resume.
+      runtimeMock.state.malformedSessionIds.add("ses_malformed");
+
+      const exit = yield* Effect.exit(
+        adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "ses_malformed" },
+        }),
+      );
+
+      NodeAssert.equal(Exit.isFailure(exit), true);
+      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_malformed"]);
+      NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
     }),
   );
 

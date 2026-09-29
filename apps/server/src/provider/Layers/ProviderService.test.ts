@@ -54,6 +54,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterProcessError,
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -984,6 +985,93 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     assert.include(failure.issue, "Provider instance 'codex_personal' is disabled");
     assert.equal(codex.startSession.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// The caller seam: a requested continuation whose native session is gone must
+// surface the adapter failure, without the service inventing a new session,
+// persisting a binding, or emitting a started receipt that would look like a
+// successful ready handoff.
+it.effect(
+  "propagates a missing-resume failure without persisting a new binding or a started receipt",
+  () => {
+    const recordedAnalytics = makeRecordingAnalytics();
+    const codex = makeFakeCodexAdapter();
+    const startSessionInputs: Array<ProviderSessionStartInput> = [];
+    const failingAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+      ...codex.adapter,
+      startSession: (input) =>
+        Effect.sync(() => {
+          startSessionInputs.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterProcessError({
+                provider: CODEX_DRIVER,
+                threadId: input.threadId,
+                detail:
+                  "OpenCode session 'ses_gone' was not found; refusing to start a new session for a requested continuation.",
+              }),
+            ),
+          ),
+        ),
+    };
+    const registry = makeStaticInstanceRegistry([[codexInstanceId, failingAdapter]]);
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+
+    return Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-missing-resume-caller");
+      const resumeCursor = { opaque: "ses_gone" };
+
+      const exit = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor,
+        }),
+      );
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(startSessionInputs.length, 1);
+      // The requested continuation was actually forwarded, and it did not fall
+      // back to an intentional new start at the service boundary.
+      assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, resumeCursor);
+      assert.equal(Option.isNone(yield* directory.getBinding(threadId)), true);
+      assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 0);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          makeProviderServiceLive().pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(providerAdapterLayer),
+            Layer.provide(directoryLayer),
+            Layer.provide(defaultServerSettingsLayer),
+            Layer.provide(serverConfigTestLayer),
+            Layer.provide(recordedAnalytics.layer),
+            Layer.provide(
+              Layer.succeed(
+                ProviderEventLoggers.ProviderEventLoggers,
+                ProviderEventLoggers.NoOpProviderEventLoggers,
+              ),
+            ),
+          ),
+          directoryLayer,
+          runtimeRepositoryLayer,
+          NodeServices.layer,
+        ),
+      ),
+    );
+  },
 );
 
 const routing = makeProviderServiceLayer();
