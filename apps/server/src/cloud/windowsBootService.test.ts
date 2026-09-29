@@ -19,13 +19,15 @@ import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
 import {
   parseScQc,
   parseScQuery,
+  parseWindowsCommandLine,
   isQualifiedWindowsAccount,
-  normalizeWindowsImagePath,
   quoteWindowsArgument,
   renderWindowsServiceImagePath,
   scRunningState,
   scServiceDoesNotExist,
   windowsRegistrationMatchesOurBinding,
+  windowsRegistrationOwnedByUs,
+  windowsRuntimeBelongsToHome,
   windowsServiceHelperPath,
   WINDOWS_BOOT_SERVICE_NAME,
   type WindowsBootServiceBinding,
@@ -61,34 +63,74 @@ it("maps sc.exe state and absence tokens honestly", () => {
   expect(scRunningState("STOPPED")).toBe("stopped");
   expect(scRunningState("START_PENDING")).toBe("transitioning");
   expect(scRunningState("WHO_KNOWS")).toBe("unknown");
-  expect(scServiceDoesNotExist(1060, "", "")).toBe(true);
-  expect(
-    scServiceDoesNotExist(1, "", "The specified service does not exist as an installed service."),
-  ).toBe(true);
-  expect(scServiceDoesNotExist(1, "", "Access is denied.")).toBe(false);
+  // Absence is only the authoritative numeric 1060, never incidental text.
+  expect(scServiceDoesNotExist(1060)).toBe(true);
+  expect(scServiceDoesNotExist(1)).toBe(false);
+  expect(scServiceDoesNotExist(5)).toBe(false);
+  expect(scServiceDoesNotExist(null)).toBe(false);
 });
 
-it("binds only an exact home/helper/runtime image path", () => {
+it("splits Windows command lines losslessly and quotes them reversibly", () => {
+  const image = parseWindowsCommandLine(
+    '"C:\\Program Files\\t3\\host.exe" --home "C:\\Agent  Data" --runtime "C:\\t3\\t3.exe"',
+  );
+  expect(image).toEqual([
+    "C:\\Program Files\\t3\\host.exe",
+    "--home",
+    "C:\\Agent  Data",
+    "--runtime",
+    "C:\\t3\\t3.exe",
+  ]);
+  // A trailing backslash before the closing quote is doubled, and round-trips.
+  expect(quoteWindowsArgument("C:\\Program Files\\")).toBe('"C:\\Program Files\\\\"');
+  expect(parseWindowsCommandLine(quoteWindowsArgument("C:\\Program Files\\"))).toEqual([
+    "C:\\Program Files\\",
+  ]);
+  expect(quoteWindowsArgument('a"b')).toBe('"a\\"b"');
+  expect(parseWindowsCommandLine(quoteWindowsArgument('a"b'))).toEqual(['a"b']);
+  expect(quoteWindowsArgument("")).toBe('""');
+  expect(parseWindowsCommandLine('"C:\\a b\\\\" x')).toEqual(["C:\\a b\\", "x"]);
+});
+
+it("binds ownership on account/helper/home and allows an owned older runtime", () => {
   const binding: WindowsBootServiceBinding = {
-    hostPath: "C:\\t3\\runtime\\versions\\1.2.3\\t3-windows-service-host.exe",
+    hostPath: "C:\\Users\\theo\\.t3\\runtime\\versions\\1.2.3\\t3-windows-service-host.exe",
     homeDir: "C:\\Users\\theo\\.t3",
-    runtimePath: "C:\\t3\\runtime\\versions\\1.2.3\\t3.exe",
+    runtimePath: "C:\\Users\\theo\\.t3\\runtime\\versions\\1.2.3\\t3.exe",
     logPath: "C:\\Users\\theo\\.t3\\userdata\\logs\\boot-service.log",
     serviceName: WINDOWS_BOOT_SERVICE_NAME,
     account: "DOMAIN\\svc",
   };
+  const qcOf = (binaryPathName: string, serviceStartName = "DOMAIN\\svc") => ({
+    binaryPathName,
+    serviceStartName,
+  });
   const image = renderWindowsServiceImagePath(binding);
-  expect(windowsRegistrationMatchesOurBinding({ binaryPathName: image }, binding)).toBe(true);
-  expect(
-    windowsRegistrationMatchesOurBinding(
-      { binaryPathName: image.replace("C:\\Users\\theo\\.t3", "C:\\Users\\other\\.t3") },
-      binding,
-    ),
-  ).toBe(false);
+  expect(windowsRegistrationMatchesOurBinding(qcOf(image), binding)).toBe(true);
+  expect(windowsRegistrationOwnedByUs(qcOf(image), binding)).toBe(true);
+  // A changed native account is not ours.
+  expect(windowsRegistrationMatchesOurBinding(qcOf(image, "DOMAIN\\other"), binding)).toBe(false);
+  expect(windowsRegistrationOwnedByUs(qcOf(image, "DOMAIN\\other"), binding)).toBe(false);
+  // A genuinely different home (even differing only by an extra space) is not ours.
+  const twoSpaces = image.replace("C:\\Users\\theo\\.t3", "C:\\Users\\theo\\.t3  x");
+  expect(windowsRegistrationMatchesOurBinding(qcOf(twoSpaces), binding)).toBe(false);
+  expect(windowsRegistrationOwnedByUs(qcOf(twoSpaces), binding)).toBe(false);
+  // An owned older runtime is upgradable: owned, not the desired version.
+  const olderRuntime = binding.runtimePath.replace("1.2.3", "1.2.2");
+  const olderImage = image.replace(binding.runtimePath, olderRuntime);
+  expect(windowsRegistrationOwnedByUs(qcOf(olderImage), binding)).toBe(true);
+  expect(windowsRegistrationMatchesOurBinding(qcOf(olderImage), binding)).toBe(false);
+  // A runtime outside this home's tree is foreign, not an upgrade.
+  const foreignImage = image.replace(binding.runtimePath, "C:\\elsewhere\\t3.exe");
+  expect(windowsRegistrationOwnedByUs(qcOf(foreignImage), binding)).toBe(false);
   expect(windowsRegistrationMatchesOurBinding({}, binding)).toBe(false);
-  expect(normalizeWindowsImagePath(`"C:\\a b\\host.exe --home x"`)).toBe(
-    `C:\\a b\\host.exe --home x`,
-  );
+  expect(
+    windowsRuntimeBelongsToHome(
+      "C:\\Users\\theo\\.t3\\runtime\\versions\\1.2.3\\t3.exe",
+      binding.homeDir,
+    ),
+  ).toBe(true);
+  expect(windowsRuntimeBelongsToHome("C:\\elsewhere\\t3.exe", binding.homeDir)).toBe(false);
   expect(quoteWindowsArgument("a b")).toBe('"a b"');
 });
 
@@ -105,8 +147,15 @@ interface ScmControl {
   qcImagePath: string | undefined;
   startType: string;
   queryState: string;
+  processId: number;
   failQuery: boolean;
   timeoutQuery: boolean;
+  /** Applied after `sc stop`; a non-stopped value models a pending stop. */
+  stopQueryState?: string;
+  /** When true, `sc stop` then makes every query fail (unknown stop). */
+  failQueryAfterStop?: boolean;
+  /** When true, `sc delete` leaves the registration marked-for-deletion. */
+  deletePending?: boolean;
   stateAfterStop?: string;
 }
 
@@ -139,9 +188,11 @@ const makeHarness = Effect.fn("test.make_windows_boot_service_harness")(function
     qcImagePath: undefined,
     startType: "2   AUTO_START",
     queryState: "4  RUNNING",
+    processId: 4321,
     failQuery: false,
     timeoutQuery: false,
   };
+  const serviceStartName = options?.account ?? "NT AUTHORITY\\LocalService";
   const commands: string[] = [];
   const ok = (stdout: string) => ({
     stdout,
@@ -181,11 +232,17 @@ const makeHarness = Effect.fn("test.make_windows_boot_service_harness")(function
                 `SERVICE_NAME: ${WINDOWS_BOOT_SERVICE_NAME}`,
                 `        START_TYPE         : ${control.startType}`,
                 `        BINARY_PATH_NAME   : ${control.qcImagePath ?? ourImagePath}`,
-                `        SERVICE_START_NAME : NT AUTHORITY\\LocalService`,
+                `        SERVICE_START_NAME : ${serviceStartName}`,
               ].join("\n"),
             );
           return ok(
-            `SERVICE_NAME: ${WINDOWS_BOOT_SERVICE_NAME}\n        STATE              : ${control.queryState}\n`,
+            [
+              `SERVICE_NAME: ${WINDOWS_BOOT_SERVICE_NAME}`,
+              `        STATE              : ${control.queryState}`,
+              ...(/RUNNING/.test(control.queryState)
+                ? [`        PID                : ${control.processId}`]
+                : []),
+            ].join("\n"),
           );
         }
         if (sub === "create") {
@@ -193,14 +250,19 @@ const makeHarness = Effect.fn("test.make_windows_boot_service_harness")(function
           return ok("CreateService SUCCESS");
         }
         if (sub === "config") return ok("ChangeServiceConfig SUCCESS");
-        if (sub === "start") return ok("StartService SUCCESS");
+        if (sub === "start") {
+          control.queryState = "4  RUNNING";
+          return ok("StartService SUCCESS");
+        }
         if (sub === "stop") {
           if (control.stateAfterStop !== undefined)
             yield* fs.writeFileString(statePath, control.stateAfterStop).pipe(Effect.orDie);
+          control.queryState = control.stopQueryState ?? "1  STOPPED";
+          if (control.failQueryAfterStop === true) control.failQuery = true;
           return ok("StopService SUCCESS");
         }
         if (sub === "delete") {
-          control.registered = false;
+          if (control.deletePending !== true) control.registered = false;
           return ok("DeleteService SUCCESS");
         }
         return ok("");
@@ -255,13 +317,23 @@ const makeHarness = Effect.fn("test.make_windows_boot_service_harness")(function
 });
 
 it.layer(NodeServices.layer)("windows SCM boot service", (it) => {
-  it.effect("refuses selection and mutations without a qualified account", () =>
+  it.effect("observes without credentials but refuses mutation without a qualified account", () =>
     Effect.gen(function* () {
-      const { makeService, fs, statePath } = yield* makeHarness();
+      const { makeService, fs, statePath, control } = yield* makeHarness();
       const service = yield* makeService(undefined);
-      const status = yield* service.status;
-      expect(status).toMatchObject({ supported: false, manager: "unsupported", installed: false });
-      expect((yield* service.install().pipe(Effect.flip))._tag).toBe("BootServiceUnsupportedError");
+      // Read-only status still queries the SCM by fixed name; a missing install
+      // account is not a claim that the platform is unsupported.
+      expect(yield* service.status).toMatchObject({
+        supported: true,
+        manager: "scm",
+        installed: false,
+        running: "not-loaded",
+      });
+      control.registered = true;
+      expect(yield* service.status).toMatchObject({ installed: true });
+      expect((yield* service.install().pipe(Effect.flip))._tag).toBe(
+        "BootServicePrerequisiteError",
+      );
       expect(yield* fs.exists(statePath)).toBe(false);
     }),
   );
