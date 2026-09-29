@@ -318,7 +318,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
-  it.effect("omits update feeds for pull request preview builds", () =>
+  it.effect("omits update feeds for preview builds and unsigned macOS builds", () =>
     Effect.gen(function* () {
       const preview = yield* createBuildConfig(
         "mac",
@@ -329,9 +329,29 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
         undefined,
       );
-      const release = yield* createBuildConfig(
+      // Unsigned macOS cannot complete a Squirrel.Mac update, so it must not
+      // poll a feed it can never apply.
+      const unsignedMac = yield* createBuildConfig(
         "mac",
         "dmg",
+        "0.0.33",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const signedMac = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.0.33",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+      const unsignedWindows = yield* createBuildConfig(
+        "win",
+        "nsis",
         "0.0.33",
         false,
         false,
@@ -351,7 +371,16 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.notProperty(preview, "publish");
       assert.notProperty(previewChannel, "publish");
-      assert.deepStrictEqual(release.publish, [
+      assert.notProperty(unsignedMac, "publish");
+      assert.deepStrictEqual(signedMac.publish, [
+        {
+          provider: "github",
+          owner: "pingdotgg",
+          repo: "t3code",
+          releaseType: "release",
+        },
+      ]);
+      assert.deepStrictEqual(unsignedWindows.publish, [
         {
           provider: "github",
           owner: "pingdotgg",

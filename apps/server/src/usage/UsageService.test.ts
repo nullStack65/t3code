@@ -32,6 +32,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 function claudeLine(id: number, outputTokens: number, model = "claude-fable-5"): string {
   return `${JSON.stringify({
@@ -498,6 +499,607 @@ describe("UsageService", () => {
           }),
         ),
       );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("counts empty and invalid usage containers as malformed, not zero", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const lines =
+        [
+          encodeUnknownJsonString({
+            type: "assistant",
+            timestamp: "2026-08-01T10:00:00Z",
+            sessionId: "session-1",
+            message: { id: "m_empty", model: "claude-fable-5", usage: {} },
+          }),
+          encodeUnknownJsonString({
+            type: "assistant",
+            timestamp: "2026-08-01T10:00:01Z",
+            sessionId: "session-1",
+            message: { id: "m_invalid", model: "claude-fable-5", usage: { input_tokens: null } },
+          }),
+          claudeLine(3, 9),
+        ].join("\n") + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, lines));
+
+      yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          summary.sources.find((source) => source.fingerprint.provider === "claude")
+            ?.malformedRecords,
+          2,
+        );
+        // Only the valid line contributes tokens.
+        assert.strictEqual(totalOutputTokens(summary), 9);
+      }).pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-malformed-test", home, settings })),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("enriches an unchanged legacy v3 entry once and keeps deleted history", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const content = claudeLine(1, 5);
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, content));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const liveDir = yield* Effect.promise(() => NodeFSP.realpath(NodePath.dirname(transcript)));
+        const livePath = NodePath.join(liveDir, NodePath.basename(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const deletedPath = NodePath.join(liveDir, "deleted.jsonl");
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A v3 document: the live entry's (size, mtime) match the file exactly so
+        // the pre-fix warm hit would have served the erased row forever, and the
+        // deleted entry exists only in the cache.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 3,
+              models: ["claude-fable-5"],
+              sessions: ["session-1", "deleted-session"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 0, 10, 0, 0, 5, 0, "msg_live:", null]],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+                [deletedPath]: {
+                  s: 100,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 1, 10, 0, 0, 7, 0, "msg_deleted:", null]],
+                  t: [],
+                  o: 90,
+                  gl: 64,
+                  gh: 11,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        // The deleted entry's 7 tokens are retained and the live file's 5 are
+        // counted once, whether read from the enriched cache or re-parsed.
+        assert.strictEqual(totalOutputTokens(first), 12);
+
+        const afterFirst = decodeUnknownJsonString(
+          yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+        ) as {
+          version: number;
+          files: Record<string, { li?: number; r: unknown[][] }>;
+        };
+        assert.strictEqual(afterFirst.version, 4);
+        const liveEntry = afterFirst.files[livePath]!;
+        assert.strictEqual(liveEntry.li, undefined);
+        // Enriched: the native request id the v3 row could not carry is present.
+        assert.strictEqual(liveEntry.r[0]?.[10], "req_1");
+        assert.strictEqual(afterFirst.files[deletedPath]?.li, 1);
+
+        // A second scan of the unchanged live file is a warm hit: no re-parse,
+        // no cache rewrite, and stable totals.
+        const beforeSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        const second = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(second), 12);
+        const afterSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        assert.strictEqual(afterSecond, beforeSecond);
+
+        // A restart reads the enriched cache and still keeps deleted history.
+        const restarted = yield* UsageService.make;
+        const third = yield* restarted.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(third), 12);
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-legacy-enrich-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("refreshes a predecessor v4 quality cache entry once and keeps deleted history", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const content =
+        encodeUnknownJsonString({
+          type: "assistant",
+          timestamp: "2026-08-01T10:00:00Z",
+          requestId: "req_live",
+          sessionId: "session-1",
+          message: { id: "msg_live", model: "claude-fable-5", usage: { input_tokens: 10 } },
+        }) + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, content));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const liveDir = yield* Effect.promise(() => NodeFSP.realpath(NodePath.dirname(transcript)));
+        const livePath = NodePath.join(liveDir, NodePath.basename(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const deletedPath = NodePath.join(liveDir, "deleted.jsonl");
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A predecessor v4 document: `identity` is declared (no legacy marker)
+        // but the rows are 15 fields with no completeness metadata, exactly as
+        // the predecessor writer emitted. Independently, a nonzero total used to
+        // decode as `complete`, silently promoting an unknown measurement.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 4,
+              models: ["claude-fable-5"],
+              sessions: ["session-1", "deleted-session"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 0, 10, 0, 0, 0, 0, "msg_live:", null, null, null, null, 0, 0]],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+                [deletedPath]: {
+                  s: 100,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 1, 7, 0, 0, 0, 0, "msg_deleted:", null, null, null, null, 0, 0]],
+                  t: [],
+                  o: 90,
+                  gl: 64,
+                  gh: 11,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        // Live file cold re-parsed once (10) plus retained deleted history (7).
+        assert.strictEqual(
+          first.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          17,
+        );
+
+        const afterFirst = decodeUnknownJsonString(
+          yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+        ) as { version: number; files: Record<string, { li?: number; r: unknown[][] }> };
+        assert.strictEqual(afterFirst.version, 4);
+        const liveRow = afterFirst.files[livePath]!.r[0]!;
+        // Enriched to the current 18-field row with the completeness code (1 =
+        // partial) the predecessor row could not carry.
+        assert.strictEqual(liveRow.length, 18);
+        assert.strictEqual(liveRow[15], 1);
+        assert.strictEqual(afterFirst.files[livePath]!.li, undefined);
+        // Deleted history retained conservatively; it cannot be re-parsed.
+        const deletedRow = afterFirst.files[deletedPath]!.r[0]!;
+        assert.strictEqual(deletedRow[3], 7);
+        assert.strictEqual(deletedRow[15], 1);
+
+        // A second scan of the unchanged live file is a warm hit: no re-parse,
+        // no cache rewrite, stable totals.
+        const beforeSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        const second = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          second.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          17,
+        );
+        const afterSecond = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+        assert.strictEqual(afterSecond, beforeSecond);
+
+        // A restart reads the enriched cache and keeps deleted history.
+        const restarted = yield* UsageService.make;
+        const third = yield* restarted.readSummary(WINDOW);
+        assert.strictEqual(
+          third.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          17,
+        );
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-predecessor-refresh-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("keeps retained fallback rows when an extant transcript cannot be read", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const content =
+        encodeUnknownJsonString({
+          type: "assistant",
+          timestamp: "2026-08-01T10:00:00Z",
+          sessionId: "session-1",
+          message: { id: "msg_unreadable", model: "claude-fable-5", usage: { input_tokens: 9 } },
+        }) + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, content));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const liveDir = yield* Effect.promise(() => NodeFSP.realpath(NodePath.dirname(transcript)));
+        const livePath = NodePath.join(liveDir, NodePath.basename(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A predecessor row matching the live file exactly. The warm guard must
+        // reject it and attempt a read; making the file unreadable then forces
+        // the fallback path rather than an empty transcript.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 4,
+              models: ["claude-fable-5"],
+              sessions: ["session-1"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [[TS, 0, 0, 9, 0, 0, 0, 0, "msg_unreadable:", null, null, null, null, 0, 0]],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+        yield* Effect.promise(() => NodeFSP.chmod(livePath, 0o000));
+
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        // The cached 9 tokens survive the failed read; nothing is zeroed out.
+        assert.strictEqual(
+          summary.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0),
+          9,
+        );
+      }).pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-failed-read-test", home, settings })),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "keeps a persisted predecessor fallback predecessor, then cold re-classifies on recovery",
+    () =>
+      Effect.gen(function* () {
+        const { transcript, settings, home } = yield* setup;
+        const secondPath = NodePath.join(home, "claude", "projects", "proj", "second.jsonl");
+        // The target parses under the current parser as `invalid` (a recognised
+        // field with an invalid value). The predecessor cache stored it as an
+        // observed/partial zero because numeric quality metadata did not exist
+        // then; a warm or resumed read would keep that stale classification.
+        const invalidContent =
+          encodeUnknownJsonString({
+            type: "assistant",
+            timestamp: "2026-08-01T10:00:00Z",
+            requestId: "req_live",
+            sessionId: "session-1",
+            message: { id: "msg_live", model: "claude-fable-5", usage: { input_tokens: null } },
+          }) + "\n";
+        yield* Effect.promise(() => NodeFSP.writeFile(transcript, invalidContent));
+        yield* Effect.promise(() => NodeFSP.writeFile(secondPath, claudeLine(2, 7)));
+
+        yield* Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          const livePath = yield* Effect.promise(() => NodeFSP.realpath(transcript));
+          const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+          const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+          const TS = Date.parse("2026-08-01T10:00:00Z");
+          // Seed a predecessor v4 entry for the target, matching the file exactly
+          // so only the stale quality metadata (not size/mtime) forces the cold
+          // re-parse.
+          yield* Effect.promise(() =>
+            NodeFSP.writeFile(
+              scanCachePath,
+              encodeUnknownJsonString({
+                version: 4,
+                models: ["claude-fable-5"],
+                sessions: ["session-1"],
+                files: {
+                  [livePath]: {
+                    s: liveStat.size,
+                    m: liveStat.mtimeMs,
+                    p: "claude",
+                    r: [
+                      [
+                        TS,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "msg_live:",
+                        null,
+                        "req_live",
+                        "msg_live",
+                        null,
+                        0,
+                        0,
+                      ],
+                    ],
+                    t: [],
+                    o: liveStat.size,
+                    gl: 0,
+                    gh: 0,
+                    cs: null,
+                  },
+                },
+              }),
+            ),
+          );
+          // Deterministic failure seam: make the target unreadable, then let a
+          // second readable file change so the cache is persisted while the
+          // target's retained fallback row is still the predecessor one.
+          yield* Effect.promise(() => NodeFSP.chmod(livePath, 0o000));
+
+          const service = yield* UsageService.make;
+          const failed = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(failed), 7);
+
+          const afterFail = decodeUnknownJsonString(
+            yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+          ) as { files: Record<string, { lq?: number; r: unknown[][] }> };
+          // The persisted fallback keeps the predecessor provenance, not just the
+          // 15-field shape the encoder rewrites.
+          assert.strictEqual(afterFail.files[livePath]?.lq, 1);
+          assert.strictEqual(afterFail.files[livePath]?.r[0]?.[13], 0);
+
+          // Restore access without changing size or mtime, then restart.
+          yield* Effect.promise(() => NodeFSP.chmod(livePath, 0o644));
+          const restarted = yield* UsageService.make;
+          const recovered = yield* restarted.readSummary(WINDOW);
+          // One full cold parse recovers the corrected all-invalid
+          // classification and counts it as malformed, not a measured zero.
+          assert.strictEqual(
+            recovered.sources.find((source) => source.fingerprint.provider === "claude")
+              ?.malformedRecords,
+            1,
+          );
+          assert.strictEqual(totalOutputTokens(recovered), 7);
+
+          const afterRecover = decodeUnknownJsonString(
+            yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+          ) as { files: Record<string, { lq?: number; r: unknown[][] }> };
+          // Freshness is cleared only after the successful re-parse; the row now
+          // carries the current invalid measurement code (3).
+          assert.strictEqual(afterRecover.files[livePath]?.lq, undefined);
+          assert.strictEqual(afterRecover.files[livePath]?.r[0]?.[13], 3);
+
+          // The next unchanged scan is warm: byte-identical cache, stable totals.
+          const beforeWarm = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+          const warm = yield* restarted.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(warm), 7);
+          const afterWarm = yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8"));
+          assert.strictEqual(afterWarm, beforeWarm);
+        }).pipe(
+          Effect.provide(
+            serviceLayers({ prefix: "usage-service-freshness-persist-test", home, settings }),
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("does not resume a stale predecessor prefix after a restarted persist", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      const secondPath = NodePath.join(home, "claude", "projects", "proj", "second.jsonl");
+      // The target parses as `invalid` under the current parser; the predecessor
+      // entry only has a stale zero-total partial row for it.
+      const invalidContent =
+        encodeUnknownJsonString({
+          type: "assistant",
+          timestamp: "2026-08-01T10:00:00Z",
+          requestId: "req_live",
+          sessionId: "session-1",
+          message: { id: "msg_live", model: "claude-fable-5", usage: { input_tokens: null } },
+        }) + "\n";
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, invalidContent));
+      yield* Effect.promise(() => NodeFSP.writeFile(secondPath, claudeLine(2, 7)));
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const livePath = yield* Effect.promise(() => NodeFSP.realpath(transcript));
+        const liveStat = yield* Effect.promise(() => NodeFSP.stat(livePath));
+        const scanCachePath = NodePath.join(config.stateDir, "usage-scan-cache.json");
+        const TS = Date.parse("2026-08-01T10:00:00Z");
+        // A predecessor entry whose parse position already sits at the current
+        // end of the file, matching size/mtime exactly.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            scanCachePath,
+            encodeUnknownJsonString({
+              version: 4,
+              models: ["claude-fable-5"],
+              sessions: ["session-1"],
+              files: {
+                [livePath]: {
+                  s: liveStat.size,
+                  m: liveStat.mtimeMs,
+                  p: "claude",
+                  r: [
+                    [
+                      TS,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      "msg_live:",
+                      null,
+                      "req_live",
+                      "msg_live",
+                      null,
+                      0,
+                      0,
+                    ],
+                  ],
+                  t: [],
+                  o: liveStat.size,
+                  gl: 0,
+                  gh: 0,
+                  cs: null,
+                },
+              },
+            }),
+          ),
+        );
+        // Unreadable target plus a second changed file forces a persist of the
+        // retained fallback while the target entry is still predecessor.
+        yield* Effect.promise(() => NodeFSP.chmod(livePath, 0o000));
+        const service = yield* UsageService.make;
+        const failed = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(failed), 7);
+        const fallback = decodeUnknownJsonString(
+          yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+        ) as { files: Record<string, { lq?: number }> };
+        assert.strictEqual(fallback.files[livePath]?.lq, 1);
+
+        // Restore access and append a readable line so the file is strictly
+        // larger. A stale-but-declared entry would resume from the cached end
+        // offset and never re-see the invalid prefix; the persisted
+        // predecessor marker must force a full re-parse instead.
+        yield* Effect.promise(() => NodeFSP.chmod(livePath, 0o644));
+        yield* Effect.promise(() => NodeFSP.appendFile(livePath, claudeLine(3, 5)));
+        const restarted = yield* UsageService.make;
+        const recovered = yield* restarted.readSummary(WINDOW);
+        // The invalid prefix is reclassified (not retained as a measured zero)
+        // and the appended line is counted: 7 + 5 = 12.
+        assert.strictEqual(
+          recovered.sources.find((source) => source.fingerprint.provider === "claude")
+            ?.malformedRecords,
+          1,
+        );
+        assert.strictEqual(totalOutputTokens(recovered), 12);
+        const after = decodeUnknownJsonString(
+          yield* Effect.promise(() => NodeFSP.readFile(scanCachePath, "utf8")),
+        ) as { files: Record<string, { lq?: number; r: unknown[][] }> };
+        assert.strictEqual(after.files[livePath]?.lq, undefined);
+        assert.strictEqual(after.files[livePath]?.r.length, 2);
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-stale-prefix-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("counts Codex and Grok invalid events as malformed while keeping valid tokens", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const codexDir = NodePath.join(home, "codex", "sessions");
+      const grokDir = NodePath.join(home, "grok", "sessions", "session");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(codexDir, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(codexDir, "rollout.jsonl"),
+          [
+            { type: "session_meta", payload: { id: "codex-invalid-session" } },
+            { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+            {
+              type: "event_msg",
+              timestamp: "2026-08-01T10:00:00Z",
+              payload: {
+                type: "token_count",
+                info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } },
+              },
+            },
+            {
+              type: "event_msg",
+              timestamp: "2026-08-01T10:00:01Z",
+              payload: {
+                type: "token_count",
+                info: { last_token_usage: { input_tokens: null, output_tokens: null } },
+              },
+            },
+          ]
+            .map((line) => encodeUnknownJsonString(line))
+            .join("\n") + "\n",
+        );
+        await NodeFSP.mkdir(grokDir, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(grokDir, "updates.jsonl"),
+          encodeUnknownJsonString({
+            timestamp: Date.parse("2026-08-01T10:00:00Z") / 1000,
+            method: "_x.ai/session/update",
+            params: {
+              sessionId: "grok-invalid-session",
+              update: {
+                sessionUpdate: "turn_completed",
+                prompt_id: "prompt-1",
+                usage: {
+                  inputTokens: 10,
+                  outputTokens: 13,
+                  modelUsage: {
+                    "model-invalid": { inputTokens: null, outputTokens: null },
+                    "model-valid": { inputTokens: 10, outputTokens: 13 },
+                  },
+                },
+              },
+            },
+          }) + "\n",
+        );
+      });
+
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-nonclaude-malformed-test", home, settings }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+
+      const codexSource = summary.sources.find((source) => source.fingerprint.provider === "codex");
+      const grokSource = summary.sources.find((source) => source.fingerprint.provider === "grok");
+      assert.strictEqual(codexSource?.malformedRecords, 1);
+      assert.strictEqual(grokSource?.malformedRecords, 1);
+      // 2 Codex output + 13 Grok output; the invalid events add no tokens.
+      assert.strictEqual(totalOutputTokens(summary), 15);
+      assert.strictEqual(codexSource?.distinctSessions, 1);
+      assert.strictEqual(grokSource?.distinctSessions, 1);
     }).pipe(Effect.scoped),
   );
 
