@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
+  TurnId,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
 } from "@t3tools/contracts";
@@ -23,7 +24,15 @@ import * as ConnectionWakeups from "../connection/wakeups.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
+import {
+  derivePostStartActivityAnchors,
+  resolvePostStartActivity,
+} from "@t3tools/shared/postStartActivity";
 import { makeEnvironmentShellState, ShellSnapshotLoader } from "./shell.ts";
+import {
+  resetPostStartObservationReceipts,
+  resolvePostStartObservationReceipt,
+} from "./postStartObservationReceipt.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -40,6 +49,13 @@ const PREPARED: PreparedConnection = {
   httpAuthorization: null,
   target: TARGET,
 };
+
+// The receipt registry stamps real wall-clock instants, so the observation
+// under test must use the same real clock rather than Effect's TestClock.
+function realNowIso(offsetMs = 0): string {
+  // @effect-diagnostics-next-line globalDate:off
+  return new Date(Date.now() + offsetMs).toISOString();
+}
 
 const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   snapshotSequence: 1,
@@ -449,6 +465,198 @@ describe("environment shell synchronization", () => {
       }
       expect(yield* Ref.get(capturedAfterSequences)).toEqual([10, 40, 40, 20]);
       expect(yield* Ref.get(loaderCalls)).toBe(2);
+    }),
+  );
+
+  it.effect("records each accepted observation's receipt in the client state (C2)", () =>
+    Effect.gen(function* () {
+      resetPostStartObservationReceipts();
+      const observedAt = realNowIso();
+      const quietSince = realNowIso(-6 * 60_000);
+      const turnId = TurnId.make("turn-1");
+      const snapshot: OrchestrationShellSnapshot = {
+        ...LIVE_SHELL_SNAPSHOT,
+        threads: [{ id: "thread-a", postStartActivity: { observedAt } } as never],
+      };
+      const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+      const client = {
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: () => Stream.fromQueue(events),
+      } as unknown as WsRpcProtocolClient;
+      const supervisorState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+      const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
+        Option.some(session(client)),
+      );
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: supervisorState,
+        session: activeSession,
+        prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+      const cache = Persistence.EnvironmentCacheStore.of({
+        loadShell: () => Effect.succeed(Option.none()),
+        saveShell: () => Effect.void,
+        loadThread: () => Effect.succeed(Option.none()),
+        saveThread: () => Effect.void,
+        removeThread: () => Effect.void,
+        loadServerConfig: () => Effect.succeed(Option.none()),
+        saveServerConfig: () => Effect.void,
+        loadVcsRefs: () => Effect.succeed(Option.none()),
+        saveVcsRefs: () => Effect.void,
+        removeVcsRefs: () => Effect.void,
+        clearVcsRefs: () => Effect.void,
+        clear: () => Effect.void,
+      });
+      const shellState = yield* makeEnvironmentShellState().pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+        Effect.provideService(
+          ShellSnapshotLoader,
+          ShellSnapshotLoader.of({ load: () => Effect.succeed(Option.none()) }),
+        ),
+      );
+
+      yield* SubscriptionRef.set(supervisorState, {
+        desired: true,
+        network: "online",
+        phase: "connected",
+        stage: null,
+        attempt: 1,
+        generation: 1,
+        lastFailure: null,
+        retryAt: null,
+      });
+      yield* Queue.offer(events, { kind: "snapshot", snapshot });
+      yield* SubscriptionRef.changes(shellState).pipe(
+        Stream.filter(
+          (state) =>
+            Option.isSome(state.snapshot) &&
+            state.snapshot.value.threads.some((thread) => thread.id === "thread-a"),
+        ),
+        Stream.runHead,
+      );
+
+      // No view or notification preference consumed the observation: the state
+      // path records the receipt itself at acceptance.
+      const first = resolvePostStartObservationReceipt(
+        TARGET.environmentId,
+        "thread-a",
+        observedAt,
+      );
+      expect(first).not.toBeNull();
+
+      // The consumer derivation reads that same basis six minutes later and
+      // still classifies the observation as quiet silence, not clock
+      // uncertainty. A receipt captured at UI consumption would instead be six
+      // minutes late and make the offset unsupported.
+      const anchors = derivePostStartActivityAnchors({
+        activities: [],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: quietSince,
+          startedAt: quietSince,
+          completedAt: null,
+        },
+        session: { status: "running", activeTurnId: turnId },
+        live: {
+          lastProviderActivityAt: quietSince,
+          lastToolCompletedAt: null,
+          outstandingTools: [],
+          observedAt,
+          turnId,
+        },
+        receivedAtMs: first!.wallMs,
+        receivedMonotonicMs: first!.monotonicMs,
+      });
+      const observation = resolvePostStartActivity(anchors, first!.wallMs + 6 * 60_000, {
+        nowMonotonicMs: first!.monotonicMs + 6 * 60_000,
+      });
+      expect(observation.status).toBe("quiet");
+
+      // Counterfactual: a receipt captured six minutes late (the old first-UI
+      // consumption) would be classified as unsupported clock skew instead.
+      const lateAnchors = derivePostStartActivityAnchors({
+        activities: [],
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: quietSince,
+          startedAt: quietSince,
+          completedAt: null,
+        },
+        session: { status: "running", activeTurnId: turnId },
+        live: {
+          lastProviderActivityAt: quietSince,
+          lastToolCompletedAt: null,
+          outstandingTools: [],
+          observedAt,
+          turnId,
+        },
+        receivedAtMs: first!.wallMs + 6 * 60_000,
+        receivedMonotonicMs: first!.monotonicMs + 6 * 60_000,
+      });
+      expect(
+        resolvePostStartActivity(lateAnchors, first!.wallMs + 6 * 60_000, {
+          nowMonotonicMs: first!.monotonicMs + 6 * 60_000,
+        }).status,
+      ).toBe("unknown");
+
+      // An unrelated update for another thread re-sends thread-a unchanged; the
+      // receipt must not be re-dated.
+      yield* Queue.offer(events, {
+        kind: "thread-upserted",
+        sequence: 2,
+        thread: {
+          id: "thread-b",
+          postStartActivity: { observedAt: "2026-06-06T00:01:00.000Z" },
+        } as never,
+      });
+      yield* SubscriptionRef.changes(shellState).pipe(
+        Stream.filter(
+          (state) =>
+            Option.isSome(state.snapshot) &&
+            state.snapshot.value.threads.some((thread) => thread.id === "thread-b"),
+        ),
+        Stream.runHead,
+      );
+      expect(resolvePostStartObservationReceipt(TARGET.environmentId, "thread-a", observedAt)).toBe(
+        first,
+      );
+
+      // A genuinely newer observation for the same thread replaces the basis;
+      // the previous observation no longer resolves, so the re-receipt happens
+      // on the new bytes rather than on a later read.
+      const observedAt2 = "2026-06-06T00:02:00.000Z";
+      yield* Queue.offer(events, {
+        kind: "thread-upserted",
+        sequence: 3,
+        thread: { id: "thread-a", postStartActivity: { observedAt: observedAt2 } } as never,
+      });
+      yield* SubscriptionRef.changes(shellState).pipe(
+        Stream.filter(
+          (state) =>
+            Option.isSome(state.snapshot) &&
+            state.snapshot.value.threads.some(
+              (thread) =>
+                thread.id === "thread-a" &&
+                (thread.postStartActivity?.observedAt ?? null) === observedAt2,
+            ),
+        ),
+        Stream.runHead,
+      );
+      expect(
+        resolvePostStartObservationReceipt(TARGET.environmentId, "thread-a", observedAt),
+      ).toBeNull();
+      const second = resolvePostStartObservationReceipt(
+        TARGET.environmentId,
+        "thread-a",
+        observedAt2,
+      );
+      expect(second).not.toBeNull();
+      expect(second).not.toBe(first);
     }),
   );
 });

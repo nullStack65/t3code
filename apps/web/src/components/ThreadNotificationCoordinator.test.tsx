@@ -99,7 +99,7 @@ vi.mock("./ui/toast", () => ({
 }));
 
 import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
-import { resetPostStartObservationReceipts } from "../state/postStartObservationReceipt";
+import { resetPostStartObservationReceipts } from "@t3tools/client-runtime/state/post-start-observation-receipt";
 
 let renderer: ReactTestRenderer | undefined;
 
@@ -190,6 +190,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(() => renderer?.unmount());
   renderer = undefined;
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -352,6 +353,49 @@ describe("thread notifications", () => {
     await render();
     expect(state.close).toHaveBeenCalledWith("toast-1");
     expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps first-load quiet suppression across repeated unchanged evaluations (C1)", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = true;
+    const stale = (id: string) => observedThread({ id, title: id, lastActivityAgoMs: 6 * MIN });
+    // Several already-stale threads with current-shaped observations arrive in
+    // the first live snapshot: hydration must not alert and must keep the
+    // suppression, so an unchanged repeated evaluation does not alert either.
+    // Hold the same observation objects across evaluations: an unchanged
+    // server snapshot keeps the same quiet origin and episode identity.
+    const quietB = stale("thread-b");
+    const quietC = stale("thread-c");
+    state.threadsByEnv["env-1"] = [stale("thread-a"), quietB, quietC];
+    await render();
+    await render();
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.notification).not.toHaveBeenCalled();
+
+    // Real progress on thread-a ends its episode; thread-b/thread-c stay quiet
+    // and already suppressed.
+    state.threadsByEnv["env-1"] = [
+      observedThread({ id: "thread-a", title: "thread-a", lastActivityAgoMs: 0 }),
+      quietB,
+      quietC,
+    ];
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+
+    // A genuinely new silence episode on thread-a alerts exactly once.
+    state.threadsByEnv["env-1"] = [
+      observedThread({ id: "thread-a", title: "thread-a", lastActivityAgoMs: 7 * MIN }),
+      quietB,
+      quietC,
+    ];
+    await render();
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "No recent provider activity", description: "thread-a" }),
+    );
   });
 
   it("does not replay an episode across a preference remount", async () => {
