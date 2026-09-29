@@ -251,9 +251,33 @@ create/start/stop/delete/config` with `obj=` and the account, not a unit file.
   restart and uninstall observe `sc.exe queryex` by bounded polling and never
   promote a timeout, a failed query or an unreachable manager to a successful
   transition. A stop that is not confirmed `STOPPED` is never followed by a
-  reconfigure, delete or success claim, and an already stopped/absent target is
-  idempotent. `install({ start: false })` still creates or reconfigures the
-  registration so a later start runs the new version, but does not activate it.
+  reconfigure, delete or success claim. `install({ start: false })` still
+  creates or reconfigures the registration so a later start runs the new
+  version, but does not activate it.
+- Ownership is decided from the registration's **effective** arguments. The
+  `ImagePath` is resolved with the same rule set the native host applies —
+  inline `--flag=value` accepted, a repeated flag last-wins — but a duplicate
+  or unsupported token is refused, so an apparently bound flag followed by
+  another home/runtime can never qualify a different effective native target.
+  The registered `--runtime` must normalize (Windows rules, `..` collapsed) to
+  exactly `<home>/runtime/versions/<exact-version>/t3.exe`, and the registered
+  program must be the helper shipped beside that same runtime. An owned older
+  package — helper beside its own older runtime — is therefore upgraded by an
+  ordinary install, while the desired new helper pointed at an old runtime, a
+  path that escapes the runtime tree, or another home/account is foreign.
+- A stop is idempotent without hiding failure. The adapter probes the exact
+  owned state first and issues no `sc.exe stop` for an already stopped/absent
+  registration, so the SCM's `ERROR_SERVICE_NOT_ACTIVE` (1062) is not treated as
+  a failure. A stop that fails for any reason is tolerated only when a
+  follow-up probe confirms the service really is stopped; a failed or
+  unconfirmed cleanup stays a blocking observation and is never followed by a
+  delete.
+- Install preserves state truthfully. The launcher-owned state document is
+  captured before it is rewritten; a failed create/config restores the exact
+  previous bytes, and a failed start after the registration was already changed
+  reports an explicit `BootServicePartialStateError` with the version the
+  registration now names instead of implying the previous state survived. The
+  adapter never restarts speculatively over an unconfirmed cleanup.
 
 Launcher (`apps/server/src/serviceLauncher.ts`, `serviceProtocol.ts`):
 `ServiceLauncherControlRequest` plus the request/ack ids; see

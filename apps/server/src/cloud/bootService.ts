@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Path from "effect/Path";
 import { HttpClient } from "effect/unstable/http";
 import * as Schema from "effect/Schema";
@@ -51,6 +52,7 @@ import {
   windowsServiceProgram,
   windowsServiceSteps,
   type WindowsBootServiceBinding,
+  type WindowsServiceSteps,
 } from "./windowsBootService.ts";
 
 const BOOT_SERVICE_NAME = "t3code";
@@ -576,13 +578,34 @@ export class BootServiceDowngradeRefusedError extends Schema.TaggedError<BootSer
   }
 }
 
+/**
+ * A mutation failed after the SCM registration already named the new version,
+ * so the previous owned state could not be restored. This is an explicit
+ * partial outcome, not a claim that the previous state survived.
+ */
+export class BootServicePartialStateError extends Schema.TaggedError<BootServicePartialStateError>()(
+  "BootServicePartialStateError",
+  {
+    step: Schema.String,
+    activeVersion: Schema.optional(Schema.String),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Background setup failed while ${this.step}. The SCM registration already names t3@${
+      this.activeVersion ?? "the new version"
+    }, so the previous service state could not be restored.`;
+  }
+}
+
 export type BootServiceError =
   | BootServiceUnsupportedError
   | BootServiceCommandError
   | BootServiceInstallError
   | BootServicePrerequisiteError
   | BootServiceUpdatePendingError
-  | BootServiceDowngradeRefusedError;
+  | BootServiceDowngradeRefusedError
+  | BootServicePartialStateError;
 
 /**
  * Version of the additive `t3 service status --json` contract. Bump when an
@@ -1585,6 +1608,54 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       })`,
     });
 
+  /**
+   * Confirms and, only when needed, stops the exact owned registration. An
+   * already-stopped or absent target is idempotent: the SCM answers
+   * `ERROR_SERVICE_NOT_ACTIVE` (1062) to a stop on a stopped service, so the
+   * adapter probes first and issues no stop. A stop that fails for any reason
+   * is tolerated only when a follow-up probe confirms the service really is
+   * stopped; an unreachable probe or an unconfirmed failure stays a blocking
+   * observation. Returns the confirmed probe so the caller can report it.
+   */
+  const stopOwnedWindowsService = (
+    binding: WindowsBootServiceBinding,
+    steps: WindowsServiceSteps,
+  ) =>
+    Effect.gen(function* () {
+      const observed = yield* probeWindowsServiceState(binding);
+      if (windowsStopped(observed)) return observed;
+      if (observed.kind === "unreachable") {
+        return yield* new BootServicePrerequisiteError({ problem: "windows-service-unreachable" });
+      }
+      const outcome = yield* runSteps([steps.stop]).pipe(Effect.result);
+      if (Result.isFailure(outcome)) {
+        const confirmed = yield* probeWindowsServiceState(binding);
+        if (windowsStopped(confirmed)) return confirmed;
+        return yield* outcome.failure;
+      }
+      return yield* waitForWindowsServiceState(binding, windowsStopped);
+    });
+
+  /** Restores the exact launcher-owned state captured before an install write. */
+  const restoreWindowsState = (
+    previousState: Option.Option<string>,
+    previousRestartPending: Option.Option<string>,
+  ) =>
+    Effect.gen(function* () {
+      if (Option.isSome(previousState)) {
+        yield* writeDurably(statePath, previousState.value);
+      } else {
+        yield* fs.remove(statePath, { force: true });
+      }
+      if (Option.isSome(previousRestartPending)) {
+        yield* fs.writeFileString(restartPendingPath, previousRestartPending.value, {
+          mode: 0o600,
+        });
+      } else {
+        yield* fs.remove(restartPendingPath, { force: true });
+      }
+    });
+
   const checkWindowsInstallPreconditions = (options?: { readonly allowDowngrade?: boolean }) =>
     Effect.gen(function* () {
       const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
@@ -1634,14 +1705,19 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (registered) yield* checkWindowsInstallPreconditions(options);
 
     if (registered && start) {
-      yield* runSteps([steps.stop]);
-      const stopped = yield* waitForWindowsServiceState(binding, windowsStopped);
+      const stopped = yield* stopOwnedWindowsService(binding, steps);
       if (!windowsStopped(stopped)) return yield* windowsTransitionStep("stop", stopped);
       // The launcher may have finished a remote update while the service
       // drained; revalidate its mutable state after the confirmed stop and
       // before touching the registration or launcher-owned state.
       yield* checkWindowsInstallPreconditions(options);
     }
+
+    // Capture the exact launcher-owned state before it is rewritten, so a
+    // registration failure can restore it rather than leaving a state document
+    // that claims a version the registration does not serve.
+    const previousState = yield* fs.readFileString(statePath).pipe(Effect.option);
+    const previousRestartPending = yield* fs.readFileString(restartPendingPath).pipe(Effect.option);
 
     if (!start && registered) {
       yield* fs.writeFileString(restartPendingPath, `${input.cliVersion}\n`, { mode: 0o600 });
@@ -1668,9 +1744,32 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // Registration and activation are distinct: even with start=false the
     // registration is created or reconfigured so a later start runs this
     // version. Only the start step is gated on activation.
-    yield* runSteps([registered ? steps.reconfigure : steps.register]);
+    const registration = yield* runSteps([registered ? steps.reconfigure : steps.register]).pipe(
+      Effect.result,
+    );
+    if (Result.isFailure(registration)) {
+      // The SCM registration still names the previous owned helper/runtime (a
+      // failed create leaves none), so restore the exact previous
+      // launcher-owned state instead of leaving a state document that claims a
+      // version the registration does not serve.
+      yield* restoreWindowsState(previousState, previousRestartPending);
+      return yield* registration.failure;
+    }
     if (start) {
-      yield* runSteps([steps.start]);
+      const started = yield* runSteps([steps.start]).pipe(Effect.result);
+      if (Result.isFailure(started)) {
+        // The registration already names the new helper/runtime, so the
+        // previous owned state cannot be restored; report the actual partial
+        // outcome instead of implying transactional preservation.
+        return yield* new BootServicePartialStateError({
+          step:
+            started.failure._tag === "BootServiceCommandError"
+              ? started.failure.step
+              : "starting the service",
+          activeVersion: input.cliVersion,
+          cause: started.failure,
+        });
+      }
       const running = yield* waitForWindowsServiceState(binding, windowsRunning);
       if (!windowsRunning(running)) return yield* windowsTransitionStep("start", running);
       yield* fs.remove(restartPendingPath, { force: true });
@@ -1863,8 +1962,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         return false;
       }
       const steps = windowsServiceSteps(binding);
-      yield* runSteps([steps.stop]);
-      const stopped = yield* waitForWindowsServiceState(binding, windowsStopped);
+      const stopped = yield* stopOwnedWindowsService(binding, steps);
       if (!windowsStopped(stopped)) return yield* windowsTransitionStep("stop", stopped);
       yield* runSteps([steps.start]);
       const running = yield* waitForWindowsServiceState(binding, windowsRunning);
@@ -1914,8 +2012,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         return false;
       }
       const steps = windowsServiceSteps(binding);
-      yield* runSteps([steps.stop]);
-      const stopped = yield* waitForWindowsServiceState(binding, windowsStopped);
+      const stopped = yield* stopOwnedWindowsService(binding, steps);
       if (!windowsStopped(stopped)) {
         // A failed or unknown stop must not be hidden by deleting anyway, and
         // uninstall must not claim success over it.
