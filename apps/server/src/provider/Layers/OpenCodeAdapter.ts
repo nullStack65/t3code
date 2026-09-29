@@ -2899,10 +2899,14 @@ export function makeOpenCodeAdapter(
                     )
                   : undefined;
 
-                // A payload with no usable id is indistinguishable from absent;
-                // never reuse or fork it, and let the resume check below fail.
+                // The returned identity must round-trip EXACTLY to the id we
+                // requested. A blank, missing, non-string, or mismatched id is
+                // never this session: reusing or forking it would bind the
+                // thread to a different conversation. No trim/normalization is
+                // allowed to force a match, and no replacement session is
+                // minted; the resume check below fails visibly instead.
                 const adopted =
-                  fetched && typeof fetched.id === "string" && fetched.id.trim().length > 0
+                  fetched && typeof fetched.id === "string" && fetched.id === resumeSessionId
                     ? fetched
                     : undefined;
 
@@ -2955,16 +2959,24 @@ export function makeOpenCodeAdapter(
                 }
 
                 // A resume id was supplied but the native session is confirmed
-                // absent (404/missing) or the payload was unusable. Minting a
-                // fresh session here would silently drop the conversation the
-                // caller asked to continue (#3604), so fail visibly instead.
-                // The user can explicitly start new work afterwards.
+                // absent (404/missing), the payload was unusable, or the server
+                // returned a different session identity. Minting or reusing a
+                // fresh session here would silently drop (or cross-wire) the
+                // conversation the caller asked to continue (#3604), so fail
+                // visibly instead. The user can explicitly start new work
+                // afterwards.
                 if (resumeSessionId) {
+                  const returnedId =
+                    fetched && typeof fetched.id === "string" ? fetched.id : undefined;
+                  const detail =
+                    returnedId === undefined
+                      ? fetched
+                        ? `OpenCode session '${resumeSessionId}' returned a payload without a usable id; refusing to start a new session for a requested continuation.`
+                        : `OpenCode session '${resumeSessionId}' was not found; refusing to start a new session for a requested continuation.`
+                      : `OpenCode session.get requested '${resumeSessionId}' but returned a different session '${returnedId}'; refusing to reuse or fork a mismatched session for a requested continuation.`;
                   return yield* new OpenCodeRuntimeError({
                     operation: "session.get",
-                    detail: fetched
-                      ? `OpenCode session '${resumeSessionId}' returned an unusable payload; refusing to start a new session for a requested continuation.`
-                      : `OpenCode session '${resumeSessionId}' was not found; refusing to start a new session for a requested continuation.`,
+                    detail,
                   });
                 }
 
