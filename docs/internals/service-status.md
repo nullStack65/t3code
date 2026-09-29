@@ -116,12 +116,17 @@ bounded and read-only, using `sc.exe queryex` and `sc.exe qc`:
 - `running` comes from the `STATE` token (`RUNNING` / `STOPPED` /
   `*_PENDING`); `enabled` comes from `START_TYPE` (`AUTO_START` vs
   `DEMAND_START`/`DISABLED`).
-- A registration is this installation's own only when its normalized
-  `BINARY_PATH_NAME` equals this adapter's rendering for the selected home,
-  helper, runtime, log and account. A different binding is
+- A registration is this installation's own when its losslessly-parsed
+  `BINARY_PATH_NAME` binds the exact helper, home, log and service-name, its
+  `SERVICE_START_NAME` equals the selected account, and its `--runtime` lives
+  under this home's `runtime/versions/<exact-version>` tree. An owned older
+  runtime is therefore upgraded by install rather than treated as foreign; a
+  changed account or a genuinely different home is
   `windows-service-foreign-registration`, and install/restart/uninstall refuse
   to overwrite or delete it. `install` also refuses when the account is not
-  qualified or the helper is not installed beside the runtime.
+  qualified or the helper is not installed beside the runtime. Read-only status
+  observes an installed service even without install credentials; mutation still
+  requires a qualified account.
 
 ## Deliberately out of scope
 

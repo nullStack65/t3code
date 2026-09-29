@@ -150,16 +150,19 @@ a clean stop.
 
 The host delivers control to the launcher over a private, per-instance request
 file the launcher watches, not by assuming a Node IPC channel appears on its
-own. On `SERVICE_CONTROL_STOP`/`SHUTDOWN` the host writes
-`<home>/runtime/.service-control.json` containing
-`{ protocol, type: "stop", instance, requestId }` and passes the same
+own. On `SERVICE_CONTROL_STOP`/`SHUTDOWN` the host publishes
+`<home>/runtime/.service-control.json` atomically (a unique sibling temp file
+written, flushed and renamed over the target) containing
+`{ protocol, type: "stop", instance, requestId }`, and passes the same
 per-instance token to the launcher in `T3_SERVICE_LAUNCHER_INSTANCE`. The
-launcher (`serviceLauncher.ts`) reads the file, ignores a request whose token is
-not its own (stale or foreign), consumes it before acting, and runs its real
-`Launcher.stop`, which drives the child's drain over the child IPC channel it
-already opened. The file is not the cleanup marker: `.service-stopping` remains
-a separate cleanup hint, and the host writes it only as a fallback, not as
-evidence that control was delivered.
+launcher (`serviceLauncher.ts`) claims the request by renaming it to a private
+per-attempt path before decoding it, with a single in-flight consumer, so a
+partial write is never read and overlapping polls cannot both act on one
+request; it ignores a request whose token is not its own (stale or foreign) and
+runs its real `Launcher.stop`, which drives the child's drain over the child IPC
+channel it already opened. The file is not the cleanup marker: `.service-stopping`
+remains a separate cleanup hint, and the host writes it only as a fallback, not
+as evidence that control was delivered.
 
 - **A parent control channel** is therefore the per-instance request file, not a
   fabricated Node IPC frame. A future owner may replace it with a real inherited
@@ -235,12 +238,22 @@ Adapter (`apps/server/src/cloud/bootService.ts`, pure rules in
   command (`hostPath`, `--home`, `--runtime <activeVersion>/t3.exe`, `--log`,
   `--service-name`, optional `--expected-account`). Steps are `sc.exe
 create/start/stop/delete/config` with `obj=` and the account, not a unit file.
-- `selectBootServiceManager` returns it for `platform === "win32"` only when the
-  home and a qualified account are known; otherwise it returns `undefined` and
-  the CLI reports the service unsupported rather than defaulting to LocalSystem.
+- `selectBootServiceManager` returns it for `platform === "win32"` whenever the
+  home, helper and runtime binding are known, so read-only status can observe an
+  installed service even when install credentials are absent. Mutation still
+  requires a qualified account (`requireWindowsBinding`), fails before any
+  runtime download or service change, and the adapter never defaults to
+  LocalSystem.
 - `BootServiceStatus` reports the SCM state; registration, start type and
   observed running state stay separate, as they are for Linux. Install/restart/
   uninstall refuse a foreign registration and a missing helper or account.
+- `start`/`stop`/`delete` are requests, not completed SCM state: install,
+  restart and uninstall observe `sc.exe queryex` by bounded polling and never
+  promote a timeout, a failed query or an unreachable manager to a successful
+  transition. A stop that is not confirmed `STOPPED` is never followed by a
+  reconfigure, delete or success claim, and an already stopped/absent target is
+  idempotent. `install({ start: false })` still creates or reconfigures the
+  registration so a later start runs the new version, but does not activate it.
 
 Launcher (`apps/server/src/serviceLauncher.ts`, `serviceProtocol.ts`):
 `ServiceLauncherControlRequest` plus the request/ack ids; see
