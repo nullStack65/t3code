@@ -189,3 +189,48 @@ it.effect("never acknowledges a stop that was not requested", () =>
     expect(host.sent).toEqual([]);
   }),
 );
+
+it.effect("acknowledges only after a delayed application finalizer has drained", () =>
+  Effect.gen(function* () {
+    const host = new FakeLauncherProcess({
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      childVersion: packageJson.version,
+    });
+    const signals: string[] = [];
+    const onSigterm = () => signals.push("SIGTERM");
+    process.on("SIGTERM", onSigterm);
+    let sentWhenDrained = -1;
+    try {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* buildShutdownLayer(host);
+          // A real application finalizer that takes time to release its
+          // resources. It is acquired after the shutdown layer, so it runs
+          // first on scope close; the acknowledgement must not have been sent
+          // when it finishes.
+          yield* Effect.addFinalizer(() =>
+            Effect.promise(
+              () =>
+                new Promise<void>((resolve) => {
+                  setTimeout(() => {
+                    sentWhenDrained = host.sent.length;
+                    resolve();
+                  }, 25);
+                }),
+            ),
+          );
+          host.emit({ type: "stop", requestId: "req-delayed" });
+          yield* Effect.yieldNow;
+          expect(signals).toEqual(["SIGTERM"]);
+          expect(host.sent).toEqual([]);
+        }),
+      );
+    } finally {
+      process.off("SIGTERM", onSigterm);
+    }
+    // The delayed finalizer observed no acknowledgement yet, proving the layer
+    // acknowledges after its own drain, not on the stop request.
+    expect(sentWhenDrained).toBe(0);
+    expect(host.sent).toEqual([{ type: "stopped", requestId: "req-delayed" }]);
+  }),
+);
