@@ -229,7 +229,10 @@ impl ChildHandle for WindowsChild {
         if let Some(parent) = self.control_request.parent() {
             std::fs::create_dir_all(parent).map_err(|_| QueryError)?;
         }
-        std::fs::write(&self.control_request, request.as_bytes()).map_err(|_| QueryError)?;
+        // Atomic publication: the launcher's watcher never reads a partial
+        // request, and a replacement is all-or-nothing.
+        crate::launcher_control::publish_atomically(&self.control_request, request.as_bytes())
+            .map_err(|_| QueryError)?;
         // Cleanup fallback only; not evidence that control was delivered.
         if let Some(parent) = self.stop_marker.parent() {
             std::fs::create_dir_all(parent).map_err(|_| QueryError)?;
