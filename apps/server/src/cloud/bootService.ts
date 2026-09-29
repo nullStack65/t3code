@@ -1514,7 +1514,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         return { kind: "unreachable" as const };
       }
       if (result.value.code !== 0) {
-        return scServiceDoesNotExist(result.value.code, result.value.stdout, result.value.stderr)
+        return scServiceDoesNotExist(result.value.code)
           ? { kind: "absent" as const }
           : { kind: "unreachable" as const };
       }
