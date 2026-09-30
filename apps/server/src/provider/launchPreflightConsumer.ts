@@ -20,6 +20,7 @@ import {
   type ServerSettings,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { parse as parseJsonc, type ParseError } from "jsonc-parser";
 
 import type { LaunchPreflightConsumer } from "../environment/LaunchPreflight.ts";
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
@@ -30,20 +31,43 @@ const decodeOpenCodeSettings = Schema.decodeUnknownOption(OpenCodeSettings);
 const OPENCODE_DRIVER: ProviderDriverKind = "opencode" as ProviderDriverKind;
 
 /**
+ * Parses the inline `OPENCODE_CONFIG_CONTENT` byte-for-byte the way OpenCode
+ * itself does. OpenCode v1.18.x loads this value through `loadConfig`, which
+ * uses a JSONC parser, so comments and trailing commas are valid in a config
+ * that OpenCode accepts. `jsonc-parser` is the same small parser the web app
+ * already depends on; this reads only the in-memory string (no file or tree
+ * discovery, no network).
+ */
+const parseInlineOpenCodeConfig = (
+  configContent: string,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } => {
+  const errors: ParseError[] = [];
+  const value = parseJsonc(configContent, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+    allowEmptyContent: false,
+  });
+  return errors.length > 0 ? { ok: false } : { ok: true, value };
+};
+
+/**
  * Whether the effective OpenCode config still stages Git snapshots. OpenCode
  * defaults snapshots on, so only an explicit boolean `false` disables the
- * provider-specific requirement; an unparseable or absent config keeps the
- * default. This intentionally does not search config files or call out.
+ * provider-specific requirement; an absent config keeps that default. An
+ * inline config that cannot be parsed at all is `"unknown"`: the preflight must
+ * not assert snapshots are definitely enabled, so it does not force the
+ * provider-specific `--sparse` requirement from unparsed content. This
+ * intentionally does not search config files or call out.
  */
-export const openCodeSnapshotsEnabled = (configContent: string): boolean => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(configContent);
-  } catch {
-    return true;
-  }
-  if (typeof parsed !== "object" || parsed === null) return true;
-  return (parsed as { readonly snapshot?: unknown }).snapshot !== false;
+export const openCodeSnapshotsEnabled = (configContent: string): boolean | "unknown" => {
+  const parsed = parseInlineOpenCodeConfig(configContent);
+  if (!parsed.ok) return "unknown";
+  const value = parsed.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "unknown";
+  const snapshot = (value as { readonly snapshot?: unknown }).snapshot;
+  if (snapshot === undefined || snapshot === true) return true;
+  if (snapshot === false) return false;
+  return "unknown";
 };
 
 export interface ResolveLaunchPreflightConsumerInput {
