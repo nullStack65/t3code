@@ -981,47 +981,48 @@ export const make = (options?: StartupOptions) =>
               ...(sharedSessionRoot !== undefined ? { configuredRoot: sharedSessionRoot } : {}),
             })
             .pipe(
-            Effect.tap((result) =>
-              Effect.gen(function* () {
-                yield* Effect.forEach(
-                  result.warnings,
-                  (warning) =>
-                    Effect.logWarning(`launch preflight: ${warning.message}`, {
+              Effect.tap((result) =>
+                Effect.gen(function* () {
+                  yield* Effect.forEach(
+                    result.warnings,
+                    (warning) =>
+                      Effect.logWarning(`launch preflight: ${warning.message}`, {
+                        code: warning.code,
+                        severity: warning.severity,
+                        cwd: serverConfig.cwd,
+                      }),
+                    { discard: true },
+                  );
+                  // No thread exists yet, so carry these to the first provider
+                  // session in this directory, which delivers them through the
+                  // existing user-visible warning transport.
+                  const inbox =
+                    yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
+                  LaunchPreflightWarningInboxModule.recordLaunchPreflightWarnings(
+                    inbox,
+                    LaunchPreflight.normalizePathKey(pathService, serverConfig.cwd),
+                    result.warnings.map((warning) => ({
                       code: warning.code,
-                      severity: warning.severity,
-                      cwd: serverConfig.cwd,
-                    }),
-                  { discard: true },
-                );
-                // No thread exists yet, so carry these to the first provider
-                // session in this directory, which delivers them through the
-                // existing user-visible warning transport.
-                const inbox = yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
-                LaunchPreflightWarningInboxModule.recordLaunchPreflightWarnings(
-                  inbox,
-                  LaunchPreflight.normalizePathKey(pathService, serverConfig.cwd),
-                  result.warnings.map((warning) => ({
-                    code: warning.code,
-                    message: warning.message,
-                  })),
-                );
-                yield* Effect.forEach(
-                  result.blockers,
-                  (blocker) =>
-                    Effect.logError(`launch preflight: ${blocker.message}`, {
-                      code: blocker.code,
-                      severity: blocker.severity,
-                      cwd: serverConfig.cwd,
-                    }),
-                  { discard: true },
-                );
-              }),
-            ),
-            Effect.asVoid,
-            Effect.catchCause((cause) =>
-              Effect.logWarning("launch preflight failed to run", { cause }),
-            ),
-          );
+                      message: warning.message,
+                    })),
+                  );
+                  yield* Effect.forEach(
+                    result.blockers,
+                    (blocker) =>
+                      Effect.logError(`launch preflight: ${blocker.message}`, {
+                        code: blocker.code,
+                        severity: blocker.severity,
+                        cwd: serverConfig.cwd,
+                      }),
+                    { discard: true },
+                  );
+                }),
+              ),
+              Effect.asVoid,
+              Effect.catchCause((cause) =>
+                Effect.logWarning("launch preflight failed to run", { cause }),
+              ),
+            );
         }),
       );
 

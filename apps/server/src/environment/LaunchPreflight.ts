@@ -797,9 +797,7 @@ export const makeGitProbe = (
 };
 
 /** @public Service construction is part of the canonical Effect module API. */
-export const makeFileProbe = (
-  fileSystem: FileSystem.FileSystem,
-): LaunchPreflightFileProbe => ({
+export const makeFileProbe = (fileSystem: FileSystem.FileSystem): LaunchPreflightFileProbe => ({
   // Reuse the typed stat/absence distinction: a genuine NotFound is the only
   // state that means "absent". A denied or I/O-failed lookup stays a probe
   // error so the caller warns instead of reading it as absence.
@@ -852,7 +850,9 @@ export const make = Effect.gen(function* () {
         git,
         files,
         ...(options?.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
-        ...(options?.configuredRoot !== undefined ? { configuredRoot: options.configuredRoot } : {}),
+        ...(options?.configuredRoot !== undefined
+          ? { configuredRoot: options.configuredRoot }
+          : {}),
         ...(options?.consumer !== undefined ? { consumer: options.consumer } : {}),
         ...(options?.gitEnvironment !== undefined
           ? { gitEnvironment: options.gitEnvironment }

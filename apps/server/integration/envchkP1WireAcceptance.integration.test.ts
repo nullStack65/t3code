@@ -573,7 +573,6 @@ it.live(
         missingFailureDetail.includes("grok") || missingFailureDetail.includes("not-a-real-grok"),
         true,
       );
-
     }).pipe(
       // Bound the whole attempt (startup, auth, subscription, cleanup), not just
       // the WebSocket phase, so a wedged start cannot hang the run. Generous
