@@ -112,6 +112,7 @@ const makeIntegrationFixture = (options?: {
     root: string,
     options?: {
       readonly isSharedRoot?: boolean;
+      readonly configuredRoot?: string;
       readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
       readonly gitEnvironment?: NodeJS.ProcessEnv;
     },
@@ -542,10 +543,15 @@ it.live("a launch-preflight warning is reported and the session still starts onc
 
 it.live("the same repository at the server cwd is ordinary by default", () =>
   Effect.gen(function* () {
-    const seen: Array<boolean | undefined> = [];
+    const seen: Array<{ readonly isSharedRoot?: boolean; readonly configuredRoot?: string }> = [];
     const fixture = yield* makeIntegrationFixture({
       launchPreflightRunner: (_root, options) => {
-        seen.push(options?.isSharedRoot);
+        seen.push({
+          ...(options?.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+          ...(options?.configuredRoot !== undefined
+            ? { configuredRoot: options.configuredRoot }
+            : {}),
+        });
         return Effect.succeed(findingResult([]));
       },
     });
@@ -561,50 +567,66 @@ it.live("the same repository at the server cwd is ordinary by default", () =>
       });
     }).pipe(Effect.provide(fixture.layer));
 
-    assert.deepStrictEqual(seen, [false]);
+    // No shared root is configured, so neither an explicit shared-root override
+    // nor a configured root is handed to the bounded preflight.
+    assert.deepStrictEqual(seen, [{}]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.live("a configured shared session root applies independently of the backend cwd", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const otherBackendCwd = yield* fs.makeTempDirectory();
-    const seen: Array<boolean | undefined> = [];
-    const fixture = yield* makeIntegrationFixture({
-      serverConfigCwd: otherBackendCwd,
-      sharedSessionRootIsWorkspace: true,
-      launchPreflightRunner: (_root, options) => {
-        seen.push(options?.isSharedRoot);
-        return Effect.succeed(findingResult([]));
-      },
-    });
-    const nested = path.join(fixture.cwd, "nested");
-    yield* fs.makeDirectory(nested, { recursive: true });
-
-    yield* Effect.gen(function* () {
-      const provider = yield* ProviderService;
-      // The configured shared root is treated as shared even though the
-      // backend cwd is a different directory.
-      yield* provider.startSession(ThreadId.make("thread-shared-root"), {
-        threadId: ThreadId.make("thread-shared-root"),
-        provider: ProviderDriverKind.make("codex"),
-        providerInstanceId: codexInstanceId,
-        cwd: fixture.cwd,
-        runtimeMode: "full-access",
+it.live(
+  "a configured shared session root is carried into the preflight independently of the cwd",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const otherBackendCwd = yield* fs.makeTempDirectory();
+      const seen: Array<{ readonly isSharedRoot?: boolean; readonly configuredRoot?: string }> = [];
+      const fixture = yield* makeIntegrationFixture({
+        serverConfigCwd: otherBackendCwd,
+        sharedSessionRootIsWorkspace: true,
+        launchPreflightRunner: (_root, options) => {
+          seen.push({
+            ...(options?.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+            ...(options?.configuredRoot !== undefined
+              ? { configuredRoot: options.configuredRoot }
+              : {}),
+          });
+          return Effect.succeed(findingResult([]));
+        },
       });
-      // A nested repository selected as the session cwd stays ordinary.
-      yield* provider.startSession(ThreadId.make("thread-shared-nested"), {
-        threadId: ThreadId.make("thread-shared-nested"),
-        provider: ProviderDriverKind.make("codex"),
-        providerInstanceId: codexInstanceId,
-        cwd: nested,
-        runtimeMode: "full-access",
-      });
-    }).pipe(Effect.provide(fixture.layer));
+      const nested = path.join(fixture.cwd, "nested");
+      yield* fs.makeDirectory(nested, { recursive: true });
 
-    assert.deepStrictEqual(seen, [true, false]);
-  }).pipe(Effect.provide(NodeServices.layer)),
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        // The exact configured root is carried into the bounded preflight even
+        // though the backend cwd is a different directory.
+        yield* provider.startSession(ThreadId.make("thread-shared-root"), {
+          threadId: ThreadId.make("thread-shared-root"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          cwd: fixture.cwd,
+          runtimeMode: "full-access",
+        });
+        // A nested repository selected as the session cwd still receives the
+        // configured root; the preflight owns the canonical comparison and keeps
+        // the nested repository ordinary (covered by the real-preflight suites).
+        yield* provider.startSession(ThreadId.make("thread-shared-nested"), {
+          threadId: ThreadId.make("thread-shared-nested"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          cwd: nested,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(fixture.layer));
+
+      assert.deepStrictEqual(seen, [
+        { configuredRoot: fixture.cwd },
+        { configuredRoot: fixture.cwd },
+      ]);
+      // Clean up the extra backend cwd owned by this fixture.
+      yield* fs.remove(otherBackendCwd, { recursive: true, force: true });
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.live("the launch preflight inspects the selected provider environment", () =>

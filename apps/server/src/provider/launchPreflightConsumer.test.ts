@@ -46,7 +46,7 @@ it.effect("W1-D: production settings resolve JSONC snapshot:false to a disabled 
       settings: {
         ...DEFAULT_SERVER_SETTINGS,
         providerInstances: {
-          opencode: {
+          [ProviderInstanceId.make("opencode")]: {
             driver: opencode,
             enabled: true,
             environment: [
@@ -74,7 +74,7 @@ it.effect("W1-D: the ordinary default keeps snapshots enabled", () =>
       settings: {
         ...DEFAULT_SERVER_SETTINGS,
         providerInstances: {
-          opencode: { driver: opencode, enabled: true },
+          [ProviderInstanceId.make("opencode")]: { driver: opencode, enabled: true },
         },
       },
       hostEnv: {},

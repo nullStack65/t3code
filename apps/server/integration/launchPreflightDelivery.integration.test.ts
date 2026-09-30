@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - a real temporary workspace exercises the launch path.
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - a real temporary workspace exercises the launch path and tests stringify provider warnings for failure detail.
 import {
   CommandId,
   GrokSettings,
@@ -947,7 +947,9 @@ it.live(
       yield* git(["init", "-q"]);
       yield* git(["config", "user.name", "Test"]);
       yield* git(["config", "user.email", "test@test.com"]);
-      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(repo, "src", "file.txt"), "hi\n"));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(NodePath.join(repo, "src", "file.txt"), "hi\n"),
+      );
       yield* git(["add", "."]);
       yield* git(["commit", "-q", "-m", "initial"]);
       // A real sparse checkout makes `git add --sparse` relevant for T3's own
@@ -1025,4 +1027,3 @@ it.live(
       yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
-

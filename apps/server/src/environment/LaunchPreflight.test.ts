@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - real temp directories exercise the bounded probes.
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - real temp directories exercise the bounded probes and the launch fixtures use JSON.stringify for failure detail.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -581,11 +581,14 @@ it.effect("W1-A: genuine absence is quiet but a denied metadata read is a probe 
     const real = yield* FileSystem.FileSystem;
     const probe = LaunchPreflight.makeFileProbe(real);
     // Genuine absence stays `false` (quiet), never a warning.
-    assert.strictEqual(yield* probe.exists(NodePath.join(NodeOS.tmpdir(), "envchk-absent-x")), false);
+    assert.strictEqual(
+      yield* probe.exists(NodePath.join(NodeOS.tmpdir(), "envchk-absent-x")),
+      false,
+    );
 
     // A denied lookup is not absence: the production adapter must surface it as
     // a probe failure instead of converting it to `false`.
-    const deniedLayer = Layer.mock(FileSystem.FileSystem)({
+    const deniedLayer = FileSystem.layerNoop({
       stat: (target) =>
         Effect.fail(
           PlatformError.systemError({
@@ -629,25 +632,27 @@ it.effect("W1-A: a denied candidate metadata read warns instead of reading as ab
 
 // --- W1-B: incomplete relevant capability checks warn for sparse checkouts ----
 
-it.effect("W1-B: a failed capability probe for a verified sparse checkout warns (non-OpenCode)", () =>
-  Effect.gen(function* () {
-    const result = yield* run(
-      input({
-        root: "/repo",
-        git: gitProbe({
-          resolveIdentity: () =>
-            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
-          isSparseCheckout: () => Effect.succeed(true),
-          probeSparseAdd: () => Effect.fail(probeError("failed", "denied")),
+it.effect(
+  "W1-B: a failed capability probe for a verified sparse checkout warns (non-OpenCode)",
+  () =>
+    Effect.gen(function* () {
+      const result = yield* run(
+        input({
+          root: "/repo",
+          git: gitProbe({
+            resolveIdentity: () =>
+              Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+            isSparseCheckout: () => Effect.succeed(true),
+            probeSparseAdd: () => Effect.fail(probeError("failed", "denied")),
+          }),
+          files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
         }),
-        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
-      }),
-    );
+      );
 
-    // Applicability came from the verified sparse checkout, not the consumer.
-    assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
-    assert.notInclude(codes(result), "git-sparse-add-unsupported");
-  }),
+      // Applicability came from the verified sparse checkout, not the consumer.
+      assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
+      assert.notInclude(codes(result), "git-sparse-add-unsupported");
+    }),
 );
 
 it.effect("W1-B: a hung capability probe for a verified sparse checkout warns (non-OpenCode)", () =>
@@ -773,7 +778,13 @@ it.effect("W1-C: an unresolved configured-root identity does not invent an umbre
         configuredRoot: "/private/var/folders/x/shared",
         git: gitProbe({
           resolveIdentity: () =>
-            Effect.succeed(identity({ state: "ok", topLevel: "/var/folders/x/shared", commonDir: "/var/folders/x/shared/.git" })),
+            Effect.succeed(
+              identity({
+                state: "ok",
+                topLevel: "/var/folders/x/shared",
+                commonDir: "/var/folders/x/shared/.git",
+              }),
+            ),
         }),
         files: {
           exists: (target) => Effect.succeed(target.endsWith(".git")),
@@ -875,7 +886,7 @@ const writePathFormatRejectingGit = (binDir: string, realGit: string) =>
       "    process.exit(129);",
       "  }",
       "}",
-      "const r = spawnSync(__REAL_GIT__, args, { stdio: \"inherit\" });",
+      'const r = spawnSync(__REAL_GIT__, args, { stdio: "inherit" });',
       "process.exit(r.status ?? 1);",
       "",
     ].join("\n"),
