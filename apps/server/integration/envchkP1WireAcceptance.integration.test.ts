@@ -55,6 +55,8 @@ interface Fixture {
   readonly root: string;
   readonly fakeDir: string;
   readonly argvLogPath: string;
+  /** Each stub invocation appends its pid here so cleanup can reap the tree. */
+  readonly pidLogPath: string;
   readonly wrapperPath: string;
 }
 
@@ -71,6 +73,7 @@ const makeFixture = (): Effect.Effect<Fixture> =>
       fs.mkdtemp(NodePath.join(NodeOS.tmpdir(), "envchk-p1-fake-")),
     );
     const argvLogPath = NodePath.join(fakeDir, "argv.log");
+    const pidLogPath = NodePath.join(fakeDir, "stub-pids.log");
     const mockAgentPath = NodePath.join(
       NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
       "../scripts/acp-mock-agent.ts",
@@ -78,7 +81,16 @@ const makeFixture = (): Effect.Effect<Fixture> =>
     const wrapperPath = writeFakeCli({
       directory: fakeDir,
       name: "fake-grok-envchk-p1",
-      source: execScriptSource({ scriptPath: mockAgentPath, argvLogPath }),
+      // Record this invocation's pid before the mock agent takes over. The T3
+      // server spawns each provider CLI in its own process group, so killing the
+      // server does not reach them; cleanup reads these pids and kills the
+      // exact fixture-owned processes instead of matching on a name.
+      source:
+        'import { appendFileSync as recordStubPid } from "node:fs";\n' +
+        "recordStubPid(" +
+        JSON.stringify(pidLogPath) +
+        ', String(process.pid) + "\\n");\n' +
+        execScriptSource({ scriptPath: mockAgentPath, argvLogPath }),
     });
     yield* Effect.promise(
       () =>
@@ -88,7 +100,7 @@ const makeFixture = (): Effect.Effect<Fixture> =>
           );
         }),
     );
-    return { baseDir, root, fakeDir, argvLogPath, wrapperPath };
+    return { baseDir, root, fakeDir, argvLogPath, pidLogPath, wrapperPath };
   }).pipe(Effect.orDie);
 
 interface SpawnedServer {
@@ -194,6 +206,35 @@ const waitForHttp = async (port: number, attempted: () => string): Promise<void>
 };
 
 /**
+ * Reaps the provider stub processes a fixture server launched. The server spawns
+ * each provider CLI in its own process group, so killing the server leaves them
+ * orphaned; each stub records its pid at startup and this kills exactly those
+ * fixture-owned pids (never a name or pattern match). Safe on POSIX and Windows.
+ */
+const killRecordedStubs = async (pidLogPath: string): Promise<void> => {
+  const fs = await import("node:fs/promises");
+  let contents = "";
+  try {
+    contents = await fs.readFile(pidLogPath, "utf8");
+  } catch {
+    return;
+  }
+  const pids = new Set(
+    contents
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0),
+  );
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already exited; nothing to reap.
+    }
+  }
+};
+
+/**
  * Terminates a fixture-owned server and awaits its actual exit before its state
  * directories are removed. Bounded so a wedged process cannot hang cleanup.
  */
@@ -289,10 +330,19 @@ it.live(
   "ENVCHK:P1 authenticated production WebSocket smoke: preflight warning delivered over the wire",
   () => {
     let cleanupFixture: Fixture | undefined;
-    const removeFixture = () =>
-      Effect.promise(async () => {
-        const fixture = cleanupFixture;
-        if (fixture === undefined) return;
+    let cleanupServer: SpawnedServer | undefined;
+    // Single ordered teardown, safe to run twice and from either the resource
+    // release or the `ensuring` guard. It kills the server first so it can no
+    // longer spawn provider stubs, reaps the stubs it orphaned, and only then
+    // removes the fixture state they were reading.
+    const teardown = Effect.gen(function* () {
+      if (cleanupServer !== undefined) {
+        yield* killAndAwaitExit(cleanupServer.child);
+      }
+      const fixture = cleanupFixture;
+      if (fixture === undefined) return;
+      yield* Effect.promise(() => killRecordedStubs(fixture.pidLogPath));
+      yield* Effect.promise(async () => {
         const fs = await import("node:fs/promises");
         await Promise.all([
           fs.rm(fixture.baseDir, { recursive: true, force: true }),
@@ -300,6 +350,7 @@ it.live(
           fs.rm(fixture.root, { recursive: true, force: true }),
         ]);
       });
+    });
     return Effect.gen(function* () {
       const fixture = yield* makeFixture();
       cleanupFixture = fixture;
@@ -315,8 +366,9 @@ it.live(
             port,
           }),
         ),
-        (spawned) => killAndAwaitExit(spawned.child),
+        () => teardown,
       );
+      cleanupServer = server;
 
       yield* Effect.promise(() => waitForHttp(port, server.stderr));
       yield* Effect.logInfo(`ENVCHK_P1_HTTP_READY port=${port}`);
@@ -583,9 +635,10 @@ it.live(
           ? Effect.die(new Error("ENVCHK wire smoke timed out"))
           : Effect.void,
       ),
-      // Cleanup runs on success and failure alike: the server is killed and its
-      // exit awaited before its state directories are removed.
-      Effect.ensuring(removeFixture()),
+      // Cleanup runs on success and failure alike. `teardown` is idempotent, so
+      // the guard here and the resource release both drive the same ordered
+      // kill-server -> reap-stubs -> remove-state sequence.
+      Effect.ensuring(teardown),
       Effect.provide(NodeServices.layer),
     );
   },
