@@ -65,18 +65,42 @@ No hash, route, or Linux qualification is invented here.
 
 This reuses the reviewed installer mechanism; it is not a new downloader. The
 guard **exits before any download, extraction, or symlink** while a required
-receipt is unset/`UNISSUED`. Run as an ordinary user, never root. This is a
-dormant install: it does not start a service.
+receipt is unset/`UNISSUED`, then verifies the installer and archive digests it
+fetched. It then exposes **only** those verified bytes through a private
+loopback staging mirror and points the installer's existing
+`T3CODE_RELEASE_BASE_URL` at it. There is no second upstream download, an
+ambient `T3CODE_RELEASE_BASE_URL` cannot redirect the fetch, and a stale
+`.install-complete` marker cannot skip consumption of the verified archive. Run
+as an ordinary user, never root. This is a dormant install: it does not start a
+service. Requires `curl`, `tar`, `sha256sum` (or `shasum`), and `python3` for
+the private staging mirror.
+
+The installer and archive precheck sources are overridable **only** through
+`T3_INSTALLER_SOURCE_URL` / `T3_ARCHIVE_SOURCE_URL`; those bytes remain bound by
+`T3_INSTALLER_SHA256` / `T3_ARCHIVE_SHA256`+`T3_ARCHIVE_SIZE`, which the retained
+offline regression test (`scripts/pilot-handoff.test.ts`) uses with small local
+fixtures. The installer itself always runs from the verified local copy.
+
+**What this binds.** The guard binds the _bytes_ of the installer and of the
+release archive (`size` + `SHA-256`) and refuses a stale marker, so the archive
+the installer extracts is exactly the archive this guard verified. It does
+**not** establish build, platform, or provenance for the binary inside that
+archive: `T3_BINARY_SOURCE` and `OPENCODE_LINUX_SHA256` are format-checked
+_recorded_ receipts, not verified bindings. A nonempty `T3_BINARY_SOURCE` is a
+recorded commit, not a proven build origin, and the OpenCode `1.17.9` linux-x64
+artifact remains **UNRECORDED** (§2) until its owner supplies the digest. Do not
+read this guard as a Linux qualification.
 
 ```sh
 #!/bin/sh
-# Dormant install guard. Fails closed (EX_CONFIG=78) before any mutation.
+# Dormant, receipt-gated install guard. Fails closed before any mutation.
 set -eu
 
 # Reviewed installer bytes, pinned by full commit + independently recorded digest.
 T3_INSTALLER_REPO="${T3_INSTALLER_REPO:-nullStack65/t3code}"
 T3_INSTALLER_COMMIT="${T3_INSTALLER_COMMIT:-419f7574010c066a56974fc9e3ac0709a08efb33}"
 T3_INSTALLER_SHA256="${T3_INSTALLER_SHA256:-e2462ba995aaa2773872f1fe9f2ccee53094d4ba6a4207dbc5115a65710b8a0a}"
+T3_INSTALLER_SOURCE_URL="${T3_INSTALLER_SOURCE_URL:-https://raw.githubusercontent.com/${T3_INSTALLER_REPO}/${T3_INSTALLER_COMMIT}/scripts/install.sh}"
 
 # Pilot-candidate receipts. UNISSUED until a release owner records them.
 T3_VERSION="${T3_VERSION:-UNISSUED}"
@@ -85,40 +109,74 @@ T3_ARCHIVE_SIZE="${T3_ARCHIVE_SIZE:-UNISSUED}"
 T3_BINARY_SOURCE="${T3_BINARY_SOURCE:-UNISSUED}"
 OPENCODE_VERSION="${OPENCODE_VERSION:-UNISSUED}"
 OPENCODE_LINUX_SHA256="${OPENCODE_LINUX_SHA256:-UNISSUED}"
+T3_ARCHIVE_SOURCE_URL="${T3_ARCHIVE_SOURCE_URL:-https://github.com/${T3_INSTALLER_REPO}/releases/download/v${T3_VERSION}/t3-${T3_VERSION}-linux-x64.tar.gz}"
+
+die() { printf 'refusing to install: %s\n' "$1" >&2; exit "$2"; }
+is_hex() { printf '%s' "$1" | grep -Eq "^[0-9a-f]{$2}$"; }
+checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 
 for name in T3_VERSION T3_ARCHIVE_SHA256 T3_ARCHIVE_SIZE T3_BINARY_SOURCE \
             OPENCODE_VERSION OPENCODE_LINUX_SHA256; do
   eval "value=\${$name}"
   case "$value" in
     ""|UNISSUED)
-      printf 'refusing to install: receipt %s is unset/UNISSUED\n' "$name" >&2
-      exit 78 ;;
+      die "receipt $name is unset/UNISSUED" 78 ;;
   esac
 done
+is_hex "$T3_INSTALLER_SHA256" 64 || die "T3_INSTALLER_SHA256 is not a 64-hex digest" 65
+is_hex "$T3_ARCHIVE_SHA256" 64 || die "T3_ARCHIVE_SHA256 is not a 64-hex digest" 65
+is_hex "$T3_BINARY_SOURCE" 40 || die "T3_BINARY_SOURCE is not a 40-hex commit" 65
+is_hex "$OPENCODE_LINUX_SHA256" 64 || die "OPENCODE_LINUX_SHA256 is not a 64-hex digest" 65
+printf '%s' "$T3_ARCHIVE_SIZE" | grep -Eq '^[0-9]+$' || die "T3_ARCHIVE_SIZE is not an integer" 65
 
-# 1. Fetch the installer at the pinned COMMIT (never `main`), verify its exact
-#    bytes against the recorded digest, and only then execute them.
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT INT TERM
-src="https://raw.githubusercontent.com/${T3_INSTALLER_REPO}/${T3_INSTALLER_COMMIT}/scripts/install.sh"
-curl -fsSL "$src" -o "$work/install.sh"
-actual="$(sha256sum "$work/install.sh" | cut -d' ' -f1)"
-[ "$actual" = "$T3_INSTALLER_SHA256" ] || { printf 'installer digest mismatch\n' >&2; exit 65; }
+work="$(mktemp -d)"; server_pid=
+cleanup() { [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true; rm -rf "$work"; }
+trap cleanup EXIT INT TERM
 
-# 2. Independently verify the release archive BEFORE the installer consumes it.
-#    The release's own SHA256SUMS sits beside the mutable archive and is not
-#    sufficient alone; T3_ARCHIVE_SHA256/SIZE are the authoritative receipt.
-base="https://github.com/${T3_INSTALLER_REPO}/releases/download/v${T3_VERSION}"
-curl -fsSL "${base}/t3-${T3_VERSION}-linux-x64.tar.gz" -o "$work/archive.tar.gz"
-size="$(wc -c < "$work/archive.tar.gz" | tr -d ' ')"
-hash="$(sha256sum "$work/archive.tar.gz" | cut -d' ' -f1)"
-[ "$size" = "$T3_ARCHIVE_SIZE" ] || { printf 'archive size mismatch\n' >&2; exit 65; }
-[ "$hash" = "$T3_ARCHIVE_SHA256" ] || { printf 'archive digest mismatch\n' >&2; exit 65; }
+# 1. Fetch the installer at the pinned COMMIT (never `main`) and verify its
+#    exact bytes before it can run.
+curl -fsSL "$T3_INSTALLER_SOURCE_URL" -o "$work/install.sh"
+[ "$(checksum "$work/install.sh")" = "$T3_INSTALLER_SHA256" ] || die "installer digest mismatch" 65
 
-# 3. Run the reviewed, digest-verified installer with the exact version pinned.
-#    `install.sh` downloads, checks the release SHA256SUMS, extracts, smoke-runs
-#    `t3 --version`, and symlinks into ~/.local/bin. It does not start a service.
+# 2. Independently download and verify the release archive BEFORE the installer
+#    consumes it. The release's own SHA256SUMS sits beside the mutable archive
+#    and is not trusted alone; T3_ARCHIVE_SHA256/SIZE are the authoritative receipt.
+curl -fsSL "$T3_ARCHIVE_SOURCE_URL" -o "$work/archive.tar.gz"
+[ "$(wc -c < "$work/archive.tar.gz" | tr -d ' ')" = "$T3_ARCHIVE_SIZE" ] || die "archive size mismatch" 65
+[ "$(checksum "$work/archive.tar.gz")" = "$T3_ARCHIVE_SHA256" ] || die "archive digest mismatch" 65
+
+# 3. Expose ONLY the verified bytes through a private loopback staging mirror,
+#    so the installer's own download extracts exactly the archive just verified.
+archive_name="t3-${T3_VERSION}-linux-x64.tar.gz"
+mirror="$work/mirror"; mkdir -p "$mirror/v${T3_VERSION}"
+cp "$work/archive.tar.gz" "$mirror/v${T3_VERSION}/${archive_name}"
+printf '%s  %s\n' "$T3_ARCHIVE_SHA256" "$archive_name" > "$mirror/v${T3_VERSION}/SHA256SUMS"
+port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+( cd "$mirror" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+server_pid=$!
+i=0
+while ! curl -fsS "http://127.0.0.1:${port}/v${T3_VERSION}/SHA256SUMS" >/dev/null 2>&1; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || die "staging mirror did not start" 69
+  sleep 0.1
+done
+
+# 4. Refuse a stale marker: the verified bytes must actually be consumed, never
+#    skipped because something already looks installed.
+t3_home="${T3CODE_HOME:-$HOME/.t3}"
+if [ -e "${t3_home}/runtime/versions/${T3_VERSION}/.install-complete" ]; then
+  die "isolated target already has an install marker for ${T3_VERSION}; use an empty target" 65
+fi
+
+# 5. Run the reviewed, digest-verified installer. These assignments deliberately
+#    override any ambient T3CODE_RELEASE_BASE_URL.
 T3CODE_VERSION="$T3_VERSION" \
 T3CODE_RELEASE_REPOSITORY="$T3_INSTALLER_REPO" \
+T3CODE_RELEASE_BASE_URL="http://127.0.0.1:${port}" \
+T3CODE_HOME="$t3_home" \
+T3CODE_INSTALL_BIN_DIR="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}" \
 sh "$work/install.sh"
 ```
 
@@ -152,23 +210,64 @@ contain the repair; do not present it as the pilot candidate.
 ## 5. Bounded local measurement (one week, no prompts/secrets)
 
 One sample every **60 s**, hard stop after **604800 s**, cumulative output
-capped at **50 MiB**. Existing tools only; no daemon or dashboard. A missing
-metric is recorded `unavailable`, never guessed. `df` measures **filesystem
-capacity/free space**, not the growth of any individual directory.
+capped at **50 MiB**. Existing tools only; no daemon or dashboard. Any metric
+that cannot be read is recorded `unavailable`, never guessed. The cap is checked
+on the exact UTF-8 byte length **before** the line is written, and the terminal
+status text counts toward it, so the file can never exceed the cap. Each probe
+is a bounded subprocess (killed at `MEASURE_PROBE_TIMEOUT`), and the sleep never
+runs past the hard stop. `df` measures **filesystem capacity/free space**, not
+the growth of any individual directory; no recursive directory scans are
+performed. CPU counters are recorded as raw, named `/proc/stat` fields including
+`steal`; memory uses `MemAvailable` (not `MemFree`) and records swap where
+available; memory pressure (PSI) is recorded where available.
 
 ```sh
-interval=60; max_seconds=604800; cap_bytes=52428800
-out="$HOME/t3-opencode-pilot-$(date +%Y%m%dT%H%M%SZ)"; mkdir -p "$out"
-log="$out/monitor.log"; end=$(( $(date +%s) + max_seconds )); total=0
-while [ "$(date +%s)" -lt "$end" ]; do
-  cpu="$(awk '/^cpu /{print $2+$3+$4, $5}' /proc/stat 2>/dev/null || true)"; [ -n "$cpu" ] || cpu=unavailable
-  mem="$(free -m 2>/dev/null | awk '/^Mem:/{print $2,$3,$4};/^Swap:/{print $2,$3}' | tr '\n' ';' || true)"; [ -n "$mem" ] || mem=unavailable
-  psi="$(awk 'NF{printf "%s ",$0}' /proc/pressure/memory 2>/dev/null || true)"; [ -n "$psi" ] || psi=unavailable
-  cap="$(df -B1 --output=source,size,used,avail / 2>/dev/null | tail -n +2 | tr '\n' ';' || true)"; [ -n "$cap" ] || cap=unavailable
-  line="$(date -u +%FT%TZ) cpu_jiffies=$cpu mem_swap_mb=$mem psi_memory=$psi fs_capacity=$cap"
-  printf '%s\n' "$line" >> "$log"; total=$(( total + ${#line} + 1 ))
-  [ "$total" -lt "$cap_bytes" ] || { printf 'size cap reached\n' >> "$log"; break; }
-  sleep "$interval"
+#!/bin/sh
+# Bounded one-week sampler. Reads only counters; never prompts, args, or content.
+interval="${MEASURE_INTERVAL:-60}"; max_seconds="${MEASURE_MAX_SECONDS:-604800}"
+cap_bytes="${MEASURE_CAP_BYTES:-52428800}"; probe_timeout="${MEASURE_PROBE_TIMEOUT:-5}"
+proc_root="${MEASURE_PROC_ROOT:-/proc}"
+out="${MEASURE_OUT:-$HOME/t3-opencode-pilot-$(date +%Y%m%dT%H%M%SZ)}"
+now="${MEASURE_NOW:-date +%s}"; nap="${MEASURE_SLEEP:-sleep}"
+
+# Run a probe in the background and kill it if it outlives probe_timeout.
+bounded() {
+  secs="$1"; shift; "$@" & pid=$!
+  ticks=0; limit=$((secs * 10))
+  while kill -0 "$pid" 2>/dev/null; do
+    ticks=$((ticks + 1))
+    if [ "$ticks" -gt "$limit" ]; then
+      kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 124
+    fi
+    sleep 0.1
+  done
+  wait "$pid"
+}
+
+mkdir -p "$out"; log="$out/monitor.log"; total=0
+end=$(( $($now) + max_seconds ))
+while :; do
+  [ "$($now)" -lt "$end" ] || break
+  if [ -n "${MEASURE_PROBE:-}" ]; then
+    line="$(bounded "$probe_timeout" sh -c "$MEASURE_PROBE" 2>/dev/null || true)"
+  else
+    cpu="$(bounded "$probe_timeout" awk '/^cpu /{print "user="$2" nice="$3" system="$4" idle="$5" iowait="$6" irq="$7" softirq="$8" steal="$9}' "$proc_root/stat" 2>/dev/null || true)"; [ -n "$cpu" ] || cpu=unavailable
+    mem="$(bounded "$probe_timeout" sh -c 'free -m 2>/dev/null' | awk '/^Mem:/{print "total="$2" used="$3" free="$4" available="$7} /^Swap:/{print "swap_total="$2" swap_used="$3" swap_free="$4"}' || true)"; [ -n "$mem" ] || mem=unavailable
+    psi="$(bounded "$probe_timeout" awk 'NF{printf "%s ",$0}' "$proc_root/pressure/memory" 2>/dev/null || true)"; [ -n "$psi" ] || psi=unavailable
+    cap="$(bounded "$probe_timeout" sh -c 'df -B1 / 2>/dev/null' | tail -n +2 | tr '\n' ';' || true)"; [ -n "$cap" ] || cap=unavailable
+    line="$(date -u +%FT%TZ) cpu[$cpu] mem[$mem] psi_memory[$psi] fs_capacity[$cap]"
+  fi
+  [ -n "$line" ] || line="$(date -u +%FT%TZ) unavailable"
+  bytes="$(printf '%s\n' "$line" | wc -c | tr -d ' ')"
+  if [ $((total + bytes)) -gt "$cap_bytes" ]; then
+    banner='size cap reached'; bb="$(printf '%s\n' "$banner" | wc -c | tr -d ' ')"
+    [ $((total + bb)) -le "$cap_bytes" ] && printf '%s\n' "$banner" >> "$log"
+    break
+  fi
+  printf '%s\n' "$line" >> "$log"; total=$((total + bytes))
+  remaining=$((end - $($now))); [ "$remaining" -gt 0 ] || break
+  step="$interval"; [ "$step" -lt "$remaining" ] || step="$remaining"
+  "$nap" "$step"
 done
 ```
 
