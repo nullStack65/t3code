@@ -567,11 +567,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // silently drops a failed/timed-out cwd stat.
 
     const settings = yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => undefined));
-    const isSharedRoot = LaunchPreflight.isConfiguredSharedSessionRoot(
-      pathService,
-      input.cwd,
-      settings?.sharedSessionRoot,
-    );
+    // Shared-root intent is carried into the bounded preflight as the exact
+    // configured root, so its canonical identity comparison can recognize alias
+    // spellings of the same physical directory. A lexical compare here would
+    // lose that intent before the probe ever runs.
+    const configuredRoot = settings?.sharedSessionRoot;
     // The consumer/operation is derived from the selected production
     // instance/runtime facts: the effective OpenCode snapshot configuration and
     // whether an external OpenCode server owns the session. Non-OpenCode
@@ -596,7 +596,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ? undefined
         : mergeProviderInstanceEnvironment(instanceEnvironment);
     const result = yield* runLaunchPreflight(input.cwd, {
-      isSharedRoot,
+      ...(configuredRoot !== undefined ? { configuredRoot } : {}),
       ...(consumer !== undefined ? { consumer } : {}),
       ...(gitEnvironment !== undefined ? { gitEnvironment } : {}),
     }).pipe(

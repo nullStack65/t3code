@@ -969,17 +969,18 @@ export const make = (options?: StartupOptions) =>
         "launch.preflight",
         Effect.gen(function* () {
           // Shared-inbox intent comes only from the explicit setting; the
-          // server's own cwd is an ordinary working directory.
+          // server's own cwd is an ordinary working directory. The configured
+          // root is carried into the bounded preflight so alias spellings of the
+          // same physical root still recognize shared intent.
           const sharedSessionRoot = yield* serverSettings.getSettings.pipe(
             Effect.map((settings) => settings.sharedSessionRoot),
             Effect.orElseSucceed(() => undefined),
           );
-          const isSharedRoot = LaunchPreflight.isConfiguredSharedSessionRoot(
-            pathService,
-            serverConfig.cwd,
-            sharedSessionRoot,
-          );
-          return yield* launchPreflight.run(serverConfig.cwd, { isSharedRoot }).pipe(
+          return yield* launchPreflight
+            .run(serverConfig.cwd, {
+              ...(sharedSessionRoot !== undefined ? { configuredRoot: sharedSessionRoot } : {}),
+            })
+            .pipe(
             Effect.tap((result) =>
               Effect.gen(function* () {
                 yield* Effect.forEach(

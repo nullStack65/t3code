@@ -50,13 +50,15 @@ const findFreePort = (): Promise<number> =>
     });
   });
 
-const makeFixture = (): Effect.Effect<{
+interface Fixture {
   readonly baseDir: string;
   readonly root: string;
   readonly fakeDir: string;
   readonly argvLogPath: string;
   readonly wrapperPath: string;
-}> =>
+}
+
+const makeFixture = (): Effect.Effect<Fixture> =>
   Effect.gen(function* () {
     const fs = yield* Effect.promise(() => import("node:fs/promises"));
     const baseDir = yield* Effect.promise(() =>
@@ -177,7 +179,9 @@ const spawnServer = async (input: {
 
 const waitForHttp = async (port: number, attempted: () => string): Promise<void> => {
   const url = `http://127.0.0.1:${port}/api/auth/session`;
-  for (let i = 0; i < 160; i += 1) {
+  // A cold start runs the full migration + module load; on a busy native host
+  // that can take tens of seconds, so allow a generous bounded window.
+  for (let i = 0; i < 400; i += 1) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
       if (response.status > 0) return;
@@ -188,6 +192,27 @@ const waitForHttp = async (port: number, attempted: () => string): Promise<void>
   }
   throw new Error(`server never responded; stderr=\n${attempted()}`);
 };
+
+/**
+ * Terminates a fixture-owned server and awaits its actual exit before its state
+ * directories are removed. Bounded so a wedged process cannot hang cleanup.
+ */
+const killAndAwaitExit = (child: NodeChildProcess.ChildProcess): Effect.Effect<void> =>
+  Effect.promise(
+    () =>
+      new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(() => resolve(), 10_000);
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        child.kill("SIGKILL");
+      }),
+  );
 
 const bootstrapCookie = async (port: number): Promise<string> => {
   const response = await fetch(`http://127.0.0.1:${port}/api/auth/browser-session`, {
@@ -262,9 +287,22 @@ const activitiesOf = (items: ReadonlyArray<OrchestrationThreadStreamItem>) =>
 
 it.live(
   "ENVCHK:P1 authenticated production WebSocket smoke: preflight warning delivered over the wire",
-  () =>
-    Effect.gen(function* () {
+  () => {
+    let cleanupFixture: Fixture | undefined;
+    const removeFixture = () =>
+      Effect.promise(async () => {
+        const fixture = cleanupFixture;
+        if (fixture === undefined) return;
+        const fs = await import("node:fs/promises");
+        await Promise.all([
+          fs.rm(fixture.baseDir, { recursive: true, force: true }),
+          fs.rm(fixture.fakeDir, { recursive: true, force: true }),
+          fs.rm(fixture.root, { recursive: true, force: true }),
+        ]);
+      });
+    return Effect.gen(function* () {
       const fixture = yield* makeFixture();
+      cleanupFixture = fixture;
       const port = yield* Effect.promise(findFreePort);
       const missingPath = NodePath.join(fixture.fakeDir, "not-a-real-grok");
       const server = yield* Effect.acquireRelease(
@@ -277,10 +315,7 @@ it.live(
             port,
           }),
         ),
-        (spawned) =>
-          Effect.sync(() => {
-            spawned.child.kill("SIGKILL");
-          }),
+        (spawned) => killAndAwaitExit(spawned.child),
       );
 
       yield* Effect.promise(() => waitForHttp(port, server.stderr));
@@ -539,20 +574,20 @@ it.live(
         true,
       );
 
-      yield* Effect.promise(() =>
-        import("node:fs/promises").then((fs) =>
-          fs.rm(fixture.baseDir, { recursive: true, force: true }),
-        ),
-      );
-      yield* Effect.promise(() =>
-        import("node:fs/promises").then((fs) =>
-          fs.rm(fixture.fakeDir, { recursive: true, force: true }),
-        ),
-      );
-      yield* Effect.promise(() =>
-        import("node:fs/promises").then((fs) =>
-          fs.rm(fixture.root, { recursive: true, force: true }),
-        ),
-      );
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(
+      // Bound the whole attempt (startup, auth, subscription, cleanup), not just
+      // the WebSocket phase, so a wedged start cannot hang the run. Generous
+      // because a cold native start can take tens of seconds.
+      Effect.timeoutOption("180 seconds"),
+      Effect.flatMap((outcome) =>
+        outcome._tag === "None"
+          ? Effect.die(new Error("ENVCHK wire smoke timed out"))
+          : Effect.void,
+      ),
+      // Cleanup runs on success and failure alike: the server is killed and its
+      // exit awaited before its state directories are removed.
+      Effect.ensuring(removeFixture()),
+      Effect.provide(NodeServices.layer),
+    );
+  },
 );

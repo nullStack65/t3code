@@ -10,14 +10,48 @@ import { CheckpointRef } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { writeFakeCli } from "../testUtils/fakeCli.ts";
 import * as LaunchPreflight from "./LaunchPreflight.ts";
+
+const isWindows = process.platform === "win32";
+
+/** Resolves the real Git executable the same way on every host. */
+const resolveRealGitPath = (): string => {
+  const finder = isWindows ? "where.exe" : "which";
+  const output = NodeChildProcess.execFileSync(finder, ["git"], { encoding: "utf8" });
+  const first = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (first === undefined) throw new Error("git was not found on PATH");
+  return first;
+};
+
+/**
+ * Writes a portable executable named `git` into `binDir`. The behavior lives in
+ * a Node stub (launched by a `.cmd` shim on Windows, a `sh` launcher elsewhere)
+ * so the fixture runs natively on every host and the real resolver/launcher is
+ * exercised. `body` is module source with `process.argv.slice(2)` as Git's args;
+ * `__REAL_GIT__` is replaced with the real Git path.
+ */
+const writeGitStub = (binDir: string, body: string, realGit: string): string => {
+  NodeFS.mkdirSync(binDir, { recursive: true });
+  return writeFakeCli({
+    directory: binDir,
+    name: "git",
+    source: body.replaceAll("__REAL_GIT__", JSON.stringify(realGit)),
+    platform: process.platform,
+  });
+};
 
 const probeError = (
   reason: LaunchPreflight.LaunchPreflightProbeFailureReason,
@@ -39,13 +73,15 @@ const gitProbe = (
 ): LaunchPreflight.LaunchPreflightGitProbe => ({
   version: () => Effect.succeed("2.55.0"),
   resolveIdentity: () => Effect.succeed(identity()),
-  probeSparseAdd: () => Effect.succeed("not-required"),
+  isSparseCheckout: () => Effect.succeed(false),
+  probeSparseAdd: () => Effect.succeed("supported"),
   ...overrides,
 });
 
 const input = (options: {
   readonly root?: string;
   readonly isSharedRoot?: boolean;
+  readonly configuredRoot?: string;
   readonly git?: LaunchPreflight.LaunchPreflightGitProbe;
   readonly files?: Partial<LaunchPreflight.LaunchPreflightFileProbe>;
   readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
@@ -53,6 +89,7 @@ const input = (options: {
 }): LaunchPreflight.LaunchPreflightInput => ({
   root: options.root ?? "/session-root",
   ...(options.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+  ...(options.configuredRoot !== undefined ? { configuredRoot: options.configuredRoot } : {}),
   ...(options.consumer !== undefined ? { consumer: options.consumer } : {}),
   ...(options.gitEnvironment !== undefined ? { gitEnvironment: options.gitEnvironment } : {}),
   git: options.git ?? gitProbe(),
@@ -139,7 +176,7 @@ it.effect("flags an accidental umbrella repository at the shared root", () =>
 
     assert.deepStrictEqual(codes(result), ["shared-root-git"]);
     assert.deepStrictEqual(severities(result), ["warning"]);
-    assert.include(result.warnings[0]?.message ?? "", "/Documents/.git");
+    assert.include(result.warnings[0]?.message ?? "", NodePath.join("/Documents", ".git"));
   }),
 );
 
@@ -245,7 +282,7 @@ it.effect("blocks when Git cannot start and the session root is a repository", (
       input({
         root: "/repo",
         git: { ...gitProbe(), version: () => Effect.fail(probeError("unavailable")) },
-        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+        files: { exists: (target) => Effect.succeed(target === NodePath.join("/repo", ".git")) },
       }),
     );
 
@@ -282,6 +319,7 @@ it.effect("warns when a sparse checkout's resolved Git lacks git add --sparse", 
           resolveIdentity: () =>
             Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
           probeSparseAdd: () => Effect.succeed("unsupported"),
+          isSparseCheckout: () => Effect.succeed(true),
         }),
         files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
       }),
@@ -301,7 +339,7 @@ it.effect("does not warn about git add --sparse when the repository is not spars
         git: gitProbe({
           resolveIdentity: () =>
             Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
-          probeSparseAdd: () => Effect.succeed("not-required"),
+          isSparseCheckout: () => Effect.succeed(false),
         }),
         files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
       }),
@@ -536,6 +574,219 @@ it.effect("R2: failed canonicalization does not assert an external repository", 
   }),
 );
 
+// --- W1-A: the production file probe preserves metadata failures --------------
+
+it.effect("W1-A: genuine absence is quiet but a denied metadata read is a probe failure", () =>
+  Effect.gen(function* () {
+    const real = yield* FileSystem.FileSystem;
+    const probe = LaunchPreflight.makeFileProbe(real);
+    // Genuine absence stays `false` (quiet), never a warning.
+    assert.strictEqual(yield* probe.exists(NodePath.join(NodeOS.tmpdir(), "envchk-absent-x")), false);
+
+    // A denied lookup is not absence: the production adapter must surface it as
+    // a probe failure instead of converting it to `false`.
+    const deniedLayer = Layer.mock(FileSystem.FileSystem)({
+      stat: (target) =>
+        Effect.fail(
+          PlatformError.systemError({
+            _tag: "PermissionDenied",
+            module: "FileSystem",
+            method: "stat",
+            pathOrDescriptor: target,
+          }),
+        ),
+    });
+    const denied = yield* FileSystem.FileSystem.pipe(Effect.provide(deniedLayer));
+    const deniedProbe = LaunchPreflight.makeFileProbe(denied);
+    const error = yield* deniedProbe.exists("/denied/AGENTS.md").pipe(Effect.flip);
+    assert.strictEqual(error.reason, "failed");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("W1-A: a denied candidate metadata read warns instead of reading as absent", () =>
+  Effect.gen(function* () {
+    const denied = PlatformError.systemError({
+      _tag: "PermissionDenied",
+      module: "FileSystem",
+      method: "stat",
+      pathOrDescriptor: "candidate",
+    });
+    const result = yield* run(
+      input({
+        root: "/repo",
+        files: {
+          // Every metadata read is denied, including the initial cwd stat.
+          exists: () => Effect.fail(probeError("failed", String(denied))),
+          stat: () => Effect.fail(probeError("failed", String(denied))),
+        },
+      }),
+    );
+
+    assert.deepStrictEqual(codes(result), ["root-read-failed"]);
+    assert.deepStrictEqual(severities(result), ["warning"]);
+  }),
+);
+
+// --- W1-B: incomplete relevant capability checks warn for sparse checkouts ----
+
+it.effect("W1-B: a failed capability probe for a verified sparse checkout warns (non-OpenCode)", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          isSparseCheckout: () => Effect.succeed(true),
+          probeSparseAdd: () => Effect.fail(probeError("failed", "denied")),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
+    // Applicability came from the verified sparse checkout, not the consumer.
+    assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
+    assert.notInclude(codes(result), "git-sparse-add-unsupported");
+  }),
+);
+
+it.effect("W1-B: a hung capability probe for a verified sparse checkout warns (non-OpenCode)", () =>
+  Effect.gen(function* () {
+    const fiber = yield* run(
+      input({
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          isSparseCheckout: () => Effect.succeed(true),
+          probeSparseAdd: () => Effect.never,
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    ).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust("1500 millis");
+    const result = yield* Fiber.join(fiber);
+
+    assert.deepStrictEqual(codes(result), ["git-probe-timed-out"]);
+  }),
+);
+
+it.effect("W1-B: a non-required repository with an incomplete capability check stays quiet", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          isSparseCheckout: () => Effect.succeed(false),
+          probeSparseAdd: () => Effect.never,
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
+    assert.deepStrictEqual(result.findings, []);
+  }),
+);
+
+// --- W1-C: canonical configured-root identity through both directions ---------
+
+it.effect("W1-C: alias spellings of the configured root still recognize shared intent", () =>
+  Effect.gen(function* () {
+    // The configured root and the actual cwd are the same physical directory
+    // under different spellings; only the canonical compare can see that.
+    const result = yield* run(
+      input({
+        root: "/private/var/folders/x/shared",
+        configuredRoot: "/var/folders/x/shared",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(
+              identity({
+                state: "ok",
+                topLevel: "/private/var/folders/x/shared",
+                commonDir: "/private/var/folders/x/shared/.git",
+              }),
+            ),
+        }),
+        files: {
+          exists: (target) => Effect.succeed(target.endsWith(".git")),
+          realPath: (target) =>
+            Effect.succeed(target.startsWith("/var/") ? `/private${target}` : target),
+        },
+      }),
+    );
+
+    assert.deepStrictEqual(codes(result), ["shared-root-git"]);
+  }),
+);
+
+it.effect("W1-C: a genuinely different configured root stays ordinary", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        configuredRoot: "/elsewhere",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
+    assert.deepStrictEqual(result.findings, []);
+  }),
+);
+
+it.effect("W1-C: a nested repository selected as cwd stays ordinary under a configured root", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/Documents/project",
+        configuredRoot: "/Documents",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(
+              identity({
+                state: "ok",
+                topLevel: "/Documents/project",
+                commonDir: "/Documents/project/.git",
+              }),
+            ),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/Documents/project/.git") },
+      }),
+    );
+
+    assert.deepStrictEqual(result.findings, []);
+  }),
+);
+
+it.effect("W1-C: an unresolved configured-root identity does not invent an umbrella", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/var/folders/x/shared",
+        configuredRoot: "/private/var/folders/x/shared",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/var/folders/x/shared", commonDir: "/var/folders/x/shared/.git" })),
+        }),
+        files: {
+          exists: (target) => Effect.succeed(target.endsWith(".git")),
+          // Canonicalization is unavailable for both sides.
+          realPath: () => Effect.succeed(null),
+        },
+      }),
+    );
+
+    assert.deepStrictEqual(result.findings, []);
+  }),
+);
+
 it.effect("wires the real service probes and passes a healthy root", () =>
   Effect.gen(function* () {
     const directory = yield* Effect.promise(() =>
@@ -612,33 +863,30 @@ const E3PreflightLayer = LaunchPreflight.layer.pipe(Layer.provide(E3VcsLayer));
 const E3CombinedLayer = Layer.merge(E3VcsLayer, E3PreflightLayer);
 
 /** A `git` that rejects `--path-format` (like Git < 2.31) and delegates everything else. */
-const writePathFormatRejectingGit = (binDir: string, realGit: string) => {
-  const wrapperPath = NodePath.join(binDir, "git");
-  NodeFS.writeFileSync(
-    wrapperPath,
+const writePathFormatRejectingGit = (binDir: string, realGit: string) =>
+  writeGitStub(
+    binDir,
     [
-      "#!/bin/sh",
-      'for a in "$@"; do',
-      '  case "$a" in',
-      "    --path-format|--path-format=*)",
-      "      echo \"fatal: unknown option 'path-format'\" >&2",
-      "      exit 129",
-      "      ;;",
-      "  esac",
-      "done",
-      `exec "${realGit}" "$@"`,
+      'import { spawnSync } from "node:child_process";',
+      "const args = process.argv.slice(2);",
+      "for (const a of args) {",
+      '  if (a === "--path-format" || a.startsWith("--path-format=")) {',
+      "    process.stderr.write(\"fatal: unknown option 'path-format'\\n\");",
+      "    process.exit(129);",
+      "  }",
+      "}",
+      "const r = spawnSync(__REAL_GIT__, args, { stdio: \"inherit\" });",
+      "process.exit(r.status ?? 1);",
       "",
     ].join("\n"),
-    { mode: 0o755 },
+    realGit,
   );
-  return wrapperPath;
-};
 
 it.effect(
   "R1: a Git that rejects --path-format still launches and captures an ordinary checkpoint",
   () =>
     Effect.gen(function* () {
-      const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+      const realGit = resolveRealGitPath();
       const base = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e3-pathformat-")),
       );
@@ -712,18 +960,18 @@ it.live(
       // The owned fixture records its own PID and the PID of a descendant it
       // spawns, then sleeps. Cleanup must terminate both, not just leave the
       // post-sleep marker unwritten.
-      NodeFS.writeFileSync(
-        NodePath.join(binDir, "git"),
+      writeGitStub(
+        binDir,
         [
-          "#!/bin/sh",
-          `echo $$ > "${childPidFile}"`,
-          "sleep 30 &",
-          `echo $! > "${grandchildPidFile}"`,
-          "wait",
-          `touch "${marker}"`,
+          'import { spawn } from "node:child_process";',
+          'import { writeFileSync } from "node:fs";',
+          `writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));`,
+          'const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });',
+          `writeFileSync(${JSON.stringify(grandchildPidFile)}, String(descendant.pid));`,
+          `setTimeout(() => { writeFileSync(${JSON.stringify(marker)}, "done"); process.exit(0); }, 30000);`,
           "",
         ].join("\n"),
-        { mode: 0o755 },
+        resolveRealGitPath(),
       );
 
       const isAlive = (pid: number): boolean => {
@@ -794,9 +1042,18 @@ const makeRealGitProbe = Effect.gen(function* () {
 
 const realpath = (target: string) => Effect.promise(() => NodeFSP.realpath(target));
 
+/** Windows filesystem paths differ by case/separator; compare canonically. */
+const sameRealPath = (actual: string, expected: string): boolean => {
+  const normalize = (value: string) => {
+    const resolved = NodePath.resolve(value);
+    return isWindows ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(actual) === normalize(expected);
+};
+
 it.live("F1: git identity resolves relative common dirs against the invocation cwd", () =>
   Effect.gen(function* () {
-    const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+    const realGit = resolveRealGitPath();
     const base = yield* Effect.promise(() =>
       NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e4-identity-")),
     );
@@ -819,25 +1076,28 @@ it.live("F1: git identity resolves relative common dirs against the invocation c
 
     const probe = yield* makeRealGitProbe;
     const repoReal = yield* realpath(repo);
+    const repoGitDir = NodePath.join(repoReal, ".git");
 
     // 1. Root is the repository root: common dir is `<repo>/.git`.
     const rootIdentity = yield* probe.resolveIdentity(repo);
     assert.strictEqual(rootIdentity.state, "ok");
-    assert.strictEqual(yield* realpath(rootIdentity.commonDir ?? ""), `${repoReal}/.git`);
+    assert.isTrue(sameRealPath(yield* realpath(rootIdentity.commonDir ?? ""), repoGitDir));
 
     // 2. Root is a subdirectory: plain `git rev-parse --git-common-dir` returns
     //    a relative `../.git`; it must resolve to `<repo>/.git`, not outside.
     const subIdentity = yield* probe.resolveIdentity(sub);
     assert.strictEqual(subIdentity.state, "ok");
-    assert.strictEqual(yield* realpath(subIdentity.topLevel ?? ""), repoReal);
-    assert.strictEqual(yield* realpath(subIdentity.commonDir ?? ""), `${repoReal}/.git`);
+    assert.isTrue(sameRealPath(yield* realpath(subIdentity.topLevel ?? ""), repoReal));
+    assert.isTrue(sameRealPath(yield* realpath(subIdentity.commonDir ?? ""), repoGitDir));
 
     // 3. Root is a linked worktree: the common dir points back at the main
     //    repository, and its top level is the worktree itself.
     const worktreeIdentity = yield* probe.resolveIdentity(worktree);
     assert.strictEqual(worktreeIdentity.state, "ok");
-    assert.strictEqual(yield* realpath(worktreeIdentity.commonDir ?? ""), `${repoReal}/.git`);
-    assert.strictEqual(yield* realpath(worktreeIdentity.topLevel ?? ""), yield* realpath(worktree));
+    assert.isTrue(sameRealPath(yield* realpath(worktreeIdentity.commonDir ?? ""), repoGitDir));
+    assert.isTrue(
+      sameRealPath(yield* realpath(worktreeIdentity.topLevel ?? ""), yield* realpath(worktree)),
+    );
 
     yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
   }).pipe(Effect.provide(E3VcsLayer)),
@@ -845,7 +1105,7 @@ it.live("F1: git identity resolves relative common dirs against the invocation c
 
 it.live("F3: the real probe reports git add --sparse support only for a sparse checkout", () =>
   Effect.gen(function* () {
-    const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+    const realGit = resolveRealGitPath();
     const base = yield* Effect.promise(() =>
       NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-e4-sparse-")),
     );
@@ -866,15 +1126,13 @@ it.live("F3: the real probe reports git add --sparse support only for a sparse c
     yield* git(["commit", "-m", "initial"]);
 
     const probe = yield* makeRealGitProbe;
-    assert.strictEqual(yield* probe.probeSparseAdd(repo), "not-required");
-    // A selected OpenCode consumer requires `--sparse` even in an ordinary
-    // repository, so the capability is probed there too.
-    assert.strictEqual(
-      yield* probe.probeSparseAdd(repo, { requiredByConsumer: true }),
-      "supported",
-    );
+    assert.strictEqual(yield* probe.isSparseCheckout(repo), false);
+    // The selected OpenCode consumer requires `--sparse` even in an ordinary
+    // repository, so its capability is probed regardless of the sparse config.
+    assert.strictEqual(yield* probe.probeSparseAdd(repo), "supported");
 
     yield* git(["sparse-checkout", "set", "src"]);
+    assert.strictEqual(yield* probe.isSparseCheckout(repo), true);
     assert.strictEqual(yield* probe.probeSparseAdd(repo), "supported");
 
     yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
@@ -890,22 +1148,23 @@ it.live("F3: the real probe reports git add --sparse support only for a sparse c
  * environment sentinel it inherited. This models a provider environment whose
  * resolved Git is older than the host's.
  */
-const writeSparseLessGit = (binDir: string, realGit: string, recordPath: string) => {
-  NodeFS.writeFileSync(
-    NodePath.join(binDir, "git"),
+const writeSparseLessGit = (binDir: string, realGit: string, recordPath: string): void => {
+  writeGitStub(
+    binDir,
     [
-      "#!/bin/sh",
-      `printf '%s|%s\\n' "$0" "$ENVCHK_SENTINEL" >> "${recordPath}"`,
-      'if [ "$1" = "add" ] && [ "$2" = "-h" ]; then',
-      '  echo "usage: git add [options] [--] <pathspec>..."',
-      '  echo "    -n, --dry-run         dry run"',
-      '  echo "    -v, --verbose         be verbose"',
-      "  exit 0",
-      "fi",
-      `exec "${realGit}" "$@"`,
+      'import { appendFileSync } from "node:fs";',
+      'import { spawnSync } from "node:child_process";',
+      "const args = process.argv.slice(2);",
+      `appendFileSync(${JSON.stringify(recordPath)}, process.argv[1] + "|" + (process.env.ENVCHK_SENTINEL ?? "") + "\\n");`,
+      'if (args[0] === "add" && args[1] === "-h") {',
+      '  process.stdout.write("usage: git add [options] [--] <pathspec>...\\n    -n, --dry-run         dry run\\n    -v, --verbose         be verbose\\n");',
+      "  process.exit(0);",
+      "}",
+      'const r = spawnSync(__REAL_GIT__, args, { stdio: "inherit" });',
+      "process.exit(r.status ?? 1);",
       "",
     ].join("\n"),
-    { mode: 0o755 },
+    realGit,
   );
 };
 
@@ -933,7 +1192,7 @@ it.live(
   "A1/A2: ordinary OpenCode repo resolves the selected provider Git and warns on missing --sparse",
   () =>
     Effect.gen(function* () {
-      const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+      const realGit = resolveRealGitPath();
       const base = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-v5-consumer-")),
       );
@@ -976,7 +1235,9 @@ it.live(
       assert.isTrue(recordLines.length > 0);
       for (const line of recordLines) {
         const [executable, recordedSentinel] = line.split("|");
-        assert.strictEqual(executable, NodePath.join(providerBin, "git"));
+        // The wrapper ran from the selected provider environment's directory
+        // (the launcher/stub lives in providerBin, not on the host).
+        assert.strictEqual(NodePath.dirname(executable ?? ""), providerBin);
         assert.strictEqual(recordedSentinel, sentinel);
       }
 

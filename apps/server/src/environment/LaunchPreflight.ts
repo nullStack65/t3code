@@ -93,31 +93,32 @@ export interface LaunchPreflightGitProbe {
     env?: NodeJS.ProcessEnv,
   ) => Effect.Effect<LaunchPreflightRepoIdentity, LaunchPreflightProbeError>;
   /**
-   * Probes the real capability the selected consumer/operation needs:
-   * `git add --sparse`. Read-only: it inspects config and `git add -h`, never
-   * stages anything. Applicability is a property of the consumer, not of the
-   * repository's `core.sparseCheckout`: the OpenCode snapshot operation passes
-   * `git add --all --sparse` for eligible files in ordinary repositories too,
-   * so `requiredByConsumer` marks those launches. A sparse checkout also
-   * requires `--sparse` for T3's own checkpoint path. The optional `rev-parse
-   * --path-format` fast path is deliberately not probed or warned about: its
-   * absence is a harmless optimization fallback handled inside `GitVcsDriver`.
+   * Read-only: whether the root repository is a sparse checkout
+   * (`git config --bool core.sparseCheckout`). This establishes the
+   * repository-side applicability of `git add --sparse` separately from the
+   * consumer, so an incomplete capability probe can still be recognized as
+   * relevant. Uses `allowNonZeroExit`, so a missing key is `false`, not a
+   * failure.
+   */
+  readonly isSparseCheckout: (
+    root: string,
+    env?: NodeJS.ProcessEnv,
+  ) => Effect.Effect<boolean, LaunchPreflightProbeError>;
+  /**
+   * Probes the real capability `git add --sparse`. Read-only: it inspects
+   * `git add -h`, never stages anything. The caller decides applicability (a
+   * verified sparse checkout or the selected consumer) and only probes when the
+   * capability is relevant. The optional `rev-parse --path-format` fast path is
+   * deliberately not probed or warned about: its absence is a harmless
+   * optimization fallback handled inside `GitVcsDriver`.
    */
   readonly probeSparseAdd: (
     root: string,
-    options?: {
-      readonly requiredByConsumer?: boolean;
-      readonly env?: NodeJS.ProcessEnv;
-    },
+    env?: NodeJS.ProcessEnv,
   ) => Effect.Effect<LaunchPreflightSparseCapability, LaunchPreflightProbeError>;
 }
 
-export type LaunchPreflightSparseCapability =
-  /**
-   * Neither the selected consumer/operation nor the repository's sparse-checkout
-   * configuration requires `git add --sparse`, so its absence is not actionable.
-   */
-  "not-required" | "supported" | "unsupported";
+export type LaunchPreflightSparseCapability = "supported" | "unsupported";
 
 /**
  * The consumer/operation about to run. `--sparse` applicability belongs to the
@@ -129,13 +130,17 @@ export type LaunchPreflightSparseCapability =
 export interface LaunchPreflightConsumer {
   /** Provider driver kind selected for this launch (e.g. "opencode"). */
   readonly driver: string;
-  /** Whether OpenCode-style snapshot staging is enabled for this launch. */
-  readonly snapshotsEnabled: boolean;
+  /**
+   * Whether OpenCode-style snapshot staging is enabled for this launch.
+   * `undefined` means the effective configuration could not be read, so the
+   * requirement is not asserted; only an explicit `true` requires `--sparse`.
+   */
+  readonly snapshotsEnabled: boolean | undefined;
 }
 
 /** Whether the selected consumer/operation stages with `git add --sparse`. */
 export const consumerUsesSparseAdd = (consumer: LaunchPreflightConsumer | undefined): boolean =>
-  consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled;
+  consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled === true;
 
 export interface LaunchPreflightRepoIdentity {
   readonly state: "ok" | "not-a-repository" | "failed";
@@ -153,7 +158,13 @@ export interface LaunchPreflightFsEntry {
 }
 
 export interface LaunchPreflightFileProbe {
-  readonly exists: (target: string) => Effect.Effect<boolean>;
+  /**
+   * Presence check that keeps genuine absence distinct from a failed metadata
+   * read. Returns `false` only when the entry is genuinely absent; a
+   * denied/stalled/I-O-failed lookup is a `LaunchPreflightProbeError` so the
+   * caller can warn instead of reading it as absence.
+   */
+  readonly exists: (target: string) => Effect.Effect<boolean, LaunchPreflightProbeError>;
   /**
    * Bounded-type stat. Genuine absence is the observable `"missing"` state, so
    * callers can keep it distinct from a denied/stalled metadata read. Any other
@@ -182,9 +193,19 @@ export interface LaunchPreflightInput {
   /**
    * Whether `root` is an explicitly configured shared session root (as opposed
    * to a selected nested repository). Only a shared root that is *itself* a
-   * repository is reported as an unexpected umbrella.
+   * repository is reported as an unexpected umbrella. When `configuredRoot` is
+   * provided, this boolean is derived from a bounded canonical comparison
+   * instead of being trusted as given.
    */
   readonly isSharedRoot?: boolean;
+  /**
+   * The explicitly configured shared session root, as spelled in settings. The
+   * preflight canonicalizes it against the actual root through the same bounded
+   * filesystem probe so alias spellings of the same physical root
+   * (`/var` ↔ `/private/var`, a Windows junction) still recognize shared intent.
+   * Unset or empty means no root is configured and every session is ordinary.
+   */
+  readonly configuredRoot?: string;
   /**
    * The selected consumer/operation. Determines whether `git add --sparse` is
    * required even in an ordinary repository (OpenCode snapshots use it there).
@@ -256,7 +277,7 @@ export const runLaunchPreflight = (
 ): Effect.Effect<LaunchPreflightResult, never, Path.Path> =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
-    const isSharedRoot = input.isSharedRoot === true;
+    const configuredRoot = input.configuredRoot?.trim() ?? "";
     const collected = yield* Ref.make<ReadonlyArray<LaunchPreflightFinding>>([]);
     const add = (finding: LaunchPreflightFinding) =>
       Ref.update(collected, (current) => [...current, finding]);
@@ -336,6 +357,23 @@ export const runLaunchPreflight = (
       // by macOS `/var` ↔ `/private/var` aliases. `null` means canonicalization
       // failed: identity must then stay unknown, never affirmative external.
       const canonicalRoot = yield* realPathBounded(input.root);
+
+      // Shared-root intent comes only from the explicit setting. When a
+      // configured root is present, resolve it through the same bounded
+      // canonicalization as the actual root: an alias spelling of the same
+      // physical directory still counts as the shared root, while a genuinely
+      // different configured root stays ordinary. Unlike a lexical compare, this
+      // does not lose intent before the probe runs.
+      let isSharedRoot = input.isSharedRoot === true;
+      if (configuredRoot.length > 0) {
+        const canonicalConfigured = yield* realPathBounded(configuredRoot);
+        isSharedRoot =
+          canonicalRoot !== null && canonicalConfigured !== null
+            ? samePath(path, canonicalRoot, canonicalConfigured)
+            : // Canonicalization failed for at least one side; a lexical compare
+              // is the neutral fallback and cannot invent shared intent.
+              isConfiguredSharedSessionRoot(path, input.root, configuredRoot);
+      }
 
       // Only a real `.git` entry counts as repository evidence. A retired marker
       // such as `.git.macfix-m1-retired` is a different path and is ignored. An
@@ -454,59 +492,76 @@ export const runLaunchPreflight = (
           });
         }
 
-        // Applicability comes from the selected consumer/operation, not only
-        // from `core.sparseCheckout`. OpenCode snapshot staging passes `git add
-        // --all --sparse` for eligible files in ordinary repositories too, so a
-        // missing `--sparse` there is actionable. T3's own checkpoint path only
-        // needs it in a sparse checkout. Probe read-only; the optional
-        // `--path-format` fast path is never probed or warned about.
+        // Applicability comes from the selected consumer/operation and from the
+        // repository's own sparse-checkout configuration. OpenCode snapshot
+        // staging passes `git add --all --sparse` for eligible files in ordinary
+        // repositories too, so a missing `--sparse` is actionable for that
+        // consumer. T3's own checkpoint path only needs it in a sparse checkout.
+        // Resolve the repository-side applicability *before* the capability probe
+        // so an incomplete probe is still recognized as relevant (W1-B): a
+        // failure after a verified sparse checkout must warn, not be dropped.
         const requiredByConsumer = consumerUsesSparseAdd(input.consumer) && inGitWorkTree;
-        const sparseOutcome = yield* input.git
-          .probeSparseAdd(input.root, {
-            requiredByConsumer,
-            ...(input.gitEnvironment !== undefined ? { env: input.gitEnvironment } : {}),
-          })
+        const sparseConfigOutcome = yield* input.git
+          .isSparseCheckout(input.root, input.gitEnvironment)
           .pipe(
-            Effect.map((state) => ({ _tag: "ok" as const, state })),
+            Effect.map((value) => ({ _tag: "ok" as const, value })),
             Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
             Effect.timeoutOption(GIT_PROBE_TIMEOUT),
             Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
           );
-        if (sparseOutcome._tag === "ok" && sparseOutcome.state === "unsupported") {
-          yield* add({
-            code: "git-sparse-add-unsupported",
-            severity: "warning",
-            message: requiredByConsumer
-              ? "The selected OpenCode session snapshots this repository with `git add --sparse`, but the " +
-                "Git this launch resolves does not support `--sparse`. Staging changed and untracked files " +
-                "for a snapshot will fail, so snapshots may be incomplete. Install a newer Git (or disable " +
-                "OpenCode snapshots) to keep snapshots accurate; the session can still start."
-              : "This is a sparse Git checkout, but the Git this launch resolves does not support " +
-                "`git add --sparse`. T3 Code cannot tell which files the sparse rules exclude, so a " +
-                "checkpoint may record excluded files as deleted. Install a newer Git to keep sparse " +
-                "checkpoints accurate; the session can still start.",
-          });
-        } else if (requiredByConsumer && sparseOutcome._tag === "timeout") {
-          // The capability is relevant to the selected launch and could not be
-          // confirmed. Report it as incomplete rather than silently clean; never
-          // mislabel an unknown capability as unsupported, and never block.
-          yield* add({
-            code: "git-probe-timed-out",
-            severity: "warning",
-            message:
-              "The Git `add --sparse` capability probe did not finish in time, so the selected OpenCode " +
-              "launch could not be confirmed to support `git add --sparse`. Snapshots may be incomplete; " +
-              "the session can still start. Check the Git install and the session-root filesystem.",
-          });
-        } else if (requiredByConsumer && sparseOutcome._tag === "error") {
-          yield* add({
-            code: "git-probe-failed",
-            severity: "warning",
-            message:
-              `The Git \`add --sparse\` capability probe failed (${sparseOutcome.error.detail}), so the ` +
-              "selected OpenCode launch could not be confirmed to support `git add --sparse`. Snapshots " +
-              "may be incomplete; the session can still start.",
-          });
+        // A verified sparse checkout makes the capability relevant for every
+        // consumer. When the config check itself is incomplete, only the
+        // consumer-derived requirement is known; the repository side stays
+        // unknown rather than assumed.
+        const sparseCheckoutVerified =
+          sparseConfigOutcome._tag === "ok" && sparseConfigOutcome.value;
+        const sparseApplicable = requiredByConsumer || sparseCheckoutVerified;
+        if (sparseApplicable) {
+          const sparseOutcome = yield* input.git
+            .probeSparseAdd(input.root, input.gitEnvironment)
+            .pipe(
+              Effect.map((state) => ({ _tag: "ok" as const, state })),
+              Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
+              Effect.timeoutOption(GIT_PROBE_TIMEOUT),
+              Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
+            );
+          if (sparseOutcome._tag === "ok" && sparseOutcome.state === "unsupported") {
+            yield* add({
+              code: "git-sparse-add-unsupported",
+              severity: "warning",
+              message: requiredByConsumer
+                ? "The selected OpenCode session snapshots this repository with `git add --sparse`, but the " +
+                  "Git this launch resolves does not support `--sparse`. Staging changed and untracked files " +
+                  "for a snapshot will fail, so snapshots may be incomplete. Install a newer Git (or disable " +
+                  "OpenCode snapshots) to keep snapshots accurate; the session can still start."
+                : "This is a sparse Git checkout, but the Git this launch resolves does not support " +
+                  "`git add --sparse`. T3 Code cannot tell which files the sparse rules exclude, so a " +
+                  "checkpoint may record excluded files as deleted. Install a newer Git to keep sparse " +
+                  "checkpoints accurate; the session can still start.",
+            });
+          } else if (sparseOutcome._tag === "timeout") {
+            // The capability is relevant and could not be confirmed. Report it as
+            // incomplete rather than silently clean; never mislabel an unknown
+            // capability as unsupported, and never block.
+            yield* add({
+              code: "git-probe-timed-out",
+              severity: "warning",
+              message:
+                "The Git `add --sparse` capability probe did not finish in time, so this launch could not " +
+                "be confirmed to support `git add --sparse`. Snapshots or sparse checkpoints may be " +
+                "incomplete; the session can still start. Check the Git install and the session-root " +
+                "filesystem.",
+            });
+          } else if (sparseOutcome._tag === "error") {
+            yield* add({
+              code: "git-probe-failed",
+              severity: "warning",
+              message:
+                `The Git \`add --sparse\` capability probe failed (${sparseOutcome.error.detail}), so this ` +
+                "launch could not be confirmed to support `git add --sparse`. Snapshots or sparse " +
+                "checkpoints may be incomplete; the session can still start.",
+            });
+          }
         }
       } else if (gitOutcome._tag === "timeout" || gitOutcome.error.reason === "timeout") {
         yield* add({
@@ -621,6 +676,7 @@ export class LaunchPreflight extends Context.Service<
       root: string,
       options?: {
         readonly isSharedRoot?: boolean;
+        readonly configuredRoot?: string;
         readonly consumer?: LaunchPreflightConsumer;
         readonly gitEnvironment?: NodeJS.ProcessEnv;
       },
@@ -711,9 +767,8 @@ export const makeGitProbe = (
           detail: "",
         } satisfies LaunchPreflightRepoIdentity;
       }),
-    probeSparseAdd: (root, options) =>
+    isSparseCheckout: (root, env) =>
       Effect.gen(function* () {
-        const env = options?.env;
         // Read-only: is the root repository actually a sparse checkout?
         const sparseConfig = yield* runGit(
           "launch-preflight.git-sparse-config",
@@ -722,14 +777,10 @@ export const makeGitProbe = (
           true,
           env,
         );
-        const sparseCheckout =
-          Number(sparseConfig.exitCode) === 0 && sparseConfig.stdout.trim() === "true";
-        // A selected consumer (OpenCode snapshots) requires `--sparse` even in
-        // an ordinary repository; a sparse checkout requires it for T3's own
-        // checkpoint path. Only then is a missing `--sparse` actionable.
-        if (!sparseCheckout && options?.requiredByConsumer !== true) {
-          return "not-required" satisfies LaunchPreflightSparseCapability;
-        }
+        return Number(sparseConfig.exitCode) === 0 && sparseConfig.stdout.trim() === "true";
+      }),
+    probeSparseAdd: (root, env) =>
+      Effect.gen(function* () {
         // Read-only usage probe; `git add -h` never stages a file.
         const help = yield* runGit(
           "launch-preflight.git-sparse-add-help",
@@ -746,36 +797,53 @@ export const makeGitProbe = (
 };
 
 /** @public Service construction is part of the canonical Effect module API. */
+export const makeFileProbe = (
+  fileSystem: FileSystem.FileSystem,
+): LaunchPreflightFileProbe => ({
+  // Reuse the typed stat/absence distinction: a genuine NotFound is the only
+  // state that means "absent". A denied or I/O-failed lookup stays a probe
+  // error so the caller warns instead of reading it as absence.
+  exists: (target) =>
+    fileSystem.stat(target).pipe(
+      Effect.as(true),
+      Effect.catchIf(
+        (cause) => cause.reason._tag === "NotFound",
+        () => Effect.succeed(false),
+      ),
+      Effect.mapError(
+        (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
+      ),
+    ),
+  stat: (target) =>
+    fileSystem.stat(target).pipe(
+      Effect.map((entry): LaunchPreflightFsEntry => ({
+        type: entry.type === "Directory" ? "directory" : entry.type === "File" ? "file" : "other",
+      })),
+      Effect.catchIf(
+        (cause) => cause.reason._tag === "NotFound",
+        () => Effect.succeed({ type: "missing" } satisfies LaunchPreflightFsEntry),
+      ),
+      Effect.mapError(
+        (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
+      ),
+    ),
+  realPath: (target) => fileSystem.realPath(target).pipe(Effect.orElseSucceed(() => null)),
+  readFirstBytes: (target, maxBytes) =>
+    fileSystem.stream(target, { bytesToRead: maxBytes }).pipe(
+      Stream.runCount,
+      Effect.mapError(
+        (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
+      ),
+    ),
+});
+
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const vcsProcess = yield* VcsProcess.VcsProcess;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const git = makeGitProbe(vcsProcess, path);
-
-  const files: LaunchPreflightFileProbe = {
-    exists: (target) => fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false)),
-    stat: (target) =>
-      fileSystem.stat(target).pipe(
-        Effect.map((entry): LaunchPreflightFsEntry => ({
-          type: entry.type === "Directory" ? "directory" : entry.type === "File" ? "file" : "other",
-        })),
-        Effect.catchIf(
-          (cause) => cause.reason._tag === "NotFound",
-          () => Effect.succeed({ type: "missing" } satisfies LaunchPreflightFsEntry),
-        ),
-        Effect.mapError(
-          (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
-        ),
-      ),
-    realPath: (target) => fileSystem.realPath(target).pipe(Effect.orElseSucceed(() => null)),
-    readFirstBytes: (target, maxBytes) =>
-      fileSystem.stream(target, { bytesToRead: maxBytes }).pipe(
-        Stream.runCount,
-        Effect.mapError(
-          (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
-        ),
-      ),
-  };
+  const files = makeFileProbe(fileSystem);
 
   return LaunchPreflight.of({
     run: (root: string, options) =>
@@ -784,6 +852,7 @@ export const make = Effect.gen(function* () {
         git,
         files,
         ...(options?.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+        ...(options?.configuredRoot !== undefined ? { configuredRoot: options.configuredRoot } : {}),
         ...(options?.consumer !== undefined ? { consumer: options.consumer } : {}),
         ...(options?.gitEnvironment !== undefined
           ? { gitEnvironment: options.gitEnvironment }

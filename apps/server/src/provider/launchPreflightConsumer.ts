@@ -19,6 +19,7 @@ import {
   OpenCodeSettings,
   type ServerSettings,
 } from "@t3tools/contracts";
+import { parseLenientJsonUnknown } from "@t3tools/shared/schemaJson";
 import * as Schema from "effect/Schema";
 
 import type { LaunchPreflightConsumer } from "../environment/LaunchPreflight.ts";
@@ -31,19 +32,20 @@ const OPENCODE_DRIVER: ProviderDriverKind = "opencode" as ProviderDriverKind;
 
 /**
  * Whether the effective OpenCode config still stages Git snapshots. OpenCode
- * defaults snapshots on, so only an explicit boolean `false` disables the
- * provider-specific requirement; an unparseable or absent config keeps the
- * default. This intentionally does not search config files or call out.
+ * accepts inline JSONC (comments and trailing commas), so the value is parsed
+ * with the shared lenient parser rather than `JSON.parse`. An explicit boolean
+ * `false` disables the provider-specific requirement and an explicit `true`
+ * keeps it; any value that cannot be read as a boolean (unparseable content, a
+ * non-object, or a non-boolean `snapshot`) is `undefined` — unknown, never
+ * asserted enabled. This intentionally does not search config files or call out.
  */
-export const openCodeSnapshotsEnabled = (configContent: string): boolean => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(configContent);
-  } catch {
-    return true;
-  }
-  if (typeof parsed !== "object" || parsed === null) return true;
-  return (parsed as { readonly snapshot?: unknown }).snapshot !== false;
+export const openCodeSnapshotsEnabled = (configContent: string): boolean | undefined => {
+  const parsed = parseLenientJsonUnknown(configContent);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const snapshot = (parsed as { readonly snapshot?: unknown }).snapshot;
+  if (snapshot === false) return false;
+  if (snapshot === true || snapshot === undefined) return true;
+  return undefined;
 };
 
 export interface ResolveLaunchPreflightConsumerInput {
