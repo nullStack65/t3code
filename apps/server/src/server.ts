@@ -280,10 +280,7 @@ const ProviderLayerLive = Layer.unwrap(
     const orchestrationEngine = yield* OrchestrationEngineService;
     const crypto = yield* Crypto.Crypto;
     return makeProviderServiceLive({
-      reportLaunchPreflightWarning: makeLaunchPreflightWarningReporter(
-        orchestrationEngine,
-        crypto,
-      ),
+      reportLaunchPreflightWarning: makeLaunchPreflightWarningReporter(orchestrationEngine, crypto),
     });
   }),
 ).pipe(
