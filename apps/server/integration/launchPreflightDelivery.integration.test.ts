@@ -657,6 +657,69 @@ it.live(
       });
       assert.deepStrictEqual(disabled.consumer, { driver: "opencode", snapshotsEnabled: false });
 
+      // 2b. OpenCode loads OPENCODE_CONFIG_CONTENT through a JSONC parser, so a
+      //     commented/trailing-comma config with `snapshot:false` is honored too.
+      const jsoncDisabled = yield* runCase({
+        threadId: "r3-jsonc-disabled",
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        providerInstances: {
+          opencode: openCodeInstance({
+            environment: [
+              {
+                name: "OPENCODE_CONFIG_CONTENT",
+                value: '{\n  // snapshots off for this project\n  "snapshot": false,\n}\n',
+                sensitive: false,
+              },
+            ],
+          }),
+        },
+      });
+      assert.deepStrictEqual(jsoncDisabled.consumer, {
+        driver: "opencode",
+        snapshotsEnabled: false,
+      });
+
+      // 2c. A JSONC config that keeps the default is still the provider default.
+      const jsoncDefault = yield* runCase({
+        threadId: "r3-jsonc-default",
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        providerInstances: {
+          opencode: openCodeInstance({
+            environment: [
+              {
+                name: "OPENCODE_CONFIG_CONTENT",
+                value: "{\n  // keep OpenCode defaults\n}\n",
+                sensitive: false,
+              },
+            ],
+          }),
+        },
+      });
+      assert.deepStrictEqual(jsoncDefault.consumer, {
+        driver: "opencode",
+        snapshotsEnabled: true,
+      });
+
+      // 2d. Unknown configuration is not asserted definitely enabled.
+      const unknownConfig = yield* runCase({
+        threadId: "r3-unknown-config",
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        providerInstances: {
+          opencode: openCodeInstance({
+            environment: [
+              { name: "OPENCODE_CONFIG_CONTENT", value: "not a config", sensitive: false },
+            ],
+          }),
+        },
+      });
+      assert.deepStrictEqual(unknownConfig.consumer, {
+        driver: "opencode",
+        snapshotsEnabled: "unknown",
+      });
+
       // 3. External OpenCode server: the local Git is not that process's Git.
       const external = yield* runCase({
         threadId: "r3-external",
@@ -787,6 +850,93 @@ it.live(
       assert.isDefined(sparseWarning, "no git-sparse-add-unsupported warning was reported");
       assert.include(sparseWarning?.message ?? "", "OpenCode");
       assert.include(sparseWarning?.message ?? "", "--sparse");
+
+      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+// --- W2-C: real settings-to-preflight construction recognizes a configured alias -----------------
+
+it.live(
+  "W2-C: production settings recognize a symlinked shared root and keep a nested repository ordinary",
+  () =>
+    Effect.gen(function* () {
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w2-c-alias-")),
+      );
+      const realRoot = NodePath.join(base, "real-root");
+      const aliasRoot = NodePath.join(base, "alias-root");
+      const nested = NodePath.join(realRoot, "nested");
+      yield* Effect.promise(() => NodeFSP.mkdir(nested, { recursive: true }));
+      NodeChildProcess.execFileSync("git", ["init", "-q"], { cwd: realRoot });
+      NodeChildProcess.execFileSync("git", ["init", "-q"], { cwd: nested });
+      yield* Effect.promise(() => NodeFSP.symlink(realRoot, aliasRoot, "dir"));
+
+      const harness = yield* makeTestProviderAdapterHarness();
+      const registry = makeAdapterRegistryMock({
+        [ProviderDriverKind.make("codex")]: harness.adapter,
+      });
+      const reported = yield* Ref.make<ReadonlyArray<{ readonly code: string }>>([]);
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(ProviderSessionRuntime.layer),
+      );
+      const shared = Layer.mergeAll(
+        directoryLayer,
+        Layer.succeed(ProviderAdapterRegistry, registry),
+        Layer.succeed(LaunchPreflightWarningInbox, new Map()),
+        ServerConfig.layerTest(realRoot, realRoot).pipe(Layer.provide(NodeServices.layer)),
+        ServerSettingsService.layerTest({
+          ...DEFAULT_SERVER_SETTINGS,
+          // The configured value is the alias spelling while the session cwd is
+          // the resolved path, so a lexical comparison cannot match them.
+          sharedSessionRoot: aliasRoot,
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              config: {},
+            },
+          },
+        }),
+        AnalyticsService.layerTest,
+        Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+      ).pipe(Layer.provide(SqlitePersistenceMemory));
+      const providerLayer = makeProviderServiceLive({
+        reportLaunchPreflightWarning: ({ code }) =>
+          Ref.update(reported, (current) => [...current, { code }]).pipe(Effect.as(true)),
+      }).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provideMerge(shared),
+        // No runner override: the real bounded preflight service runs.
+        Layer.provide(
+          LaunchPreflight.layer.pipe(
+            Layer.provide(VcsProcess.layer),
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      );
+
+      const start = (threadId: string, cwd: string) =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService;
+          yield* provider.startSession(ThreadId.make(threadId), {
+            threadId: ThreadId.make(threadId),
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            cwd,
+            runtimeMode: "full-access",
+          });
+        }).pipe(Effect.provide(providerLayer));
+
+      yield* start("w2-c-alias-thread", realRoot);
+      const afterAlias = yield* Ref.get(reported);
+      assert.isTrue(afterAlias.some((warning) => warning.code === "shared-root-git"));
+
+      yield* start("w2-c-nested-thread", nested);
+      const afterNested = yield* Ref.get(reported);
+      assert.isFalse(
+        afterNested.slice(afterAlias.length).some((warning) => warning.code === "shared-root-git"),
+      );
 
       yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

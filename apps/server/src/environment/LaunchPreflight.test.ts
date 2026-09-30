@@ -46,6 +46,7 @@ const gitProbe = (
 const input = (options: {
   readonly root?: string;
   readonly isSharedRoot?: boolean;
+  readonly configuredSharedRoot?: string;
   readonly git?: LaunchPreflight.LaunchPreflightGitProbe;
   readonly files?: Partial<LaunchPreflight.LaunchPreflightFileProbe>;
   readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
@@ -53,6 +54,9 @@ const input = (options: {
 }): LaunchPreflight.LaunchPreflightInput => ({
   root: options.root ?? "/session-root",
   ...(options.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+  ...(options.configuredSharedRoot !== undefined
+    ? { configuredSharedRoot: options.configuredSharedRoot }
+    : {}),
   ...(options.consumer !== undefined ? { consumer: options.consumer } : {}),
   ...(options.gitEnvironment !== undefined ? { gitEnvironment: options.gitEnvironment } : {}),
   git: options.git ?? gitProbe(),
@@ -1007,4 +1011,264 @@ it.live(
 
       yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
     }).pipe(Effect.provide(E3PreflightLayer)),
+);
+
+// --- W2: production-path completions (metadata, sparse applicability, root identity) -------------
+
+const realPreflightLayer = LaunchPreflight.layer.pipe(
+  Layer.provide(VcsProcess.layer),
+  Layer.provide(NodeServices.layer),
+);
+
+it.effect(
+  "W2-A: a denied candidate metadata read warns through the real adapter instead of reading as absent",
+  () =>
+    Effect.gen(function* () {
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w2-denied-")),
+      );
+      const root = NodePath.join(base, "root");
+      yield* Effect.promise(() => NodeFSP.mkdir(root, { recursive: true }));
+      NodeChildProcess.execFileSync("git", ["init", "-q"], { cwd: root });
+      // A read-only root (no execute bit) makes stat() of a known child fail
+      // with EACCES while the root itself still stats as a directory: exactly
+      // the denied candidate metadata the old adapter folded into `false`.
+      yield* Effect.promise(() => NodeFSP.chmod(root, 0o400));
+      const result = yield* LaunchPreflight.LaunchPreflight.pipe(
+        Effect.flatMap((preflight) => preflight.run(root)),
+        Effect.provide(realPreflightLayer),
+      );
+      yield* Effect.promise(() => NodeFSP.chmod(root, 0o700));
+
+      const denied = result.findings.filter((finding) => finding.code === "root-read-failed");
+      assert.isTrue(denied.length > 0);
+      assert.deepStrictEqual(
+        denied.map((finding) => finding.severity),
+        denied.map(() => "warning"),
+      );
+      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+    }),
+);
+
+it.effect("W2-A control: genuine absence stays quiet through the real adapter", () =>
+  Effect.gen(function* () {
+    const plain = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w2-absent-")),
+    );
+    const result = yield* LaunchPreflight.LaunchPreflight.pipe(
+      Effect.flatMap((preflight) => preflight.run(plain)),
+      Effect.provide(realPreflightLayer),
+    );
+    assert.deepStrictEqual(result.findings, []);
+    yield* Effect.promise(() => NodeFSP.rm(plain, { recursive: true, force: true }));
+  }),
+);
+
+/** A VCS runner where `git add -h` never returns and everything else is a healthy repo. */
+const hangingSparseProbeLayer = (repo: string) =>
+  LaunchPreflight.layer.pipe(
+    Layer.provide(
+      Layer.mock(VcsProcess.VcsProcess)({
+        run: (processInput) => {
+          const args = processInput.args;
+          if (args.includes("--version")) {
+            return Effect.succeed(vcsResult("git version 2.55.0\n"));
+          }
+          if (args.includes("--show-toplevel")) return Effect.succeed(vcsResult(`${repo}\n`));
+          if (args.includes("--git-common-dir")) {
+            return Effect.succeed(vcsResult(`${NodePath.join(repo, ".git")}\n`));
+          }
+          if (args[0] === "config") return Effect.succeed(vcsResult("true\n"));
+          if (args[0] === "add") return Effect.never;
+          return Effect.succeed(vcsResult(""));
+        },
+      }),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
+
+const vcsResult = (stdout: string) => ({
+  exitCode: ChildProcessSpawner.ExitCode(0),
+  stdout,
+  stderr: "",
+  stdoutTruncated: false,
+  stderrTruncated: false,
+});
+
+it.live(
+  "W2-B: a failed-then-unconfirmed check after a verified sparse checkout warns for a non-OpenCode consumer",
+  () =>
+    Effect.gen(function* () {
+      const repo = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w2-sparse-mock-")),
+      );
+      const result = yield* LaunchPreflight.LaunchPreflight.pipe(
+        Effect.flatMap((preflight) =>
+          preflight.run(repo, { consumer: { driver: "codex", snapshotsEnabled: true } }),
+        ),
+        Effect.provide(hangingSparseProbeLayer(repo)),
+      );
+
+      assert.deepStrictEqual(codes(result), ["git-probe-timed-out"]);
+      assert.notInclude(codes(result), "git-sparse-add-unsupported");
+      assert.include(result.warnings[0]?.message ?? "", "sparse checkout");
+      yield* Effect.promise(() => NodeFSP.rm(repo, { recursive: true, force: true }));
+    }),
+);
+
+it.live(
+  "W2-B real: a non-OpenCode consumer still warns when the sparse capability probe hangs",
+  () =>
+    Effect.gen(function* () {
+      const realGit = NodeChildProcess.execFileSync("which", ["git"]).toString().trim();
+      const base = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w2-sparse-hang-")),
+      );
+      const repo = NodePath.join(base, "repo");
+      const binDir = NodePath.join(base, "bin");
+      const git = (args: ReadonlyArray<string>) =>
+        Effect.promise(async () => {
+          NodeChildProcess.execFileSync(realGit, args, { cwd: repo });
+        });
+      yield* Effect.promise(() => NodeFSP.mkdir(binDir, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(binDir, "git"),
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "add" ] && [ "$2" = "-h" ]; then',
+            "  sleep 3",
+            "  exit 0",
+            "fi",
+            `exec "${realGit}" "$@"`,
+            "",
+          ].join("\n"),
+          { mode: 0o755 },
+        ),
+      );
+      yield* Effect.promise(() => NodeFSP.mkdir(repo, { recursive: true }));
+      yield* git(["init"]);
+      yield* git(["config", "user.name", "Test"]);
+      yield* git(["config", "user.email", "test@test.com"]);
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(repo, "file.txt"), "hello\n"));
+      yield* git(["add", "."]);
+      yield* git(["commit", "-m", "initial"]);
+      yield* git(["sparse-checkout", "set", "."]);
+
+      const providerEnvironment: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${binDir}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+      };
+      const result = yield* LaunchPreflight.LaunchPreflight.pipe(
+        Effect.flatMap((preflight) =>
+          preflight.run(repo, {
+            consumer: { driver: "codex", snapshotsEnabled: true },
+            gitEnvironment: providerEnvironment,
+          }),
+        ),
+        Effect.provide(realPreflightLayer),
+      );
+
+      assert.deepStrictEqual(codes(result), ["git-probe-timed-out"]);
+      assert.include(result.warnings[0]?.message ?? "", "sparse checkout");
+      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+    }),
+);
+
+it.effect("W2-C: a configured shared root is recognized by bounded physical identity", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/private/var/session-root",
+        isSharedRoot: false,
+        configuredSharedRoot: "/var/session-root",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(
+              identity({
+                state: "ok",
+                topLevel: "/private/var/session-root",
+                commonDir: "/private/var/session-root/.git",
+              }),
+            ),
+        }),
+        files: {
+          exists: (target) => Effect.succeed(target === "/private/var/session-root/.git"),
+          realPath: (target) =>
+            Effect.succeed(target === "/var/session-root" ? "/private/var/session-root" : target),
+        },
+      }),
+    );
+    assert.deepStrictEqual(codes(result), ["shared-root-git"]);
+  }),
+);
+
+it.effect("W2-C: a selected nested repository under the configured root stays ordinary", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/parent/nested",
+        isSharedRoot: false,
+        configuredSharedRoot: "/parent",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(
+              identity({
+                state: "ok",
+                topLevel: "/parent/nested",
+                commonDir: "/parent/nested/.git",
+              }),
+            ),
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/parent/nested/.git") },
+      }),
+    );
+    assert.notInclude(codes(result), "shared-root-git");
+    assert.deepStrictEqual(result.findings, []);
+  }),
+);
+
+it.effect("W2-C: an unresolved identity never invents shared intent", () =>
+  Effect.gen(function* () {
+    const result = yield* run(
+      input({
+        root: "/repo",
+        isSharedRoot: false,
+        configuredSharedRoot: "/somewhere-else",
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+        }),
+        files: {
+          exists: (target) => Effect.succeed(target === "/repo/.git"),
+          realPath: () => Effect.succeed(null),
+        },
+      }),
+    );
+    assert.notInclude(codes(result), "shared-root-git");
+  }),
+);
+
+it.live("W2-C real: a symlinked configured root is recognized through the real preflight", () =>
+  Effect.gen(function* () {
+    const base = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w2-alias-")),
+    );
+    const realRoot = NodePath.join(base, "real-root");
+    const aliasRoot = NodePath.join(base, "alias-root");
+    yield* Effect.promise(() => NodeFSP.mkdir(realRoot, { recursive: true }));
+    NodeChildProcess.execFileSync("git", ["init", "-q"], { cwd: realRoot });
+    yield* Effect.promise(() => NodeFSP.symlink(realRoot, aliasRoot, "dir"));
+
+    const result = yield* LaunchPreflight.LaunchPreflight.pipe(
+      Effect.flatMap((preflight) =>
+        // The lexical override is false; only bounded physical identity can
+        // recognize the alias, which is what the production call sites now pass.
+        preflight.run(realRoot, { isSharedRoot: false, configuredSharedRoot: aliasRoot }),
+      ),
+      Effect.provide(realPreflightLayer),
+    );
+    assert.include(codes(result), "shared-root-git");
+    yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+  }),
 );
