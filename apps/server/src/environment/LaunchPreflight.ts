@@ -37,6 +37,13 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
  */
 
 const GIT_PROBE_TIMEOUT = "1500 millis";
+/**
+ * Each of the two sequential `--sparse` capability steps is bounded below the
+ * outer {@link GIT_PROBE_TIMEOUT} net, so a completed applicability check is
+ * always observed (as a capability or as a typed, applicable failure) instead
+ * of being replaced by an outer timeout that has no applicability information.
+ */
+const SPARSE_STEP_TIMEOUT = "600 millis";
 const NARROW_FS_TIMEOUT = "500 millis";
 const READ_PROBE_TIMEOUT = "500 millis";
 const TOTAL_PROBE_BUDGET = "5 seconds";
@@ -74,6 +81,13 @@ export type LaunchPreflightProbeFailureReason = "unavailable" | "timeout" | "fai
 export class LaunchPreflightProbeError extends Data.TaggedError("LaunchPreflightProbeError")<{
   readonly reason: LaunchPreflightProbeFailureReason;
   readonly detail: string;
+  /**
+   * `--sparse` capability probes only: whether `git add --sparse` is actionable
+   * for this launch (a verified sparse checkout, or the selected consumer needs
+   * it even in an ordinary repository). Carried on the failure so an incomplete
+   * but *relevant* check is never silently dropped as clean.
+   */
+  readonly applicable?: boolean;
 }> {}
 
 export interface LaunchPreflightGitProbe {
@@ -129,13 +143,18 @@ export type LaunchPreflightSparseCapability =
 export interface LaunchPreflightConsumer {
   /** Provider driver kind selected for this launch (e.g. "opencode"). */
   readonly driver: string;
-  /** Whether OpenCode-style snapshot staging is enabled for this launch. */
-  readonly snapshotsEnabled: boolean;
+  /**
+   * Whether OpenCode-style snapshot staging is enabled for this launch.
+   * `"unknown"` means a present inline configuration could not be parsed, so
+   * the preflight must not assert snapshots are definitely enabled and does not
+   * make `git add --sparse` a provider-specific requirement.
+   */
+  readonly snapshotsEnabled: boolean | "unknown";
 }
 
 /** Whether the selected consumer/operation stages with `git add --sparse`. */
 export const consumerUsesSparseAdd = (consumer: LaunchPreflightConsumer | undefined): boolean =>
-  consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled;
+  consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled === true;
 
 export interface LaunchPreflightRepoIdentity {
   readonly state: "ok" | "not-a-repository" | "failed";
@@ -153,7 +172,13 @@ export interface LaunchPreflightFsEntry {
 }
 
 export interface LaunchPreflightFileProbe {
-  readonly exists: (target: string) => Effect.Effect<boolean>;
+  /**
+   * Bounded existence check that keeps genuine absence quiet as `false` while a
+   * denied, stalled, or otherwise failed metadata read is a
+   * `LaunchPreflightProbeError`. Collapsing that error into `false` would let
+   * the preflight read a denied candidate as absent.
+   */
+  readonly exists: (target: string) => Effect.Effect<boolean, LaunchPreflightProbeError>;
   /**
    * Bounded-type stat. Genuine absence is the observable `"missing"` state, so
    * callers can keep it distinct from a denied/stalled metadata read. Any other
@@ -185,6 +210,14 @@ export interface LaunchPreflightInput {
    * repository is reported as an unexpected umbrella.
    */
   readonly isSharedRoot?: boolean;
+  /**
+   * The explicitly configured shared session root, exactly as supplied by
+   * settings. When present, shared-root intent is decided by bounded physical
+   * identity against `root`, so an alias spelling (`/var` vs `/private/var`, a
+   * symlinked or junctioned root) is recognized even though a lexical caller
+   * precheck cannot match it.
+   */
+  readonly configuredSharedRoot?: string;
   /**
    * The selected consumer/operation. Determines whether `git add --sparse` is
    * required even in an ordinary repository (OpenCode snapshots use it there).
@@ -256,7 +289,6 @@ export const runLaunchPreflight = (
 ): Effect.Effect<LaunchPreflightResult, never, Path.Path> =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
-    const isSharedRoot = input.isSharedRoot === true;
     const collected = yield* Ref.make<ReadonlyArray<LaunchPreflightFinding>>([]);
     const add = (finding: LaunchPreflightFinding) =>
       Ref.update(collected, (current) => [...current, finding]);
@@ -284,6 +316,28 @@ export const runLaunchPreflight = (
         Effect.map(Option.getOrElse(() => null)),
         Effect.orElseSucceed(() => null),
       );
+
+    // Shared-inbox intent is an explicit override, or the configured shared root
+    // compared to the actual root by bounded physical identity. Both paths are
+    // canonicalized inside the existing narrow-stat budget; if either identity
+    // is unresolved the fallback is exact lexical equality, so a failed
+    // canonicalization never invents shared intent (`neutral`). A selected
+    // nested repository has a different physical path and stays ordinary.
+    const isConfiguredSharedRoot = (configuredRoot: string | undefined) =>
+      Effect.gen(function* () {
+        const trimmed = configuredRoot?.trim() ?? "";
+        if (trimmed.length === 0) return false;
+        const [rootCanonical, configuredCanonical] = yield* Effect.all(
+          [realPathBounded(input.root), realPathBounded(trimmed)],
+          { concurrency: 2 },
+        );
+        if (rootCanonical !== null && configuredCanonical !== null) {
+          return (
+            normalizePathKey(path, rootCanonical) === normalizePathKey(path, configuredCanonical)
+          );
+        }
+        return normalizeForCompare(path, input.root) === normalizeForCompare(path, trimmed);
+      });
 
     // One actionable warning shape for an incomplete filesystem metadata check.
     // Genuine absence never reaches here: only timeout/permission/other failure.
@@ -336,6 +390,8 @@ export const runLaunchPreflight = (
       // by macOS `/var` ↔ `/private/var` aliases. `null` means canonicalization
       // failed: identity must then stay unknown, never affirmative external.
       const canonicalRoot = yield* realPathBounded(input.root);
+      const isSharedRoot =
+        input.isSharedRoot === true || (yield* isConfiguredSharedRoot(input.configuredSharedRoot));
 
       // Only a real `.git` entry counts as repository evidence. A retired marker
       // such as `.git.macfix-m1-retired` is a different path and is ignored. An
@@ -472,6 +528,14 @@ export const runLaunchPreflight = (
             Effect.timeoutOption(GIT_PROBE_TIMEOUT),
             Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
           );
+        // An incomplete capability outcome is relevant when the selected
+        // consumer needs `--sparse`, or when the probe verified a sparse
+        // checkout before it could be completed. The production probe carries
+        // that applicability on its typed failure so a verified sparse checkout
+        // under a non-OpenCode provider is not dropped here.
+        const sparseApplicable =
+          requiredByConsumer ||
+          (sparseOutcome._tag === "error" && sparseOutcome.error.applicable === true);
         if (sparseOutcome._tag === "ok" && sparseOutcome.state === "unsupported") {
           yield* add({
             code: "git-sparse-add-unsupported",
@@ -486,26 +550,35 @@ export const runLaunchPreflight = (
                 "checkpoint may record excluded files as deleted. Install a newer Git to keep sparse " +
                 "checkpoints accurate; the session can still start.",
           });
-        } else if (requiredByConsumer && sparseOutcome._tag === "timeout") {
+        } else if (sparseApplicable && sparseOutcome._tag === "timeout") {
           // The capability is relevant to the selected launch and could not be
           // confirmed. Report it as incomplete rather than silently clean; never
           // mislabel an unknown capability as unsupported, and never block.
           yield* add({
             code: "git-probe-timed-out",
             severity: "warning",
-            message:
-              "The Git `add --sparse` capability probe did not finish in time, so the selected OpenCode " +
-              "launch could not be confirmed to support `git add --sparse`. Snapshots may be incomplete; " +
-              "the session can still start. Check the Git install and the session-root filesystem.",
+            message: requiredByConsumer
+              ? "The Git `add --sparse` capability probe did not finish in time, so the selected OpenCode " +
+                "launch could not be confirmed to support `git add --sparse`. Snapshots may be incomplete; " +
+                "the session can still start. Check the Git install and the session-root filesystem."
+              : "The Git `add --sparse` capability probe did not finish in time, so this sparse checkout's " +
+                "`--sparse` support could not be confirmed. A checkpoint may record excluded files as " +
+                "deleted; the session can still start. Check the Git install and the session-root filesystem.",
           });
-        } else if (requiredByConsumer && sparseOutcome._tag === "error") {
+        } else if (sparseApplicable && sparseOutcome._tag === "error") {
+          // A bounded step that ran out of time is reported as a timeout, not a
+          // failure, but it is never read as clean or as unsupported.
+          const timedOut = sparseOutcome.error.reason === "timeout";
           yield* add({
-            code: "git-probe-failed",
+            code: timedOut ? "git-probe-timed-out" : "git-probe-failed",
             severity: "warning",
-            message:
-              `The Git \`add --sparse\` capability probe failed (${sparseOutcome.error.detail}), so the ` +
-              "selected OpenCode launch could not be confirmed to support `git add --sparse`. Snapshots " +
-              "may be incomplete; the session can still start.",
+            message: requiredByConsumer
+              ? `The Git \`add --sparse\` capability probe failed (${sparseOutcome.error.detail}), so the ` +
+                "selected OpenCode launch could not be confirmed to support `git add --sparse`. Snapshots " +
+                "may be incomplete; the session can still start."
+              : `The Git \`add --sparse\` capability probe failed (${sparseOutcome.error.detail}), so this ` +
+                "sparse checkout's `--sparse` support could not be confirmed. A checkpoint may record " +
+                "excluded files as deleted; the session can still start.",
           });
         }
       } else if (gitOutcome._tag === "timeout" || gitOutcome.error.reason === "timeout") {
@@ -614,6 +687,45 @@ const classifyGitProbeError = (error: VcsError): LaunchPreflightProbeError => {
   return new LaunchPreflightProbeError({ reason: "failed", detail: error.message });
 };
 
+/** Stamps applicability onto a probe failure without dropping the reason. */
+const asApplicableProbeError = (
+  error: LaunchPreflightProbeError,
+  applicable: boolean,
+): LaunchPreflightProbeError =>
+  new LaunchPreflightProbeError({
+    reason: error.reason,
+    detail: error.detail,
+    applicable: error.applicable === true || applicable,
+  });
+
+/**
+ * Bounds one `--sparse` capability step below the outer probe net. A step that
+ * does not finish becomes a typed failure that still carries applicability, so
+ * an incomplete-but-relevant check is warned about instead of being read as
+ * clean (or, worse, as unsupported).
+ */
+const boundSparseStep = <A>(
+  step: Effect.Effect<A, LaunchPreflightProbeError>,
+  operation: string,
+  applicable: boolean,
+): Effect.Effect<A, LaunchPreflightProbeError> =>
+  step.pipe(
+    Effect.timeoutOption(SPARSE_STEP_TIMEOUT),
+    Effect.flatMap(
+      Option.match({
+        onNone: () =>
+          Effect.fail(
+            new LaunchPreflightProbeError({
+              reason: "timeout",
+              detail: `${operation} did not finish in time`,
+              applicable,
+            }),
+          ),
+        onSome: (value) => Effect.succeed(value),
+      }),
+    ),
+  );
+
 export class LaunchPreflight extends Context.Service<
   LaunchPreflight,
   {
@@ -621,6 +733,7 @@ export class LaunchPreflight extends Context.Service<
       root: string,
       options?: {
         readonly isSharedRoot?: boolean;
+        readonly configuredSharedRoot?: string;
         readonly consumer?: LaunchPreflightConsumer;
         readonly gitEnvironment?: NodeJS.ProcessEnv;
       },
@@ -714,29 +827,41 @@ export const makeGitProbe = (
     probeSparseAdd: (root, options) =>
       Effect.gen(function* () {
         const env = options?.env;
-        // Read-only: is the root repository actually a sparse checkout?
+        const requiredByConsumer = options?.requiredByConsumer === true;
+        // Read-only: is the root repository actually a sparse checkout? Bounded
+        // below the outer net, carrying applicability on any failure so a
+        // consumer-only requirement is not lost as a generic probe error.
         const sparseConfig = yield* runGit(
           "launch-preflight.git-sparse-config",
           root,
           ["config", "--bool", "core.sparseCheckout"],
           true,
           env,
+        ).pipe(
+          Effect.mapError((error) => asApplicableProbeError(error, requiredByConsumer)),
+          (step) => boundSparseStep(step, "core.sparseCheckout", requiredByConsumer),
         );
         const sparseCheckout =
           Number(sparseConfig.exitCode) === 0 && sparseConfig.stdout.trim() === "true";
         // A selected consumer (OpenCode snapshots) requires `--sparse` even in
         // an ordinary repository; a sparse checkout requires it for T3's own
-        // checkpoint path. Only then is a missing `--sparse` actionable.
-        if (!sparseCheckout && options?.requiredByConsumer !== true) {
+        // checkpoint path. Only then is a missing `--sparse` actionable; an
+        // unverified, non-required sparse state stays quiet.
+        if (!sparseCheckout && !requiredByConsumer) {
           return "not-required" satisfies LaunchPreflightSparseCapability;
         }
-        // Read-only usage probe; `git add -h` never stages a file.
+        // Read-only usage probe; `git add -h` never stages a file. Applicability
+        // is established here (verified sparse checkout or selected consumer),
+        // so an incomplete probe must surface, never be dropped.
         const help = yield* runGit(
           "launch-preflight.git-sparse-add-help",
           root,
           ["add", "-h"],
           true,
           env,
+        ).pipe(
+          Effect.mapError((error) => asApplicableProbeError(error, true)),
+          (step) => boundSparseStep(step, "git add -h", true),
         );
         return /--(?:\[no-\])?sparse\b/.test(`${help.stdout}${help.stderr}`)
           ? ("supported" satisfies LaunchPreflightSparseCapability)
@@ -753,7 +878,20 @@ export const make = Effect.gen(function* () {
   const git = makeGitProbe(vcsProcess, path);
 
   const files: LaunchPreflightFileProbe = {
-    exists: (target) => fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false)),
+    exists: (target) =>
+      fileSystem.stat(target).pipe(
+        Effect.map(() => true),
+        // Genuine absence stays quiet; a denied or failed metadata read does
+        // not. Folding the error into `false` would report a denied candidate
+        // as absent and hide the incomplete check.
+        Effect.catchIf(
+          (cause) => cause.reason._tag === "NotFound",
+          () => Effect.succeed(false),
+        ),
+        Effect.mapError(
+          (cause) => new LaunchPreflightProbeError({ reason: "failed", detail: String(cause) }),
+        ),
+      ),
     stat: (target) =>
       fileSystem.stat(target).pipe(
         Effect.map((entry): LaunchPreflightFsEntry => ({
@@ -784,6 +922,9 @@ export const make = Effect.gen(function* () {
         git,
         files,
         ...(options?.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
+        ...(options?.configuredSharedRoot !== undefined
+          ? { configuredSharedRoot: options.configuredSharedRoot }
+          : {}),
         ...(options?.consumer !== undefined ? { consumer: options.consumer } : {}),
         ...(options?.gitEnvironment !== undefined
           ? { gitEnvironment: options.gitEnvironment }
