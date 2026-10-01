@@ -164,11 +164,7 @@ export const formatSchemaError = (cause: Cause.Cause<Schema.SchemaError>) => {
  */
 const decodeJsonString = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 
-/**
- * Strips JSONC syntax (JS-style comments and trailing commas) while leaving
- * quoted string contents untouched, producing strict JSON text.
- */
-export const stripJsonComments = (input: string): string => {
+const parseLenientJsonGetter = SchemaGetter.onSome((input: string) => {
   // Strip single-line comments - alternation preserves quoted strings.
   let stripped = input.replace(
     /("(?:[^"\\]|\\.)*")|\/\/[^\n]*/g,
@@ -190,29 +186,11 @@ export const stripJsonComments = (input: string): string => {
       stringLiteral ? match : (bracket ?? ""),
   );
 
-  return stripped;
-};
-
-/**
- * Parses a lenient JSON string (tolerating comments and trailing commas) into
- * an `unknown` value synchronously, returning `undefined` when the value cannot
- * be parsed. Small in-memory configuration values that are validated by their
- * consumer should use this rather than a strict `JSON.parse`.
- */
-export const parseLenientJsonUnknown = (input: string): unknown | undefined => {
-  try {
-    return JSON.parse(stripJsonComments(input));
-  } catch {
-    return undefined;
-  }
-};
-
-const parseLenientJsonGetter = SchemaGetter.onSome((input: string) =>
-  decodeJsonString(stripJsonComments(input)).pipe(
+  return decodeJsonString(stripped).pipe(
     Effect.map(Option.some),
     Effect.mapError((error) => error.issue),
-  ),
-);
+  );
+});
 
 /**
  * Schema transformation: lenient JSONC string ↔ unknown.

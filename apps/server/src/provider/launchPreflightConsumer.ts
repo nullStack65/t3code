@@ -19,8 +19,8 @@ import {
   OpenCodeSettings,
   type ServerSettings,
 } from "@t3tools/contracts";
-import { parseLenientJsonUnknown } from "@t3tools/shared/schemaJson";
 import * as Schema from "effect/Schema";
+import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 
 import type { LaunchPreflightConsumer } from "../environment/LaunchPreflight.ts";
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
@@ -31,16 +31,28 @@ const decodeOpenCodeSettings = Schema.decodeUnknownOption(OpenCodeSettings);
 const OPENCODE_DRIVER: ProviderDriverKind = "opencode" as ProviderDriverKind;
 
 /**
+ * Parses inline OpenCode configuration, which accepts JSONC (comments and
+ * trailing commas), with the maintained `jsonc-parser` rather than an ad-hoc
+ * regular expression. A parse error is treated as unknown configuration rather
+ * than a best-effort partial value.
+ */
+const parseOpenCodeConfig = (configContent: string): unknown => {
+  const errors: Array<ParseError> = [];
+  const parsed: unknown = parseJsonc(configContent, errors, { allowTrailingComma: true });
+  return errors.length > 0 ? undefined : parsed;
+};
+
+/**
  * Whether the effective OpenCode config still stages Git snapshots. OpenCode
- * accepts inline JSONC (comments and trailing commas), so the value is parsed
- * with the shared lenient parser rather than `JSON.parse`. An explicit boolean
- * `false` disables the provider-specific requirement and an explicit `true`
- * keeps it; any value that cannot be read as a boolean (unparseable content, a
- * non-object, or a non-boolean `snapshot`) is `undefined` — unknown, never
- * asserted enabled. This intentionally does not search config files or call out.
+ * accepts inline JSONC, so the value is parsed with a supported parser. An
+ * explicit boolean `false` disables the provider-specific requirement and an
+ * explicit `true` keeps it; any value that cannot be read as a boolean
+ * (unparseable content, a non-object, or a non-boolean `snapshot`) is
+ * `undefined` — unknown, never asserted enabled. This intentionally does not
+ * search config files or call out.
  */
 export const openCodeSnapshotsEnabled = (configContent: string): boolean | undefined => {
-  const parsed = parseLenientJsonUnknown(configContent);
+  const parsed = parseOpenCodeConfig(configContent);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   const snapshot = (parsed as { readonly snapshot?: unknown }).snapshot;
   if (snapshot === false) return false;

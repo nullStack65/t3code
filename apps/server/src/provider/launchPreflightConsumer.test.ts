@@ -27,6 +27,48 @@ it.effect("W1-D: honors inline JSONC without comments or trailing commas misread
   }),
 );
 
+it.effect("W1-D: JSONC markers inside strings and escaped characters never alter detection", () =>
+  Effect.gen(function* () {
+    // Comment markers inside a quoted value are data, not syntax.
+    assert.strictEqual(
+      openCodeSnapshotsEnabled('{"note":"// not a comment","snapshot":false}'),
+      false,
+    );
+    assert.strictEqual(
+      openCodeSnapshotsEnabled('{"note":"/* not a block comment */","snapshot":true}'),
+      true,
+    );
+    // Bracket/comma markers inside a string must not be read as trailing commas.
+    assert.strictEqual(openCodeSnapshotsEnabled('{"note":"a, ] } ,","snapshot":false}'), false);
+    // Escaped quotes and a trailing escaped backslash.
+    assert.strictEqual(
+      openCodeSnapshotsEnabled('{"note":"a \\"quoted\\" value","snapshot":false}'),
+      false,
+    );
+    assert.strictEqual(
+      openCodeSnapshotsEnabled('{"note":"ends with a backslash \\\\","snapshot":true}'),
+      true,
+    );
+  }),
+);
+
+it.effect("W1-D: comments and trailing commas combine with in-string markers", () =>
+  Effect.gen(function* () {
+    const config = [
+      "{",
+      '  // keep the "snapshot" key addressable',
+      '  "note": "/* not a comment */ and a trailing comma , }",',
+      "  /* block comment */",
+      '  "snapshot": false,',
+      "}",
+    ].join("\n");
+    assert.strictEqual(openCodeSnapshotsEnabled(config), false);
+
+    // A trailing comma after a value whose string ends in a backslash.
+    assert.strictEqual(openCodeSnapshotsEnabled('{"snapshot": true,\n}'), true);
+  }),
+);
+
 it.effect("W1-D: unknown configuration is never asserted enabled", () =>
   Effect.gen(function* () {
     assert.strictEqual(openCodeSnapshotsEnabled("not json at all"), undefined);
@@ -35,6 +77,9 @@ it.effect("W1-D: unknown configuration is never asserted enabled", () =>
     assert.strictEqual(openCodeSnapshotsEnabled('"a string"'), undefined);
     // A non-boolean snapshot value is not a definite enable.
     assert.strictEqual(openCodeSnapshotsEnabled('{"snapshot":"off"}'), undefined);
+    // A malformed document is unknown, never a best-effort partial read.
+    assert.strictEqual(openCodeSnapshotsEnabled('{"snapshot":false,} trailing'), undefined);
+    assert.strictEqual(openCodeSnapshotsEnabled("{ /* unterminated"), undefined);
   }),
 );
 
