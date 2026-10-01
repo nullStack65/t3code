@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalTimers:off preferSchemaOverJson:off - this test owns a real temp workspace and a real server process.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalTimers:off globalDate:off preferSchemaOverJson:off - this test owns a real temp workspace and a real server process.
 import {
   CommandId,
   MessageId,
@@ -205,55 +205,178 @@ const waitForHttp = async (port: number, attempted: () => string): Promise<void>
   throw new Error(`server never responded; stderr=\n${attempted()}`);
 };
 
+const CLEANUP_TIMEOUT_MS = 10_000;
+const CLEANUP_POLL_MS = 50;
+
 /**
- * Reaps the provider stub processes a fixture server launched. The server spawns
- * each provider CLI in its own process group, so killing the server leaves them
- * orphaned; each stub records its pid at startup and this kills exactly those
- * fixture-owned pids (never a name or pattern match). Safe on POSIX and Windows.
+ * Termination/probe seam. The defaults signal and observe real OS processes by
+ * the exact pids the fixture recorded; a regression test injects a signal that
+ * never reports exit to exercise the bounded-failure path without a real kill.
  */
-const killRecordedStubs = async (pidLogPath: string): Promise<void> => {
+interface OwnedProcessSignal {
+  readonly terminate: (pid: number) => void;
+  readonly isAlive: (pid: number) => boolean;
+}
+
+const defaultOwnedProcessSignal: OwnedProcessSignal = {
+  terminate: (pid) => process.kill(pid, "SIGKILL"),
+  isAlive: (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  },
+};
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const readRecordedStubPids = async (pidLogPath: string): Promise<ReadonlyArray<number>> => {
   const fs = await import("node:fs/promises");
   let contents = "";
   try {
     contents = await fs.readFile(pidLogPath, "utf8");
   } catch {
-    return;
+    return [];
   }
-  const pids = new Set(
-    contents
-      .split("\n")
-      .map((line) => Number(line.trim()))
-      .filter((pid) => Number.isInteger(pid) && pid > 0),
-  );
+  return [
+    ...new Set(
+      contents
+        .split("\n")
+        .map((line) => Number(line.trim()))
+        .filter((pid) => Number.isInteger(pid) && pid > 0),
+    ),
+  ];
+};
+
+/**
+ * Sends the termination signal to exact captured fixture-owned pids and waits
+ * until every one is confirmed gone. Never matches a name or pattern, so
+ * installed T3/provider processes are untouched. Rejects with the still-live
+ * pids if the bound elapses.
+ */
+const terminateAndConfirmPidsExited = async (
+  pids: ReadonlyArray<number>,
+  options: {
+    readonly timeoutMs?: number | undefined;
+    readonly signal?: OwnedProcessSignal | undefined;
+  } = {},
+): Promise<void> => {
+  const timeoutMs = options.timeoutMs ?? CLEANUP_TIMEOUT_MS;
+  const signal = options.signal ?? defaultOwnedProcessSignal;
   for (const pid of pids) {
     try {
-      process.kill(pid, "SIGKILL");
+      signal.terminate(pid);
     } catch {
       // Already exited; nothing to reap.
     }
   }
+  const deadline = Date.now() + timeoutMs;
+  let remaining = pids.filter((pid) => signal.isAlive(pid));
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await delay(CLEANUP_POLL_MS);
+    remaining = remaining.filter((pid) => signal.isAlive(pid));
+  }
+  if (remaining.length > 0) {
+    throw new Error(`owned process(es) still alive after ${timeoutMs}ms: ${remaining.join(", ")}`);
+  }
 };
 
 /**
- * Terminates a fixture-owned server and awaits its actual exit before its state
- * directories are removed. Bounded so a wedged process cannot hang cleanup.
+ * Terminates the captured fixture server and awaits its actual exit. Bounded so
+ * a wedged process fails cleanup rather than hanging it.
  */
-const killAndAwaitExit = (child: NodeChildProcess.ChildProcess): Effect.Effect<void> =>
-  Effect.promise(
-    () =>
-      new Promise<void>((resolve) => {
-        if (child.exitCode !== null || child.signalCode !== null) {
-          resolve();
-          return;
-        }
-        const timer = setTimeout(() => resolve(), 10_000);
-        child.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-        child.kill("SIGKILL");
-      }),
-  );
+const terminateAndConfirmChildExit = (
+  child: NodeChildProcess.ChildProcess,
+  options: {
+    readonly timeoutMs?: number | undefined;
+    readonly terminate?: ((child: NodeChildProcess.ChildProcess) => void) | undefined;
+  } = {},
+): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    const timeoutMs = options.timeoutMs ?? CLEANUP_TIMEOUT_MS;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    let timer: NodeJS.Timeout;
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      child.removeListener("exit", onExit);
+      reject(
+        new Error(
+          `captured server pid ${child.pid ?? "unknown"} did not exit within ${timeoutMs}ms`,
+        ),
+      );
+    }, timeoutMs);
+    child.once("exit", onExit);
+    try {
+      (options.terminate ?? ((target) => target.kill("SIGKILL")))(child);
+    } catch (error) {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+
+interface FixtureCleanupInput {
+  readonly serverChild: NodeChildProcess.ChildProcess | undefined;
+  readonly fixture: Fixture | undefined;
+  readonly timeoutMs?: number;
+  readonly signal?: OwnedProcessSignal;
+  readonly terminateChild?: (child: NodeChildProcess.ChildProcess) => void;
+}
+
+/**
+ * Ordered teardown: terminate the captured server so it can no longer spawn
+ * stubs, then reap the exact pids the fixture recorded, and only after every
+ * owned process is confirmed exited remove the fixture state. On any
+ * termination/confirmation failure it throws and deliberately leaves the
+ * fixture directories in place for diagnosis rather than reporting clean
+ * cleanup.
+ */
+const cleanupFixtureProcesses = async (input: FixtureCleanupInput): Promise<void> => {
+  const errors: Array<string> = [];
+  if (input.serverChild !== undefined) {
+    try {
+      await terminateAndConfirmChildExit(input.serverChild, {
+        timeoutMs: input.timeoutMs,
+        terminate: input.terminateChild,
+      });
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  const fixture = input.fixture;
+  if (fixture !== undefined) {
+    try {
+      const pids = await readRecordedStubPids(fixture.pidLogPath);
+      await terminateAndConfirmPidsExited(pids, {
+        timeoutMs: input.timeoutMs,
+        signal: input.signal,
+      });
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  if (errors.length > 0) {
+    throw new Error(
+      `ENVCHK fixture cleanup failed; preserving fixture state for diagnosis: ${errors.join("; ")}`,
+    );
+  }
+  if (fixture !== undefined) {
+    const fs = await import("node:fs/promises");
+    await Promise.all([
+      fs.rm(fixture.baseDir, { recursive: true, force: true }),
+      fs.rm(fixture.fakeDir, { recursive: true, force: true }),
+      fs.rm(fixture.root, { recursive: true, force: true }),
+    ]);
+  }
+};
 
 const bootstrapCookie = async (port: number): Promise<string> => {
   const response = await fetch(`http://127.0.0.1:${port}/api/auth/browser-session`, {
@@ -331,25 +454,18 @@ it.live(
   () => {
     let cleanupFixture: Fixture | undefined;
     let cleanupServer: SpawnedServer | undefined;
-    // Single ordered teardown, safe to run twice and from either the resource
-    // release or the `ensuring` guard. It kills the server first so it can no
-    // longer spawn provider stubs, reaps the stubs it orphaned, and only then
-    // removes the fixture state they were reading.
-    const teardown = Effect.gen(function* () {
-      if (cleanupServer !== undefined) {
-        yield* killAndAwaitExit(cleanupServer.child);
-      }
-      const fixture = cleanupFixture;
-      if (fixture === undefined) return;
-      yield* Effect.promise(() => killRecordedStubs(fixture.pidLogPath));
-      yield* Effect.promise(async () => {
-        const fs = await import("node:fs/promises");
-        await Promise.all([
-          fs.rm(fixture.baseDir, { recursive: true, force: true }),
-          fs.rm(fixture.fakeDir, { recursive: true, force: true }),
-          fs.rm(fixture.root, { recursive: true, force: true }),
-        ]);
+    // Single ordered teardown, memoized so the resource release and the
+    // `ensuring` guard drive the same run: terminate the server (so it can no
+    // longer spawn stubs), reap the exact recorded stub pids, and remove state
+    // only after every owned process is confirmed exited. A failure leaves the
+    // fixture directories in place for diagnosis.
+    let teardownPromise: Promise<void> | undefined;
+    const teardown = Effect.promise(() => {
+      teardownPromise ??= cleanupFixtureProcesses({
+        serverChild: cleanupServer?.child,
+        fixture: cleanupFixture,
       });
+      return teardownPromise;
     });
     return Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -642,4 +758,105 @@ it.live(
       Effect.provide(NodeServices.layer),
     );
   },
+);
+
+it.live(
+  "ENVCHK:E7 fixture cleanup proves owned-process exit before removing state (normal + forced timeout)",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* Effect.promise(() => import("node:fs/promises"));
+
+      const makeCleanupFixture = (): Effect.Effect<Fixture> =>
+        Effect.promise(async () => {
+          const baseDir = await fs.mkdtemp(
+            NodePath.join(NodeOS.tmpdir(), "envchk-e7-cleanup-base-"),
+          );
+          const root = await fs.mkdtemp(NodePath.join(NodeOS.tmpdir(), "envchk-e7-cleanup-root-"));
+          const fakeDir = await fs.mkdtemp(
+            NodePath.join(NodeOS.tmpdir(), "envchk-e7-cleanup-fake-"),
+          );
+          return {
+            baseDir,
+            root,
+            fakeDir,
+            argvLogPath: NodePath.join(fakeDir, "argv.log"),
+            pidLogPath: NodePath.join(fakeDir, "stub-pids.log"),
+            wrapperPath: "",
+          };
+        });
+
+      const spawnSleeper = (): Effect.Effect<NodeChildProcess.ChildProcess> =>
+        Effect.promise(() =>
+          Promise.resolve(
+            NodeChildProcess.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+              stdio: "ignore",
+            }),
+          ),
+        );
+
+      const awaitChildExit = (child: NodeChildProcess.ChildProcess): Effect.Effect<void> =>
+        Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              if (child.exitCode !== null || child.signalCode !== null) {
+                resolve();
+                return;
+              }
+              child.once("exit", () => resolve());
+            }),
+        );
+
+      const removeFixtureState = (fixture: Fixture): Effect.Effect<void> =>
+        Effect.promise(() =>
+          Promise.all([
+            fs.rm(fixture.baseDir, { recursive: true, force: true }),
+            fs.rm(fixture.fakeDir, { recursive: true, force: true }),
+            fs.rm(fixture.root, { recursive: true, force: true }),
+          ]),
+        );
+
+      // Normal completion: a captured live stub pid is terminated and confirmed
+      // gone, and only then is the fixture state removed.
+      const normalFixture = yield* makeCleanupFixture();
+      const normalChild = yield* spawnSleeper();
+      yield* Effect.promise(() =>
+        fs.writeFile(normalFixture.pidLogPath, `${normalChild.pid ?? 0}\n`, "utf8"),
+      );
+      yield* Effect.promise(() =>
+        cleanupFixtureProcesses({ serverChild: undefined, fixture: normalFixture }),
+      );
+      assert.strictEqual(NodeFS.existsSync(normalFixture.baseDir), false);
+      assert.strictEqual(NodeFS.existsSync(normalFixture.fakeDir), false);
+      assert.strictEqual(NodeFS.existsSync(normalFixture.root), false);
+
+      // Forced timeout: a captured pid that never reports exit must fail cleanup
+      // clearly and preserve the fixture directories for diagnosis.
+      const stuckFixture = yield* makeCleanupFixture();
+      const stuckChild = yield* spawnSleeper();
+      yield* Effect.promise(() =>
+        fs.writeFile(stuckFixture.pidLogPath, `${stuckChild.pid ?? 0}\n`, "utf8"),
+      );
+      const neverExits: OwnedProcessSignal = { terminate: () => {}, isAlive: () => true };
+      const failure = yield* Effect.promise(() =>
+        cleanupFixtureProcesses({
+          serverChild: undefined,
+          fixture: stuckFixture,
+          timeoutMs: 150,
+          signal: neverExits,
+        }).then(
+          () => undefined,
+          (error: unknown) => error,
+        ),
+      );
+      assert.instanceOf(failure, Error);
+      assert.include((failure as Error).message, "preserving fixture state");
+      assert.strictEqual(NodeFS.existsSync(stuckFixture.baseDir), true);
+      assert.strictEqual(NodeFS.existsSync(stuckFixture.fakeDir), true);
+      assert.strictEqual(NodeFS.existsSync(stuckFixture.root), true);
+
+      // Real teardown of the deliberately-stuck fixture so this test leaks nothing.
+      stuckChild.kill("SIGKILL");
+      yield* awaitChildExit(stuckChild);
+      yield* removeFixtureState(stuckFixture);
+    }),
 );
