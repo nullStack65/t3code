@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -19,6 +20,7 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
 
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
@@ -188,6 +190,20 @@ describe("custom model settings", () => {
     ).toEqual([{ slug: "x", capabilities }]);
     expect(() =>
       decodeServerSettingsPatch({ providers: { codex: { customModels: [{ name: "no slug" }] } } }),
+    ).toThrow();
+  });
+
+  it("supports an instance-scoped Codex catalog mode", () => {
+    expect(decodeCodexSettings({}).modelCatalogMode).toBe("app-server");
+    expect(decodeCodexSettings({ modelCatalogMode: "custom-only" }).modelCatalogMode).toBe(
+      "custom-only",
+    );
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { modelCatalogMode: "custom-only" } } })
+        .providers?.codex?.modelCatalogMode,
+    ).toBe("custom-only");
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { codex: { modelCatalogMode: "unknown" } } }),
     ).toThrow();
   });
 });

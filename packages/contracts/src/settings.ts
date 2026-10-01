@@ -567,6 +567,9 @@ function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fields>(
   );
 }
 
+export const CodexModelCatalogMode = Schema.Literals(["app-server", "custom-only"]);
+export type CodexModelCatalogMode = typeof CodexModelCatalogMode.Type;
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -603,6 +606,22 @@ export const CodexSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    modelCatalogMode: CodexModelCatalogMode.pipe(
+      Schema.withDecodingDefault(Effect.succeed("app-server" as const)),
+      Schema.annotateKey({
+        title: "Model catalog",
+        description:
+          "Use the Codex app-server catalog, or restrict this instance to its configured custom models.",
+        providerSettingsForm: {
+          control: "select",
+          clearWhenEmpty: "omit",
+          options: [
+            { value: "app-server", label: "Codex app-server" },
+            { value: "custom-only", label: "Custom models only" },
+          ],
+        },
+      }),
+    ),
     launchArgs: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -616,7 +635,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "shadowHomePath", "modelCatalogMode", "launchArgs"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -1395,6 +1414,7 @@ const CodexSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
+  modelCatalogMode: Schema.optionalKey(CodexModelCatalogMode),
   launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
