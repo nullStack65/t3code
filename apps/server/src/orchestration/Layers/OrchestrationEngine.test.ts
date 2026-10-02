@@ -16,6 +16,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
   ProviderInstanceId,
+  type ProviderSession,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
@@ -54,15 +55,32 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
 
+const providerServiceForEngineTests = {
+  listSessions: () => Effect.succeed([]),
+  getInstanceInfo: (instanceId: ProviderInstanceId) =>
+    Effect.succeed({
+      instanceId,
+      driverKind: "codex",
+      displayName: "Codex",
+      enabled: true,
+      continuationIdentity: {
+        driverKind: "codex",
+        continuationKey: `codex:${instanceId}`,
+      },
+    }),
+} as unknown as ProviderService["Service"];
+
 function makeOrchestrationLayer(
   databasePath?: string,
   repositoryIdentityResolver?: RepositoryIdentityResolver.RepositoryIdentityResolver["Service"],
+  providerService: ProviderService["Service"] = providerServiceForEngineTests,
 ) {
   const persistence = databasePath
     ? makeSqlitePersistenceLive(databasePath)
@@ -91,6 +109,7 @@ function makeOrchestrationLayer(
     ),
     Layer.provide(persistence),
     Layer.provideMerge(ServerConfigLayer),
+    Layer.provide(Layer.succeed(ProviderService, providerService)),
     Layer.provideMerge(NodeServices.layer),
   );
 }
@@ -98,9 +117,10 @@ function makeOrchestrationLayer(
 async function createOrchestrationSystem(
   databasePath?: string,
   repositoryIdentityResolver?: RepositoryIdentityResolver.RepositoryIdentityResolver["Service"],
+  providerService?: ProviderService["Service"],
 ) {
   const runtime = ManagedRuntime.make(
-    makeOrchestrationLayer(databasePath, repositoryIdentityResolver),
+    makeOrchestrationLayer(databasePath, repositoryIdentityResolver, providerService),
   );
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
@@ -469,6 +489,7 @@ describe("OrchestrationEngine", () => {
         } satisfies OrchestrationProjectionPipelineShape),
       ),
       Layer.provide(Layer.succeed(OrchestrationEventStore, eventStore)),
+      Layer.provide(Layer.succeed(ProviderService, providerServiceForEngineTests)),
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(SqlitePersistenceMemory),
@@ -565,6 +586,306 @@ describe("OrchestrationEngine", () => {
       });
       expect(yield* engine.latestSequence).toBe(sequence);
     }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
+  effectIt.effect.each([
+    { targetInstanceId: "claude", sessionStatus: "running" },
+    { targetInstanceId: "codex-jeffrey-business", sessionStatus: "running" },
+    { targetInstanceId: "claude", sessionStatus: "ready" },
+    { targetInstanceId: "codex-jeffrey-business", sessionStatus: "stopped" },
+  ] as const)(
+    "rejects incompatible callback routes before ingesting messages ($targetInstanceId, $sessionStatus)",
+    ({ targetInstanceId, sessionStatus }) =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const receipts = yield* OrchestrationCommandReceipts.OrchestrationCommandReceiptRepository;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const threadId = ThreadId.make(`thread-route-reject-${targetInstanceId}`);
+        const projectId = ProjectId.make(`project-route-reject-${targetInstanceId}`);
+        const commandId = CommandId.make(`cmd-route-reject-${targetInstanceId}`);
+        const createdAt = now();
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make(`project-route-reject-${targetInstanceId}`),
+          projectId,
+          title: "Callback route",
+          workspaceRoot: "/tmp/callback-route",
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`thread-route-reject-${targetInstanceId}`),
+          threadId,
+          projectId,
+          title: "Callback route",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-luna"),
+            model: "gpt-6-luna",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`session-route-reject-${targetInstanceId}`),
+          threadId,
+          createdAt,
+          session: {
+            threadId,
+            status: sessionStatus,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex-luna"),
+            runtimeMode: "full-access",
+            activeTurnId: sessionStatus === "running" ? TurnId.make("turn-still-running") : null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+        });
+        const before = yield* snapshots.getThreadDetailById(threadId);
+        const beforeSequence = yield* engine.latestSequence;
+        const error = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId,
+            threadId,
+            message: {
+              messageId: asMessageId(`callback-message-${targetInstanceId}`),
+              role: "user",
+              text: "Preserve this business result",
+              attachments: [],
+            },
+            modelSelection: {
+              instanceId: ProviderInstanceId.make(targetInstanceId),
+              model: "gpt-6-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt,
+          })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain("cannot resume on incompatible instance");
+        expect(yield* engine.latestSequence).toBe(beforeSequence);
+        const after = yield* snapshots.getThreadDetailById(threadId);
+        expect(after).toEqual(before);
+        expect(Option.getOrNull(yield* receipts.getByCommandId({ commandId }))).toMatchObject({
+          commandId,
+          status: "rejected",
+          aggregateId: threadId,
+          error: error.message,
+          resultSequence: beforeSequence,
+        });
+        const repeated = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId,
+            threadId,
+            message: {
+              messageId: asMessageId(`callback-message-${targetInstanceId}`),
+              role: "user",
+              text: "Preserve this business result",
+              attachments: [],
+            },
+            modelSelection: {
+              instanceId: ProviderInstanceId.make(targetInstanceId),
+              model: "gpt-6-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt,
+          })
+          .pipe(Effect.flip);
+        expect(repeated._tag).toBe("OrchestrationCommandPreviouslyRejectedError");
+        expect(yield* engine.latestSequence).toBe(beforeSequence);
+      }).pipe(
+        Effect.provide(
+          makeOrchestrationLayer(undefined, undefined, {
+            ...providerServiceForEngineTests,
+            listSessions: () =>
+              Effect.succeed(
+                sessionStatus === "running"
+                  ? [
+                      {
+                        threadId: ThreadId.make(`thread-route-reject-${targetInstanceId}`),
+                        provider: "codex",
+                        providerInstanceId: ProviderInstanceId.make("codex-luna"),
+                        status: "running",
+                        resumeCursor: { opaque: "still-running-resume-cursor" },
+                      } as unknown as ProviderSession,
+                    ]
+                  : [],
+              ),
+            getInstanceInfo: (instanceId: ProviderInstanceId) =>
+              Effect.succeed({
+                instanceId,
+                driverKind: instanceId === "claude" ? "claudeAgent" : "codex",
+                displayName: String(instanceId),
+                enabled: true,
+                continuationIdentity: {
+                  driverKind: instanceId === "claude" ? "claudeAgent" : "codex",
+                  continuationKey: String(instanceId),
+                },
+              }),
+          } as unknown as ProviderService["Service"]),
+        ),
+      ),
+  );
+
+  effectIt.effect(
+    "rejects a stale callback route binding but preserves deliberate user model changes",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const projectId = ProjectId.make("project-route-binding");
+        const threadId = ThreadId.make("thread-route-binding");
+        const oldSelection = {
+          instanceId: ProviderInstanceId.make("codex-recipient"),
+          model: "gpt-6-luna",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        };
+        const currentSelection = {
+          ...oldSelection,
+          options: [{ id: "reasoningEffort", value: "low" }],
+        };
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("project-route-binding"),
+          projectId,
+          title: "Route binding",
+          workspaceRoot: "/tmp/route-binding",
+          createdAt: now(),
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("thread-route-binding"),
+          threadId,
+          projectId,
+          title: "Route binding",
+          modelSelection: oldSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        });
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("thread-route-binding-model-update"),
+          threadId,
+          modelSelection: currentSelection,
+        });
+        const before = yield* engine.latestSequence;
+        const staleError = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("thread-route-binding-stale"),
+            threadId,
+            message: {
+              messageId: asMessageId("message-route-binding-stale"),
+              role: "user",
+              text: "Stale callback result",
+              attachments: [],
+            },
+            modelSelection: oldSelection,
+            routeBinding: oldSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now(),
+          })
+          .pipe(Effect.flip);
+        expect(staleError.message).toContain("destination route");
+        expect(yield* engine.latestSequence).toBe(before);
+        expect(
+          Option.getOrNull(yield* snapshots.getThreadDetailById(threadId))?.messages,
+        ).toHaveLength(0);
+
+        const senderRouteSelection = {
+          ...currentSelection,
+          instanceId: ProviderInstanceId.make("codex-sender"),
+        };
+        const senderRouteError = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("thread-route-binding-sender-instance"),
+            threadId,
+            message: {
+              messageId: asMessageId("message-route-binding-sender-instance"),
+              role: "user",
+              text: "Wrong sender route",
+              attachments: [],
+            },
+            modelSelection: senderRouteSelection,
+            routeBinding: senderRouteSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now(),
+          })
+          .pipe(Effect.flip);
+        expect(senderRouteError.message).toContain("destination route");
+        expect(yield* engine.latestSequence).toBe(before);
+
+        const deliveredMessageId = asMessageId("message-route-binding-delivered");
+        yield* engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("thread-route-binding-delivered"),
+          threadId,
+          message: {
+            messageId: deliveredMessageId,
+            role: "user",
+            text: "Callback result already delivered",
+            attachments: [],
+          },
+          modelSelection: currentSelection,
+          routeBinding: currentSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: now(),
+        });
+        const afterDelivery = yield* engine.latestSequence;
+        const duplicateMessageError = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("thread-route-binding-new-command-duplicate-message"),
+            threadId,
+            message: {
+              messageId: deliveredMessageId,
+              role: "user",
+              text: "Callback result already delivered",
+              attachments: [],
+            },
+            modelSelection: currentSelection,
+            routeBinding: currentSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now(),
+          })
+          .pipe(Effect.flip);
+        expect(duplicateMessageError.message).toContain("already present");
+        expect(yield* engine.latestSequence).toBe(afterDelivery);
+
+        yield* engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("thread-route-binding-deliberate-change"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-route-binding-user-change"),
+            role: "user",
+            text: "Intentional model change",
+            attachments: [],
+          },
+          modelSelection: { ...currentSelection, model: "gpt-6-pro" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: now(),
+        });
+        expect(
+          Option.getOrNull(yield* snapshots.getThreadDetailById(threadId))?.messages,
+        ).toHaveLength(2);
+      }).pipe(Effect.provide(makeOrchestrationLayer())),
   );
 
   effectIt.effect(
@@ -1515,6 +1836,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(ThreadBackgroundLiveness.layer),
         Layer.provide(ThreadPlanProgress.layer),
         Layer.provide(OrchestrationProjectionPipelineLive),
+        Layer.provide(Layer.succeed(ProviderService, providerServiceForEngineTests)),
         Layer.provide(Layer.succeed(OrchestrationEventStore, flakyStore)),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
@@ -1623,6 +1945,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(ThreadBackgroundLiveness.layer),
         Layer.provide(ThreadPlanProgress.layer),
         Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, flakyProjectionPipeline)),
+        Layer.provide(Layer.succeed(ProviderService, providerServiceForEngineTests)),
         Layer.provide(OrchestrationEventStoreLive),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
@@ -1772,6 +2095,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(ThreadBackgroundLiveness.layer),
         Layer.provide(ThreadPlanProgress.layer),
         Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, flakyProjectionPipeline)),
+        Layer.provide(Layer.succeed(ProviderService, providerServiceForEngineTests)),
         Layer.provide(Layer.succeed(OrchestrationEventStore, nonTransactionalStore)),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
