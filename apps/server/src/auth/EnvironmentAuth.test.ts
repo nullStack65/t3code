@@ -19,6 +19,7 @@ import * as SessionStore from "./SessionStore.ts";
 
 /** Pinned so dev-mode cookie tests can assert the port-scoped name. */
 const TEST_SERVER_PORT = 13_773;
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const isPairingCredentialIssueError = Schema.is(PairingGrantStore.PairingCredentialIssueError);
 const isPersistenceSqlError = Schema.is(PersistenceErrors.PersistenceSqlError);
 
@@ -133,7 +134,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       expect(firstState.subject).toBe("provider-principal-1");
       expect(secondState.subject).toBe(firstState.subject);
       expect(driftedState.subject).not.toBe(firstState.subject);
-      expect(JSON.stringify(firstState)).not.toContain(first.token);
+      expect(encodeJson(firstState)).not.toContain(first.token);
       expect(anonymousState.subject).toBeUndefined();
     }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web" }))),
   );
