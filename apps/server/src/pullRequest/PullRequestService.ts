@@ -2326,7 +2326,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const requestReviewers: PullRequestService["Service"]["requestReviewers"] = (input) => {
+  const requestReviewers: PullRequestService["Service"]["requestReviewers"] = (_input) => {
     return Effect.fail(
       new PullRequestOperationError({
         operation: "requestReviewers",
