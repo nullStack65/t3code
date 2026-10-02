@@ -163,18 +163,33 @@ function createProviderServiceHarness() {
   };
 
   const setSession = (session: ProviderSession): void => {
-    const existingIndex = runtimeSessions.findIndex((entry) => entry.threadId === session.threadId);
+    const sessionWithInstance = {
+      ...session,
+      providerInstanceId:
+        session.providerInstanceId ?? ProviderInstanceId.make(String(session.provider)),
+    };
+    const existingIndex = runtimeSessions.findIndex(
+      (entry) => entry.threadId === sessionWithInstance.threadId,
+    );
     if (existingIndex >= 0) {
-      runtimeSessions[existingIndex] = session;
+      runtimeSessions[existingIndex] = sessionWithInstance;
       return;
     }
-    runtimeSessions.push(session);
+    runtimeSessions.push(sessionWithInstance);
   };
 
   const normalizeLegacyEvent = (event: LegacyProviderRuntimeEvent): ProviderRuntimeEvent => {
+    const eventWithInstance = {
+      ...event,
+      providerInstanceId:
+        event.providerInstanceId ?? ProviderInstanceId.make(String(event.provider)),
+    };
     if (isLegacyTurnCompletedEvent(event)) {
       const normalized: Extract<ProviderRuntimeEvent, { type: "turn.completed" }> = {
-        ...(event as Omit<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>, "payload">),
+        ...(eventWithInstance as Omit<
+          Extract<ProviderRuntimeEvent, { type: "turn.completed" }>,
+          "payload"
+        >),
         payload: {
           state: event.status,
           ...(typeof event.errorMessage === "string" ? { errorMessage: event.errorMessage } : {}),
@@ -183,7 +198,7 @@ function createProviderServiceHarness() {
       return normalized;
     }
 
-    return event as ProviderRuntimeEvent;
+    return eventWithInstance as ProviderRuntimeEvent;
   };
 
   const emit = (event: LegacyProviderRuntimeEvent): void => {
@@ -269,6 +284,7 @@ describe("ProviderRuntimeIngestion", () => {
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
     threadTitle?: string;
+    providerInstanceId?: string;
     workspaceSubdirectory?: string;
     isGitRepository?: CheckpointStore.CheckpointStore["Service"]["isGitRepository"];
   }) {
@@ -380,8 +396,8 @@ describe("ProviderRuntimeIngestion", () => {
       projectId: asProjectId("project-1"),
       title: options?.threadTitle ?? "Thread",
       modelSelection: {
-        instanceId: ProviderInstanceId.make("codex"),
-        model: "gpt-5-codex",
+        instanceId: ProviderInstanceId.make(options?.providerInstanceId ?? "codex"),
+        model: options?.providerInstanceId === "opencode" ? "openai/gpt-5-codex" : "gpt-5-codex",
       },
       interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       runtimeMode: "approval-required",
@@ -396,7 +412,8 @@ describe("ProviderRuntimeIngestion", () => {
       session: {
         threadId: ThreadId.make("thread-1"),
         status: "ready",
-        providerName: "codex",
+        providerName: options?.providerInstanceId === "opencode" ? "opencode" : "codex",
+        providerInstanceId: ProviderInstanceId.make(options?.providerInstanceId ?? "codex"),
         runtimeMode: "approval-required",
         activeTurnId: null,
         updatedAt: createdAt,
@@ -540,6 +557,7 @@ describe("ProviderRuntimeIngestion", () => {
     async (terminalType) => {
       const harness = await createHarness({
         serverSettings: { responseStreamingMode: "paragraph" },
+        providerInstanceId: "opencode",
       });
       const threadId = asThreadId("thread-1");
       const oldTurnId = asTurnId("old-buffered-turn");
@@ -624,6 +642,7 @@ describe("ProviderRuntimeIngestion", () => {
   ])("ignores late OpenCode aborts for $source across newer turns", async (lateAbort) => {
     const harness = await createHarness({
       serverSettings: { responseStreamingMode: "token" },
+      providerInstanceId: "opencode",
     });
     const threadId = asThreadId("thread-1");
     const stoppedTurnId = asTurnId("opencode-stopped-turn");

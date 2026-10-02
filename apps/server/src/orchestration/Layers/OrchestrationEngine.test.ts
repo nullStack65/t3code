@@ -852,6 +852,81 @@ describe("OrchestrationEngine", () => {
       ),
   );
 
+  effectIt.effect("fails closed for an unresolved retained active provider instance", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const projectId = asProjectId("project-unresolved-active-instance");
+      const threadId = ThreadId.make("thread-unresolved-active-instance");
+      const createdAt = now();
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("project-unresolved-active-instance"),
+        projectId,
+        title: "Unresolved active instance",
+        workspaceRoot: "/tmp/unresolved-active-instance",
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("thread-unresolved-active-instance"),
+        threadId,
+        projectId,
+        title: "Unresolved active instance",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+      const retainedSession = {
+        threadId,
+        status: "running" as const,
+        providerName: "codex",
+        runtimeMode: "full-access" as const,
+        activeTurnId: TurnId.make("unresolved-running-turn"),
+        lastError: null,
+        updatedAt: createdAt,
+      };
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("session-unresolved-active-instance"),
+        threadId,
+        session: retainedSession,
+        createdAt,
+      });
+      const before = yield* snapshots.getThreadDetailById(threadId);
+      const beforeSequence = yield* engine.latestSequence;
+      const error = yield* engine
+        .dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("turn-unresolved-active-instance"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-unresolved-active-instance"),
+            role: "user",
+            text: "Preserve this result",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt,
+        })
+        .pipe(Effect.flip);
+
+      expect(error.message).toContain("active provider instance is unknown");
+      expect(yield* engine.latestSequence).toBe(beforeSequence);
+      expect(yield* snapshots.getThreadDetailById(threadId)).toEqual(before);
+      expect(Option.getOrNull(yield* snapshots.getThreadShellById(threadId))?.session).toEqual(
+        retainedSession,
+      );
+    }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
   effectIt.effect(
     "rejects a stale callback route binding but preserves deliberate user model changes",
     () =>
