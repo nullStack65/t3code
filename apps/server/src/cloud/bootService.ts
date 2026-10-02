@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDateInEffect:off globalTimersInEffect:off -- The bounded SCM transition poll must advance on the real wall clock even under a test clock.
 import {
   HostProcessArchitecture,
   HostProcessExecutablePath,
@@ -12,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Path from "effect/Path";
 import { HttpClient } from "effect/unstable/http";
 import * as Schema from "effect/Schema";
@@ -23,6 +25,7 @@ import {
   ensurePinnedRuntimeInstalled,
   pinnedRuntimeCommand,
   pinnedRuntimePaths,
+  pinnedRuntimeVersionsDir,
   PinnedRuntimeInstallError,
 } from "./pinnedRuntime.ts";
 import {
@@ -30,11 +33,27 @@ import {
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STATE_FILE,
   compareExactServiceVersions,
+  isExactServiceVersion,
   parseServiceState,
   serviceStateActiveVersion,
   serviceStateHasPendingUpdate,
   type ServiceState,
 } from "./serviceProtocol.ts";
+import {
+  isQualifiedWindowsAccount,
+  parseScQc,
+  parseScQuery,
+  scRunningState,
+  scServiceDoesNotExist,
+  WINDOWS_BOOT_SERVICE_NAME,
+  windowsRegistrationOwnedByUs,
+  windowsRuntimeFromImagePath,
+  windowsServiceHelperPath,
+  windowsServiceProgram,
+  windowsServiceSteps,
+  type WindowsBootServiceBinding,
+  type WindowsServiceSteps,
+} from "./windowsBootService.ts";
 
 const BOOT_SERVICE_NAME = "t3code";
 const BOOT_SERVICE_UNIT_FILE = `${BOOT_SERVICE_NAME}.service`;
@@ -212,12 +231,34 @@ export interface BootServiceStep {
 const STOP_STEP_TIMEOUT = Duration.seconds(120);
 
 /**
+ * `sc.exe stop`/`start`/`delete` return once the request is accepted, which is
+ * not SCM state completion: a stop can stay `STOP_PENDING`, a delete can stay
+ * marked-for-deletion. SCM transitions are instead observed by bounded polling
+ * of authoritative `sc.exe queryex` state; a timeout or failed query is never
+ * promoted to a successful transition.
+ */
+const WINDOWS_TRANSITION_POLL_MS = 200;
+const WINDOWS_TRANSITION_TIMEOUT_MS = 30_000;
+
+/**
+ * A real-time delay for the bounded SCM transition poll. It deliberately does
+ * not use the Effect `Clock`, so the wait also advances under a test clock where
+ * an `Effect.sleep` would never elapse. It only spaces out authoritative state
+ * probes; it is never itself treated as evidence that a transition completed.
+ */
+const realDelay = (ms: number): Effect.Effect<void> =>
+  Effect.callback<void, never>((resume) => {
+    const timer = setTimeout(() => resume(Effect.void), ms);
+    return Effect.sync(() => clearTimeout(timer));
+  });
+
+/**
  * Platform service-manager integration as data: paths, a pure renderer, and
  * the command steps each flow runs. install/uninstall/status consume this and
  * never branch on platform.
  */
 export interface BootServiceManager {
-  readonly kind: "systemd" | "launchd";
+  readonly kind: "systemd" | "launchd" | "scm";
   readonly unitPath: string;
   readonly render: (plan: BootServicePlan) => string;
   /** Before rewriting files, when a unit is already installed. */
@@ -230,6 +271,25 @@ export interface BootServiceManager {
   readonly deactivate: ReadonlyArray<BootServiceStep>;
   /** Uninstall, after the unit file is removed. */
   readonly finalize: ReadonlyArray<BootServiceStep>;
+}
+
+/**
+ * SCM integration is registration-based, not file-based: `install`/`status`/
+ * `uninstall` branch on it explicitly. `unitPath` is empty because there is no
+ * unit file; identity comes from `sc.exe qc`.
+ */
+function windowsManager(binding: WindowsBootServiceBinding): BootServiceManager {
+  const steps = windowsServiceSteps(binding);
+  return {
+    kind: "scm",
+    unitPath: "",
+    render: () => windowsServiceProgram(binding).join(" "),
+    stop: [steps.stop],
+    activate: [steps.reconfigure, steps.start],
+    restart: [steps.start],
+    deactivate: [steps.stop, steps.delete],
+    finalize: [],
+  };
 }
 
 function systemdManager(input: {
@@ -386,6 +446,7 @@ function selectBootServiceManager(input: {
   readonly uid: number | undefined;
   readonly path: Path.Path;
   readonly environmentPath: string;
+  readonly windows?: WindowsBootServiceBinding;
 }): BootServiceManager | undefined {
   if (input.homeDir === "") {
     return undefined;
@@ -400,6 +461,14 @@ function selectBootServiceManager(input: {
       uid: input.uid,
       environmentPath: input.environmentPath,
     });
+  }
+  // Windows is selectable for read-only observation whenever the home, helper
+  // and runtime are known, even without an install account: status must be able
+  // to observe an installed service the caller has no credentials to mutate.
+  // Mutation still refuses a missing/unqualified account in
+  // `requireWindowsBinding`, so the adapter never defaults to LocalSystem.
+  if (input.platform === "win32" && input.windows !== undefined) {
+    return windowsManager(input.windows);
   }
   return undefined;
 }
@@ -446,6 +515,10 @@ const BootServiceProblem = Schema.Literals([
   "service-disabled",
   "service-stopped",
   "restart-pending",
+  "service-account-missing",
+  "service-helper-missing",
+  "windows-service-unreachable",
+  "windows-service-foreign-registration",
 ]);
 type BootServiceProblem = typeof BootServiceProblem.Type;
 
@@ -464,6 +537,14 @@ export function formatBootServiceProblem(problem: BootServiceProblem): string {
       return "The service is not running. Check the service log and `systemctl --user status t3code.service`, then run `t3 service install`.";
     case "restart-pending":
       return "A newer version is installed but the service is still running the previous one. Run `t3 service restart` to switch.";
+    case "service-account-missing":
+      return "Windows background setup needs an explicit, qualified service account (DOMAIN\\user or user@domain). Set T3_SERVICE_ACCOUNT to a dedicated account; T3 never defaults to LocalSystem.";
+    case "service-helper-missing":
+      return "The T3 Windows service host (t3-windows-service-host.exe) is not installed beside the pinned runtime. It ships with the packaged release; this copy has no Windows service support.";
+    case "windows-service-unreachable":
+      return "The Windows service control manager did not answer a bounded query. The registration state is unknown, not absent and not healthy; retry after `sc.exe query` responds.";
+    case "windows-service-foreign-registration":
+      return "An existing service named T3Code is not bound to this T3 home, helper and runtime. T3 will not overwrite or delete another installation's registration.";
   }
 }
 
@@ -497,17 +578,125 @@ export class BootServiceDowngradeRefusedError extends Schema.TaggedError<BootSer
   }
 }
 
+/**
+ * A mutation failed after the SCM registration already named the new version,
+ * so the previous owned state could not be restored. This is an explicit
+ * partial outcome, not a claim that the previous state survived.
+ */
+export class BootServicePartialStateError extends Schema.TaggedError<BootServicePartialStateError>()(
+  "BootServicePartialStateError",
+  {
+    step: Schema.String,
+    activeVersion: Schema.optional(Schema.String),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Background setup failed while ${this.step}. The SCM registration already names t3@${
+      this.activeVersion ?? "the new version"
+    }, so the previous service state could not be restored.`;
+  }
+}
+
 export type BootServiceError =
   | BootServiceUnsupportedError
   | BootServiceCommandError
   | BootServiceInstallError
   | BootServicePrerequisiteError
   | BootServiceUpdatePendingError
-  | BootServiceDowngradeRefusedError;
+  | BootServiceDowngradeRefusedError
+  | BootServicePartialStateError;
+
+/**
+ * Version of the additive `t3 service status --json` contract. Bump when an
+ * existing field changes meaning or is removed; adding optional fields does
+ * not require a bump. The contract is documented in
+ * `docs/internals/service-status.md`.
+ */
+export const BOOT_SERVICE_STATUS_SCHEMA_VERSION = 2;
+
+export type BootServiceManagerKind = "systemd" | "launchd" | "scm" | "unsupported";
+
+/** `unknown` is the honest answer whenever the manager did not answer. */
+export type BootServiceEnabledState = "enabled" | "disabled" | "unknown";
+
+/**
+ * `transitioning` covers manager states that are neither a live job nor a
+ * proven stop (systemd `activating`/`deactivating`). A transitional unit is
+ * never reported as stopped.
+ */
+export type BootServiceRunningState =
+  | "running"
+  | "stopped"
+  | "transitioning"
+  | "not-loaded"
+  | "unknown";
+
+/**
+ * A bounded, read-only observation of the service manager. It is deliberately
+ * narrower than application health: `running` only means the manager reports
+ * the job's main process alive. A state file, a launchd `last exit code` of 0
+ * or a `current` identity never substitute for a live manager answer.
+ */
+export interface BootServiceManagerObservation {
+  readonly manager: "systemd" | "launchd" | "scm";
+  /** The command this observation came from. */
+  readonly source: string;
+  readonly observedAt: string;
+  /** Whether the manager control plane answered at all. */
+  readonly reachable: boolean;
+  readonly enabled: BootServiceEnabledState;
+  readonly running: BootServiceRunningState;
+  /** Raw manager activity token, preserved verbatim (systemd `ActiveState`, launchd `state`). */
+  readonly state?: string;
+  /** Raw manager sub-state when the manager exposes one (systemd `SubState`). */
+  readonly subState?: string;
+  /** The manager's main process id, only when it is a valid positive integer. */
+  readonly processId?: number;
+  /**
+   * The program path the manager is *configured* to launch (systemd
+   * `ExecStart`, launchd `program`). This is configuration, not proof of the
+   * running server: T3 keeps its launcher executable while it swaps the server
+   * child during an update, so the configured launcher and the running server
+   * can be different versions. It is reported whether or not it binds to the
+   * selected base dir; only a bound path yields `configuredVersion`.
+   */
+  readonly configuredProgramPath?: string;
+  /**
+   * Version parsed from `configuredProgramPath` when that path is inside the
+   * selected base dir's runtime tree. This names the configured launcher, not
+   * the running server; a different-home path never produces it.
+   */
+  readonly configuredVersion?: string;
+  /**
+   * `systemd NRestarts`: monotonic since the unit last (re)started. launchd has
+   * no equivalent, so this is never set on macOS; launchd throttling is not a
+   * finite restart budget and must not be presented as one.
+   */
+  readonly restartCount?: number;
+  /** The manager's own last-result token, when it reports one (systemd `Result`, launchd `last exit code`). */
+  readonly lastResult?: string;
+  /** Why a value is unknown. Sanitized: never contains host secrets or process environments. */
+  readonly detail?: string;
+}
 
 export interface BootServiceStatus {
+  readonly schemaVersion: number;
   readonly supported: boolean;
+  readonly manager: BootServiceManagerKind;
   readonly installed: boolean;
+  /**
+   * Manager-reported registration state. `unknown` whenever the manager could
+   * not be reached, timed out or returned output this CLI cannot parse.
+   */
+  readonly enabled: BootServiceEnabledState;
+  /** Manager-observed job state; `unknown` is never healthy. */
+  readonly running: BootServiceRunningState;
+  /**
+   * Identity only: unit/plist matches this CLI, pinned runtime is present, the
+   * state file names this version and no update is pending. `current: true`
+   * says nothing about whether the server answers or is even running.
+   */
   readonly current: boolean;
   readonly installedVersion?: string;
   /**
@@ -517,9 +706,181 @@ export interface BootServiceStatus {
    * server of the machine it ran on.
    */
   readonly installedBaseDir?: string;
+  /**
+   * Version of the launch program the manager is configured to run, when the
+   * manager exposes that path and it binds to the selected base dir. This is
+   * configuration, not proof of the running server: T3 retains its launcher
+   * executable while replacing the server child, so the configured launcher
+   * and the running server can differ. There is deliberately no observed
+   * running-server version here until a bounded probe can prove one.
+   */
+  readonly configuredVersion?: string;
+  readonly observation?: BootServiceManagerObservation;
   readonly problems?: ReadonlyArray<BootServiceProblem>;
   readonly unitPath: string;
   readonly logPath: string;
+  readonly observedAt: string;
+}
+
+/** Extracts an exact release version from a manager-reported runtime path. */
+export function bootServiceVersionFromProgramPath(programPath: string): string | undefined {
+  const version = /[\\/]runtime[\\/]versions[\\/]([^\\/]+)[\\/]/.exec(programPath)?.[1];
+  return version !== undefined && isExactServiceVersion(version) ? version : undefined;
+}
+
+export interface BootServiceProgramBinding {
+  /** Whether the normalized program path really lives under the selected base dir's runtime tree. */
+  readonly contained: boolean;
+  /** Version parsed from the contained path's first runtime-tree segment, when exact. */
+  readonly version?: string;
+}
+
+/**
+ * A manager-reported program only identifies *this* installation when it lives
+ * under the selected T3 home's `runtime/versions` tree. The check normalizes
+ * both paths through the platform `Path` helpers and rejects anything whose
+ * relative path escapes that tree, so a lexical prefix or a `..` segment
+ * under it is not mistaken for containment. A stale unit, or a home other than
+ * the one this CLI is bound to, stays unbound rather than being promoted to
+ * this service's identity.
+ */
+export function bindBootServiceProgramPath(
+  programPath: string,
+  baseDir: string,
+  path: Path.Path,
+): BootServiceProgramBinding {
+  const versionsDir = path.resolve(pinnedRuntimeVersionsDir(path, baseDir));
+  const relative = path.relative(versionsDir, path.resolve(programPath));
+  const escaped =
+    relative === "" ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`);
+  if (escaped) return { contained: false };
+  const [segment = ""] = relative.split(path.sep);
+  return {
+    contained: true,
+    ...(isExactServiceVersion(segment) ? { version: segment } : {}),
+  };
+}
+
+/**
+ * `launchctl` stderr is not a stable format either, so only a coarse token
+ * match is used. A permission refusal is a distinct observation: the manager
+ * control plane exists but this user may not inspect it. It must never be
+ * folded into "missing domain" or "job not loaded" and must never be healthy.
+ */
+export function launchdPermissionDenied(stderr: string): boolean {
+  return /\b(operation not permitted|permission denied|not privileged|eperm)\b/i.test(stderr);
+}
+
+/**
+ * The established "this job/domain does not exist" outcomes. Any other nonzero
+ * launchctl failure is an unexpected query error, not evidence of absence.
+ */
+export function launchdNotFound(stderr: string): boolean {
+  return /\b(could not find|not find|no such (?:process|service|domain)|service not found|domain not found)\b/i.test(
+    stderr,
+  );
+}
+
+export interface BootServiceSystemdProperties {
+  readonly loadState: string;
+  readonly activeState: string;
+  readonly subState: string;
+  readonly unitFileState: string;
+  readonly execStart: string;
+  readonly mainPid?: number;
+  readonly nRestarts?: number;
+  readonly result?: string;
+}
+
+/**
+ * Reads a whole field as a safe integer. A numeric prefix with trailing junk
+ * (`12junk`), a non-decimal spelling, or a value outside `Number.MAX_SAFE_INTEGER`
+ * stays unknown rather than being truncated or rounded into a misleading
+ * number. Sign and positivity are decided by the caller's domain rules.
+ */
+function parseWholeSafeInteger(text: string | undefined): number | undefined {
+  if (text === undefined) return undefined;
+  const trimmed = text.trim();
+  if (!/^-?\d+$/.test(trimmed)) return undefined;
+  const value = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+/**
+ * Parses `systemctl --user show` key=value output. Missing LoadState or
+ * ActiveState means the answer is unusable and must stay unknown rather than
+ * defaulting to a healthy value. A malformed or nonpositive `MainPID` and a
+ * malformed or negative `NRestarts` are dropped rather than coerced, including
+ * values too large to represent exactly as a safe integer.
+ */
+export function parseSystemdShow(stdout: string): BootServiceSystemdProperties | undefined {
+  const values = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    values.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  const loadState = values.get("LoadState");
+  const activeState = values.get("ActiveState");
+  if (loadState === undefined || activeState === undefined) return undefined;
+  const restartValue = parseWholeSafeInteger(values.get("NRestarts"));
+  const nRestarts = restartValue !== undefined && restartValue >= 0 ? restartValue : undefined;
+  const mainPidValue = parseWholeSafeInteger(values.get("MainPID"));
+  const mainPid = mainPidValue !== undefined && mainPidValue > 0 ? mainPidValue : undefined;
+  const result = values.get("Result");
+  return {
+    loadState,
+    activeState,
+    subState: values.get("SubState") ?? "",
+    unitFileState: values.get("UnitFileState") ?? "",
+    execStart: values.get("ExecStart") ?? "",
+    ...(mainPid === undefined ? {} : { mainPid }),
+    ...(nRestarts === undefined ? {} : { nRestarts }),
+    ...(result !== undefined && result !== "" ? { result } : {}),
+  };
+}
+
+export interface BootServiceLaunchdPrint {
+  readonly state?: string;
+  readonly pid?: number;
+  readonly program?: string;
+  readonly lastExitCode?: number;
+}
+
+/**
+ * `launchctl print` has no stable machine format, so only a few anchored tokens
+ * are read. A response with none of them is malformed and stays unknown. A
+ * `pid` is only observed when the whole field is a positive safe integer; a
+ * zero, a numeric prefix with trailing junk, or an unrepresentable value is not
+ * a live process. `last exit code` is read as a whole safe signed integer.
+ */
+export function parseLaunchdPrint(stdout: string): BootServiceLaunchdPrint | undefined {
+  if (!/(?:^|\n)[ \t]*(?:state|pid|program|last exit code)[ \t]*=/.test(stdout)) return undefined;
+  const state = /(?:^|\n)[ \t]*state[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1]?.trim();
+  const pidText = /(?:^|\n)[ \t]*pid[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1];
+  const program = /(?:^|\n)[ \t]*program[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1]?.trim();
+  const lastExitText = /(?:^|\n)[ \t]*last exit code[ \t]*=[ \t]*([^\n]*)/.exec(stdout)?.[1];
+  const pidValue = parseWholeSafeInteger(pidText);
+  const pid = pidValue !== undefined && pidValue > 0 ? pidValue : undefined;
+  const lastExitCode = parseWholeSafeInteger(lastExitText);
+  return {
+    ...(state === undefined || state === "" ? {} : { state }),
+    ...(pid === undefined ? {} : { pid }),
+    ...(program === undefined || program === "" ? {} : { program }),
+    ...(lastExitCode === undefined ? {} : { lastExitCode }),
+  };
+}
+
+/** Reads enabled/disabled out of `launchctl print-disabled gui/<uid>`. */
+export function parseLaunchdDisabled(stdout: string, label: string): boolean | undefined {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\n)[ \\t]*"?${escaped}"?[ \\t]*=>[ \\t]*(true|false)`).exec(
+    stdout,
+  );
+  return match === null ? undefined : match[1] === "true";
 }
 
 export class BootService extends Context.Service<
@@ -555,6 +916,8 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   readonly logsDir: string;
   readonly cliVersion: string;
   readonly host?: BootServiceHost;
+  /** Test seam: override the bounded SCM transition wait. Production uses 30s. */
+  readonly windowsTransitionTimeoutMs?: number;
 }) {
   const hostExecPath = yield* HostProcessExecutablePath;
   const platform = yield* HostProcessPlatform;
@@ -591,18 +954,37 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     ]),
   ).join(":");
 
+  const runtimePaths = pinnedRuntimePaths(path, input.baseDir, input.cliVersion, platform);
+  // Windows binds an explicit, qualified account; there is no LocalSystem
+  // default. Absent or unqualified, the manager is not selectable at all.
+  const windowsAccount = Option.getOrUndefined(
+    yield* Config.String("T3_SERVICE_ACCOUNT").pipe(Config.option),
+  )?.trim();
+  const windowsBinding: WindowsBootServiceBinding | undefined =
+    platform === "win32"
+      ? {
+          hostPath: windowsServiceHelperPath(runtimePaths.entryPath, path),
+          homeDir: input.baseDir,
+          runtimePath: runtimePaths.entryPath,
+          logPath: path.join(input.logsDir, "boot-service.log"),
+          serviceName: WINDOWS_BOOT_SERVICE_NAME,
+          ...(windowsAccount === undefined || windowsAccount === ""
+            ? {}
+            : { account: windowsAccount }),
+        }
+      : undefined;
   const detectedManager = selectBootServiceManager({
     platform,
     homeDir,
     uid,
     path,
     environmentPath,
+    ...(windowsBinding === undefined ? {} : { windows: windowsBinding }),
   });
   const unitPath = detectedManager?.unitPath ?? "";
   const logPath = path.join(input.logsDir, "boot-service.log");
   const statePath = path.join(input.baseDir, "runtime", SERVICE_STATE_FILE);
   const restartPendingPath = path.join(input.baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
-  const runtimePaths = pinnedRuntimePaths(path, input.baseDir, input.cliVersion, platform);
   const writeDurably = (filePath: string, contents: string) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -726,6 +1108,398 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     return problems;
   });
 
+  /**
+   * A single bounded, read-only manager probe. Timeouts are the caller's to
+   * interpret: a manager that does not answer within the bound is unknown, not
+   * stopped and certainly not healthy.
+   */
+  const probeManager = (command: string, args: ReadonlyArray<string>) =>
+    runner
+      .run({
+        command,
+        args,
+        timeout: Duration.seconds(5),
+        timeoutBehavior: "timedOutResult",
+      })
+      .pipe(Effect.option);
+
+  const unknownObservation = (input: {
+    readonly manager: "systemd" | "launchd" | "scm";
+    readonly source: string;
+    readonly observedAt: string;
+    readonly detail: string;
+    readonly enabled?: BootServiceEnabledState;
+    readonly reachable?: boolean;
+  }): BootServiceManagerObservation => ({
+    manager: input.manager,
+    source: input.source,
+    observedAt: input.observedAt,
+    reachable: input.reachable ?? false,
+    enabled: input.enabled ?? "unknown",
+    running: "unknown",
+    detail: input.detail,
+  });
+
+  const observeSystemd = Effect.fn("cloud.boot_service.observe_systemd")(function* () {
+    const source = `systemctl --user show ${BOOT_SERVICE_UNIT_FILE}`;
+    const observedAt = DateTime.formatIso(yield* DateTime.now);
+    const result = yield* probeManager("systemctl", [
+      "--user",
+      "show",
+      BOOT_SERVICE_UNIT_FILE,
+      "--property=LoadState,ActiveState,SubState,MainPID,UnitFileState,ExecStart,NRestarts,Result",
+    ]);
+    if (Option.isNone(result)) {
+      return unknownObservation({
+        manager: "systemd",
+        source,
+        observedAt,
+        detail: "manager-unreachable",
+      });
+    }
+    if (result.value.timedOut) {
+      return unknownObservation({
+        manager: "systemd",
+        source,
+        observedAt,
+        detail: "manager-timeout",
+      });
+    }
+    if (result.value.code !== 0) {
+      return unknownObservation({
+        manager: "systemd",
+        source,
+        observedAt,
+        detail: "manager-unreachable",
+      });
+    }
+    const parsed = parseSystemdShow(result.value.stdout);
+    if (parsed === undefined) {
+      return unknownObservation({
+        manager: "systemd",
+        source,
+        observedAt,
+        detail: "manager-output-malformed",
+        reachable: true,
+      });
+    }
+    const running: BootServiceRunningState =
+      parsed.loadState === "not-found"
+        ? "not-loaded"
+        : parsed.activeState === "activating" || parsed.activeState === "deactivating"
+          ? "transitioning"
+          : parsed.activeState === "active" || parsed.activeState === "reloading"
+            ? parsed.subState === "running" && parsed.mainPid !== undefined
+              ? "running"
+              : "unknown"
+            : parsed.activeState === "inactive" || parsed.activeState === "failed"
+              ? "stopped"
+              : "unknown";
+    const enabled: BootServiceEnabledState =
+      parsed.unitFileState === "enabled"
+        ? "enabled"
+        : parsed.unitFileState === "disabled" ||
+            parsed.unitFileState === "masked" ||
+            parsed.unitFileState === "not-found"
+          ? "disabled"
+          : "unknown";
+    const programPath = /path=([^;]+?)\s*(?:;|})/.exec(parsed.execStart)?.[1];
+    const binding =
+      programPath === undefined
+        ? undefined
+        : bindBootServiceProgramPath(programPath, input.baseDir, path);
+    const detail =
+      binding !== undefined && !binding.contained
+        ? "configured-from-different-home"
+        : running === "unknown"
+          ? "manager-state-unknown"
+          : undefined;
+    return {
+      manager: "systemd",
+      source,
+      observedAt,
+      reachable: true,
+      enabled,
+      running,
+      ...(parsed.activeState === "" ? {} : { state: parsed.activeState }),
+      ...(parsed.subState === "" ? {} : { subState: parsed.subState }),
+      ...(parsed.mainPid === undefined ? {} : { processId: parsed.mainPid }),
+      ...(programPath === undefined ? {} : { configuredProgramPath: programPath }),
+      ...(binding?.version === undefined ? {} : { configuredVersion: binding.version }),
+      ...(parsed.nRestarts === undefined ? {} : { restartCount: parsed.nRestarts }),
+      ...(parsed.result === undefined ? {} : { lastResult: parsed.result }),
+      ...(detail === undefined ? {} : { detail }),
+    } satisfies BootServiceManagerObservation;
+  });
+
+  const observeLaunchd = Effect.fn("cloud.boot_service.observe_launchd")(function* () {
+    const observedAt = DateTime.formatIso(yield* DateTime.now);
+    if (uid === undefined) {
+      // The selected user is unknown, so there is no `gui/<uid>` domain to bind
+      // to. Guessing one (e.g. `gui/0`) would observe the wrong user.
+      return unknownObservation({
+        manager: "launchd",
+        source: `launchctl print gui/<uid>/${BOOT_SERVICE_LAUNCHD_LABEL}`,
+        observedAt,
+        detail: "manager-user-unknown",
+      });
+    }
+    const domainTarget = `gui/${String(uid)}`;
+    const domainSource = `launchctl print ${domainTarget}`;
+    const jobSource = `launchctl print ${domainTarget}/${BOOT_SERVICE_LAUNCHD_LABEL}`;
+    const domain = yield* probeManager("launchctl", ["print", domainTarget]);
+    if (Option.isNone(domain)) {
+      return unknownObservation({
+        manager: "launchd",
+        source: domainSource,
+        observedAt,
+        detail: "manager-unreachable",
+      });
+    }
+    if (domain.value.timedOut) {
+      return unknownObservation({
+        manager: "launchd",
+        source: domainSource,
+        observedAt,
+        detail: "manager-timeout",
+      });
+    }
+    if (domain.value.code !== 0 || domain.value.stdout.trim() === "") {
+      if (launchdPermissionDenied(domain.value.stderr)) {
+        return unknownObservation({
+          manager: "launchd",
+          source: domainSource,
+          observedAt,
+          detail: "manager-permission-denied",
+          reachable: true,
+        });
+      }
+      // A zero-code answer, or an explicit "could not find", is an absent domain.
+      // Any other nonzero result is an unexpected query failure and is not
+      // evidence that the domain is missing.
+      const absentDomain = domain.value.code === 0 || launchdNotFound(domain.value.stderr);
+      return unknownObservation({
+        manager: "launchd",
+        source: domainSource,
+        observedAt,
+        detail: absentDomain ? "gui-login-domain-unavailable" : "manager-query-failed",
+        reachable: !absentDomain,
+      });
+    }
+    const disabledResult = yield* probeManager("launchctl", ["print-disabled", domainTarget]);
+    const disabled =
+      Option.isSome(disabledResult) &&
+      !disabledResult.value.timedOut &&
+      disabledResult.value.code === 0
+        ? parseLaunchdDisabled(disabledResult.value.stdout, BOOT_SERVICE_LAUNCHD_LABEL)
+        : undefined;
+    const enabled: BootServiceEnabledState =
+      disabled === undefined ? "unknown" : disabled ? "disabled" : "enabled";
+    const job = yield* probeManager("launchctl", [
+      "print",
+      `${domainTarget}/${BOOT_SERVICE_LAUNCHD_LABEL}`,
+    ]);
+    if (Option.isNone(job)) {
+      return unknownObservation({
+        manager: "launchd",
+        source: jobSource,
+        observedAt,
+        detail: "manager-unreachable",
+        enabled,
+        reachable: true,
+      });
+    }
+    if (job.value.timedOut) {
+      return unknownObservation({
+        manager: "launchd",
+        source: jobSource,
+        observedAt,
+        detail: "manager-timeout",
+        enabled,
+        reachable: true,
+      });
+    }
+    if (job.value.code !== 0) {
+      if (launchdPermissionDenied(job.value.stderr)) {
+        return unknownObservation({
+          manager: "launchd",
+          source: jobSource,
+          observedAt,
+          detail: "manager-permission-denied",
+          enabled,
+          reachable: true,
+        });
+      }
+      // A genuine "could not find service" is a not-loaded job. Any other
+      // nonzero result is an unexpected query failure: unknown, not absence.
+      return launchdNotFound(job.value.stderr)
+        ? ({
+            manager: "launchd",
+            source: jobSource,
+            observedAt,
+            reachable: true,
+            enabled,
+            running: "not-loaded",
+            detail: "launch-agent-not-loaded",
+          } satisfies BootServiceManagerObservation)
+        : unknownObservation({
+            manager: "launchd",
+            source: jobSource,
+            observedAt,
+            detail: "manager-query-failed",
+            enabled,
+            reachable: true,
+          });
+    }
+    const parsed = parseLaunchdPrint(job.value.stdout);
+    if (parsed === undefined) {
+      return unknownObservation({
+        manager: "launchd",
+        source: jobSource,
+        observedAt,
+        detail: "manager-output-malformed",
+        enabled,
+        reachable: true,
+      });
+    }
+    const running: BootServiceRunningState =
+      parsed.state === "running" && parsed.pid !== undefined
+        ? "running"
+        : parsed.state === "not running" || parsed.state === "waiting" || parsed.state === "exited"
+          ? "stopped"
+          : "unknown";
+    const binding =
+      parsed.program === undefined
+        ? undefined
+        : bindBootServiceProgramPath(parsed.program, input.baseDir, path);
+    const detail =
+      binding !== undefined && !binding.contained
+        ? "configured-from-different-home"
+        : running === "unknown"
+          ? "manager-state-unknown"
+          : undefined;
+    return {
+      manager: "launchd",
+      source: jobSource,
+      observedAt,
+      reachable: true,
+      enabled,
+      running,
+      ...(parsed.state === undefined ? {} : { state: parsed.state }),
+      ...(parsed.pid === undefined ? {} : { processId: parsed.pid }),
+      ...(parsed.program === undefined ? {} : { configuredProgramPath: parsed.program }),
+      ...(binding?.version === undefined ? {} : { configuredVersion: binding.version }),
+      ...(parsed.lastExitCode === undefined ? {} : { lastResult: String(parsed.lastExitCode) }),
+      ...(detail === undefined ? {} : { detail }),
+    } satisfies BootServiceManagerObservation;
+  });
+
+  /**
+   * Bounded SCM observation through `sc.exe`. Registration, start type and the
+   * live state are read from real manager output; a failed or timed-out query is
+   * unknown, and only the SCM's own 1060 is absence.
+   */
+  const observeScm = Effect.fn("cloud.boot_service.observe_scm")(function* () {
+    const source = `sc.exe queryex ${WINDOWS_BOOT_SERVICE_NAME}`;
+    const observedAt = DateTime.formatIso(yield* DateTime.now);
+    const binding = windowsBinding;
+    if (binding === undefined) {
+      return unknownObservation({
+        manager: "scm",
+        source,
+        observedAt,
+        detail: "manager-unconfigured",
+      });
+    }
+    const result = yield* probeManager("sc.exe", ["queryex", binding.serviceName]);
+    if (Option.isNone(result)) {
+      return unknownObservation({
+        manager: "scm",
+        source,
+        observedAt,
+        detail: "manager-unreachable",
+      });
+    }
+    if (result.value.timedOut) {
+      return unknownObservation({ manager: "scm", source, observedAt, detail: "manager-timeout" });
+    }
+    if (result.value.code !== 0 && scServiceDoesNotExist(result.value.code)) {
+      return {
+        manager: "scm",
+        source,
+        observedAt,
+        reachable: true,
+        enabled: "unknown",
+        running: "not-loaded",
+        detail: "service-not-registered",
+      } satisfies BootServiceManagerObservation;
+    }
+    if (result.value.code !== 0) {
+      return unknownObservation({
+        manager: "scm",
+        source,
+        observedAt,
+        detail: "manager-query-failed",
+        reachable: true,
+      });
+    }
+    const parsed = parseScQuery(result.value.stdout);
+    if (parsed === undefined) {
+      return unknownObservation({
+        manager: "scm",
+        source,
+        observedAt,
+        detail: "manager-output-malformed",
+        reachable: true,
+      });
+    }
+    const qcResult = yield* probeManager("sc.exe", ["qc", binding.serviceName]);
+    const qc =
+      Option.isSome(qcResult) && !qcResult.value.timedOut && qcResult.value.code === 0
+        ? parseScQc(qcResult.value.stdout)
+        : undefined;
+    const enabled: BootServiceEnabledState =
+      qc?.startType === undefined
+        ? "unknown"
+        : /AUTO_START/i.test(qc.startType)
+          ? "enabled"
+          : /DEMAND_START|DISABLED/i.test(qc.startType)
+            ? "disabled"
+            : "unknown";
+    const runtimeFromImage =
+      qc?.binaryPathName === undefined ? undefined : windowsRuntimeFromImagePath(qc.binaryPathName);
+    const bound =
+      runtimeFromImage === undefined
+        ? undefined
+        : bindBootServiceProgramPath(runtimeFromImage, input.baseDir, path);
+    const running =
+      parsed.state !== undefined && scRunningState(parsed.state) === "running"
+        ? parsed.processId === undefined
+          ? "unknown"
+          : "running"
+        : scRunningState(parsed.state);
+    return {
+      manager: "scm",
+      source,
+      observedAt,
+      reachable: true,
+      enabled,
+      running,
+      ...(parsed.state === undefined ? {} : { state: parsed.state }),
+      ...(parsed.processId === undefined ? {} : { processId: parsed.processId }),
+      ...(qc?.binaryPathName === undefined ? {} : { configuredProgramPath: qc.binaryPathName }),
+      ...(bound?.version === undefined ? {} : { configuredVersion: bound.version }),
+      ...(running === "unknown" ? { detail: "manager-state-unknown" } : {}),
+    } satisfies BootServiceManagerObservation;
+  });
+
+  const observeManager =
+    detectedManager?.kind === "systemd"
+      ? observeSystemd
+      : detectedManager?.kind === "launchd"
+        ? observeLaunchd
+        : observeScm;
+
   const requireSystemdPrerequisites = Effect.gen(function* () {
     const problems = yield* readSystemdProblems(false);
     const unavailable = problems.find((problem) => problem !== "linger-disabled");
@@ -744,6 +1518,270 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (remaining[0]) return yield* new BootServicePrerequisiteError({ problem: remaining[0] });
   });
 
+  const requireWindowsBinding = Effect.gen(function* () {
+    if (windowsBinding === undefined || !isQualifiedWindowsAccount(windowsBinding.account)) {
+      return yield* new BootServicePrerequisiteError({ problem: "service-account-missing" });
+    }
+    return windowsBinding;
+  });
+
+  /**
+   * Reads the existing SCM registration without mutating it. `undefined`
+   * registered means the SCM's own 1060; a failed or timed-out query is
+   * distinct and callers must not read it as absence.
+   */
+  const inspectWindowsRegistration = (binding: WindowsBootServiceBinding) =>
+    Effect.gen(function* () {
+      const result = yield* probeManager("sc.exe", ["qc", binding.serviceName]);
+      if (Option.isNone(result) || result.value.timedOut) {
+        return { kind: "unreachable" as const };
+      }
+      if (result.value.code !== 0) {
+        return scServiceDoesNotExist(result.value.code)
+          ? { kind: "absent" as const }
+          : { kind: "unreachable" as const };
+      }
+      const qc = parseScQc(result.value.stdout);
+      if (qc === undefined) return { kind: "unreachable" as const };
+      return { kind: "registered" as const, qc };
+    });
+
+  type WindowsServiceProbe =
+    | { readonly kind: "absent" }
+    | { readonly kind: "unreachable" }
+    | { readonly kind: "observed"; readonly state?: string; readonly processId?: number };
+
+  /** One bounded, read-only `sc.exe queryex`; absent only on the numeric 1060. */
+  const probeWindowsServiceState = (binding: WindowsBootServiceBinding) =>
+    Effect.gen(function* () {
+      const result = yield* probeManager("sc.exe", ["queryex", binding.serviceName]);
+      if (Option.isNone(result) || result.value.timedOut) {
+        return { kind: "unreachable" } satisfies WindowsServiceProbe;
+      }
+      if (result.value.code !== 0) {
+        return (
+          scServiceDoesNotExist(result.value.code) ? { kind: "absent" } : { kind: "unreachable" }
+        ) satisfies WindowsServiceProbe;
+      }
+      const parsed = parseScQuery(result.value.stdout);
+      if (parsed === undefined) return { kind: "unreachable" } satisfies WindowsServiceProbe;
+      return {
+        kind: "observed",
+        ...(parsed.state === undefined ? {} : { state: parsed.state }),
+        ...(parsed.processId === undefined ? {} : { processId: parsed.processId }),
+      } satisfies WindowsServiceProbe;
+    });
+
+  const windowsStopped = (probe: WindowsServiceProbe) =>
+    probe.kind === "absent" ||
+    (probe.kind === "observed" && scRunningState(probe.state) === "stopped");
+  const windowsRunning = (probe: WindowsServiceProbe) =>
+    probe.kind === "observed" &&
+    scRunningState(probe.state) === "running" &&
+    probe.processId !== undefined;
+  const windowsAbsent = (probe: WindowsServiceProbe) => probe.kind === "absent";
+
+  /**
+   * Polls SCM state until `accept` holds or the bound expires. An unreachable
+   * or malformed query ends the wait immediately: it is unknown, and never
+   * evidence that a requested transition completed. The final probe is
+   * returned so the caller reports the truthful outcome.
+   */
+  const waitForWindowsServiceState = (
+    binding: WindowsBootServiceBinding,
+    accept: (probe: WindowsServiceProbe) => boolean,
+  ) =>
+    Effect.gen(function* () {
+      const deadline =
+        Date.now() + (input.windowsTransitionTimeoutMs ?? WINDOWS_TRANSITION_TIMEOUT_MS);
+      for (;;) {
+        const probe = yield* probeWindowsServiceState(binding);
+        if (accept(probe) || probe.kind === "unreachable" || Date.now() >= deadline) return probe;
+        yield* realDelay(WINDOWS_TRANSITION_POLL_MS);
+      }
+    });
+
+  const windowsTransitionStep = (label: string, probe: WindowsServiceProbe) =>
+    new BootServiceCommandError({
+      step: `waiting for the SCM service to ${label} (observed ${probe.kind}${
+        probe.kind === "observed" ? `:${probe.state ?? "unknown"}` : ""
+      })`,
+    });
+
+  /**
+   * Confirms and, only when needed, stops the exact owned registration. An
+   * already-stopped or absent target is idempotent: the SCM answers
+   * `ERROR_SERVICE_NOT_ACTIVE` (1062) to a stop on a stopped service, so the
+   * adapter probes first and issues no stop. A stop that fails for any reason
+   * is tolerated only when a follow-up probe confirms the service really is
+   * stopped; an unreachable probe or an unconfirmed failure stays a blocking
+   * observation. Returns the confirmed probe so the caller can report it.
+   */
+  const stopOwnedWindowsService = (
+    binding: WindowsBootServiceBinding,
+    steps: WindowsServiceSteps,
+  ) =>
+    Effect.gen(function* () {
+      const observed = yield* probeWindowsServiceState(binding);
+      if (windowsStopped(observed)) return observed;
+      if (observed.kind === "unreachable") {
+        return yield* new BootServicePrerequisiteError({ problem: "windows-service-unreachable" });
+      }
+      const outcome = yield* runSteps([steps.stop]).pipe(Effect.result);
+      if (Result.isFailure(outcome)) {
+        const confirmed = yield* probeWindowsServiceState(binding);
+        if (windowsStopped(confirmed)) return confirmed;
+        return yield* outcome.failure;
+      }
+      return yield* waitForWindowsServiceState(binding, windowsStopped);
+    });
+
+  /** Restores the exact launcher-owned state captured before an install write. */
+  const restoreWindowsState = (
+    previousState: Option.Option<string>,
+    previousRestartPending: Option.Option<string>,
+  ) =>
+    Effect.gen(function* () {
+      if (Option.isSome(previousState)) {
+        yield* writeDurably(statePath, previousState.value);
+      } else {
+        yield* fs.remove(statePath, { force: true });
+      }
+      if (Option.isSome(previousRestartPending)) {
+        yield* fs.writeFileString(restartPendingPath, previousRestartPending.value, {
+          mode: 0o600,
+        });
+      } else {
+        yield* fs.remove(restartPendingPath, { force: true });
+      }
+    });
+
+  const checkWindowsInstallPreconditions = (options?: { readonly allowDowngrade?: boolean }) =>
+    Effect.gen(function* () {
+      const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
+      if (Option.isNone(previousStateText)) return;
+      if (serviceStateHasPendingUpdate(previousStateText.value)) {
+        return yield* new BootServiceUpdatePendingError();
+      }
+      const installedVersion = serviceStateActiveVersion(previousStateText.value);
+      if (
+        installedVersion !== undefined &&
+        options?.allowDowngrade !== true &&
+        compareExactServiceVersions(input.cliVersion, installedVersion) < 0
+      ) {
+        return yield* new BootServiceDowngradeRefusedError({
+          installedVersion,
+          targetVersion: input.cliVersion,
+        });
+      }
+    });
+
+  const installWindows = Effect.fn("cloud.boot_service.install_windows")(function* (options?: {
+    readonly allowDowngrade?: boolean;
+    readonly start?: boolean;
+  }) {
+    const binding = yield* requireWindowsBinding;
+    if (!(yield* fs.exists(binding.hostPath))) {
+      return yield* new BootServicePrerequisiteError({ problem: "service-helper-missing" });
+    }
+    const steps = windowsServiceSteps(binding);
+    const inspection = yield* inspectWindowsRegistration(binding);
+    if (inspection.kind === "unreachable") {
+      return yield* new BootServicePrerequisiteError({ problem: "windows-service-unreachable" });
+    }
+    const registered = inspection.kind === "registered";
+    if (registered && !windowsRegistrationOwnedByUs(inspection.qc, binding)) {
+      // A foreign or changed binding is refused before anything is stopped or
+      // rewritten; the adapter never adopts another install's registration. An
+      // owned older runtime is *not* foreign and is upgraded below.
+      return yield* new BootServicePrerequisiteError({
+        problem: "windows-service-foreign-registration",
+      });
+    }
+    const start = options?.start !== false;
+
+    // Fail on an in-flight update or an obvious downgrade before disrupting a
+    // running service.
+    if (registered) yield* checkWindowsInstallPreconditions(options);
+
+    if (registered && start) {
+      const stopped = yield* stopOwnedWindowsService(binding, steps);
+      if (!windowsStopped(stopped)) return yield* windowsTransitionStep("stop", stopped);
+      // The launcher may have finished a remote update while the service
+      // drained; revalidate its mutable state after the confirmed stop and
+      // before touching the registration or launcher-owned state.
+      yield* checkWindowsInstallPreconditions(options);
+    }
+
+    // Capture the exact launcher-owned state before it is rewritten, so a
+    // registration failure can restore it rather than leaving a state document
+    // that claims a version the registration does not serve.
+    const previousState = yield* fs.readFileString(statePath).pipe(Effect.option);
+    const previousRestartPending = yield* fs.readFileString(restartPendingPath).pipe(Effect.option);
+
+    if (!start && registered) {
+      yield* fs.writeFileString(restartPendingPath, `${input.cliVersion}\n`, { mode: 0o600 });
+    }
+    yield* writeDurably(
+      statePath,
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned document.
+      `${JSON.stringify(
+        {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: input.cliVersion,
+        } satisfies ServiceState,
+        null,
+        2,
+      )}\n`,
+    );
+    if (!start && registered) {
+      const written = yield* fs.readFileString(statePath);
+      if (serviceStateActiveVersion(written) !== input.cliVersion) {
+        return yield* new BootServiceUpdatePendingError();
+      }
+    }
+
+    // Registration and activation are distinct: even with start=false the
+    // registration is created or reconfigured so a later start runs this
+    // version. Only the start step is gated on activation.
+    const registration = yield* runSteps([registered ? steps.reconfigure : steps.register]).pipe(
+      Effect.result,
+    );
+    if (Result.isFailure(registration)) {
+      // The SCM registration still names the previous owned helper/runtime (a
+      // failed create leaves none), so restore the exact previous
+      // launcher-owned state instead of leaving a state document that claims a
+      // version the registration does not serve.
+      yield* restoreWindowsState(previousState, previousRestartPending);
+      return yield* registration.failure;
+    }
+    if (start) {
+      const started = yield* runSteps([steps.start]).pipe(Effect.result);
+      if (Result.isFailure(started)) {
+        // The registration already names the new helper/runtime, so the
+        // previous owned state cannot be restored; report the actual partial
+        // outcome instead of implying transactional preservation.
+        return yield* new BootServicePartialStateError({
+          step:
+            started.failure._tag === "BootServiceCommandError"
+              ? started.failure.step
+              : "starting the service",
+          activeVersion: input.cliVersion,
+          cause: started.failure,
+        });
+      }
+      const running = yield* waitForWindowsServiceState(binding, windowsRunning);
+      if (!windowsRunning(running)) return yield* windowsTransitionStep("start", running);
+      yield* fs.remove(restartPendingPath, { force: true });
+    }
+    return {
+      program: windowsServiceProgram(binding),
+      baseDir: input.baseDir,
+      logPath,
+      unitPath: binding.hostPath,
+    } satisfies BootServicePlan;
+  });
+
   const install = Effect.fn("cloud.boot_service.install")(function* (options?: {
     readonly allowDowngrade?: boolean;
     readonly start?: boolean;
@@ -756,6 +1794,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // A permissions failure must not leave a partial install or stop a working server.
     if (manager.kind === "systemd") {
       yield* requireSystemdPrerequisites.pipe(Effect.tapError(logFailure));
+    }
+    // An unqualified or missing Windows account fails before any runtime
+    // download or service mutation.
+    if (manager.kind === "scm") {
+      yield* requireWindowsBinding;
     }
 
     // Prepare every immutable artifact before stopping the installed unit.
@@ -811,6 +1854,13 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           : new BootServiceInstallError({ cause: error }),
       ),
     );
+    if (manager.kind === "scm") {
+      return yield* installWindows(options).pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "PlatformError" ? new BootServiceInstallError({ cause }) : cause,
+        ),
+      );
+    }
     const installed = yield* fs
       .exists(unitPath)
       .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
@@ -901,6 +1951,29 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
   const restart: BootService["Service"]["restart"] = Effect.gen(function* () {
     const manager = yield* requireManager;
+    if (manager.kind === "scm") {
+      const binding = yield* requireWindowsBinding;
+      const inspection = yield* inspectWindowsRegistration(binding);
+      if (
+        inspection.kind !== "registered" ||
+        !windowsRegistrationOwnedByUs(inspection.qc, binding)
+      ) {
+        // Absent, unreachable or another home's registration: leave it alone.
+        return false;
+      }
+      const steps = windowsServiceSteps(binding);
+      const stopped = yield* stopOwnedWindowsService(binding, steps);
+      if (!windowsStopped(stopped)) return yield* windowsTransitionStep("stop", stopped);
+      yield* runSteps([steps.start]);
+      const running = yield* waitForWindowsServiceState(binding, windowsRunning);
+      if (!windowsRunning(running)) {
+        // Truthful partial outcome: the stop was confirmed but the start did
+        // not reach RUNNING. Do not speculate with a second start.
+        return yield* windowsTransitionStep("start", running);
+      }
+      yield* fs.remove(restartPendingPath, { force: true });
+      return true;
+    }
     const unit = yield* fs.readFileString(unitPath).pipe(Effect.option);
     if (Option.isNone(unit)) return false;
     const installedBaseDir = bootServiceBaseDirOf(unit.value);
@@ -927,6 +2000,33 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
   const uninstall: BootService["Service"]["uninstall"] = Effect.gen(function* () {
     const manager = yield* requireManager;
+    if (manager.kind === "scm") {
+      const binding = yield* requireWindowsBinding;
+      const inspection = yield* inspectWindowsRegistration(binding);
+      if (
+        inspection.kind !== "registered" ||
+        !windowsRegistrationOwnedByUs(inspection.qc, binding)
+      ) {
+        // Never delete a foreign or unreachable registration, and never touch
+        // the home or userdata; only the exact owned registration is removed.
+        return false;
+      }
+      const steps = windowsServiceSteps(binding);
+      const stopped = yield* stopOwnedWindowsService(binding, steps);
+      if (!windowsStopped(stopped)) {
+        // A failed or unknown stop must not be hidden by deleting anyway, and
+        // uninstall must not claim success over it.
+        return yield* windowsTransitionStep("stop before deletion", stopped);
+      }
+      yield* runSteps([steps.delete]);
+      const deleted = yield* waitForWindowsServiceState(binding, windowsAbsent);
+      if (!windowsAbsent(deleted)) {
+        // `DeleteService` only marks the service for deletion; a still-present
+        // registration is a truthful failure, not a successful uninstall.
+        return yield* windowsTransitionStep("deletion to complete", deleted);
+      }
+      return true;
+    }
     if (
       !(yield* fs
         .exists(unitPath)
@@ -942,11 +2042,127 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   }).pipe(Effect.withSpan("cloud.boot_service.uninstall"));
 
   const status: BootService["Service"]["status"] = Effect.gen(function* () {
+    const observedAt = DateTime.formatIso(yield* DateTime.now);
     if (detectedManager === undefined) {
-      return { supported: false, installed: false, current: false, unitPath, logPath };
+      return {
+        schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+        supported: false,
+        manager: "unsupported",
+        installed: false,
+        enabled: "unknown",
+        running: "unknown",
+        current: false,
+        unitPath,
+        logPath,
+        observedAt,
+      } satisfies BootServiceStatus;
+    }
+    if (detectedManager.kind === "scm") {
+      // Read-only observation needs no install credentials: the SCM is queried
+      // by fixed service name. A missing install account must not make an
+      // installed service unobservable or the platform look unsupported; it only
+      // blocks mutation, which still enforces `requireWindowsBinding`.
+      const binding = windowsBinding;
+      if (binding === undefined) {
+        return {
+          schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+          supported: false,
+          manager: "unsupported",
+          installed: false,
+          enabled: "unknown",
+          running: "unknown",
+          current: false,
+          unitPath,
+          logPath,
+          observedAt,
+        } satisfies BootServiceStatus;
+      }
+      const observation = yield* observeScm();
+      if (observation.detail === "service-not-registered") {
+        return {
+          schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+          supported: true,
+          manager: "scm",
+          installed: false,
+          enabled: "unknown",
+          running: "not-loaded",
+          current: false,
+          observation,
+          unitPath,
+          logPath,
+          observedAt,
+        } satisfies BootServiceStatus;
+      }
+      const inspection = yield* inspectWindowsRegistration(binding);
+      const queryFailed =
+        inspection.kind === "unreachable" ||
+        [
+          "manager-unreachable",
+          "manager-timeout",
+          "manager-query-failed",
+          "manager-output-malformed",
+        ].includes(observation.detail ?? "");
+      const [runtimeEntryExists, runtimeSentinel, stateText] = yield* Effect.all([
+        fs.exists(runtimePaths.entryPath),
+        fs.readFileString(runtimePaths.sentinelPath).pipe(Effect.option),
+        fs.readFileString(statePath).pipe(Effect.option),
+      ]);
+      const installedVersion = Option.isSome(stateText)
+        ? serviceStateActiveVersion(stateText.value)
+        : undefined;
+      const state = Option.isSome(stateText) ? parseServiceState(stateText.value) : undefined;
+      const bound =
+        inspection.kind === "registered" && windowsRegistrationOwnedByUs(inspection.qc, binding);
+      const problems: BootServiceProblem[] = [];
+      if (queryFailed) problems.push("windows-service-unreachable");
+      else if (!bound) problems.push("windows-service-foreign-registration");
+      if (observation.running === "stopped") problems.push("service-stopped");
+      if (observation.enabled === "disabled") problems.push("service-disabled");
+      if (yield* fs.exists(restartPendingPath)) problems.push("restart-pending");
+      return {
+        schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+        supported: true,
+        manager: "scm",
+        installed: inspection.kind === "registered",
+        enabled: observation.enabled,
+        running: observation.running,
+        ...(installedVersion === undefined ? {} : { installedVersion }),
+        installedBaseDir: binding.homeDir,
+        ...(observation.configuredVersion === undefined
+          ? {}
+          : { configuredVersion: observation.configuredVersion }),
+        observation,
+        problems,
+        current:
+          problems.length === 0 &&
+          bound &&
+          observation.configuredVersion === input.cliVersion &&
+          runtimeEntryExists &&
+          Option.isSome(runtimeSentinel) &&
+          runtimeSentinel.value.trim() === input.cliVersion &&
+          state?.activeVersion === input.cliVersion &&
+          state?.update?.status !== "pending",
+        unitPath,
+        logPath,
+        observedAt,
+      } satisfies BootServiceStatus;
     }
     if (!(yield* fs.exists(unitPath))) {
-      return { supported: true, installed: false, current: false, unitPath, logPath };
+      // No unit file is the only claim made here. The manager is not probed for
+      // an unregistered service, and an absent file is not evidence about a
+      // foreign registration that happens to share the fixed unit name.
+      return {
+        schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
+        supported: true,
+        manager: detectedManager.kind,
+        installed: false,
+        enabled: "unknown",
+        running: "unknown",
+        current: false,
+        unitPath,
+        logPath,
+        observedAt,
+      } satisfies BootServiceStatus;
     }
     const [unit, runtimeEntryExists, runtimeSentinel, stateText] = yield* Effect.all([
       fs.readFileString(unitPath),
@@ -963,14 +2179,25 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       detectedManager.kind === "launchd"
         ? contents.replace(/(<key>PATH<\/key>\n\s*<string>)[^<]*(<\/string>)/, "$1$2")
         : contents;
+    // Existing problem codes and their `current` effect are preserved; the
+    // richer manager observation below is additive and never rewrites them.
     const problems: BootServiceProblem[] =
       detectedManager.kind === "systemd" ? [...(yield* readSystemdProblems(true))] : [];
     if (yield* fs.exists(restartPendingPath)) problems.push("restart-pending");
+    const observation = yield* observeManager();
     return {
+      schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
       supported: true,
+      manager: detectedManager.kind,
       installed: true,
+      enabled: observation.enabled,
+      running: observation.running,
       ...(installedVersion === undefined ? {} : { installedVersion }),
       ...(installedBaseDir === undefined ? {} : { installedBaseDir }),
+      ...(observation.configuredVersion === undefined
+        ? {}
+        : { configuredVersion: observation.configuredVersion }),
+      observation,
       problems,
       current:
         problems.length === 0 &&
@@ -982,6 +2209,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         state?.update?.status !== "pending",
       unitPath,
       logPath,
+      observedAt,
     };
   }).pipe(
     Effect.mapError((cause) => new BootServiceInstallError({ cause })),

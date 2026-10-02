@@ -1,7 +1,7 @@
 # Running T3 Code in the background
 
-On Linux and macOS, T3 Code can run as a service for your user so you do not need
-to keep a terminal open.
+On Linux, macOS, and Windows, T3 Code can run as a service for your user so you
+do not need to keep a terminal open.
 
 ## Manage the service
 
@@ -15,6 +15,12 @@ run these commands on the machine that will host T3 Code:
 | Move to a newer release         | `t3 update`            |
 | Restart                         | `t3 service restart`   |
 | Stop and remove from startup    | `t3 service uninstall` |
+
+`t3 service status` also reports what the service manager itself observes — whether the
+job is registered, enabled, and running — separately from whether T3 is set up correctly.
+A manager-reported version is the launch program the service is configured to run, not proof
+of the server process that is actually running, so status never presents it as one.
+Pass `--json` for a stable, machine-readable version of the same status.
 
 Uninstalling the service leaves your projects, threads, and settings intact.
 Running `t3 service install` again repairs a service that `t3 service status`
@@ -51,7 +57,15 @@ Mac logged in and awake for unattended remote access. Installing over SSH while
 nobody is logged in at the Mac's screen can fail at the final start step; the
 service is still installed and will start at the next login.
 
-Windows background services are not supported.
+Windows registers the service with the Service Control Manager through the
+T3-owned `t3-windows-service-host.exe`, which runs the pinned launcher under a
+job object. Setup needs an explicit, qualified service account
+(`DOMAIN\user` or `user@domain`) in `T3_SERVICE_ACCOUNT`; T3 never installs the
+workload as LocalSystem. The host binary ships beside the pinned runtime in a
+packaged release, so a copy without it refuses instead of installing a partial
+service. Windows support stays disabled until the packaged helper and a real
+SCM run are qualified; `t3 service status` reports the SCM state honestly until
+then.
 
 T3 Connect can offer service installation during setup, but the two are managed
 separately. Signing out of T3 Connect does not stop or uninstall the service.
@@ -60,7 +74,10 @@ separately. Signing out of T3 Connect does not stop or uninstall the service.
 
 Start with `t3 service status` on the host. It prints the log path and, on Linux,
 checks whether the installed service is running, enabled, and allowed to survive
-logout.
+logout. On macOS it asks `launchctl` for the same running/enabled state; on
+Windows it asks the Service Control Manager. What it
+reports is what the service manager sees — a running job does not by itself prove
+the server is answering, so also check the log if remote clients cannot connect.
 
 If it stops when your SSH session closes, check for `linger-disabled`. An
 administrator can enable lingering with:
@@ -86,6 +103,10 @@ that session open.
 | `user-manager-unavailable`              | Run `systemctl --user status` in a login session for the service user; check your distribution's systemd user-session support. |
 | `service-disabled` or `service-stopped` | Read the log and `systemctl --user status t3code.service`, then use the repair command printed by T3 Code.                     |
 | `restart-pending`                       | A newer version is installed but the service still runs the previous one. Run `t3 service restart`.                            |
+| `service-account-missing`               | Windows: set `T3_SERVICE_ACCOUNT` to a dedicated, qualified account before installing; T3 never uses LocalSystem.              |
+| `service-helper-missing`                | Windows: this copy has no `t3-windows-service-host.exe` beside the pinned runtime. Use a packaged release that ships it.       |
+| `windows-service-unreachable`           | The SCM did not answer a bounded query, so registration state is unknown. Retry once `sc.exe query T3Code` responds.           |
+| `windows-service-foreign-registration`  | A `T3Code` service is bound to another home, helper or account. T3 leaves it alone; remove it deliberately if that is stale.   |
 
 On macOS, check **System Settings → General → Login Items** if the service no
 longer starts at login. If agent work cannot access Desktop, Documents, or
