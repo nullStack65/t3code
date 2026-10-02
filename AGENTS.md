@@ -159,3 +159,5 @@ Full glossary with file links: `docs/internals/glossary.md`
 
 - Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+For human assignment, review and recovery guidance, use the canonical [HUMANS guide](https://github.com/nullStack65/closura-agent-config/blob/master/HUMANS.md). Local instructions and installed controls remain authoritative for this repository.
