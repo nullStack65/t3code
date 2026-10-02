@@ -325,8 +325,8 @@ jobs:
           echo "vp toolchain (before):"
           vp toolchain || true
           # Build, under the pinned Node, with evidence of the effective version.
-          vp run --filter t3 exec -- node --version
-          vp run --filter t3 exec -- node -e '
+          vp exec --filter t3 -- node --version
+          vp exec --filter t3 -- node -e '
             const [major, minor] = process.versions.node.split(".").map(Number);
             if (major < 25 || (major === 25 && minor < 7)) {
               console.error(`::error::the SEA build needs Node >= 25.7 for --build-sea, got ${process.versions.node}`);
@@ -334,7 +334,7 @@ jobs:
             }
             console.log(`SEA host Node OK: ${process.versions.node}`);
           '
-          node apps/server/scripts/cli.ts build-exe --verbose
+          vp exec --filter t3 -- node scripts/cli.ts build-exe --verbose
 
       - name: Build CLI archive
         shell: bash
