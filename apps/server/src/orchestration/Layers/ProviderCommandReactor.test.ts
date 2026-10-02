@@ -214,6 +214,7 @@ describe("ProviderCommandReactor", () => {
       model: "gpt-5-codex",
     };
     const startSessionEffect = input?.startSessionEffect;
+    const sessionLifecycleDispatches: Array<{ threadId: ThreadId; status: string }> = [];
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
@@ -436,6 +437,12 @@ describe("ProviderCommandReactor", () => {
           readThreadEvents: engine.readThreadEvents,
           getThreadReplayStats: engine.getThreadReplayStats,
           dispatch: (command) => {
+            if (command.type === "thread.session.set") {
+              sessionLifecycleDispatches.push({
+                threadId: command.threadId,
+                status: command.session.status,
+              });
+            }
             if (command.type === "thread.title.regeneration.complete") {
               titleRegenerationCompletionDispatchAttempts += 1;
               if (
@@ -634,6 +641,7 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
+      sessionLifecycleDispatches,
       stateDir,
       drain,
       startReactor,
@@ -1078,38 +1086,120 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
-  effectIt.effect("fences route drift interleaved after reactor admission and before send", () =>
+  effectIt.effect.each(["ready", "running"] as const)(
+    "fences route drift during preparation for a retained %s session",
+    (sessionStatus) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("thread-1");
+        const selection = {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        };
+        const capabilityRead = yield* Deferred.make<void>();
+        const releaseCapabilityRead = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            threadModelSelection: selection,
+            activeProviderSession: {
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: selection.instanceId,
+              status: sessionStatus,
+              runtimeMode: "approval-required",
+              model: selection.model,
+              threadId,
+              resumeCursor: { opaque: "retained" },
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+            getCapabilitiesEffect: () =>
+              Deferred.succeed(capabilityRead, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseCapabilityRead)),
+              ),
+          }),
+        );
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-interleaved-route-ready"),
+          threadId,
+          session: {
+            threadId,
+            status: sessionStatus,
+            providerName: "codex",
+            providerInstanceId: selection.instanceId,
+            runtimeMode: "approval-required",
+            activeTurnId: sessionStatus === "running" ? asTurnId("retained-turn") : null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-interleaved-route-callback"),
+          threadId,
+          message: {
+            messageId: MessageId.make("message-interleaved-route-callback"),
+            role: "user",
+            text: "Keep this result",
+            attachments: [],
+          },
+          modelSelection: selection,
+          routeBinding: {
+            modelSelection: selection,
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        });
+        yield* Deferred.await(capabilityRead);
+        yield* harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-interleaved-route-change"),
+          threadId,
+          modelSelection: { ...selection, options: [{ id: "reasoningEffort", value: "low" }] },
+        });
+        yield* Deferred.succeed(releaseCapabilityRead, undefined);
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(thread?.session).toMatchObject({ status: sessionStatus, lastError: null });
+        expect(thread?.messages.map((message) => message.text)).toContain("Keep this result");
+      }),
+  );
+
+  effectIt.effect("sends a bound callback without an intervening lifecycle command", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread-1");
       const selection = {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
       };
-      const capabilityRead = yield* Deferred.make<void>();
-      const releaseCapabilityRead = yield* Deferred.make<void>();
+      const retainedSession: ProviderSession = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: selection.instanceId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        cwd: "/tmp/provider-project",
+        model: selection.model,
+        threadId,
+        resumeCursor: { opaque: "retained" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
       const harness = yield* Effect.promise(() =>
         createHarness({
           threadModelSelection: selection,
-          activeProviderSession: {
-            provider: ProviderDriverKind.make("codex"),
-            providerInstanceId: selection.instanceId,
-            status: "ready",
-            runtimeMode: "approval-required",
-            model: selection.model,
-            threadId,
-            resumeCursor: { opaque: "retained" },
-            createdAt: "2026-01-01T00:00:00.000Z",
-            updatedAt: "2026-01-01T00:00:00.000Z",
-          },
-          getCapabilitiesEffect: () =>
-            Deferred.succeed(capabilityRead, undefined).pipe(
-              Effect.andThen(Deferred.await(releaseCapabilityRead)),
-            ),
+          activeProviderSession: retainedSession,
         }),
       );
       yield* harness.engine.dispatch({
         type: "thread.session.set",
-        commandId: CommandId.make("cmd-interleaved-route-ready"),
+        commandId: CommandId.make("cmd-bound-no-pending-session-set"),
         threadId,
         session: {
           threadId,
@@ -1123,14 +1213,15 @@ describe("ProviderCommandReactor", () => {
         },
         createdAt: "2026-01-01T00:00:00.000Z",
       });
+      harness.sessionLifecycleDispatches.length = 0;
       yield* harness.engine.dispatch({
         type: "thread.turn.start",
-        commandId: CommandId.make("cmd-interleaved-route-callback"),
+        commandId: CommandId.make("cmd-bound-no-pending-turn-start"),
         threadId,
         message: {
-          messageId: MessageId.make("message-interleaved-route-callback"),
+          messageId: MessageId.make("message-bound-no-pending-turn-start"),
           role: "user",
-          text: "Keep this result",
+          text: "Continue this preserved result",
           attachments: [],
         },
         modelSelection: selection,
@@ -1143,21 +1234,15 @@ describe("ProviderCommandReactor", () => {
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         createdAt: "2026-01-01T00:00:01.000Z",
       });
-      yield* Deferred.await(capabilityRead);
-      yield* harness.engine.dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make("cmd-interleaved-route-change"),
-        threadId,
-        modelSelection: { ...selection, options: [{ id: "reasoningEffort", value: "low" }] },
-      });
-      yield* Deferred.succeed(releaseCapabilityRead, undefined);
-      yield* Effect.promise(() => harness.drain());
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sessionLifecycleDispatches).toEqual([]);
+      expect(harness.runtimeSessions).toEqual([retainedSession]);
       const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
         (entry) => entry.id === threadId,
       );
-      expect(harness.sendTurn).not.toHaveBeenCalled();
       expect(thread?.session).toMatchObject({ status: "ready", lastError: null });
-      expect(thread?.messages.map((message) => message.text)).toContain("Keep this result");
     }),
   );
 

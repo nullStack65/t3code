@@ -224,10 +224,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               detail: `The destination route for thread '${command.threadId}' changed after the callback was created. No message was ingested. Refresh the destination thread, correct the route, then submit the result deliberately.`,
             });
           }
+          const effectiveModelSelection =
+            command.modelSelection ??
+            command.routeBinding?.modelSelection ??
+            thread?.modelSelection;
           if (
             thread !== undefined &&
             thread.session !== null &&
-            command.modelSelection !== undefined &&
+            effectiveModelSelection !== undefined &&
             Option.isSome(providerService)
           ) {
             if (
@@ -242,7 +246,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             const activeSession =
               (thread.session.status === "running" || thread.session.status === "starting") &&
               thread.session.providerInstanceId !== undefined &&
-              thread.session.providerInstanceId !== command.modelSelection.instanceId
+              thread.session.providerInstanceId !== effectiveModelSelection.instanceId
                 ? (yield* providerService.value.listSessions()).find(
                     (session) => session.threadId === command.threadId,
                   )
@@ -251,7 +255,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               activeSession?.providerInstanceId ??
               thread.session.providerInstanceId ??
               thread.modelSelection.instanceId;
-            const requestedInstanceId = command.modelSelection.instanceId;
+            const requestedInstanceId = effectiveModelSelection.instanceId;
             if (currentInstanceId !== requestedInstanceId) {
               const [currentInfo, requestedInfo] = yield* Effect.all([
                 providerService.value.getInstanceInfo(currentInstanceId),

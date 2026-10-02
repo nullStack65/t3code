@@ -1597,19 +1597,22 @@ const make = Effect.gen(function* () {
       }
     }
 
-    // Existing ready sessions become starting only after route and provider
-    // continuation validation have succeeded.
-    const latestThread = yield* resolveThreadShell(event.payload.threadId);
-    if (latestThread?.session?.status === "ready") {
-      yield* setThreadSession({
-        threadId: event.payload.threadId,
-        session: {
-          ...latestThread.session,
-          status: "starting",
-          updatedAt: event.payload.createdAt,
-        },
-        createdAt: event.payload.createdAt,
-      });
+    // Bound callbacks keep this final route fence adjacent to sendTurn: a
+    // session.set dispatch here would yield and let the route change before
+    // the provider effect. Retained bound sessions keep their current status.
+    if (event.payload.routeBinding === undefined) {
+      const latestThread = yield* resolveThreadShell(event.payload.threadId);
+      if (latestThread?.session?.status === "ready") {
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            ...latestThread.session,
+            status: "starting",
+            updatedAt: event.payload.createdAt,
+          },
+          createdAt: event.payload.createdAt,
+        });
+      }
     }
 
     const send = providerService

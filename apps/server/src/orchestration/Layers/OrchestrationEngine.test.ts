@@ -734,6 +734,124 @@ describe("OrchestrationEngine", () => {
       ),
   );
 
+  effectIt.effect.each([
+    { routeBound: true, sessionStatus: "ready" as const },
+    { routeBound: true, sessionStatus: "running" as const },
+    { routeBound: false, sessionStatus: "ready" as const },
+    { routeBound: false, sessionStatus: "running" as const },
+  ])(
+    "preflights the effective thread route when selection is omitted ($routeBound, $sessionStatus)",
+    ({ routeBound, sessionStatus }) =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const receipts = yield* OrchestrationCommandReceipts.OrchestrationCommandReceiptRepository;
+        const projectId = ProjectId.make(
+          `project-omitted-selection-${routeBound}-${sessionStatus}`,
+        );
+        const threadId = ThreadId.make(`thread-omitted-selection-${routeBound}-${sessionStatus}`);
+        const targetSelection = {
+          instanceId: ProviderInstanceId.make("codex-jeffrey-business"),
+          model: "gpt-6-codex",
+        };
+        const commandId = CommandId.make(`cmd-omitted-selection-${routeBound}-${sessionStatus}`);
+        const createdAt = now();
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make(`project-omitted-selection-${routeBound}-${sessionStatus}`),
+          projectId,
+          title: "Omitted callback selection",
+          workspaceRoot: "/tmp/omitted-callback-selection",
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`thread-omitted-selection-${routeBound}-${sessionStatus}`),
+          threadId,
+          projectId,
+          title: "Omitted callback selection",
+          modelSelection: targetSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        const retainedSession = {
+          threadId,
+          status: sessionStatus,
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex-luna"),
+          runtimeMode: "full-access" as const,
+          activeTurnId: sessionStatus === "running" ? TurnId.make("running-turn") : null,
+          lastError: null,
+          updatedAt: createdAt,
+        };
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`session-omitted-selection-${routeBound}-${sessionStatus}`),
+          threadId,
+          session: retainedSession,
+          createdAt,
+        });
+        const before = yield* snapshots.getThreadDetailById(threadId);
+        const beforeSequence = yield* engine.latestSequence;
+        const error = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId,
+            threadId,
+            message: {
+              messageId: asMessageId(`message-omitted-selection-${routeBound}-${sessionStatus}`),
+              role: "user",
+              text: "Preserve this callback result",
+              attachments: [],
+            },
+            ...(routeBound
+              ? {
+                  routeBinding: {
+                    modelSelection: targetSelection,
+                    runtimeMode: "full-access" as const,
+                    interactionMode: "default" as const,
+                  },
+                }
+              : {}),
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt,
+          })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain("cannot resume on incompatible instance");
+        expect(yield* engine.latestSequence).toBe(beforeSequence);
+        expect(yield* snapshots.getThreadDetailById(threadId)).toEqual(before);
+        expect(Option.getOrNull(yield* snapshots.getThreadShellById(threadId))?.session).toEqual(
+          retainedSession,
+        );
+        expect(Option.getOrNull(yield* receipts.getByCommandId({ commandId }))).toMatchObject({
+          status: "rejected",
+          resultSequence: beforeSequence,
+        });
+      }).pipe(
+        Effect.provide(
+          makeOrchestrationLayer(undefined, undefined, {
+            ...providerServiceForEngineTests,
+            getInstanceInfo: (instanceId: ProviderInstanceId) =>
+              Effect.succeed({
+                instanceId,
+                driverKind: "codex",
+                displayName: String(instanceId),
+                enabled: true,
+                continuationIdentity: {
+                  driverKind: "codex",
+                  continuationKey: String(instanceId),
+                },
+              }),
+          } as unknown as ProviderService["Service"]),
+        ),
+      ),
+  );
+
   effectIt.effect(
     "rejects a stale callback route binding but preserves deliberate user model changes",
     () =>
@@ -860,6 +978,49 @@ describe("OrchestrationEngine", () => {
           .pipe(Effect.flip);
         expect(senderRouteError.message).toContain("destination route");
         expect(yield* engine.latestSequence).toBe(before);
+
+        yield* engine.dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("thread-route-binding-interaction-update"),
+          threadId,
+          interactionMode: "plan",
+          createdAt: now(),
+        });
+        const afterInteractionChange = yield* engine.latestSequence;
+        const interactionError = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("thread-route-binding-interaction-only-mismatch"),
+            threadId,
+            message: {
+              messageId: asMessageId("message-route-binding-interaction-only-mismatch"),
+              role: "user",
+              text: "Interaction-only stale callback",
+              attachments: [],
+            },
+            modelSelection: currentSelection,
+            routeBinding: {
+              modelSelection: currentSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now(),
+          })
+          .pipe(Effect.flip);
+        expect(interactionError.message).toContain("destination route");
+        expect(yield* engine.latestSequence).toBe(afterInteractionChange);
+        expect(
+          Option.getOrNull(yield* snapshots.getThreadDetailById(threadId))?.messages,
+        ).toHaveLength(0);
+        yield* engine.dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("thread-route-binding-interaction-restore"),
+          threadId,
+          interactionMode: "default",
+          createdAt: now(),
+        });
 
         const deliveredMessageId = asMessageId("message-route-binding-delivered");
         yield* engine.dispatch({
