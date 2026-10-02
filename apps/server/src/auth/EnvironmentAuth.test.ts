@@ -114,6 +114,32 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     ),
   );
 
+  it.effect("exposes the stable session subject without exposing credentials", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const first = yield* serverAuth.issueSession({ subject: "provider-principal-1" });
+      const second = yield* serverAuth.issueSession({ subject: "provider-principal-1" });
+      const drifted = yield* serverAuth.issueSession({ subject: "provider-principal-2" });
+
+      const firstState = yield* serverAuth.getSessionState(makeBearerRequest(first.token));
+      const secondState = yield* serverAuth.getSessionState(makeBearerRequest(second.token));
+      const driftedState = yield* serverAuth.getSessionState(makeBearerRequest(drifted.token));
+      const anonymousState = yield* serverAuth.getSessionState({
+        cookies: {},
+        headers: {},
+      } as unknown as Parameters<
+        EnvironmentAuth.EnvironmentAuth["Service"]["getSessionState"]
+      >[0]);
+
+      expect(first.token).not.toBe(second.token);
+      expect(firstState.subject).toBe("provider-principal-1");
+      expect(secondState.subject).toBe(firstState.subject);
+      expect(driftedState.subject).not.toBe(firstState.subject);
+      expect(JSON.stringify(firstState)).not.toContain(first.token);
+      expect(anonymousState.subject).toBeUndefined();
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web" }))),
+  );
+
   it.effect("does not fall back to the dev cookie after a normal cookie is rejected", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
