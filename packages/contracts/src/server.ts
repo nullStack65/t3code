@@ -24,6 +24,7 @@ import {
 import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderHostInstanceIdentity, ProviderKeyIdentifier } from "./providerIdentity.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -63,6 +64,8 @@ export const ServerProviderAuth = Schema.Struct({
   type: Schema.optional(TrimmedNonEmptyString),
   label: Schema.optional(TrimmedNonEmptyString),
   email: Schema.optional(TrimmedNonEmptyString),
+  /** Present only when the provider supplies a real stable public key ID. */
+  keyIds: Schema.optional(Schema.Array(ProviderKeyIdentifier)),
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
@@ -214,6 +217,8 @@ export const ServerProvider = Schema.Struct({
   version: Schema.NullOr(TrimmedNonEmptyString),
   status: ServerProviderState,
   auth: ServerProviderAuth,
+  /** Optional additive envelope; older clients omit and continue to decode. */
+  providerHostInstance: Schema.optional(ProviderHostInstanceIdentity),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   // Optional for back-compat: every legacy producer omits this field and
