@@ -44,6 +44,10 @@ import {
   resolveSourceRepository,
   serializeBuildInfo,
 } from "./lib/source-provenance.ts";
+import {
+  WSL_RUNTIME_ARCHIVE_HASH_NAME,
+  WSL_RUNTIME_ARCHIVE_NAME,
+} from "./lib/wsl-runtime-artifact.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1034,8 +1038,10 @@ export const WINDOWS_SERVER_EXTRA_RESOURCES = [
     filter: [WINDOWS_SERVER_ASAR_RESOURCE, `${WINDOWS_SERVER_ASAR_RESOURCE}.unpacked/**/*`],
   },
 ] as const;
-export const WSL_RUNTIME_ARCHIVE_NAME = "wsl-runtime.tar.gz";
-export const WSL_RUNTIME_ARCHIVE_HASH_NAME = `${WSL_RUNTIME_ARCHIVE_NAME}.sha256`;
+export {
+  WSL_RUNTIME_ARCHIVE_HASH_NAME,
+  WSL_RUNTIME_ARCHIVE_NAME,
+} from "./lib/wsl-runtime-artifact.ts";
 export const WSL_RUNTIME_ARCHIVE_EXTRA_RESOURCE = {
   from: `apps/desktop/prod-resources/${WSL_RUNTIME_ARCHIVE_NAME}`,
   to: WSL_RUNTIME_ARCHIVE_NAME,

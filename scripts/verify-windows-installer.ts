@@ -23,7 +23,7 @@ import * as NodePath from "node:path";
 
 import { parseBuildInfo } from "./lib/source-provenance.ts";
 import { verifyEmbeddedWslRuntime, type EmbeddedBuildInfo } from "./lib/wsl-payload.ts";
-import { WSL_RUNTIME_ARCHIVE_NAME } from "./build-desktop-artifact.ts";
+import { WSL_RUNTIME_ARCHIVE_NAME } from "./lib/wsl-runtime-artifact.ts";
 
 interface Args {
   installer: string;
