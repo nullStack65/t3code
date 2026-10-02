@@ -5,8 +5,7 @@
  * supplies a real public identifier.  No local value is a substitute.
  */
 import * as Schema from "effect/Schema";
-import { EnvironmentId } from "./environment.ts";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 export const ProviderKeyIdentifier = Schema.Struct({
@@ -82,7 +81,9 @@ export const qualifyManagedProviderLaunch = (input: {
     qualified: true,
     identity: {
       subject,
-      keyIds: [...input.keyIds],
+      // Key IDs are a set by contract. Sorting and deduplicating makes the
+      // projection deterministic without treating duplicates as new keys.
+      keyIds: normalizeKeyIds(input.keyIds),
       providerHostInstance: input.providerHostInstance,
     },
   };
@@ -94,11 +95,46 @@ export type ManagedProviderLaunchDrift =
   | "host-drift"
   | "unknown-identity";
 
-const keyIdSet = (keyIds: ReadonlyArray<ProviderKeyIdentifier>): Set<string> =>
-  new Set(keyIds.map((keyId) => `${keyId.namespace}\u0000${keyId.id}`));
+type KeyIdSet = ReadonlyMap<string, ReadonlySet<string>>;
 
-const equalSets = (left: Set<string>, right: Set<string>): boolean =>
-  left.size === right.size && [...left].every((value) => right.has(value));
+const normalizeKeyIds = (
+  keyIds: ReadonlyArray<ProviderKeyIdentifier>,
+): ReadonlyArray<ProviderKeyIdentifier> => {
+  const sorted = [...keyIds].sort((left, right) =>
+    left.namespace === right.namespace
+      ? left.id.localeCompare(right.id)
+      : left.namespace.localeCompare(right.namespace),
+  );
+  return sorted.filter(
+    (keyId, index) =>
+      index === 0 ||
+      keyId.namespace !== sorted[index - 1]?.namespace ||
+      keyId.id !== sorted[index - 1]?.id,
+  );
+};
+
+// Keep namespace and ID as separate map keys. A delimiter-joined string would
+// make tuples containing that delimiter collide and could hide key rotation.
+const keyIdSet = (keyIds: ReadonlyArray<ProviderKeyIdentifier>): KeyIdSet => {
+  const byNamespace = new Map<string, Set<string>>();
+  for (const keyId of keyIds) {
+    const ids = byNamespace.get(keyId.namespace) ?? new Set<string>();
+    ids.add(keyId.id);
+    byNamespace.set(keyId.namespace, ids);
+  }
+  return byNamespace;
+};
+
+const equalKeyIdSets = (left: KeyIdSet, right: KeyIdSet): boolean => {
+  if (left.size !== right.size) return false;
+  for (const [namespace, ids] of left) {
+    const otherIds = right.get(namespace);
+    if (!otherIds || ids.size !== otherIds.size || [...ids].some((id) => !otherIds.has(id))) {
+      return false;
+    }
+  }
+  return true;
+};
 
 /** Exact comparison used by re-authorization/rotation gates. */
 export const compareManagedProviderLaunchIdentity = (
@@ -107,7 +143,7 @@ export const compareManagedProviderLaunchIdentity = (
 ): "match" | ManagedProviderLaunchDrift => {
   if (!expected || !actual) return "unknown-identity";
   if (expected.subject !== actual.subject) return "subject-drift";
-  if (!equalSets(keyIdSet(expected.keyIds), keyIdSet(actual.keyIds))) return "key-id-drift";
+  if (!equalKeyIdSets(keyIdSet(expected.keyIds), keyIdSet(actual.keyIds))) return "key-id-drift";
   if (
     expected.providerHostInstance.environmentId !== actual.providerHostInstance.environmentId ||
     expected.providerHostInstance.providerInstanceId !==
