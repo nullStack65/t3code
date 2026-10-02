@@ -16,6 +16,12 @@ run these commands on the machine that will host T3 Code:
 | Restart                         | `t3 service restart`   |
 | Stop and remove from startup    | `t3 service uninstall` |
 
+`t3 service status` also reports what the service manager itself observes — whether the
+job is registered, enabled, and running — separately from whether T3 is set up correctly.
+A manager-reported version is the launch program the service is configured to run, not proof
+of the server process that is actually running, so status never presents it as one.
+Pass `--json` for a stable, machine-readable version of the same status.
+
 Uninstalling the service leaves your projects, threads, and settings intact.
 Running `t3 service install` again repairs a service that `t3 service status`
 reports as broken.
@@ -60,7 +66,9 @@ separately. Signing out of T3 Connect does not stop or uninstall the service.
 
 Start with `t3 service status` on the host. It prints the log path and, on Linux,
 checks whether the installed service is running, enabled, and allowed to survive
-logout.
+logout. On macOS it asks `launchctl` for the same running/enabled state. What it
+reports is what the service manager sees — a running job does not by itself prove
+the server is answering, so also check the log if remote clients cannot connect.
 
 If it stops when your SSH session closes, check for `linger-disabled`. An
 administrator can enable lingering with:
