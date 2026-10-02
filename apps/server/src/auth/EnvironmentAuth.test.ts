@@ -127,9 +127,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       const anonymousState = yield* serverAuth.getSessionState({
         cookies: {},
         headers: {},
-      } as unknown as Parameters<
-        EnvironmentAuth.EnvironmentAuth["Service"]["getSessionState"]
-      >[0]);
+      } as unknown as Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["getSessionState"]>[0]);
 
       expect(first.token).not.toBe(second.token);
       expect(firstState.subject).toBe("provider-principal-1");
