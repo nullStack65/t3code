@@ -449,12 +449,17 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   ),
 );
 
+// Build the orchestration engine with this same provider service instance so
+// serialized turn admission can resolve live route compatibility.
+const ProviderOrchestrationLayerLive = OrchestrationLayerLive.pipe(
+  Layer.provideMerge(ProviderLayerLive),
+);
+
 const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   // Subscribes to `account.rate-limits.updated` so usage bars track live
   // telemetry instead of waiting for the next status probe.
   Layer.provideMerge(ProviderUsageLimitsIngestionLive),
-  Layer.provideMerge(ProviderLayerLive),
-  Layer.provideMerge(OrchestrationLayerLive),
+  Layer.provideMerge(ProviderOrchestrationLayerLive),
 );
 
 const AntigravityInstallationRefreshLive = Layer.effectDiscard(

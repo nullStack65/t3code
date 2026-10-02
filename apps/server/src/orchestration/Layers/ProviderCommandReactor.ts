@@ -647,22 +647,6 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
-      yield* setThreadSession({
-        threadId,
-        session: {
-          threadId,
-          status: "starting",
-          providerName: activeSession?.provider ?? preferredProvider,
-          providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
-          runtimeMode: desiredRuntimeMode,
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      });
-    }
     if (thread.session !== null) {
       yield* rejectStartedThreadModelChangeIfRequired({
         threadId,
@@ -686,6 +670,7 @@ const make = Effect.gen(function* () {
         return yield* new ProviderAdapterRequestError({
           provider: preferredProvider,
           method: "thread.turn.start",
+          reason: "incompatible-resume-route",
           detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
         });
       }
@@ -696,9 +681,26 @@ const make = Effect.gen(function* () {
         return yield* new ProviderAdapterRequestError({
           provider: preferredProvider,
           method: "thread.turn.start",
+          reason: "incompatible-resume-route",
           detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
         });
       }
+    }
+    if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
+      yield* setThreadSession({
+        threadId,
+        session: {
+          threadId,
+          status: "starting",
+          providerName: activeSession?.provider ?? preferredProvider,
+          providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
+          runtimeMode: desiredRuntimeMode,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
     }
     const project = yield* resolveProject(thread.projectId);
     const effectiveCwd = resolveThreadWorkspaceCwd({
@@ -1259,12 +1261,37 @@ const make = Effect.gen(function* () {
         "The queued message was canceled before it could resume. Send it again to continue.",
       );
     }
+    if (
+      event.payload.routeBinding !== undefined &&
+      (!Equal.equals(thread.modelSelection, event.payload.routeBinding) ||
+        (event.payload.modelSelection !== undefined &&
+          !Equal.equals(event.payload.modelSelection, event.payload.routeBinding)))
+    ) {
+      return yield* appendTurnStartFailure(
+        "Callback destination route changed",
+        `The business result is already preserved in this thread. Do not resend it. Review the existing message '${event.payload.messageId}' here, restore a compatible destination route, then continue from its existing content.`,
+      );
+    }
 
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
+      const failure = Cause.findErrorOption(cause);
+      if (
+        Option.isSome(failure) &&
+        isProviderAdapterRequestError(failure.value) &&
+        failure.value.method === "thread.turn.start" &&
+        failure.value.reason === "incompatible-resume-route"
+      ) {
+        // This is a rejected route, not a provider startup failure. Admission
+        // normally catches it before persistence; retain the surviving
+        // session if the route changed between admission and reactor handling.
+        return appendTurnStartFailure("Provider route changed before turn start", detail).pipe(
+          Effect.asVoid,
+        );
+      }
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
