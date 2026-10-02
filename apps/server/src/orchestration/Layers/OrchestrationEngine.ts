@@ -14,6 +14,7 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
@@ -45,6 +46,7 @@ import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -88,6 +90,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
+  const providerService = yield* Effect.serviceOption(ProviderService);
   const crypto = yield* Crypto.Crypto;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -183,6 +186,85 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandType: envelope.command.type,
             detail: `thread ${envelope.command.threadId} changed before automatic settlement`,
           });
+        }
+
+        // Reject an incompatible resume before the decider can persist the
+        // callback's message, turn request, or lifecycle reset. Provider-side
+        // validation remains as a race and legacy-event safeguard.
+        if (envelope.command.type === "thread.turn.start") {
+          const command = envelope.command;
+          const thread = commandReadModel.threads.find((entry) => entry.id === command.threadId);
+          if (
+            command.routeBinding !== undefined &&
+            command.bootstrap?.prepareWorktree === undefined &&
+            Option.isSome(
+              yield* projectionSnapshotQuery.getTurnStartMessage({
+                threadId: command.threadId,
+                messageId: command.message.messageId,
+              }),
+            )
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Message '${command.message.messageId}' is already present on thread '${command.threadId}'. The callback result was preserved and will not be replayed.`,
+            });
+          }
+          if (
+            command.routeBinding !== undefined &&
+            (thread === undefined ||
+              thread.modelSelection.instanceId !== command.routeBinding.instanceId ||
+              thread.modelSelection.model !== command.routeBinding.model ||
+              !Equal.equals(thread.modelSelection, command.routeBinding) ||
+              (command.modelSelection !== undefined &&
+                !Equal.equals(command.modelSelection, command.routeBinding)))
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `The destination route for thread '${command.threadId}' changed after the callback was created. No message was ingested. Refresh the destination thread, correct the route, then submit the result deliberately.`,
+            });
+          }
+          if (
+            thread !== undefined &&
+            thread.session !== null &&
+            command.modelSelection !== undefined &&
+            Option.isSome(providerService)
+          ) {
+            const activeSession =
+              thread.session.status === "running" || thread.session.status === "starting"
+                ? (yield* providerService.value.listSessions()).find(
+                    (session) => session.threadId === command.threadId,
+                  )
+                : undefined;
+            const currentInstanceId =
+              activeSession?.providerInstanceId ??
+              thread.session.providerInstanceId ??
+              thread.modelSelection.instanceId;
+            const requestedInstanceId = command.modelSelection.instanceId;
+            if (currentInstanceId !== requestedInstanceId) {
+              const [currentInfo, requestedInfo] = yield* Effect.all([
+                providerService.value.getInstanceInfo(currentInstanceId),
+                providerService.value.getInstanceInfo(requestedInstanceId),
+              ]).pipe(
+                Effect.mapError(
+                  () =>
+                    new OrchestrationCommandInvariantError({
+                      commandType: command.type,
+                      detail: `Cannot safely resume thread '${command.threadId}' on provider instance '${requestedInstanceId}'. No message was ingested. Correct the route, then submit the result deliberately.`,
+                    }),
+                ),
+              );
+              if (
+                currentInfo.driverKind !== requestedInfo.driverKind ||
+                currentInfo.continuationIdentity.continuationKey !==
+                  requestedInfo.continuationIdentity.continuationKey
+              ) {
+                return yield* new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: `Thread '${command.threadId}' is bound to provider instance '${currentInstanceId}' and cannot resume on incompatible instance '${requestedInstanceId}'. No message was ingested. Choose a compatible provider route, then submit the result deliberately, or start a new thread.`,
+                });
+              }
+            }
+          }
         }
 
         // The decider compares the lookup inputs. Only recreation needs an
