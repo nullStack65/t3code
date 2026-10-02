@@ -670,6 +670,53 @@ export const OrchestrationThreadActivity = Schema.Struct({
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
+/**
+ * One tool call the server has observed as outstanding. Mirrors the shared
+ * post-start derivation's tool shape so the shell can carry live observation
+ * to clients that cannot see the thread's activity list.
+ */
+export const OrchestrationOutstandingTool = Schema.Struct({
+  toolCallId: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  itemType: Schema.NullOr(TrimmedNonEmptyString),
+  startedAt: IsoDateTime,
+  lastObservedAt: IsoDateTime,
+});
+export type OrchestrationOutstandingTool = typeof OrchestrationOutstandingTool.Type;
+
+/**
+ * Server-observed post-start provider activity for a running thread. Live-only
+ * (no persistence): after a restart the shell omits it and clients fall back to
+ * the persisted turn origin. Optional so older peers still decode.
+ */
+export const OrchestrationPostStartActivity = Schema.Struct({
+  lastProviderActivityAt: Schema.NullOr(IsoDateTime),
+  lastToolCompletedAt: Schema.NullOr(IsoDateTime),
+  outstandingTools: Schema.Array(OrchestrationOutstandingTool),
+  /**
+   * The turn this observation describes, or null while the accepted request is
+   * pending and the provider turn is not named yet. Lets a client reject a
+   * cached observation that belongs to a different turn. Optional so peers
+   * that predate the field still decode.
+   */
+  turnId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /**
+   * Tool ids the server has observed as completed this turn. Carried so a
+   * client can reconcile live evidence against persisted rows without
+   * resurrecting a finished call from stale progress in either direction.
+   * Optional so older peers still decode.
+   */
+  completedToolIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /**
+   * Server clock instant the shell was mapped. This is the observation-time
+   * basis: the client measures provider ages against the server's clock using
+   * this stamp instead of assuming the two clocks agree. Optional so peers
+   * that omit it fall back to their own clock.
+   */
+  observedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+});
+export type OrchestrationPostStartActivity = typeof OrchestrationPostStartActivity.Type;
+
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
   "interrupted",
@@ -935,6 +982,9 @@ export const OrchestrationThreadShell = Schema.Struct({
       }),
     ),
   ),
+  // Server-observed live provider activity for a running thread. Optional so
+  // old servers/clients interop; absent = unknown (fall back to turn origin).
+  postStartActivity: Schema.optional(Schema.NullOr(OrchestrationPostStartActivity)),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
