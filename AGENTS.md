@@ -85,21 +85,12 @@ The most common defect in this repo is a change that works on the path you teste
 
 ## Test data
 
-An empty database is a bad test. Seed your worktree's `.t3` with a copy of real data instead of pointing at live state:
+Use synthetic data in a fresh disposable fixture directory. Seed the events and records needed to exercise meaningful behavior through existing test helpers; an empty database alone is not adequate evidence.
 
-- Copy from `~/.t3/userdata` (the developer's real data, the most realistic test set) or `~/.t3/dev`. Worktree state lives at `<worktree>/.t3/userdata`.
-- Snapshot the database with `VACUUM INTO`, which is safe even while a server has the source open and yields one consistent file:
-
-  ```bash
-  mkdir -p .t3/userdata
-  rm -f .t3/userdata/state.sqlite*  # VACUUM INTO refuses to overwrite
-  bun -e "new (require('bun:sqlite').Database)(process.env.HOME + '/.t3/userdata/state.sqlite', { readonly: true }).run(\"VACUUM INTO '.t3/userdata/state.sqlite'\")"
-  ```
-
-  A plain `cp` is only safe when no server has the source open, and must bring the `-wal` and `-shm` siblings along. A live file copy is a corrupt copy.
-
-- Bring `secrets` and `settings.json` only if the flow under test needs them.
-- Copy in, never symlink. Data flows one way: into your sandbox, never back out.
+- Never copy or snapshot real userdata or databases into tests. Do not use `VACUUM INTO`, database backups, live SQLite/WAL/SHM copies, or secret/session/settings copies as fixtures.
+- Keep fixture state isolated from `~/.t3/userdata`, shared dev state, and production. Use fake credentials and synthetic settings only when the tested path needs them.
+- Do not delete or replace existing userdata or `state.sqlite*` files to prepare a test. If a destination already contains state, select a new disposable fixture directory instead.
+- Stop only the test processes you started. Clean up only the synthetic fixture directory that this test created and owns; never write fixture state back to live state.
 
 ## Verifying
 
