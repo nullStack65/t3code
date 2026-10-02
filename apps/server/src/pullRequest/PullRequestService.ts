@@ -305,6 +305,10 @@ const ACTION_ACCESS_REFUSALS: Record<PullRequestAction, string> = {
  */
 const REVIEWER_REQUEST_REFUSAL = "You need write access on this repository to ask for a review.";
 const LABEL_CHANGE_REFUSAL = "You need triage access on this repository to change its labels.";
+const OWNER_ONLY_REVIEW_REFUSAL =
+  "Formal review decisions are unavailable through T3. Review manually in the forge UI or with the ordinary human CLI.";
+const OWNER_ONLY_REVIEWER_REQUEST_REFUSAL =
+  "Reviewer requests and removals are unavailable through T3. Manage reviewers manually in the forge UI or with the ordinary human CLI.";
 
 /** A project this page can read: its remote is on a host with an implementation. */
 export interface SupportedProject {
@@ -2107,8 +2111,16 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  const submitReview: PullRequestService["Service"]["submitReview"] = (input) =>
-    requireProject(input).pipe(
+  const submitReview: PullRequestService["Service"]["submitReview"] = (input) => {
+    if (input.verdict !== "comment") {
+      return Effect.fail(
+        new PullRequestOperationError({
+          operation: "submitReview",
+          detail: OWNER_ONLY_REVIEW_REFUSAL,
+        }),
+      );
+    }
+    return requireProject(input).pipe(
       Effect.flatMap((project): Effect.Effect<void, PullRequestError> => {
         const review = project.api.capabilities.review;
         const refuse = (detail: string) =>
@@ -2159,6 +2171,7 @@ export const make = Effect.gen(function* () {
         );
       }),
     );
+  };
 
   const replyToThread: PullRequestService["Service"]["replyToThread"] = (input) =>
     (input.body.trim().length === 0
@@ -2313,41 +2326,14 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const requestReviewers: PullRequestService["Service"]["requestReviewers"] = (input) =>
-    requireProject(input).pipe(
-      Effect.flatMap((project): Effect.Effect<void, PullRequestError> => {
-        if (!project.api.capabilities.reviewers.request) {
-          return Effect.fail(
-            new PullRequestOperationError({
-              operation: "requestReviewers",
-              detail: "This host cannot ask somebody for a review.",
-            }),
-          );
-        }
-        return viewerPermissionsOf(project, input, "requestReviewers").pipe(
-          Effect.flatMap((viewer): Effect.Effect<void, PullRequestError> => {
-            if (!viewer.requestReviewers) {
-              return Effect.fail(
-                new PullRequestOperationError({
-                  operation: "requestReviewers",
-                  detail: REVIEWER_REQUEST_REFUSAL,
-                }),
-              );
-            }
-            return project.api
-              .setReviewerRequest({
-                cwd: project.project.workspaceRoot,
-                repository: project.repository,
-                host: project.host,
-                number: input.number,
-                reviewers: input.reviewers,
-                requested: input.requested,
-              })
-              .pipe(Effect.mapError(toPullRequestError("requestReviewers")));
-          }),
-        );
+  const requestReviewers: PullRequestService["Service"]["requestReviewers"] = (input) => {
+    return Effect.fail(
+      new PullRequestOperationError({
+        operation: "requestReviewers",
+        detail: OWNER_ONLY_REVIEWER_REQUEST_REFUSAL,
       }),
     );
+  };
 
   /**
    * The labels, like the reviewer candidates, are wanted only by somebody about to change them,
