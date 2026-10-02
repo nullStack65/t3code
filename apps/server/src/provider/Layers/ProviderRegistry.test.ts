@@ -46,7 +46,6 @@ import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistr
 import {
   mergeProviderSnapshot,
   upsertProviderWorkspaceSnapshot,
-  stampProviderHostInstance,
   ProviderRegistryLive,
 } from "./ProviderRegistry.ts";
 import * as ServerConfig from "../../config.ts";
@@ -66,28 +65,14 @@ const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
 
-const withProviderHost = <Provider extends { readonly instanceId: string }>(provider: Provider) => ({
+const withProviderHost = <Provider extends { readonly instanceId: string }>(
+  provider: Provider,
+) => ({
   ...provider,
   providerHostInstance: {
-    environmentId: "provider-registry-test",
-    providerInstanceId: provider.instanceId,
+    environmentId: EnvironmentId.make("provider-registry-test"),
+    providerInstanceId: ProviderInstanceId.make(provider.instanceId),
   },
-});
-
-describe("provider host identity stamping", () => {
-  it("uses the persisted environment plus instance and never continuation metadata", () => {
-    const provider = {
-      instanceId: ProviderInstanceId.make("codex_work"),
-      continuation: { groupKey: "codex:home:/shared" },
-    } as ServerProvider;
-    assert.deepStrictEqual(stampProviderHostInstance(provider, EnvironmentId.make("env-a")), {
-      ...provider,
-      providerHostInstance: {
-        environmentId: "env-a",
-        providerInstanceId: "codex_work",
-      },
-    });
-  });
 });
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
@@ -104,11 +89,16 @@ process.env.T3CODE_CURSOR_ENABLED = "1";
 const encoder = new TextEncoder();
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
-const TestHttpClientLive = Layer.succeed(
-  HttpClient.HttpClient,
-  HttpClient.make((request) =>
-    Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ version: "0.0.0" }))),
+const TestHttpClientLive = Layer.mergeAll(
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make((request) =>
+      Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ version: "0.0.0" }))),
+    ),
   ),
+  Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+    getEnvironmentId: Effect.succeed(EnvironmentId.make("provider-registry-test")),
+  }),
 );
 
 const BackgroundPolicyAlwaysRunLayer = Layer.mock(BackgroundPolicy.BackgroundPolicy)({
@@ -388,16 +378,7 @@ const awaitPersistedProvider = (
     Effect.forkScoped,
   );
 
-it.layer(
-  Layer.mergeAll(
-    NodeServices.layer,
-    ServerSettingsModule.layerTest(),
-    TestHttpClientLive,
-    Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(EnvironmentId.make("provider-registry-test")),
-    }),
-  ),
-)(
+it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), TestHttpClientLive))(
   "ProviderRegistry",
   (it) => {
     describe("checkCodexProviderStatus", () => {
@@ -1458,7 +1439,9 @@ it.layer(
           ).pipe(Scope.provide(scope));
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
-            assert.deepStrictEqual(yield* registry.getProviders, [withProviderHost(initialProvider)]);
+            assert.deepStrictEqual(yield* registry.getProviders, [
+              withProviderHost(initialProvider),
+            ]);
             assert.strictEqual(yield* Ref.get(refreshCalls), 0);
           }).pipe(Effect.provide(runtimeServices));
         }),
@@ -1801,7 +1784,7 @@ it.layer(
             );
             assert.deepStrictEqual(
               changedProviders.find((provider) => provider.instanceId === codexInstanceId),
-            withProviderHost(codexProvider),
+              withProviderHost(codexProvider),
             );
           }).pipe(Effect.provide(runtimeServices));
 
@@ -2130,8 +2113,12 @@ it.layer(
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
 
-            assert.deepStrictEqual(yield* registry.getProviders, [withProviderHost(cachedProvider)]);
-            assert.deepStrictEqual(yield* registry.refresh(codexDriver), [withProviderHost(cachedProvider)]);
+            assert.deepStrictEqual(yield* registry.getProviders, [
+              withProviderHost(cachedProvider),
+            ]);
+            assert.deepStrictEqual(yield* registry.refresh(codexDriver), [
+              withProviderHost(cachedProvider),
+            ]);
             assert.deepStrictEqual(yield* registry.refreshInstance(codexInstanceId), [
               withProviderHost(cachedProvider),
             ]);
