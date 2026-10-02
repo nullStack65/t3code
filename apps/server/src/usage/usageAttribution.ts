@@ -100,7 +100,7 @@ export interface AttributionSourceCapability {
   readonly note: string;
 }
 
-export const ATTRIBUTION_SOURCE_CAPABILITIES: readonly AttributionSourceCapability[] = [
+const ATTRIBUTION_SOURCE_CAPABILITIES: readonly AttributionSourceCapability[] = [
   {
     provider: "claude",
     nativeSource: "transcript",

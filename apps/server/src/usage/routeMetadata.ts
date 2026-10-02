@@ -16,7 +16,7 @@
  */
 
 /** Why a route event happened. `null` means "request only, not classified". */
-export const ROUTE_EVENT_KINDS = [
+const ROUTE_EVENT_KINDS = [
   "normal",
   "availability_fallback",
   "canary",
@@ -29,7 +29,7 @@ export type RouteEventKind = (typeof ROUTE_EVENT_KINDS)[number];
  * A bounded, coarse task class known *before* execution. `unknown` is a first
  * class value: the caller must be able to abstain rather than guess.
  */
-export const TASK_STRATA = [
+const TASK_STRATA = [
   "investigation",
   "docs",
   "tests",
@@ -50,7 +50,7 @@ export function isRouteEventKind(value: unknown): value is RouteEventKind {
   return typeof value === "string" && ROUTE_EVENT_KIND_SET.has(value);
 }
 
-export function isTaskStratum(value: unknown): value is TaskStratum {
+function isTaskStratum(value: unknown): value is TaskStratum {
   return typeof value === "string" && TASK_STRATUM_SET.has(value);
 }
 
@@ -92,7 +92,7 @@ export function normalizeProviderInstanceKey(value: unknown): string {
  * normalizes to `null` rather than being stored, so arbitrary prose cannot
  * leak into the metadata carrier.
  */
-export const MAX_ESCALATION_REASON_LENGTH = 64;
+const MAX_ESCALATION_REASON_LENGTH = 64;
 const ESCALATION_REASON_PATTERN = /^[a-z0-9][a-z0-9_.:-]*$/;
 
 export function normalizeEscalationReason(value: unknown): string | null {
