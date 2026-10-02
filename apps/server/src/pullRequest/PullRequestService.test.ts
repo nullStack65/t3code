@@ -2447,44 +2447,69 @@ it.effect("refuses line comments on a host that takes only a summary", () =>
   }),
 );
 
-it.effect(
-  "refuses a review with neither a summary nor a comment, but lets an approval through",
-  () =>
-    Effect.gen(function* () {
-      let approved = false;
-      const service = yield* makeService({
-        projects: [
-          project({
-            id: "p1",
-            title: "t3code",
-            workspaceRoot: "/a",
-            repository: "pingdotgg/t3code",
-          }),
-        ],
-        providers: [
-          fakeProvider("github", {
-            submitReview: () => {
-              approved = true;
-              return Effect.void;
-            },
-          }),
-        ],
+it.effect("allows comments and formal review decisions through the provider", () =>
+  Effect.gen(function* () {
+    let permissionReads = 0;
+    let submissions = 0;
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "t3code",
+          workspaceRoot: "/a",
+          repository: "pingdotgg/t3code",
+        }),
+      ],
+      providers: [
+        fakeProvider("github", {
+          getViewerPermissions: () => {
+            permissionReads += 1;
+            return Effect.succeed({
+              actions: ["merge", "ready", "draft", "close", "reopen"],
+              comment: true,
+              resolve: true,
+              verdicts: ["comment", "approve", "request-changes"],
+              requestReviewers: true,
+            });
+          },
+          submitReview: () => {
+            submissions += 1;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const reference = {
+      projectId: "p1" as ProjectId,
+      repository: "pingdotgg/t3code",
+      number: 1,
+    };
+
+    const error = yield* Effect.flip(
+      service.submitReview({ ...reference, verdict: "comment", body: "   ", comments: [] }),
+    );
+    assert.strictEqual(error._tag, "PullRequestOperationError");
+
+    for (const verdict of ["approve", "request-changes"] as const) {
+      yield* service.submitReview({
+        ...reference,
+        verdict,
+        body: verdict === "approve" ? "" : "Please address these findings.",
+        comments: [],
       });
-      const reference = {
-        projectId: "p1" as ProjectId,
-        repository: "pingdotgg/t3code",
-        number: 1,
-      };
+    }
+    assert.strictEqual(permissionReads, 2);
+    assert.strictEqual(submissions, 2);
 
-      const error = yield* Effect.flip(
-        service.submitReview({ ...reference, verdict: "comment", body: "   ", comments: [] }),
-      );
-      assert.strictEqual(error._tag, "PullRequestOperationError");
-
-      // An approval is a verdict in itself, so it needs no words.
-      yield* service.submitReview({ ...reference, verdict: "approve", body: "", comments: [] });
-      assert.isTrue(approved);
-    }),
+    yield* service.submitReview({
+      ...reference,
+      verdict: "comment",
+      body: "Looks good to discuss",
+      comments: [],
+    });
+    assert.strictEqual(permissionReads, 3);
+    assert.strictEqual(submissions, 3);
+  }),
 );
 
 it.effect("refuses to resolve a conversation on a host that cannot", () =>
@@ -2890,45 +2915,126 @@ it.effect("asks another checkout who is signed in when the first one cannot answ
   }),
 );
 
-it.effect("refuses to ask for a review on a host that cannot, before any call is made", () =>
+it.effect(
+  "refuses human, team, and ambiguous automation reviewer mutations before the adapter",
+  () =>
+    Effect.gen(function* () {
+      let asked = false;
+      const service = yield* makeService({
+        projects: [
+          project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" }),
+        ],
+        providers: [
+          fakeProvider("github", {
+            capabilities: {
+              diff: true,
+              comment: true,
+              actions: ["merge"],
+              mergeMethods: ["merge"],
+              search: true,
+              reactions: true,
+              review: FULL_REVIEW,
+              reviewers: { request: false, listCandidates: false },
+            },
+            getViewerPermissions: () => {
+              asked = true;
+              return Effect.die("must not be called");
+            },
+            setReviewerRequest: () => Effect.die("must not be called"),
+          }),
+        ],
+      });
+
+      const error = yield* Effect.flip(
+        service.requestReviewers({
+          projectId: "p1" as ProjectId,
+          repository: "acme/web",
+          number: 1,
+          reviewers: [{ id: "octocat", kind: "user" }],
+          requested: true,
+        }),
+      );
+
+      assert.strictEqual(error._tag, "PullRequestOperationError");
+      assert.include(error.message, "only request or remove the verified owner nullStack65");
+      assert.isFalse(asked);
+
+      const removalError = yield* Effect.flip(
+        service.requestReviewers({
+          projectId: "p1" as ProjectId,
+          repository: "acme/web",
+          number: 1,
+          reviewers: [{ id: "reviewers", kind: "team" }],
+          expectedAccountId: "112618179",
+          requested: false,
+        }),
+      );
+      assert.strictEqual(removalError._tag, "PullRequestOperationError");
+      assert.include(removalError.message, "only request or remove the verified owner nullStack65");
+      assert.isFalse(asked);
+
+      const botError = yield* Effect.flip(
+        service.requestReviewers({
+          projectId: "p1" as ProjectId,
+          repository: "acme/web",
+          number: 1,
+          reviewers: [{ id: "dependabot[bot]", kind: "user" }],
+          expectedAccountId: "112618179",
+          requested: true,
+        }),
+      );
+      assert.strictEqual(botError._tag, "PullRequestOperationError");
+      assert.include(botError.message, "ambiguous automation");
+      assert.isFalse(asked);
+    }),
+);
+
+it.effect("allows a verified owner reviewer mutation through the existing provider path", () =>
   Effect.gen(function* () {
-    let asked = false;
+    let sent: ReadonlyArray<{ id: string; kind: "user" | "team" }> = [];
     const service = yield* makeService({
       projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
       providers: [
         fakeProvider("github", {
-          capabilities: {
-            diff: true,
-            comment: true,
-            actions: ["merge"],
-            mergeMethods: ["merge"],
-            search: true,
-            reactions: true,
-            review: FULL_REVIEW,
-            reviewers: { request: false, listCandidates: false },
+          withVerifiedCredential: (_input, use) =>
+            use({
+              accountId: "112618179",
+              viewer: "nullStack65",
+              credentialFingerprint: "owner-credential",
+            }),
+          getViewerPermissions: () =>
+            Effect.succeed({
+              actions: ["ready", "draft", "close", "reopen"],
+              comment: true,
+              resolve: true,
+              verdicts: ["comment", "approve", "request-changes"],
+              requestReviewers: true,
+            }),
+          setReviewerRequest: (input) => {
+            sent = input.reviewers;
+            return Effect.void;
           },
-          getViewerPermissions: () => {
-            asked = true;
-            return Effect.die("must not be called");
-          },
-          setReviewerRequest: () => Effect.die("must not be called"),
         }),
       ],
     });
+    const reference = {
+      projectId: "p1" as ProjectId,
+      repository: "acme/web",
+      number: 1,
+      host: "github.com",
+      expectedAccountId: "112618179",
+    };
 
-    const error = yield* Effect.flip(
+    yield* service.withRoutingCredential(
+      reference,
       service.requestReviewers({
-        projectId: "p1" as ProjectId,
-        repository: "acme/web",
-        number: 1,
-        reviewers: [{ id: "octocat", kind: "user" }],
+        ...reference,
+        reviewers: [{ id: "nullStack65", kind: "user" }],
         requested: true,
       }),
     );
 
-    assert.strictEqual(error._tag, "PullRequestOperationError");
-    assert.include(error.message, "cannot ask somebody for a review.");
-    assert.isFalse(asked);
+    assert.deepStrictEqual(sent, [{ id: "nullStack65", kind: "user" }]);
   }),
 );
 
@@ -3002,7 +3108,7 @@ it.effect("refuses a review request this viewer may not make, and says what acce
     );
 
     assert.strictEqual(error._tag, "PullRequestOperationError");
-    assert.include(error.message, "You need write access on this repository to ask for a review.");
+    assert.include(error.message, "only request or remove the verified owner nullStack65");
     assert.isFalse(sent);
   }),
 );
