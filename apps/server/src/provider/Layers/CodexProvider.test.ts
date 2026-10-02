@@ -1,6 +1,10 @@
 import { assert, it } from "@effect/vitest";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  mapCodexModelCapabilities,
+  resolveCodexProviderModels,
+} from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
@@ -160,4 +164,33 @@ it("ignores custom models that shadow a preferred slug", () => {
   ]);
 
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.4");
+});
+
+it("keeps the app-server catalog by default and appends custom models", () => {
+  const models = resolveCodexProviderModels(
+    [{ slug: "gpt-native", name: "GPT Native", isCustom: false, capabilities: null }],
+    ["proxy-only"],
+    "app-server",
+  );
+
+  assert.deepStrictEqual(
+    models.map(({ slug, isCustom }) => ({ slug, isCustom })),
+    [
+      { slug: "gpt-native", isCustom: false },
+      { slug: "proxy-only", isCustom: true },
+    ],
+  );
+});
+
+it("restricts a proxy-backed instance to configured custom models", () => {
+  const models = resolveCodexProviderModels(
+    [{ slug: "gpt-native", name: "GPT Native", isCustom: false, capabilities: null }],
+    ["proxy-only"],
+    "custom-only",
+  );
+
+  assert.deepStrictEqual(
+    models.map(({ slug, isCustom }) => ({ slug, isCustom })),
+    [{ slug: "proxy-only", isCustom: true }],
+  );
 });
