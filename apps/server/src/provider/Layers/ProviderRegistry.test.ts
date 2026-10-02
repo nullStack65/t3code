@@ -19,6 +19,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettings,
@@ -45,9 +46,11 @@ import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistr
 import {
   mergeProviderSnapshot,
   upsertProviderWorkspaceSnapshot,
+  stampProviderHostInstance,
   ProviderRegistryLive,
 } from "./ProviderRegistry.ts";
 import * as ServerConfig from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as ServerSettingsModule from "../../serverSettings.ts";
 import {
   readProviderStatusCache,
@@ -62,6 +65,30 @@ import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMainte
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
+
+const withProviderHost = <Provider extends { readonly instanceId: string }>(provider: Provider) => ({
+  ...provider,
+  providerHostInstance: {
+    environmentId: "provider-registry-test",
+    providerInstanceId: provider.instanceId,
+  },
+});
+
+describe("provider host identity stamping", () => {
+  it("uses the persisted environment plus instance and never continuation metadata", () => {
+    const provider = {
+      instanceId: ProviderInstanceId.make("codex_work"),
+      continuation: { groupKey: "codex:home:/shared" },
+    } as ServerProvider;
+    assert.deepStrictEqual(stampProviderHostInstance(provider, EnvironmentId.make("env-a")), {
+      ...provider,
+      providerHostInstance: {
+        environmentId: "env-a",
+        providerInstanceId: "codex_work",
+      },
+    });
+  });
+});
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({});
@@ -361,7 +388,16 @@ const awaitPersistedProvider = (
     Effect.forkScoped,
   );
 
-it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), TestHttpClientLive))(
+it.layer(
+  Layer.mergeAll(
+    NodeServices.layer,
+    ServerSettingsModule.layerTest(),
+    TestHttpClientLive,
+    Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("provider-registry-test")),
+    }),
+  ),
+)(
   "ProviderRegistry",
   (it) => {
     describe("checkCodexProviderStatus", () => {
@@ -1422,7 +1458,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           ).pipe(Scope.provide(scope));
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
-            assert.deepStrictEqual(yield* registry.getProviders, [initialProvider]);
+            assert.deepStrictEqual(yield* registry.getProviders, [withProviderHost(initialProvider)]);
             assert.strictEqual(yield* Ref.get(refreshCalls), 0);
           }).pipe(Effect.provide(runtimeServices));
         }),
@@ -1753,7 +1789,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             );
             assert.deepStrictEqual(
               recoveredProviders.find((provider) => provider.instanceId === codexInstanceId),
-              codexProvider,
+              withProviderHost(codexProvider),
             );
 
             yield* Ref.set(catalogSnapshot, changedCatalogProvider);
@@ -1765,7 +1801,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             );
             assert.deepStrictEqual(
               changedProviders.find((provider) => provider.instanceId === codexInstanceId),
-              codexProvider,
+            withProviderHost(codexProvider),
             );
           }).pipe(Effect.provide(runtimeServices));
 
@@ -1880,7 +1916,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             const cachedProvider = yield* readProviderStatusCache(filePath);
 
             assert.deepStrictEqual(cachedProvider, {
-              ...refreshedProvider,
+              ...withProviderHost(refreshedProvider),
               models: [...initialProvider.models],
             });
           }).pipe(Effect.provide(runtimeServices));
@@ -2094,10 +2130,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
 
-            assert.deepStrictEqual(yield* registry.getProviders, [cachedProvider]);
-            assert.deepStrictEqual(yield* registry.refresh(codexDriver), [cachedProvider]);
+            assert.deepStrictEqual(yield* registry.getProviders, [withProviderHost(cachedProvider)]);
+            assert.deepStrictEqual(yield* registry.refresh(codexDriver), [withProviderHost(cachedProvider)]);
             assert.deepStrictEqual(yield* registry.refreshInstance(codexInstanceId), [
-              cachedProvider,
+              withProviderHost(cachedProvider),
             ]);
           }).pipe(Effect.provide(runtimeServices));
         }),
@@ -2205,7 +2241,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
-            assert.deepStrictEqual(yield* registry.getProviders, [codexProvider]);
+            assert.deepStrictEqual(yield* registry.getProviders, [withProviderHost(codexProvider)]);
 
             yield* Ref.set(failNextList, true);
             yield* PubSub.publish(changes, undefined);

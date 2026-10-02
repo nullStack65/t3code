@@ -8,6 +8,7 @@ import {
 import { ServerProvider } from "./server.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
+const decodeManagedProviderLaunchIdentity = Schema.decodeUnknownSync(ManagedProviderLaunchIdentity);
 const host = { environmentId: "env-a", providerInstanceId: "codex" } as const;
 const keyIds = [{ namespace: "provider.example", id: "key-a" }] as const;
 const identity = {
@@ -48,6 +49,13 @@ describe("managed provider launch identity", () => {
       qualified: false,
       reason: "missing-host-identity",
     });
+    expect(() =>
+      decodeManagedProviderLaunchIdentity({
+        subject: "subject-a",
+        keyIds: [],
+        providerHostInstance: host,
+      }),
+    ).toThrow();
   });
 
   it("compares namespace-qualified key sets and reports exact drift", () => {
