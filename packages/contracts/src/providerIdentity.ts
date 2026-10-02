@@ -37,7 +37,7 @@ export const ManagedProviderLaunchIdentity = Schema.Struct({
   /** Non-secret authenticated principal from the verified session. */
   subject: TrimmedNonEmptyString,
   /** One or more provider-issued public IDs; omission is not qualification. */
-  keyIds: Schema.Array(ProviderKeyIdentifier),
+  keyIds: Schema.Array(ProviderKeyIdentifier).check(Schema.isNonEmpty()),
   providerHostInstance: ProviderHostInstanceIdentity,
 });
 export type ManagedProviderLaunchIdentity = typeof ManagedProviderLaunchIdentity.Type;
@@ -102,8 +102,14 @@ const normalizeKeyIds = (
 ): ReadonlyArray<ProviderKeyIdentifier> => {
   const sorted = [...keyIds].sort((left, right) =>
     left.namespace === right.namespace
-      ? left.id.localeCompare(right.id)
-      : left.namespace.localeCompare(right.namespace),
+      ? left.id < right.id
+        ? -1
+        : left.id > right.id
+          ? 1
+          : 0
+      : left.namespace < right.namespace
+        ? -1
+        : 1,
   );
   return sorted.filter(
     (keyId, index) =>

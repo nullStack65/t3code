@@ -24,6 +24,8 @@
  */
 import {
   defaultInstanceIdForDriver,
+  type EnvironmentId,
+  makeProviderHostInstanceIdentity,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -41,6 +43,7 @@ import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
@@ -57,12 +60,15 @@ import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
 
 const loadProviders = (
   providerSources: ReadonlyArray<ProviderSnapshotSource>,
+  environmentId: EnvironmentId,
 ): Effect.Effect<ReadonlyArray<ServerProvider>> =>
   Effect.forEach(
     providerSources,
     (providerSource) =>
       providerSource.getSnapshot.pipe(
-        Effect.flatMap((snapshot) => correlateSnapshotWithSource(providerSource, snapshot)),
+        Effect.flatMap((snapshot) =>
+          correlateSnapshotWithSource(providerSource, snapshot, environmentId),
+        ),
       ),
     {
       concurrency: "unbounded",
@@ -231,9 +237,22 @@ const haveProvidersChanged = (
   nextProviders: ReadonlyArray<ServerProvider>,
 ): boolean => !Equal.equals(previousProviders, nextProviders);
 
+/** Stamp the persisted environment and configured instance at the registry boundary. */
+export const stampProviderHostInstance = (
+  provider: ServerProvider,
+  environmentId: EnvironmentId,
+): ServerProvider => ({
+  ...provider,
+  providerHostInstance: makeProviderHostInstanceIdentity({
+    environmentId,
+    providerInstanceId: provider.instanceId,
+  }),
+});
+
 const correlateSnapshotWithSource = (
   source: ProviderSnapshotSource,
   snapshot: ServerProvider,
+  environmentId: EnvironmentId,
 ): Effect.Effect<ServerProvider> => {
   if (snapshot.instanceId !== source.instanceId) {
     return Effect.die(
@@ -249,7 +268,10 @@ const correlateSnapshotWithSource = (
       ),
     );
   }
-  return Effect.succeed(snapshot);
+  // Provider drivers only know their configured instance. The registry owns
+  // the persisted environment identity and stamps the pair centrally so
+  // unavailable, cached, and live snapshots use the same host contract.
+  return Effect.succeed(stampProviderHostInstance(snapshot, environmentId));
 };
 
 /**
@@ -278,6 +300,9 @@ export const ProviderRegistryLive = Layer.effect(
   ProviderRegistry,
   Effect.gen(function* () {
     const instanceRegistry = yield* ProviderInstanceRegistry;
+    const environmentId = yield* ServerEnvironment.ServerEnvironmentIdentity.pipe(
+      Effect.flatMap((identity) => identity.getEnvironmentId),
+    );
     const config = yield* ServerConfig;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -296,7 +321,7 @@ export const ProviderRegistryLive = Layer.effect(
     // below.
     const bootInstances = yield* instanceRegistry.listInstances;
     const bootSources = bootInstances.map(buildSnapshotSource);
-    const fallbackProviders = yield* loadProviders(bootSources);
+    const fallbackProviders = yield* loadProviders(bootSources, environmentId);
     const fallbackByInstance = new Map<ProviderInstanceId, ServerProvider>();
     for (let index = 0; index < fallbackProviders.length; index++) {
       const provider = fallbackProviders[index];
@@ -526,7 +551,7 @@ export const ProviderRegistryLive = Layer.effect(
     ) {
       return yield* providerSource.refresh.pipe(
         Effect.flatMap((nextProvider) =>
-          correlateSnapshotWithSource(providerSource, nextProvider).pipe(
+          correlateSnapshotWithSource(providerSource, nextProvider, environmentId).pipe(
             Effect.flatMap(syncProvider),
           ),
         ),
@@ -669,7 +694,9 @@ export const ProviderRegistryLive = Layer.effect(
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
-            correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
+            correlateSnapshotWithSource(source, provider, environmentId).pipe(
+              Effect.flatMap(syncProvider),
+            ),
           ).pipe(Effect.forkScoped);
         }
         yield* Effect.yieldNow;
@@ -684,16 +711,21 @@ export const ProviderRegistryLive = Layer.effect(
             Effect.gen(function* () {
               const source = buildSnapshotSource(instance);
               const provider = yield* source.getSnapshot;
-              yield* correlateSnapshotWithSource(source, provider).pipe(
+              yield* correlateSnapshotWithSource(source, provider, environmentId).pipe(
                 Effect.flatMap(syncProvider),
               );
             }).pipe(Effect.ignoreCause({ log: true })),
           { concurrency: "unbounded", discard: true },
         );
-        yield* upsertProviders(unavailableProviders, {
-          persist: false,
-          replace: true,
-        });
+        yield* upsertProviders(
+          unavailableProviders.map((provider) =>
+            stampProviderHostInstance(provider, environmentId),
+          ),
+          {
+            persist: false,
+            replace: true,
+          },
+        );
 
         const nextSubs = new Map(carriedOver);
         for (const [instanceId, instance] of newlyAdded) {
