@@ -73,6 +73,7 @@ import {
 import {
   ProviderAdapterRequestError,
   type ProviderAdapterError,
+  ProviderLaunchPreflightBlockedError,
   ProviderValidationError,
   ProviderWorkspaceMissingError,
 } from "../Errors.ts";
@@ -87,8 +88,17 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
+import * as LaunchPreflightWarningInboxModule from "../../environment/LaunchPreflightWarningInbox.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { resolveLaunchPreflightConsumer } from "../launchPreflightConsumer.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+// Narrow-filesystem budget for the launch preflight directory checks, matching
+// the preflight's own per-operation bound so a stalled path cannot hold a launch.
+const NARROW_FS_TIMEOUT = "500 millis";
 
 interface SnapShotPromptAccessibilityNode {
   readonly role: string;
@@ -257,6 +267,33 @@ export interface ProviderServiceLiveOptions {
    * test see whether a credential was requested at all.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
+  /**
+   * Sink for launch-preflight warnings, so they reach the user instead of only
+   * the server log. The composition root wires this to an existing
+   * user-visible transport (a thread activity append). It returns whether the
+   * notice was actually delivered; a failed delivery leaves a pending startup
+   * notice in the inbox instead of silently discarding it.
+   */
+  readonly reportLaunchPreflightWarning?: (input: {
+    readonly threadId: ThreadId;
+    readonly cwd: string;
+    readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+    readonly message: string;
+  }) => Effect.Effect<boolean, never>;
+  /**
+   * Overrides the launch-preflight runner. Tests use this to force a warning or
+   * a blocker without a broken Git install. The options carry the selected
+   * consumer/operation and the exact environment the provider launch resolves
+   * `git` with.
+   */
+  readonly launchPreflightRunner?: (
+    root: string,
+    options?: {
+      readonly isSharedRoot?: boolean;
+      readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
+      readonly gitEnvironment?: NodeJS.ProcessEnv;
+    },
+  ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
 }
 
 interface TurnAnalyticsMetadata {
@@ -508,6 +545,144 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
+  const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
+  const runLaunchPreflight = options?.launchPreflightRunner ?? launchPreflight.run;
+
+  /**
+   * Runs the bounded launch preflight against the exact cwd a provider process
+   * is about to start in, before the caller's own workspace read. Warnings are
+   * surfaced through the existing log and the injected user-visible sink;
+   * blockers stop the launch with an actionable error.
+   */
+  const guardProviderLaunch = Effect.fn("ProviderService.guardProviderLaunch")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly cwd: string;
+    readonly provider?: ProviderDriverKind;
+    readonly providerInstanceId?: ProviderInstanceId;
+  }) {
+    // The bounded launch preflight itself verifies that the exact cwd is a real
+    // directory, warns about a stalled/denied filesystem, and skips a genuinely
+    // absent or non-directory path. The caller's own workspace read (and
+    // `ProviderWorkspaceMissingError`) owns that case, so this no longer
+    // silently drops a failed/timed-out cwd stat.
+
+    const settings = yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => undefined));
+    // Shared-root intent is carried into the bounded preflight as the exact
+    // configured root, so its canonical identity comparison can recognize alias
+    // spellings of the same physical directory. A lexical compare here would
+    // lose that intent before the probe ever runs.
+    const configuredRoot = settings?.sharedSessionRoot;
+    // The consumer/operation is derived from the selected production
+    // instance/runtime facts: the effective OpenCode snapshot configuration and
+    // whether an external OpenCode server owns the session. Non-OpenCode
+    // launches keep T3's own Git fallback and only need `--sparse` in a sparse
+    // checkout.
+    const consumer = resolveLaunchPreflightConsumer({
+      ...(input.provider !== undefined ? { provider: input.provider } : {}),
+      ...(input.providerInstanceId !== undefined
+        ? { providerInstanceId: input.providerInstanceId }
+        : {}),
+      ...(settings !== undefined ? { settings } : {}),
+    });
+    // The provider launch resolves `git` from the same environment the adapter
+    // inherits. Pass it through so the probe inspects the actual selected Git,
+    // not an unrelated host default.
+    const instanceEnvironment =
+      input.providerInstanceId === undefined
+        ? undefined
+        : settings?.providerInstances[input.providerInstanceId]?.environment;
+    const gitEnvironment =
+      instanceEnvironment === undefined || instanceEnvironment.length === 0
+        ? undefined
+        : mergeProviderInstanceEnvironment(instanceEnvironment);
+    const result = yield* runLaunchPreflight(input.cwd, {
+      ...(configuredRoot !== undefined ? { configuredRoot } : {}),
+      ...(consumer !== undefined ? { consumer } : {}),
+      ...(gitEnvironment !== undefined ? { gitEnvironment } : {}),
+    }).pipe(
+      Effect.catchCause(() =>
+        Effect.succeed({
+          findings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+          warnings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+          blockers: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+        }),
+      ),
+    );
+
+    const report = options?.reportLaunchPreflightWarning;
+    const deliverWarning = (warning: {
+      readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+      readonly message: string;
+    }) =>
+      Effect.gen(function* () {
+        yield* Effect.logWarning(`launch preflight: ${warning.message}`, {
+          code: warning.code,
+          threadId: input.threadId,
+          cwd: input.cwd,
+        });
+        if (report === undefined) {
+          // The startup phase already logged this; the log is the delivery.
+          return true;
+        }
+        return yield* report({
+          threadId: input.threadId,
+          cwd: input.cwd,
+          code: warning.code,
+          message: warning.message,
+        }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+      });
+
+    // Deliver warnings the startup preflight could only log (no thread existed
+    // yet) to this first affected session through the same transport. Remove a
+    // pending notice only after it was actually delivered; anything undelivered
+    // stays for the next session in the same directory.
+    const inbox = yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
+    const inboxKey = LaunchPreflight.normalizePathKey(pathService, input.cwd);
+    const pendingWarnings = LaunchPreflightWarningInboxModule.peekLaunchPreflightWarnings(
+      inbox,
+      inboxKey,
+    );
+    const deliveredCodes = new Set<string>();
+    const undelivered: Array<LaunchPreflightWarningInboxModule.PendingLaunchPreflightWarning> = [];
+    for (const warning of pendingWarnings) {
+      if (deliveredCodes.has(warning.code)) continue;
+      const delivered = yield* deliverWarning(warning);
+      if (delivered) deliveredCodes.add(warning.code);
+      else undelivered.push(warning);
+    }
+    LaunchPreflightWarningInboxModule.clearLaunchPreflightWarnings(inbox, inboxKey, undelivered);
+
+    for (const warning of result.warnings) {
+      if (deliveredCodes.has(warning.code)) continue;
+      deliveredCodes.add(warning.code);
+      yield* deliverWarning(warning);
+    }
+
+    const blocker = result.blockers[0];
+    if (blocker !== undefined) {
+      yield* Effect.logError(`launch preflight blocked provider launch: ${blocker.message}`, {
+        code: blocker.code,
+        threadId: input.threadId,
+        cwd: input.cwd,
+      });
+      if (options?.reportLaunchPreflightWarning) {
+        yield* options
+          .reportLaunchPreflightWarning({
+            threadId: input.threadId,
+            cwd: input.cwd,
+            code: blocker.code,
+            message: blocker.message,
+          })
+          .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      }
+      return yield* new ProviderLaunchPreflightBlockedError({
+        threadId: input.threadId,
+        cwd: input.cwd,
+        code: blocker.code,
+        detail: blocker.message,
+      });
+    }
+  });
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const timedOutNativeCompactions = new Set<ThreadId>();
@@ -1292,6 +1467,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
+      if (persistedCwd) {
+        yield* guardProviderLaunch({
+          threadId: input.binding.threadId,
+          cwd: persistedCwd,
+          provider: input.binding.provider,
+          providerInstanceId: bindingInstanceId,
+        });
+      }
+
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
         .startSession({
@@ -1508,13 +1692,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         if (effectiveCwd !== undefined) {
+          yield* guardProviderLaunch({
+            threadId,
+            cwd: effectiveCwd,
+            provider: resolvedProvider,
+            providerInstanceId: resolvedInstanceId,
+          });
           // Fail fast with an actionable error when the workspace folder is
           // gone (e.g. moved, deleted, or replaced by a plain file).
           // Otherwise every adapter surfaces this as a misleading "failed to
           // spawn <binary>" process error. Stat failures other than "missing"
-          // fall through to the adapter.
+          // fall through to the adapter. Bounded so a stalled path cannot hold
+          // the launch; a timeout falls through and lets the adapter report it.
           const workspaceIsDirectory = yield* fileSystem.stat(effectiveCwd).pipe(
-            Effect.map((workspaceStat) => workspaceStat.type === "Directory"),
+            Effect.timeoutOption(NARROW_FS_TIMEOUT),
+            Effect.flatMap((statOption) =>
+              Option.isSome(statOption)
+                ? Effect.succeed(statOption.value.type === "Directory")
+                : Effect.succeed(true),
+            ),
             Effect.catch((statError) => Effect.succeed(statError.reason._tag !== "NotFound")),
           );
           if (!workspaceIsDirectory) {
@@ -2444,11 +2640,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   } satisfies ProviderService.ProviderService["Service"];
 });
 
+// A self-contained preflight: the Git probe uses its own `VcsProcess` so this
+// layer only needs the platform services (`FileSystem`, `Path`,
+// `ChildProcessSpawner`) already present in the server and test harnesses.
+const LaunchPreflightLive = LaunchPreflight.layer.pipe(Layer.provide(VcsProcess.layer));
+
 export const ProviderServiceLive = Layer.effect(
   ProviderService.ProviderService,
   makeProviderService(),
-);
+).pipe(Layer.provide(LaunchPreflightLive));
 
 export function makeProviderServiceLive(options?: ProviderServiceLiveOptions) {
-  return Layer.effect(ProviderService.ProviderService, makeProviderService(options));
+  return Layer.effect(ProviderService.ProviderService, makeProviderService(options)).pipe(
+    Layer.provide(LaunchPreflightLive),
+  );
 }

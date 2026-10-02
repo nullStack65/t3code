@@ -3,6 +3,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -89,46 +90,62 @@ export type SpawnExecutableResolver = (
   command: string,
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
-) => string | undefined;
+) => Effect.Effect<string | undefined>;
 
+/**
+ * Asynchronous, bounded Windows executable resolution. It keeps the exact same
+ * PATH/PATHEXT candidate logic and npm `.cmd`/`.bat` wrapper semantics as the
+ * rest of the shell, but checks each candidate with an asynchronous `stat`
+ * instead of a synchronous `statSync`. A synchronous scan blocks the event
+ * loop, so an outer `Effect` timeout cannot interrupt a stalled lookup; an
+ * asynchronous one can.
+ */
 function resolveSpawnExecutableWithNode(
   command: string,
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
-): string | undefined {
-  const path = platform === "win32" ? NodePath.win32 : NodePath.posix;
-  const windowsPathExtensions = platform === "win32" ? resolveWindowsPathExtensions(env) : [];
-  const candidates = resolveCommandCandidates(
-    command,
-    platform,
-    windowsPathExtensions,
-    path.extname,
-  );
-  const isExecutable = (candidate: string) => {
-    try {
-      if (!NodeFS.statSync(candidate).isFile()) return false;
-      if (platform === "win32") {
-        return windowsPathExtensions.includes(path.extname(candidate).toUpperCase());
+): Effect.Effect<string | undefined> {
+  return Effect.gen(function* () {
+    const path = platform === "win32" ? NodePath.win32 : NodePath.posix;
+    const windowsPathExtensions = platform === "win32" ? resolveWindowsPathExtensions(env) : [];
+    const candidates = resolveCommandCandidates(
+      command,
+      platform,
+      windowsPathExtensions,
+      path.extname,
+    );
+    const isExecutable = (candidate: string) =>
+      Effect.promise(async () => {
+        try {
+          const stat = await NodeFSP.stat(candidate);
+          if (!stat.isFile()) return false;
+          if (platform === "win32") {
+            return windowsPathExtensions.includes(path.extname(candidate).toUpperCase());
+          }
+          await NodeFSP.access(candidate, NodeFS.constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+    if (command.includes("/") || command.includes("\\")) {
+      for (const candidate of candidates) {
+        if (yield* isExecutable(candidate)) return candidate;
       }
-      return canExecuteFile(candidate);
-    } catch {
-      return false;
+      return undefined;
     }
-  };
 
-  if (command.includes("/") || command.includes("\\")) {
-    return candidates.find(isExecutable);
-  }
-
-  for (const pathEntry of (readEnvPath(env) ?? "").split(pathDelimiterForPlatform(platform))) {
-    const normalizedPathEntry = stripWrappingQuotes(pathEntry.trim());
-    if (normalizedPathEntry.length === 0) continue;
-    for (const candidate of candidates) {
-      const candidatePath = path.join(normalizedPathEntry, candidate);
-      if (isExecutable(candidatePath)) return candidatePath;
+    for (const pathEntry of (readEnvPath(env) ?? "").split(pathDelimiterForPlatform(platform))) {
+      const normalizedPathEntry = stripWrappingQuotes(pathEntry.trim());
+      if (normalizedPathEntry.length === 0) continue;
+      for (const candidate of candidates) {
+        const candidatePath = path.join(normalizedPathEntry, candidate);
+        if (yield* isExecutable(candidatePath)) return candidatePath;
+      }
     }
-  }
-  return undefined;
+    return undefined;
+  });
 }
 
 export const SpawnExecutableResolution = Context.Reference<SpawnExecutableResolver>(
@@ -643,7 +660,7 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
         ? { ...hostEnvironment, ...options.env }
         : options.env;
   const resolveExecutable = yield* SpawnExecutableResolution;
-  const resolvedCommand = resolveExecutable(command, platform, env) ?? command;
+  const resolvedCommand = (yield* resolveExecutable(command, platform, env)) ?? command;
   const extension = NodePath.win32.extname(resolvedCommand).toLowerCase();
   if (extension !== ".cmd" && extension !== ".bat") {
     return { command: resolvedCommand, args: [...args], shell: false };

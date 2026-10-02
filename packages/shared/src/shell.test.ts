@@ -498,9 +498,8 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
         { env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" } },
       ).pipe(
         Effect.provideService(HostProcessPlatform, "win32"),
-        Effect.provideService(
-          SpawnExecutableResolution,
-          () => "C:\\Program Files\\npm & tools\\vp.cmd",
+        Effect.provideService(SpawnExecutableResolution, () =>
+          Effect.succeed("C:\\Program Files\\npm & tools\\vp.cmd"),
         ),
       );
 
@@ -530,7 +529,7 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
         }),
         Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) => {
           resolvedEnvironment = env;
-          return "C:\\Users\\tester\\AppData\\Roaming\\npm\\codex.cmd";
+          return Effect.succeed("C:\\Users\\tester\\AppData\\Roaming\\npm\\codex.cmd");
         }),
       );
 
