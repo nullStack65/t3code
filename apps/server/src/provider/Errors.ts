@@ -110,6 +110,7 @@ export class ProviderValidationError extends Schema.TaggedError<ProviderValidati
   {
     operation: Schema.String,
     issue: Schema.String,
+    reason: Schema.optional(Schema.Literal("incompatible-resume-route")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {

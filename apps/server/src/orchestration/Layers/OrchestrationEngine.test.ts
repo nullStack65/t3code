@@ -791,7 +791,11 @@ describe("OrchestrationEngine", () => {
               attachments: [],
             },
             modelSelection: oldSelection,
-            routeBinding: oldSelection,
+            routeBinding: {
+              modelSelection: oldSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
             runtimeMode: "full-access",
             interactionMode: "default",
             createdAt: now(),
@@ -802,6 +806,31 @@ describe("OrchestrationEngine", () => {
         expect(
           Option.getOrNull(yield* snapshots.getThreadDetailById(threadId))?.messages,
         ).toHaveLength(0);
+
+        const policyError = yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("thread-route-binding-policy-elevation"),
+            threadId,
+            message: {
+              messageId: asMessageId("message-route-binding-policy-elevation"),
+              role: "user",
+              text: "Policy mismatch callback",
+              attachments: [],
+            },
+            modelSelection: currentSelection,
+            routeBinding: {
+              modelSelection: currentSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            createdAt: now(),
+          })
+          .pipe(Effect.flip);
+        expect(policyError.message).toContain("destination route");
+        expect(yield* engine.latestSequence).toBe(before);
 
         const senderRouteSelection = {
           ...currentSelection,
@@ -819,7 +848,11 @@ describe("OrchestrationEngine", () => {
               attachments: [],
             },
             modelSelection: senderRouteSelection,
-            routeBinding: senderRouteSelection,
+            routeBinding: {
+              modelSelection: senderRouteSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
             runtimeMode: "full-access",
             interactionMode: "default",
             createdAt: now(),
@@ -840,7 +873,11 @@ describe("OrchestrationEngine", () => {
             attachments: [],
           },
           modelSelection: currentSelection,
-          routeBinding: currentSelection,
+          routeBinding: {
+            modelSelection: currentSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+          },
           runtimeMode: "full-access",
           interactionMode: "default",
           createdAt: now(),
@@ -858,7 +895,11 @@ describe("OrchestrationEngine", () => {
               attachments: [],
             },
             modelSelection: currentSelection,
-            routeBinding: currentSelection,
+            routeBinding: {
+              modelSelection: currentSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
             runtimeMode: "full-access",
             interactionMode: "default",
             createdAt: now(),

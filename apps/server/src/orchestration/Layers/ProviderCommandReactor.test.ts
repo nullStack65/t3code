@@ -44,6 +44,7 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import {
   ProviderAdapterRequestError,
+  ProviderValidationError,
   ProviderWorkspaceMissingError,
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
@@ -173,6 +174,8 @@ describe("ProviderCommandReactor", () => {
     readonly initialTitle?: string;
     readonly deferReactorStart?: boolean;
     readonly threadModelSelection?: ModelSelection;
+    readonly activeProviderSession?: ProviderSession;
+    readonly getCapabilitiesEffect?: () => Effect.Effect<void>;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly unreadableHistory?: boolean;
@@ -203,6 +206,9 @@ describe("ProviderCommandReactor", () => {
     );
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
+    if (input?.activeProviderSession !== undefined) {
+      runtimeSessions.push(input.activeProviderSession);
+    }
     const modelSelection = input?.threadModelSelection ?? {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
@@ -368,9 +374,9 @@ describe("ProviderCommandReactor", () => {
       stopSession: stopSession as ProviderServiceShape["stopSession"],
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>
-        Effect.succeed({
-          sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
-        }),
+        (input?.getCapabilitiesEffect?.() ?? Effect.void).pipe(
+          Effect.as({ sessionModelSwitch: input?.sessionModelSwitch ?? "in-session" }),
+        ),
       assertConversationRollbackSupported: () => unsupported(),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
@@ -1017,7 +1023,11 @@ describe("ProviderCommandReactor", () => {
           attachments: [],
         },
         modelSelection: originalSelection,
-        routeBinding: originalSelection,
+        routeBinding: {
+          modelSelection: originalSelection,
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -1066,6 +1076,174 @@ describe("ProviderCommandReactor", () => {
         ]),
       );
     }),
+  );
+
+  effectIt.effect("fences route drift interleaved after reactor admission and before send", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-1");
+      const selection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      };
+      const capabilityRead = yield* Deferred.make<void>();
+      const releaseCapabilityRead = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          threadModelSelection: selection,
+          activeProviderSession: {
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: selection.instanceId,
+            status: "ready",
+            runtimeMode: "approval-required",
+            model: selection.model,
+            threadId,
+            resumeCursor: { opaque: "retained" },
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          getCapabilitiesEffect: () =>
+            Deferred.succeed(capabilityRead, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseCapabilityRead)),
+            ),
+        }),
+      );
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-interleaved-route-ready"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: selection.instanceId,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-interleaved-route-callback"),
+        threadId,
+        message: {
+          messageId: MessageId.make("message-interleaved-route-callback"),
+          role: "user",
+          text: "Keep this result",
+          attachments: [],
+        },
+        modelSelection: selection,
+        routeBinding: {
+          modelSelection: selection,
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* Deferred.await(capabilityRead);
+      yield* harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-interleaved-route-change"),
+        threadId,
+        modelSelection: { ...selection, options: [{ id: "reasoningEffort", value: "low" }] },
+      });
+      yield* Deferred.succeed(releaseCapabilityRead, undefined);
+      yield* Effect.promise(() => harness.drain());
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(thread?.session).toMatchObject({ status: "ready", lastError: null });
+      expect(thread?.messages.map((message) => message.text)).toContain("Keep this result");
+    }),
+  );
+
+  effectIt.effect.each([
+    { routeBound: true, status: "ready" as const },
+    { routeBound: false, status: "ready" as const },
+    { routeBound: true, status: "stopped" as const },
+    { routeBound: false, status: "stopped" as const },
+  ])(
+    "preserves a retained $status session when persisted provider binding rejects (bound=$routeBound)",
+    ({ routeBound, status }) =>
+      Effect.gen(function* () {
+        const originalSelection = {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        };
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            threadModelSelection: originalSelection,
+            startSessionEffect: () =>
+              Effect.fail(
+                new ProviderValidationError({
+                  operation: "ProviderService.startSession",
+                  reason: "incompatible-resume-route",
+                  issue: "persisted continuation binding changed",
+                }),
+              ),
+          }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const originalSession = {
+          threadId,
+          status,
+          providerName: "codex",
+          providerInstanceId: originalSelection.instanceId,
+          runtimeMode: "approval-required" as const,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        };
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-retained-callback-ready"),
+          threadId,
+          session: originalSession,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-retained-callback-binding-rejected"),
+          threadId,
+          message: {
+            messageId: MessageId.make("message-retained-callback-binding-rejected"),
+            role: "user",
+            text: "Preserve this result",
+            attachments: [],
+          },
+          modelSelection: originalSelection,
+          ...(routeBound
+            ? {
+                routeBinding: {
+                  modelSelection: originalSelection,
+                  runtimeMode: "approval-required" as const,
+                  interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+                },
+              }
+            : {}),
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        });
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        expect(thread?.session).toEqual(originalSession);
+        expect(thread?.messages.map((message) => message.text)).toContain("Preserve this result");
+        expect(thread?.activities).toContainEqual(
+          expect.objectContaining({
+            kind: "provider.turn.start.failed",
+            summary: "Provider route changed before turn start",
+          }),
+        );
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+      }),
   );
 
   effectIt.effect("starts a turn and generates its title without loading old message bodies", () =>
@@ -1348,7 +1526,7 @@ describe("ProviderCommandReactor", () => {
               Effect.andThen(
                 Effect.fail(
                   new ProviderAdapterRequestError({
-                    provider: "codex",
+                    provider: ProviderDriverKind.make("codex"),
                     method: "session.stop",
                     detail: "provider stop failed",
                   }),
@@ -1618,7 +1796,7 @@ describe("ProviderCommandReactor", () => {
             failStartup
               ? Effect.fail(
                   new ProviderAdapterRequestError({
-                    provider: "codex",
+                    provider: ProviderDriverKind.make("codex"),
                     method: "thread.start",
                     detail: "deterministic startup failure",
                   }),
@@ -3943,7 +4121,7 @@ describe("ProviderCommandReactor", () => {
             interruptTurnEffect: () =>
               Effect.fail(
                 new ProviderAdapterRequestError({
-                  provider: "codex",
+                  provider: ProviderDriverKind.make("codex"),
                   method: "thread.interrupt",
                   detail: "provider session disappeared",
                 }),
@@ -3951,7 +4129,7 @@ describe("ProviderCommandReactor", () => {
             stopSessionEffect: () =>
               Effect.fail(
                 new ProviderAdapterRequestError({
-                  provider: "codex",
+                  provider: ProviderDriverKind.make("codex"),
                   method: "session.stop",
                   detail: "provider process already exited",
                 }),
@@ -4018,7 +4196,7 @@ describe("ProviderCommandReactor", () => {
           interruptTurnEffect: () =>
             Effect.fail(
               new ProviderAdapterRequestError({
-                provider: "codex",
+                provider: ProviderDriverKind.make("codex"),
                 method: "thread.interrupt",
                 detail: "provider session disappeared",
               }),
@@ -4111,7 +4289,7 @@ describe("ProviderCommandReactor", () => {
             Effect.andThen(
               Effect.fail(
                 new ProviderAdapterRequestError({
-                  provider: "codex",
+                  provider: ProviderDriverKind.make("codex"),
                   method: "thread.interrupt",
                   detail: "provider session disappeared",
                 }),

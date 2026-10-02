@@ -1546,6 +1546,38 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("rejects a cross-driver resume before starting the replacement adapter", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("cross-driver-resume-binding");
+      const original = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const failure = yield* provider
+        .startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          resumeCursor: original.resumeCursor,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.equal(failure.reason, "incompatible-resume-route");
+      assert.equal(routing.claude.startSession.mock.calls.length, 0);
+      assert.equal(
+        (yield* provider.listSessions()).find((session) => session.threadId === threadId)
+          ?.providerInstanceId,
+        codexInstanceId,
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect.each([CODEX_DRIVER, CLAUDE_AGENT_DRIVER, CURSOR_DRIVER])(
     "rejects missing, file, and saved workspace paths before starting %s",
     (driver) =>

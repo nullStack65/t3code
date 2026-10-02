@@ -196,7 +196,6 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           const thread = commandReadModel.threads.find((entry) => entry.id === command.threadId);
           if (
             command.routeBinding !== undefined &&
-            command.bootstrap?.prepareWorktree === undefined &&
             Option.isSome(
               yield* projectionSnapshotQuery.getTurnStartMessage({
                 threadId: command.threadId,
@@ -212,11 +211,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           if (
             command.routeBinding !== undefined &&
             (thread === undefined ||
-              thread.modelSelection.instanceId !== command.routeBinding.instanceId ||
-              thread.modelSelection.model !== command.routeBinding.model ||
-              !Equal.equals(thread.modelSelection, command.routeBinding) ||
+              !Equal.equals(thread.modelSelection, command.routeBinding.modelSelection) ||
+              thread.runtimeMode !== command.routeBinding.runtimeMode ||
+              thread.interactionMode !== command.routeBinding.interactionMode ||
               (command.modelSelection !== undefined &&
-                !Equal.equals(command.modelSelection, command.routeBinding)))
+                !Equal.equals(command.modelSelection, command.routeBinding.modelSelection)) ||
+              command.runtimeMode !== command.routeBinding.runtimeMode ||
+              command.interactionMode !== command.routeBinding.interactionMode)
           ) {
             return yield* new OrchestrationCommandInvariantError({
               commandType: command.type,
@@ -229,8 +230,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             command.modelSelection !== undefined &&
             Option.isSome(providerService)
           ) {
+            if (
+              (thread.session.status === "running" || thread.session.status === "starting") &&
+              thread.session.providerInstanceId === undefined
+            ) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: `Cannot safely resume thread '${command.threadId}' because its active provider instance is unknown. No message was ingested; correct the destination session route, then submit the result deliberately.`,
+              });
+            }
             const activeSession =
-              thread.session.status === "running" || thread.session.status === "starting"
+              (thread.session.status === "running" || thread.session.status === "starting") &&
+              thread.session.providerInstanceId !== undefined &&
+              thread.session.providerInstanceId !== command.modelSelection.instanceId
                 ? (yield* providerService.value.listSessions()).find(
                     (session) => session.threadId === command.threadId,
                   )
