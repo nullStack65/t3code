@@ -19,6 +19,7 @@ import * as SessionStore from "./SessionStore.ts";
 
 /** Pinned so dev-mode cookie tests can assert the port-scoped name. */
 const TEST_SERVER_PORT = 13_773;
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const isPairingCredentialIssueError = Schema.is(PairingGrantStore.PairingCredentialIssueError);
 const isPersistenceSqlError = Schema.is(PersistenceErrors.PersistenceSqlError);
 
@@ -112,6 +113,30 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         }),
       ),
     ),
+  );
+
+  it.effect("exposes the stable session subject without exposing credentials", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const first = yield* serverAuth.issueSession({ subject: "provider-principal-1" });
+      const second = yield* serverAuth.issueSession({ subject: "provider-principal-1" });
+      const drifted = yield* serverAuth.issueSession({ subject: "provider-principal-2" });
+
+      const firstState = yield* serverAuth.getSessionState(makeBearerRequest(first.token));
+      const secondState = yield* serverAuth.getSessionState(makeBearerRequest(second.token));
+      const driftedState = yield* serverAuth.getSessionState(makeBearerRequest(drifted.token));
+      const anonymousState = yield* serverAuth.getSessionState({
+        cookies: {},
+        headers: {},
+      } as unknown as Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["getSessionState"]>[0]);
+
+      expect(first.token).not.toBe(second.token);
+      expect(firstState.subject).toBe("provider-principal-1");
+      expect(secondState.subject).toBe(firstState.subject);
+      expect(driftedState.subject).not.toBe(firstState.subject);
+      expect(encodeJson(firstState)).not.toContain(first.token);
+      expect(anonymousState.subject).toBeUndefined();
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web" }))),
   );
 
   it.effect("does not fall back to the dev cookie after a normal cookie is rejected", () =>
