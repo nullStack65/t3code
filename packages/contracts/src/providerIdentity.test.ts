@@ -6,10 +6,15 @@ import {
   qualifyManagedProviderLaunch,
 } from "./providerIdentity.ts";
 import { ServerProvider } from "./server.ts";
+import { EnvironmentId } from "./baseSchemas.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeManagedProviderLaunchIdentity = Schema.decodeUnknownSync(ManagedProviderLaunchIdentity);
-const host = { environmentId: "env-a", providerInstanceId: "codex" } as const;
+const host = {
+  environmentId: EnvironmentId.make("env-a"),
+  providerInstanceId: ProviderInstanceId.make("codex"),
+};
 const keyIds = [{ namespace: "provider.example", id: "key-a" }] as const;
 const identity = {
   subject: "subject-a",
@@ -72,7 +77,7 @@ describe("managed provider launch identity", () => {
     expect(
       compareManagedProviderLaunchIdentity(identity, {
         ...identity,
-        providerHostInstance: { ...host, environmentId: "env-b" },
+        providerHostInstance: { ...host, environmentId: EnvironmentId.make("env-b") },
       }),
     ).toBe("host-drift");
     expect(compareManagedProviderLaunchIdentity(identity, undefined)).toBe("unknown-identity");
@@ -91,9 +96,10 @@ describe("managed provider launch identity", () => {
       keyIds: [{ namespace: "a", id: "b\u0000c" }],
     };
     expect(compareManagedProviderLaunchIdentity(first, second)).toBe("key-id-drift");
-    expect(qualifyManagedProviderLaunch(first).qualified).toBe(true);
-    if (qualifyManagedProviderLaunch(first).qualified) {
-      expect(qualifyManagedProviderLaunch(first).identity.keyIds).toHaveLength(1);
+    const qualification = qualifyManagedProviderLaunch(first);
+    expect(qualification.qualified).toBe(true);
+    if (qualification.qualified) {
+      expect(qualification.identity.keyIds).toHaveLength(1);
     }
   });
 });
