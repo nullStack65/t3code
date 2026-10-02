@@ -1,0 +1,37 @@
+{
+  "base": "419f7574010c066a56974fc9e3ac0709a08efb33",
+  "head": "a435c0242a6afc9f129d296dfc75deba0091279d",
+  "branch": "envfix/fork-ci-hosted-runners-20261002",
+  "pullRequest": {
+    "number": 17,
+    "url": "https://github.com/nullStack65/t3code/pull/17",
+    "state": "OPEN"
+  },
+  "changedPaths": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/mobile-fingerprint-check.yml",
+    ".github/actions/setup-apt-mirrors/action.yml"
+  ],
+  "validation": {
+    "actionlint": "passed",
+    "yamlParse": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "observedAt": "2026-10-02T02:48:07Z",
+  "workflowRuns": {
+    "CI": 36957297722,
+    "Mobile Fingerprint Check": 36957297643
+  },
+  "checkRuns": [
+    {"name":"Check","runId":36957297722,"jobId":110683005365,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005365"},
+    {"name":"Test","runId":36957297722,"jobId":110683005327,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005327"},
+    {"name":"Test Server 1","runId":36957297722,"jobId":110683005224,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005224"},
+    {"name":"Test Server 2","runId":36957297722,"jobId":110683005294,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005294"},
+    {"name":"Test Server 3","runId":36957297722,"jobId":110683005340,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005340"},
+    {"name":"Rust","runId":36957297722,"jobId":110683005276,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005276"},
+    {"name":"Mobile Native Changes","runId":36957297722,"jobId":110683005131,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005131"},
+    {"name":"Release Smoke","runId":36957297722,"jobId":110683005313,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297722/job/110683005313"},
+    {"name":"Native fingerprint diff","runId":36957297643,"jobId":110683004416,"status":"QUEUED","url":"https://github.com/nullStack65/t3code/actions/runs/36957297643/job/110683004416"}
+  ],
+  "nonGoals": ["PR16 edits", "check bypass", "run cancellation", "host/runtime mutation", "Blacksmith configuration", "merge"]
+}
