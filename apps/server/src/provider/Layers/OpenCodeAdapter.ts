@@ -91,11 +91,11 @@ function parseOpenCodeResume(raw: unknown): { readonly sessionId: string } | und
 }
 
 /**
- * Whether an error definitively reports a missing session. Only a confirmed
- * miss may silently start a fresh session; any other failure (the SDK client
- * is `throwOnError: true`, so `session.get` rejects on every non-2xx) must
- * propagate, or a transient blip resets a live thread to an empty one — the
- * #3604 silent context loss. Decides on structured signals only, never free
+ * Whether an error definitively reports a missing session. A confirmed miss
+ * lets the caller report an absent requested continuation; any other failure
+ * (the SDK client is `throwOnError: true`, so `session.get` rejects on every
+ * non-2xx) must propagate rather than being misreported as missing.
+ * Decides on structured signals only, never free
  * text: a numeric 404 or the exact `NotFoundError` name, found via a bounded walk
  * over `cause`/`body`/`error`/`data`. An explicit non-404 status seals its
  * subtree so a wrapped "NotFound" name can't reclassify a real failure.
