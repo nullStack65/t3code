@@ -55,6 +55,11 @@ on:
         required: false
         default: ""
         type: string
+      native_receipts_json:
+        description: "JSON array of genuine native acceptance receipts for receipts_source_run_id (max 32 KiB)."
+        required: false
+        default: ""
+        type: string
       receipt_run_id:
         description: "Run id holding fork-release-native-receipts to promote with. Defaults to candidate_run_id."
         required: false
@@ -177,6 +182,7 @@ jobs:
 
   bundle:
     name: Build JS bundle
+    if: ${{ !inputs.upload_receipts }}
     needs: [preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -244,6 +250,7 @@ jobs:
 
   cli_linux_x64:
     name: Linux x64 runtime archive
+    if: ${{ !inputs.upload_receipts }}
     needs: [preflight, bundle]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -391,6 +398,7 @@ jobs:
 
   desktop_win_x64:
     name: Desktop Windows x64
+    if: ${{ !inputs.upload_receipts }}
     needs: [preflight, bundle, cli_linux_x64]
     uses: ./.github/workflows/release-desktop.yml
     secrets: inherit
@@ -417,6 +425,7 @@ jobs:
 
   desktop_mac_x64:
     name: Desktop macOS x64
+    if: ${{ !inputs.upload_receipts }}
     needs: [preflight, bundle]
     uses: ./.github/workflows/release-desktop.yml
     secrets: inherit
@@ -441,7 +450,7 @@ jobs:
 
   desktop_mac_arm64:
     name: Desktop macOS arm64
-    if: ${{ inputs.include_macos_arm64 }}
+    if: ${{ inputs.include_macos_arm64 && !inputs.upload_receipts }}
     needs: [preflight, bundle]
     uses: ./.github/workflows/release-desktop.yml
     secrets: inherit
@@ -466,7 +475,7 @@ jobs:
   qualify:
     name: Qualify candidate
     needs: [preflight, desktop_win_x64, desktop_mac_x64, desktop_mac_arm64, cli_linux_x64]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.desktop_win_x64.result == 'success' && needs.desktop_mac_x64.result == 'success' && needs.cli_linux_x64.result == 'success' && (inputs.include_macos_arm64 == false || needs.desktop_mac_arm64.result == 'success') }}
+    if: ${{ !cancelled() && !inputs.upload_receipts && needs.preflight.result == 'success' && needs.desktop_win_x64.result == 'success' && needs.desktop_mac_x64.result == 'success' && needs.cli_linux_x64.result == 'success' && (inputs.include_macos_arm64 == false || needs.desktop_mac_arm64.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -673,17 +682,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # A real, repeatable receipt upload path. Native machines produce a receipt
-  # JSON and a caller dispatches this job with `upload_receipts: true`, naming
-  # the candidate run whose identity the receipts are bound to. The job verifies
-  # each receipt binds to that candidate's manifest digest and source SHA before
-  # uploading `fork-release-native-receipts` on *this* run. Promotion then reads
-  # this run's receipt artifact (see `receipt_run_id`), never a completed build
-  # run that has no mechanism to receive one.
+  # A caller supplies genuine native receipts as bounded JSON, and names the
+  # already-qualified candidate run they accept. This job verifies the exact
+  # frozen candidate identity and every receipt before uploading the receipt
+  # artifact on this run. It does not rebuild or modify the candidate.
   receipts:
     name: Import native acceptance receipts
-    needs: [preflight, qualify]
-    if: ${{ !cancelled() && needs.qualify.result == 'success' && inputs.upload_receipts && inputs.receipts_source_run_id != '' }}
+    needs: [preflight]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && inputs.upload_receipts }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -724,8 +730,70 @@ jobs:
             --name fork-release-candidate \
             --dir candidate
 
-      # The operator-supplied receipts file is committed/attached out of band.
-      # This job never invents one; it fails closed when the file is absent.
+      - name: Bind the downloaded candidate to its recorded identity
+        shell: bash
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.receipts_source_run_id }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+            const identity = JSON.parse(fs.readFileSync("candidate/candidate-identity.json", "utf8"));
+            const manifestBytes = fs.readFileSync("candidate/fork-release-manifest.json");
+            const manifest = JSON.parse(manifestBytes.toString("utf8"));
+            const digest = crypto.createHash("sha256").update(manifestBytes).digest("hex");
+            const expected = {
+              runId: process.env.CANDIDATE_RUN_ID,
+              repository: "nullStack65/t3code",
+              version: process.env.RELEASE_VERSION,
+              sourceSha: process.env.RELEASE_SHA,
+            };
+            for (const [key, value] of Object.entries(expected)) {
+              const manifestKey = key === "runId" ? "workflowRunId" : key;
+              if (identity[key] !== value || manifest[manifestKey] !== value) {
+                console.error(`::error::candidate identity/manifest ${key} does not match selected candidate (${value})`);
+                process.exit(1);
+              }
+            }
+            if (identity.runAttempt !== manifest.workflowRunAttempt) {
+              console.error("::error::candidate identity attempt does not match frozen manifest");
+              process.exit(1);
+            }
+            if (digest !== identity.manifestSha256) {
+              console.error(`::error::downloaded manifest digest ${digest} does not match frozen identity ${identity.manifestSha256}`);
+              process.exit(1);
+            }
+            console.log("Candidate bound to frozen identity:", identity.manifestSha256);
+          '
+
+      - name: Write the supplied native receipts
+        shell: bash
+        env:
+          RECEIPTS_JSON: ${{ inputs.native_receipts_json }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const raw = process.env.RECEIPTS_JSON ?? "";
+            if (Buffer.byteLength(raw, "utf8") === 0) {
+              console.error("::error::native_receipts_json is required when upload_receipts is true");
+              process.exit(1);
+            }
+            if (Buffer.byteLength(raw, "utf8") > 32 * 1024) {
+              console.error("::error::native_receipts_json exceeds the 32 KiB limit");
+              process.exit(1);
+            }
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) {
+              console.error("::error::native_receipts_json must be a JSON array");
+              process.exit(1);
+            }
+            fs.writeFileSync("fork-native-receipts.json", raw + "\n", { flag: "wx" });
+          '
+
       - name: Validate and stage native receipts
         shell: bash
         env:
@@ -733,10 +801,6 @@ jobs:
           RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           set -euo pipefail
-          test -f fork-native-receipts.json || {
-            echo "::error::fork-native-receipts.json was not provided; native acceptance must be recorded before import"
-            exit 1
-          }
           mkdir -p receipts
           node scripts/verify-fork-candidate.ts \
             --candidate-dir candidate \
