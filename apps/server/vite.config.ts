@@ -1,5 +1,6 @@
 import "vite-plus/test/config";
 import { defineConfig, mergeConfig } from "vite-plus";
+import * as NodeModule from "node:module";
 
 import baseConfig from "../../vite.config.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
@@ -19,6 +20,18 @@ import {
 } from "../../scripts/lib/cli-external-packages.ts";
 
 export { shouldBundleCliDependency };
+
+// jsonc-parser's package `main` is its UMD build, which leaves relative
+// CommonJS requires in a single-file SEA. Point only this package at its ESM
+// entry so Rolldown bundles the parser's implementation modules.
+const nodeRequire = NodeModule.createRequire(import.meta.url);
+export const jsoncParserPackInputOptions = {
+  resolve: {
+    alias: {
+      "jsonc-parser$": nodeRequire.resolve("jsonc-parser/lib/esm/main.js"),
+    },
+  },
+};
 
 const repoEnv = loadRepoEnv();
 const cliBuildChannel = /^[^-+]+-(?:nightly|preview)\./.test(packageJson.version)
@@ -106,6 +119,7 @@ export default mergeConfig(
         neverBundle: (id: string) => isExternalCliDependency(id),
         onlyBundle: false,
       },
+      inputOptions: jsoncParserPackInputOptions,
       banner: {
         js: "#!/usr/bin/env node\n",
       },
