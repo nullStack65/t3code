@@ -2986,7 +2986,7 @@ describe("PiRpc framing", () => {
 
       yield* connection.send({ type: "extension_ui_response", id: "dialog", confirmed: true });
       const ordinaryWrite = yield* Queue.take(stdin);
-      assert.deepEqual(JSON.parse(new TextDecoder().decode(ordinaryWrite)), {
+      assert.deepEqual(decodeJsonLine(new TextDecoder().decode(ordinaryWrite)), {
         type: "extension_ui_response",
         id: "dialog",
         confirmed: true,
