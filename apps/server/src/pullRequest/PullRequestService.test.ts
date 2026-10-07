@@ -2956,7 +2956,7 @@ it.effect(
       );
 
       assert.strictEqual(error._tag, "PullRequestOperationError");
-      assert.include(error.message, "only request or remove the verified owner nullStack65");
+      assert.include(error.message, "can request only nullStack65");
       assert.isFalse(asked);
 
       const removalError = yield* Effect.flip(
@@ -2970,7 +2970,7 @@ it.effect(
         }),
       );
       assert.strictEqual(removalError._tag, "PullRequestOperationError");
-      assert.include(removalError.message, "only request or remove the verified owner nullStack65");
+      assert.include(removalError.message, "can request only nullStack65");
       assert.isFalse(asked);
 
       const botError = yield* Effect.flip(
@@ -2984,7 +2984,7 @@ it.effect(
         }),
       );
       assert.strictEqual(botError._tag, "PullRequestOperationError");
-      assert.include(botError.message, "ambiguous automation");
+      assert.include(botError.message, "Other reviewer requests");
       assert.isFalse(asked);
     }),
 );
@@ -3035,17 +3035,220 @@ it.effect("allows a verified owner reviewer mutation through the existing provid
     yield* service.requestReviewers({
       ...reference,
       expectedAccountId: "112618179",
-      reviewers: [{ id: "octocat", kind: "user" }, { id: "reviewers", kind: "team" }],
+      reviewers: [
+        { id: "octocat", kind: "user" },
+        { id: "reviewers", kind: "team" },
+      ],
       requested: false,
     });
+
+    yield* service.withRoutingCredential(
+      { ...reference, host: "github.com", expectedAccountId: "112618179" },
+      service.requestReviewers({
+        ...reference,
+        host: "github.com",
+        expectedAccountId: "112618179",
+        reviewers: [{ id: "nullStack65", kind: "user" }],
+        requested: true,
+      }),
+    );
 
     assert.deepStrictEqual(sent, [
       { reviewers: [{ id: "nullStack65", kind: "user" }], requested: true },
       {
-        reviewers: [{ id: "octocat", kind: "user" }, { id: "reviewers", kind: "team" }],
+        reviewers: [
+          { id: "octocat", kind: "user" },
+          { id: "reviewers", kind: "team" },
+        ],
         requested: false,
       },
+      { reviewers: [{ id: "nullStack65", kind: "user" }], requested: true },
     ]);
+  }),
+);
+
+it.effect("refuses reviewer routing without the verified owner identity", () =>
+  Effect.gen(function* () {
+    let mutations = 0;
+    let permissionReads = 0;
+    const base = {
+      projectId: "p1" as ProjectId,
+      repository: "acme/web",
+      number: 1,
+      reviewers: [{ id: "nullStack65", kind: "user" as const }],
+      requested: true,
+    };
+    const wrongAccount = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          withVerifiedCredential: (_input, use) =>
+            use({ accountId: "7", viewer: "someone-else", credentialFingerprint: "other" }),
+          getViewerPermissions: () => {
+            permissionReads++;
+            return Effect.succeed({
+              actions: [],
+              comment: true,
+              resolve: true,
+              verdicts: ["comment", "approve", "request-changes"],
+              requestReviewers: true,
+            });
+          },
+          setReviewerRequest: () => {
+            mutations++;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const wrongAccountError = yield* Effect.flip(wrongAccount.requestReviewers(base));
+    assert.strictEqual(wrongAccountError._tag, "PullRequestOperationError");
+    assert.strictEqual(permissionReads, 0);
+    assert.strictEqual(mutations, 0);
+
+    const noVerifier = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          setReviewerRequest: () => {
+            mutations++;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const noVerifierError = yield* Effect.flip(noVerifier.requestReviewers(base));
+    assert.strictEqual(noVerifierError._tag, "PullRequestOperationError");
+    assert.strictEqual(mutations, 0);
+
+    const explicitMismatch = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          withVerifiedCredential: (_input, use) =>
+            use({ accountId: "112618179", viewer: "nullStack65", credentialFingerprint: "owner" }),
+          setReviewerRequest: () => {
+            mutations++;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const mismatchError = yield* Effect.flip(
+      explicitMismatch.requestReviewers({ ...base, expectedAccountId: "7" }),
+    );
+    assert.strictEqual(mismatchError._tag, "PullRequestOperationError");
+    assert.strictEqual(mutations, 0);
+  }),
+);
+
+it.effect("does not treat the owner's numeric GitHub ID as authority on enterprise hosts", () =>
+  Effect.gen(function* () {
+    let verified = 0;
+    let mutations = 0;
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "enterprise",
+          workspaceRoot: "/a",
+          repository: "acme/web",
+          host: "github.enterprise.test",
+        }),
+      ],
+      providers: [
+        fakeProvider("github", {
+          withVerifiedCredential: (_input, use) => {
+            verified++;
+            return use({
+              accountId: "112618179",
+              viewer: "nullStack65",
+              credentialFingerprint: "owner",
+            });
+          },
+          setReviewerRequest: () => {
+            mutations++;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const error = yield* Effect.flip(
+      service.requestReviewers({
+        projectId: "p1" as ProjectId,
+        repository: "acme/web",
+        number: 1,
+        reviewers: [{ id: "nullStack65", kind: "user" }],
+        requested: true,
+      }),
+    );
+    assert.strictEqual(error._tag, "PullRequestOperationError");
+    assert.strictEqual(verified, 0);
+    assert.strictEqual(mutations, 0);
+  }),
+);
+
+it.effect("preserves write permission and host capability denials for verified owner routing", () =>
+  Effect.gen(function* () {
+    let mutations = 0;
+    const deniedPermission = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          withVerifiedCredential: (_input, use) =>
+            use({ accountId: "112618179", viewer: "nullStack65", credentialFingerprint: "owner" }),
+          getViewerPermissions: () =>
+            Effect.succeed({
+              actions: [],
+              comment: true,
+              resolve: true,
+              verdicts: ["comment", "approve", "request-changes"],
+              requestReviewers: false,
+            }),
+          setReviewerRequest: () => {
+            mutations++;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const reference = {
+      projectId: "p1" as ProjectId,
+      repository: "acme/web",
+      number: 1,
+      reviewers: [{ id: "nullStack65", kind: "user" as const }],
+      requested: true,
+    };
+    const permissionError = yield* Effect.flip(deniedPermission.requestReviewers(reference));
+    assert.include(permissionError.message, "write access");
+    assert.strictEqual(mutations, 0);
+
+    const deniedCapability = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          capabilities: {
+            diff: true,
+            comment: true,
+            actions: ["merge"],
+            mergeMethods: ["merge"],
+            search: true,
+            reactions: true,
+            review: FULL_REVIEW,
+            reviewers: { request: false, listCandidates: false },
+          },
+          withVerifiedCredential: (_input, use) =>
+            use({ accountId: "112618179", viewer: "nullStack65", credentialFingerprint: "owner" }),
+          setReviewerRequest: () => {
+            mutations++;
+            return Effect.void;
+          },
+        }),
+      ],
+    });
+    const capabilityError = yield* Effect.flip(deniedCapability.requestReviewers(reference));
+    assert.include(capabilityError.message, "This host cannot ask somebody");
+    assert.strictEqual(mutations, 0);
   }),
 );
 
@@ -3119,7 +3322,7 @@ it.effect("refuses a review request this viewer may not make, and says what acce
     );
 
     assert.strictEqual(error._tag, "PullRequestOperationError");
-    assert.include(error.message, "only request or remove the verified owner nullStack65");
+    assert.include(error.message, "can request only nullStack65");
     assert.isFalse(sent);
   }),
 );

@@ -309,7 +309,7 @@ const LABEL_CHANGE_REFUSAL = "You need triage access on this repository to chang
 const OWNER_GITHUB_ACCOUNT_ID = "112618179";
 const OWNER_GITHUB_LOGIN = "nullstack65";
 const AMBIGUOUS_REVIEWER_REQUEST_REFUSAL =
-  "T3 can only request or remove the verified owner nullStack65 as a reviewer. Other users, teams, and ambiguous automation must be managed manually in the forge UI or with the ordinary human CLI.";
+  "T3 can request only nullStack65 as a reviewer. The verified owner can remove pending reviewer assignments. Other reviewer requests must be managed manually in the forge UI or with the ordinary human CLI.";
 
 /** A project this page can read: its remote is on a host with an implementation. */
 export interface SupportedProject {
