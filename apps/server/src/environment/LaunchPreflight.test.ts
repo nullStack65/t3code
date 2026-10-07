@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { assert, it } from "@effect/vitest";
 import { CheckpointRef } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -22,7 +23,8 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { writeFakeCli } from "../testUtils/fakeCli.ts";
 import * as LaunchPreflight from "./LaunchPreflight.ts";
 
-const isWindows = process.platform === "win32";
+const hostPlatform = HostProcessPlatform.defaultValue();
+const isWindows = hostPlatform === "win32";
 
 /** Resolves the real Git executable the same way on every host. */
 const resolveRealGitPath = (): string => {
@@ -49,7 +51,7 @@ const writeGitStub = (binDir: string, body: string, realGit: string): string => 
     directory: binDir,
     name: "git",
     source: body.replaceAll("__REAL_GIT__", JSON.stringify(realGit)),
-    platform: process.platform,
+    platform: hostPlatform,
   });
 };
 
