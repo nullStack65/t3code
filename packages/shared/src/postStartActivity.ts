@@ -54,7 +54,7 @@ export const POST_START_SILENCE_THRESHOLD_MS = 5 * 60_000;
  * freshness signal — it is an unsupported clock relationship. Represent it as
  * honest uncertainty instead of clamping it to "just happened".
  */
-export const POST_START_FUTURE_TOLERANCE_MS = 60_000;
+const POST_START_FUTURE_TOLERANCE_MS = 60_000;
 
 export type PostStartOutstandingTool = {
   readonly toolCallId: string;
