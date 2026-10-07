@@ -12,19 +12,18 @@ and `release-desktop.yml`.
 
 ## Runners
 
-Runner capacity is owner-configured, not caller-supplied. Runner labels come
-from repository variables (`vars.T3CODE_LINUX_RUNNER`,
-`vars.T3CODE_WINDOWS_RUNNER`, `vars.T3CODE_MACOS_X64_RUNNER`,
-`vars.T3CODE_MACOS_ARM64_RUNNER`) and every label must also appear in
-`vars.T3CODE_AUTHORIZED_RUNNERS`. A dispatch cannot name an arbitrary runner, so
-source is never scheduled on unauthorized capacity. The `authorize` job runs
-first, on the owner-configured Linux label, and every build job `needs`
-transitively through `preflight`, so authorization happens before any source
-executes.
+The workflow uses fixed GitHub-hosted labels in source: `ubuntu-24.04` for
+Linux x64, `windows-2025` for Windows x64, and `macos-15-intel` for Intel
+macOS x64. Apple Silicon remains opt-in on `macos-15`. Runner labels are not
+workflow-dispatch inputs or repository variables, so a caller cannot redirect
+source execution to arbitrary runner capacity. GitHub-hosted runners are free
+and unlimited for public repositories; if that capacity is unavailable, use
+the local candidate route below.
 
-- No self-hosted label is guessed.
+- No self-hosted label is accepted or guessed.
 - No personal machine is registered to run public-PR jobs.
-- No hosted/paid fallback is added silently.
+- The fixed labels are explicit in `.github/workflows/fork-release.yml` and
+  are validated by the focused workflow contract tests.
 
 ### Local candidate route (when CI capacity is unavailable)
 
@@ -232,9 +231,8 @@ by the same version and SHA:
   archive's real `t3code-build-info.json`. Completed outputs from a working
   platform are preserved even when another platform is unavailable.
 
-Apple Silicon macOS is built only when `include_macos_arm64` is set and an
-authorized `vars.T3CODE_MACOS_ARM64_RUNNER` is configured; it is reported
-untested.
+Apple Silicon macOS is built only when `include_macos_arm64` is set; it is
+reported untested.
 
 ## Versioning
 
@@ -264,10 +262,9 @@ Rules:
 
 1. Pick the immutable source SHA on `main` and the upstream base version.
 2. Run **Fork release** (`workflow_dispatch`) with `sha`, `version`, and
-   `upstream_base`. Runner labels are not inputs; they come from repository
-   variables. Leave `publish` off to build a candidate.
-3. `authorize` checks the owner-configured runner labels first. Preflight then
-   checks out that explicit SHA (never `FETCH_HEAD`), asserts `HEAD == sha`, and
+   `upstream_base`. Runner labels are fixed by the workflow source. Leave
+   `publish` off to build a candidate.
+3. Preflight checks out that explicit SHA (never `FETCH_HEAD`), asserts `HEAD == sha`, and
    applies the public ancestry policy (the SHA must be an ancestor of
    `origin/main`) with `scripts/select-release-source.ts` — this runs before
    dependencies are installed and imports no workspace packages.

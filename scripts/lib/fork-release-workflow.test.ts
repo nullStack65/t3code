@@ -70,29 +70,36 @@ it.effect("builds the Windows CLI archive so the Windows install path has an ass
   }),
 );
 
-it.effect("no job silently defaults to a GitHub-hosted runner label", () =>
+it.effect("uses fixed supported hosted labels and no caller-controlled runner variables", () =>
   Effect.gen(function* () {
     const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
-    assert.notInclude(text, "runs-on: ubuntu-");
-    assert.notInclude(text, "runs-on: windows-");
-    assert.notInclude(text, "runs-on: macos-");
-    assert.include(text, "T3CODE_AUTHORIZED_RUNNERS");
-  }),
-);
-
-it.effect("authorization runs before any build job and uses owner variables, not inputs", () =>
-  Effect.gen(function* () {
-    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
-    const authorize = jobBlock(text, "authorize");
-    assert.include(authorize, "T3CODE_AUTHORIZED_RUNNERS");
-    // Runner labels come from repository variables, never caller inputs.
+    assert.include(text, "runs-on: ubuntu-24.04");
+    assert.include(text, "runner: windows-2025");
+    assert.include(text, "runner: macos-15-intel");
+    assert.include(text, "runner: macos-15");
+    assert.notInclude(text, "T3CODE_AUTHORIZED_RUNNERS");
+    assert.notInclude(text, "vars.T3CODE_LINUX_RUNNER");
+    assert.notInclude(text, "vars.T3CODE_WINDOWS_RUNNER");
+    assert.notInclude(text, "vars.T3CODE_MACOS_X64_RUNNER");
+    assert.notInclude(text, "vars.T3CODE_MACOS_ARM64_RUNNER");
     assert.notInclude(text, "inputs.linux_runner");
     assert.notInclude(text, "inputs.windows_runner");
     assert.notInclude(text, "inputs.macos_x64_runner");
     assert.notInclude(text, "inputs.macos_arm64_runner");
-    // Every build job transitively depends on authorization.
-    assert.include(jobBlock(text, "preflight"), "needs: [authorize]");
-    assert.include(jobBlock(text, "bundle"), "needs: [preflight]");
+  }),
+);
+
+it.effect("all build and promotion jobs stay on the fixed hosted Linux label", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    for (const job of ["preflight", "bundle", "cli_linux_x64", "qualify", "receipts", "publish"]) {
+      assert.include(
+        jobBlock(text, job),
+        "runs-on: ubuntu-24.04",
+        `${job} must use hosted Linux x64`,
+      );
+    }
+    assert.notInclude(text, "authorize:");
   }),
 );
 

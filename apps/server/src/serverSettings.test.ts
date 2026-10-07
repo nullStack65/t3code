@@ -229,6 +229,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "/Users/julius/.codex",
         shadowHomePath: "",
+        modelCatalogMode: "app-server",
         launchArgs: "",
         customModels: [],
       });
@@ -938,6 +939,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "",
         shadowHomePath: "",
+        modelCatalogMode: "app-server",
         launchArgs: "",
         customModels: [],
       });

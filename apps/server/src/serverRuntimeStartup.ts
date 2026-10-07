@@ -500,10 +500,44 @@ export const reconcileProviderSessions = Effect.gen(function* () {
           .continueThreadsAfterServerUpdate
       : false;
 
-  const liveThreadIds = new Set(
-    (yield* providerService.listSessions()).map((session) => session.threadId),
-  );
+  const liveSessions = yield* providerService.listSessions();
+  const liveSessionsByThreadId = new Map<
+    (typeof liveSessions)[number]["threadId"],
+    (typeof liveSessions)[number]
+  >();
+  const ambiguousLiveThreadIds = new Set<(typeof liveSessions)[number]["threadId"]>();
+  for (const session of liveSessions) {
+    if (ambiguousLiveThreadIds.has(session.threadId)) {
+      continue;
+    }
+    if (liveSessionsByThreadId.has(session.threadId)) {
+      liveSessionsByThreadId.delete(session.threadId);
+      ambiguousLiveThreadIds.add(session.threadId);
+    } else {
+      liveSessionsByThreadId.set(session.threadId, session);
+    }
+  }
+  const liveThreadIds = new Set(liveSessions.map((session) => session.threadId));
   const { threads } = yield* query.getCommandReadModel();
+  for (const thread of threads) {
+    const session = thread.session;
+    const liveSession = liveSessionsByThreadId.get(thread.id);
+    if (
+      session === null ||
+      session.providerInstanceId !== undefined ||
+      !liveSession?.providerInstanceId
+    ) {
+      continue;
+    }
+    const refreshedAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make(yield* crypto.randomUUIDv4),
+      threadId: thread.id,
+      session: { ...session, providerInstanceId: liveSession.providerInstanceId },
+      createdAt: refreshedAt,
+    });
+  }
   // Provider startup can report ready before the continuation is submitted.
   // Find those markers in one read rather than querying every idle thread.
   const preparedThreadIds = new Set(

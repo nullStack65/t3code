@@ -48,7 +48,7 @@ import {
 } from "./routeMetadata.ts";
 import { addTotals, EMPTY_TOTALS } from "./usageTranscripts.ts";
 
-export const USAGE_ROUTE_ATTRIBUTION_VERSION = 1 as const;
+const USAGE_ROUTE_ATTRIBUTION_VERSION = 1 as const;
 
 export interface UsageRouteAttributionInput {
   /** Read cutoff; associations are as of this instant. */
