@@ -867,7 +867,7 @@ export function makeMemoryConsolidationNotificationFilter(): (
   };
 }
 
-function readRouteFields(notification: CodexServerNotification): {
+export function readRouteFields(notification: CodexServerNotification): {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
 } {
@@ -914,6 +914,7 @@ function readRouteFields(notification: CodexServerNotification): {
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/summaryPartAdded":
     case "item/reasoning/textDelta":
+    case "item/mcpToolCall/progress":
       return {
         turnId: TurnId.make(notification.params.turnId),
         itemId: ProviderItemId.make(notification.params.itemId),
