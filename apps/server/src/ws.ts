@@ -1082,6 +1082,12 @@ const makeWsRpcLayer = (
         command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
         Effect.gen(function* () {
+          if (command.routeBinding !== undefined) {
+            return yield* new OrchestrationDispatchCommandError({
+              message:
+                "A destination-bound callback cannot use thread bootstrap. No setup or message was ingested; submit it to the existing destination thread after correcting its route.",
+            });
+          }
           const bootstrap = command.bootstrap;
           const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
           let createdThread = false;
