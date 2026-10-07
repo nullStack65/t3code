@@ -58,6 +58,7 @@ const waitForTurnQuiesced = Effect.fn("TransferBudget.waitForTurnQuiesced")(func
   return receipt;
 });
 
+// Seed the replay-only historical thread without claiming the harness root as an owned worktree.
 export const seedTransferBudgetHistory = Effect.fn("TransferBudget.seedHistory")(function* (
   harness: OrchestrationIntegrationHarness,
   provider: ProviderDriverKind,
@@ -87,6 +88,7 @@ export const seedTransferBudgetHistory = Effect.fn("TransferBudget.seedHistory")
     interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
     branch: "main",
     worktreePath: harness.workspaceDir,
+    historyImport: true,
     createdAt: turnTimestamp(0),
   });
 

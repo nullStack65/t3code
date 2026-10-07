@@ -69,8 +69,9 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       expect(imported).toMatchObject({
         type: "thread.created",
         metadata: { historyImport: true },
+        payload: { executionScope: null },
       });
-      expect(live).toMatchObject({ type: "thread.created" });
+      expect(live).toMatchObject({ type: "thread.created", payload: { executionScope: "coding" } });
       expect(live).not.toMatchObject({ metadata: { historyImport: true } });
     }),
   );

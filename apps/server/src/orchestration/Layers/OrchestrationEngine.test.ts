@@ -9,6 +9,7 @@ import {
   CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EnvironmentId,
   MessageId,
   ProjectId,
   ThreadId,
@@ -56,12 +57,17 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
+const serverEnvironmentIdentityTestLayer = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  { getEnvironmentId: Effect.succeed(EnvironmentId.make("orchestration-engine-test")) },
+);
 
 const providerServiceForEngineTests = {
   listSessions: () => Effect.succeed([]),
@@ -78,6 +84,8 @@ const providerServiceForEngineTests = {
     }),
 } as unknown as ProviderService["Service"];
 
+// These engine tests seed synthetic legacy threads without owning Git worktrees.
+// Mark setup creates as history imports so the assertions stay focused on engine behavior.
 function makeOrchestrationLayer(
   databasePath?: string,
   repositoryIdentityResolver?: RepositoryIdentityResolver.RepositoryIdentityResolver["Service"],
@@ -110,6 +118,7 @@ function makeOrchestrationLayer(
         : RepositoryIdentityResolver.layer,
     ),
     Layer.provide(persistence),
+    Layer.provideMerge(serverEnvironmentIdentityTestLayer),
     Layer.provideMerge(ServerConfigLayer),
     Layer.provide(Layer.succeed(ProviderService, providerService)),
     Layer.provideMerge(NodeServices.layer),
@@ -186,6 +195,7 @@ describe("OrchestrationEngine", () => {
             interactionMode: "default",
             branch: null,
             worktreePath: null,
+            historyImport: true,
             createdAt: now(),
           }),
         );
@@ -492,6 +502,7 @@ describe("OrchestrationEngine", () => {
       ),
       Layer.provide(Layer.succeed(OrchestrationEventStore, eventStore)),
       Layer.provide(Layer.succeed(ProviderService, providerServiceForEngineTests)),
+      Layer.provide(serverEnvironmentIdentityTestLayer),
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(SqlitePersistenceMemory),
@@ -549,6 +560,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "full-access",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       });
       yield* engine.dispatch({
@@ -628,6 +640,7 @@ describe("OrchestrationEngine", () => {
           interactionMode: "default",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
         yield* engine.dispatch({
@@ -777,6 +790,7 @@ describe("OrchestrationEngine", () => {
           interactionMode: "default",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
         const retainedSession = {
@@ -883,6 +897,7 @@ describe("OrchestrationEngine", () => {
         interactionMode: "default",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       });
       const retainedSession = {
@@ -965,6 +980,7 @@ describe("OrchestrationEngine", () => {
           interactionMode: "default",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt: now(),
         });
         yield* engine.dispatch({
@@ -1203,6 +1219,7 @@ describe("OrchestrationEngine", () => {
             runtimeMode: "full-access",
             branch: null,
             worktreePath: null,
+            historyImport: true,
             createdAt: now(),
           });
         }
@@ -1334,6 +1351,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -1394,6 +1412,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "full-access",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -1487,6 +1506,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -1555,6 +1575,7 @@ describe("OrchestrationEngine", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
         yield* engine.dispatch({
@@ -1606,6 +1627,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: "t3code/generated-branch-name",
         worktreePath: "/tmp/project-branch-race-worktree",
+        historyImport: true,
         createdAt,
       }),
     );
@@ -1681,6 +1703,7 @@ describe("OrchestrationEngine", () => {
             interactionMode: "default",
             branch: "feature",
             worktreePath: null,
+            historyImport: true,
             createdAt: now(),
           }),
         );
@@ -1791,6 +1814,7 @@ describe("OrchestrationEngine", () => {
           interactionMode: "default",
           branch: "feature",
           worktreePath: null,
+          historyImport: true,
           createdAt: now(),
         }),
       );
@@ -1889,6 +1913,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: "main",
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -1943,6 +1968,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "full-access",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -1983,7 +2009,7 @@ describe("OrchestrationEngine", () => {
           createdAt,
         }),
       ),
-    ).rejects.toThrow("does not exist");
+    ).rejects.toThrow("Thread destination project is missing.");
 
     const snapshots = await system.run(Metric.snapshot);
     expect(
@@ -2031,6 +2057,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2121,6 +2148,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(Layer.succeed(OrchestrationEventStore, flakyStore)),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
+        Layer.provide(serverEnvironmentIdentityTestLayer),
         Layer.provide(SqlitePersistenceMemory),
         Layer.provideMerge(ServerConfigLayer),
         Layer.provideMerge(NodeServices.layer),
@@ -2160,6 +2188,7 @@ describe("OrchestrationEngine", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         }),
       ),
@@ -2180,6 +2209,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2232,6 +2262,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(OrchestrationEventStoreLive),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
+        Layer.provide(serverEnvironmentIdentityTestLayer),
         Layer.provide(SqlitePersistenceMemory),
         Layer.provide(NodeServices.layer),
       ),
@@ -2268,6 +2299,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2384,6 +2416,7 @@ describe("OrchestrationEngine", () => {
         Layer.provide(Layer.succeed(OrchestrationEventStore, nonTransactionalStore)),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
+        Layer.provide(serverEnvironmentIdentityTestLayer),
         Layer.provide(SqlitePersistenceMemory),
         Layer.provide(NodeServices.layer),
       ),
@@ -2420,6 +2453,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2508,6 +2542,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2570,6 +2605,7 @@ describe("OrchestrationEngine", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2635,6 +2671,7 @@ describe("OrchestrationEngine", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         }),
       );

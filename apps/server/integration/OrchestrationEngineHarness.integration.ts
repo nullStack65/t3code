@@ -5,6 +5,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   ProviderDriverKind,
   type OrchestrationEvent,
   type OrchestrationThread,
@@ -89,6 +90,7 @@ import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
 import * as PullRequestService from "../src/pullRequest/PullRequestService.ts";
+import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 
 const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
 
@@ -268,10 +270,17 @@ export const makeOrchestrationIntegrationHarness = (
     yield* initializeGitWorkspace(workspaceDir);
 
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+    const serverEnvironmentIdentityLayer = Layer.succeed(
+      ServerEnvironment.ServerEnvironmentIdentity,
+      {
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("integration-test-environment")),
+      },
+    );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(serverEnvironmentIdentityLayer),
     );
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(ProviderSessionRuntime.layer),
@@ -287,6 +296,7 @@ export const makeOrchestrationIntegrationHarness = (
       }),
     ).pipe(
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
+      Layer.provideMerge(serverEnvironmentIdentityLayer),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(providerSessionDirectoryLayer),
     );
@@ -343,6 +353,7 @@ export const makeOrchestrationIntegrationHarness = (
         }),
       ),
       Layer.provideMerge(runtimeServicesLayer),
+      Layer.provide(serverEnvironmentIdentityLayer),
       Layer.provideMerge(gitWorkflowLayer),
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(serverSettingsLayer),
@@ -357,12 +368,12 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),
-          refreshLocalStatus: () =>
+          refreshLocalStatus: (cwd) =>
             Effect.succeed({
               isRepo: true,
               hasPrimaryRemote: false,
               isDefaultRef: true,
-              refName: "main",
+              refName: runGit(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).trim(),
               hasWorkingTreeChanges: false,
               workingTree: { files: [], insertions: 0, deletions: 0 },
             }),
@@ -432,6 +443,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(RepositoryIdentityResolver.layer),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
+      Layer.provideMerge(serverEnvironmentIdentityLayer),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(
         options?.tracer ? Layer.succeed(Tracer.Tracer, options.tracer) : Layer.empty,

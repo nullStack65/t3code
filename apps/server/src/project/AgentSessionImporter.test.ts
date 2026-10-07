@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "@effect/vitest";
 import {
   AgentSessionImportProjectChangedError,
   CommandId,
+  EnvironmentId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -26,6 +27,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { makeTestProviderAdapterHarness } from "../../integration/TestProviderAdapter.integration.ts";
 import { ServerConfig } from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
@@ -63,6 +65,10 @@ import { importRecentAgentThreads } from "./AgentSessionImporter.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
+const serverEnvironmentIdentityTestLayer = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  { getEnvironmentId: Effect.succeed(EnvironmentId.make("agent-session-importer-test")) },
+);
 const WORKSPACE_ROOT = "/tmp/project-from-server";
 const CLAUDE_SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const encodeTranscriptRecord = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
@@ -578,6 +584,7 @@ const integrationLayer = Layer.mergeAll(
   Layer.provide(OrchestrationCommandReceiptRepositoryLive),
   Layer.provide(RepositoryIdentityResolver.layer),
   Layer.provide(SqlitePersistenceMemory),
+  Layer.provideMerge(serverEnvironmentIdentityTestLayer),
   Layer.provideMerge(integrationServerConfig),
   Layer.provideMerge(NodeServices.layer),
 );
@@ -1155,6 +1162,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         defaultModelSelection: null,
         createdAt: "2026-08-24T09:00:00.000Z",
       });
+      // This race fixture starts from a historical partial aggregate while import is active.
       yield* engine.dispatch({
         type: "thread.create",
         commandId: CommandId.make("create-import-turn-race-thread"),
@@ -1166,6 +1174,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         interactionMode: "default",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt: "2026-08-24T10:00:00.000Z",
       });
 

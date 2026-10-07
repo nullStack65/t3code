@@ -73,6 +73,7 @@ interface BranchToolbarProps {
   threadId: ThreadId;
   showGitControls: boolean;
   draftId?: DraftId;
+  draftScopeLocked?: boolean;
   onEnvModeChange: (mode: EnvMode) => void;
   effectiveEnvModeOverride?: EnvMode;
   activeThreadBranchOverride?: string | null;
@@ -488,6 +489,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   threadId,
   showGitControls,
   draftId,
+  draftScopeLocked = false,
   onEnvModeChange,
   effectiveEnvModeOverride,
   activeThreadBranchOverride,
@@ -537,7 +539,11 @@ export const BranchToolbar = memo(function BranchToolbar({
   // of this project — the "keep going where I just was" follow-up flow. Only
   // drafts can hop; started server threads have their workspace pinned.
   const canUsePreviousWorktree =
-    draftThread !== null && serverThread === null && !envModeLocked && !forceNewWorktree;
+    draftThread !== null &&
+    serverThread === null &&
+    !draftScopeLocked &&
+    !envModeLocked &&
+    !forceNewWorktree;
   const projectRefsForWorktreeLookup = useMemo(
     () => (canUsePreviousWorktree && activeProjectRef ? [activeProjectRef] : []),
     [canUsePreviousWorktree, activeProjectRef],
@@ -661,7 +667,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               ) : null}
             </>
           )}
-          {showGitControls ? (
+          {showGitControls && !draftScopeLocked ? (
             <BranchToolbarEnvModeSelector
               forceNewWorktree={forceNewWorktree}
               envLocked={envModeLocked}

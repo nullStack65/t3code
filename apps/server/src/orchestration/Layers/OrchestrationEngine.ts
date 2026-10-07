@@ -1,3 +1,8 @@
+import {
+  qualifyCoordinatorWorkspace,
+  qualifyThreadWorktree,
+  rejectConflictingWorktree,
+} from "../../project/ThreadWorktree.ts";
 import type {
   OrchestrationClientOrigin,
   OrchestrationEvent,
@@ -24,6 +29,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import {
   metricAttributes,
   orchestrationCommandAckDuration,
@@ -91,6 +97,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const providerService = yield* Effect.serviceOption(ProviderService);
+  const environmentIdentity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+  const environmentId = yield* environmentIdentity.getEnvironmentId;
   const crypto = yield* Crypto.Crypto;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -340,6 +348,236 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        // After callback/duplicate admission, before accepting any execution event.
+        // The existing command queue serializes ownership checks with binding changes.
+        const command = envelope.command;
+        const thread =
+          "threadId" in command
+            ? commandReadModel.threads.find(
+                (item) => item.id === command.threadId && item.deletedAt === null,
+              )
+            : undefined;
+        if (command.type === "thread.create" && command.historyImport !== true) {
+          const existingThread = commandReadModel.threads.find(
+            (item) => item.id === command.threadId,
+          );
+          if (existingThread !== undefined && existingThread.deletedAt === null) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Thread '${command.threadId}' already exists and cannot be created twice.`,
+            });
+          }
+          const executionScope = command.executionScope ?? "coding";
+          const project = commandReadModel.projects.find(
+            (item) => item.id === command.projectId && item.deletedAt === null,
+          );
+          if (!project) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Thread destination project is missing.",
+            });
+          }
+          if (executionScope === "coding") {
+            if (command.worktreePath === null || command.branch === null) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "Coding threads require an assigned Git worktree and branch.",
+              });
+            }
+            yield* rejectConflictingWorktree(
+              command.threadId,
+              command.worktreePath,
+              commandReadModel.threads,
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail:
+                      cause instanceof Error ? cause.message : "Worktree ownership check failed.",
+                  }),
+              ),
+            );
+            yield* qualifyThreadWorktree(
+              {
+                threadId: command.threadId,
+                projectCwd: project.workspaceRoot,
+                branch: command.branch,
+                worktreePath: command.worktreePath,
+              },
+              { claimWorktree: true, environmentId },
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: cause instanceof Error ? cause.message : "Worktree attach refused.",
+                  }),
+              ),
+            );
+          } else {
+            if (command.worktreePath === null) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "Coordinator threads require an assigned workspace.",
+              });
+            }
+            yield* rejectConflictingWorktree(
+              command.threadId,
+              command.worktreePath,
+              commandReadModel.threads,
+            ).pipe(
+              Effect.andThen(
+                qualifyCoordinatorWorkspace(
+                  project.workspaceRoot,
+                  command.worktreePath,
+                  command.threadId,
+                  { claimWorkspace: true, environmentId },
+                ),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail:
+                      cause instanceof Error ? cause.message : "Coordinator workspace refused.",
+                  }),
+              ),
+            );
+          }
+        }
+        if (
+          command.type === "thread.meta.update" &&
+          thread?.executionScope === "coding" &&
+          command.worktreePath !== undefined
+        ) {
+          const nextWorktreePath = command.worktreePath;
+          if (
+            nextWorktreePath === null ||
+            (thread.worktreePath !== null && nextWorktreePath !== thread.worktreePath)
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "A coding thread cannot detach or replace its assigned worktree.",
+            });
+          }
+          const project = commandReadModel.projects.find(
+            (item) => item.id === thread.projectId && item.deletedAt === null,
+          );
+          if (!project) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Coding project is missing.",
+            });
+          }
+          yield* rejectConflictingWorktree(
+            thread.id,
+            nextWorktreePath,
+            commandReadModel.threads,
+          ).pipe(
+            Effect.andThen(
+              qualifyThreadWorktree(
+                {
+                  threadId: thread.id,
+                  projectCwd: project.workspaceRoot,
+                  branch: command.branch !== undefined ? command.branch : thread.branch,
+                  worktreePath: nextWorktreePath,
+                },
+                { claimWorktree: true, environmentId },
+              ),
+            ),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: cause instanceof Error ? cause.message : "Worktree attach refused.",
+                }),
+            ),
+          );
+        }
+        if (
+          command.type === "thread.meta.update" &&
+          thread?.executionScope === "coordinator" &&
+          command.worktreePath !== undefined
+        ) {
+          if (
+            command.worktreePath === null ||
+            (thread.worktreePath !== null && command.worktreePath !== thread.worktreePath)
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "A coordinator thread cannot detach or replace its assigned workspace.",
+            });
+          }
+          const project = commandReadModel.projects.find(
+            (item) => item.id === thread.projectId && item.deletedAt === null,
+          );
+          if (!project) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Coordinator project is missing.",
+            });
+          }
+          yield* rejectConflictingWorktree(
+            thread.id,
+            command.worktreePath,
+            commandReadModel.threads,
+          ).pipe(
+            Effect.andThen(
+              qualifyCoordinatorWorkspace(project.workspaceRoot, command.worktreePath, thread.id, {
+                environmentId,
+              }),
+            ),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: cause instanceof Error ? cause.message : "Coordinator workspace refused.",
+                }),
+            ),
+          );
+        }
+        if (command.type === "thread.turn.start" && thread?.executionScope === "coding") {
+          const project = commandReadModel.projects.find(
+            (item) => item.id === thread.projectId && item.deletedAt === null,
+          );
+          if (!project)
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Coding project is missing.",
+            });
+          yield* qualifyThreadWorktree(
+            {
+              threadId: thread.id,
+              projectCwd: project.workspaceRoot,
+              worktreePath: thread.worktreePath,
+              branch: thread.branch,
+            },
+            { environmentId },
+          ).pipe(
+            Effect.andThen(
+              thread.worktreePath === null
+                ? Effect.void
+                : rejectConflictingWorktree(
+                    thread.id,
+                    thread.worktreePath,
+                    commandReadModel.threads,
+                  ),
+            ),
+
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail:
+                    cause instanceof Error
+                      ? cause.message
+                      : "Coding worktree qualification failed.",
+                }),
+            ),
+          );
+        }
+
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
