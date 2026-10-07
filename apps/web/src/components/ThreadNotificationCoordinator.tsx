@@ -44,7 +44,7 @@ export function ThreadNotificationCoordinator() {
   // Silence-episode memory lives on the always-mounted parent. The child list
   // unmounts when both notification preferences are off; keeping this here
   // means re-enabling in-app alerts cannot replay an episode the user already
-  // saw. Keyed by `${environmentId}:${threadId}:${episodeKey}`.
+  // saw. Keyed by JSON-encoded environment, thread and episode components.
   const notifiedSilenceEpisodes = useRef(new Set<string>());
   const openSilenceToasts = useRef(new Map<string, string>());
   // Desktop silence notifications by episode key, so resumption/terminal state
@@ -315,7 +315,7 @@ function EnvironmentNotifications({
   // covers threads the user is not viewing and follows the same in-app,
   // desktop and sound modes as the attention/completion signal above.
   useEffect(() => {
-    const prefix = `${environmentId}:`;
+    const prefix = `${JSON.stringify(environmentId)}:`;
     const closeEnvironmentToasts = () => {
       for (const [key, toastId] of [...openSilenceToasts.current]) {
         if (!key.startsWith(prefix)) continue;
@@ -373,7 +373,7 @@ function EnvironmentNotifications({
       const observation = resolvePostStartActivity(anchors, nowMs, {
         nowMonotonicMs: monotonicNowMs(),
       });
-      const baselineKey = `${environmentId}:${thread.id}`;
+      const baselineKey = `${prefix}${JSON.stringify(thread.id)}`;
       // Baseline on the first live observation in any state (active, waiting or
       // ready), not only once it is already quiet, so the first genuine
       // active→quiet transition still notifies. A thread that is already quiet
@@ -381,7 +381,7 @@ function EnvironmentNotifications({
       if (!hydratedThreads.current.has(baselineKey)) {
         hydratedThreads.current.add(baselineKey);
         if (observation.status === "quiet" && observation.episodeKey !== null) {
-          const key = `${baselineKey}:${observation.episodeKey}`;
+          const key = `${baselineKey}:${JSON.stringify(observation.episodeKey)}`;
           notifiedSilenceEpisodes.current.add(key);
           // Mark the hydration baseline as still-current too, so the episode
           // cleanup below cannot delete the suppression in this same evaluation
@@ -391,7 +391,7 @@ function EnvironmentNotifications({
         continue;
       }
       if (observation.status !== "quiet" || observation.episodeKey === null) continue;
-      const key = `${baselineKey}:${observation.episodeKey}`;
+      const key = `${baselineKey}:${JSON.stringify(observation.episodeKey)}`;
       seen.add(key);
       if (notifiedSilenceEpisodes.current.has(key)) continue;
 
@@ -441,7 +441,7 @@ function EnvironmentNotifications({
         try {
           const notification = new Notification("No recent provider activity", {
             body: thread.title,
-            tag: `${environmentId}:${thread.id}:silence`,
+            tag: `${baselineKey}:silence`,
             silent: true,
           });
           onNotification(environmentId, notification);

@@ -462,7 +462,7 @@ describe("thread notifications", () => {
     expect(state.add).not.toHaveBeenCalled();
     expect(state.notification).toHaveBeenCalledWith("No recent provider activity", {
       body: "Fix the login form",
-      tag: "env-1:thread-1:silence",
+      tag: '"env-1":"thread-1":silence',
       silent: true,
     });
   });
@@ -591,8 +591,8 @@ describe("thread notifications", () => {
     const sent = state.notification.mock.results.map(
       (result) => result.value as { tag: string; close: ReturnType<typeof vi.fn> },
     );
-    const silenceA = sent.find((notification) => notification.tag === "env-1:thread-a:silence");
-    const silenceB = sent.find((notification) => notification.tag === "env-2:thread-b:silence");
+    const silenceA = sent.find((notification) => notification.tag === '"env-1":"thread-a":silence');
+    const silenceB = sent.find((notification) => notification.tag === '"env-2":"thread-b":silence');
     expect(silenceA).toBeDefined();
     expect(silenceB).toBeDefined();
 
@@ -620,7 +620,7 @@ describe("thread notifications", () => {
     expect(state.notification).toHaveBeenCalledTimes(1);
     expect(state.notification).toHaveBeenCalledWith(
       "No recent provider activity",
-      expect.objectContaining({ tag: "env-1:thread-1:silence" }),
+      expect.objectContaining({ tag: '"env-1":"thread-1":silence' }),
     );
   });
 
@@ -636,7 +636,7 @@ describe("thread notifications", () => {
     const sent = state.notification.mock.results.map(
       (result) => result.value as { tag: string; close: ReturnType<typeof vi.fn> },
     );
-    const silence = sent.find((notification) => notification.tag === "env-1:thread-1:silence");
+    const silence = sent.find((notification) => notification.tag === '"env-1":"thread-1":silence');
     expect(silence).toBeDefined();
 
     // The turn finishes rather than resuming: the warning is closed.
@@ -689,5 +689,30 @@ describe("thread notifications", () => {
     await render();
     expect(state.close).toHaveBeenCalledWith(idB);
     expect(state.close).not.toHaveBeenCalledWith(idA);
+  });
+  it("keeps silence episodes and cleanup separate for IDs containing colons", async () => {
+    state.mode = "notifications";
+    state.inApp = true;
+    state.focused = true;
+    state.environments = ["a", "a:b"];
+    const a = (lastActivityAgoMs: number) =>
+      observedThread({ id: "b:c", title: "Thread A", lastActivityAgoMs });
+    const b = (lastActivityAgoMs: number) =>
+      observedThread({ id: "c", title: "Thread B", lastActivityAgoMs });
+    state.threadsByEnv["a"] = [a(0)];
+    state.threadsByEnv["a:b"] = [b(0)];
+    await render();
+    state.threadsByEnv["a"] = [a(6 * MIN)];
+    state.threadsByEnv["a:b"] = [b(6 * MIN)];
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(2);
+    const idFor = (description: string) => {
+      const index = state.add.mock.calls.findIndex((call) => call[0]?.description === description);
+      return state.add.mock.results[index]?.value;
+    };
+    state.envLive["a"] = false;
+    await render();
+    expect(state.close).toHaveBeenCalledWith(idFor("Thread A"));
+    expect(state.close).not.toHaveBeenCalledWith(idFor("Thread B"));
   });
 });

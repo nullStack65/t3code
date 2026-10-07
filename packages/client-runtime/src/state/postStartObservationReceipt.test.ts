@@ -92,6 +92,35 @@ describe("postStartObservationReceipt", () => {
     expect(resolvePostStartObservationReceipt("env-1", "thread-b", "observed-1")).toBeNull();
   });
 
+  it("keeps delimiter-containing environment and thread IDs distinct during cleanup", () => {
+    recordSnapshotObservationReceipts(
+      "env=a",
+      [{ id: "thread=b:c", postStartActivity: { observedAt: "first" } }],
+      { wallMs: 1_000, monotonicMs: 10 },
+    );
+    recordSnapshotObservationReceipts(
+      "env=a:b",
+      [{ id: "c", postStartActivity: { observedAt: "second" } }],
+      { wallMs: 2_000, monotonicMs: 20 },
+    );
+
+    expect(resolvePostStartObservationReceipt("env=a", "thread=b:c", "first")).toEqual({
+      wallMs: 1_000,
+      monotonicMs: 10,
+    });
+    expect(resolvePostStartObservationReceipt("env=a:b", "c", "second")).toEqual({
+      wallMs: 2_000,
+      monotonicMs: 20,
+    });
+
+    recordSnapshotObservationReceipts("env=a", [], { wallMs: 3_000, monotonicMs: 30 });
+    expect(resolvePostStartObservationReceipt("env=a", "thread=b:c", "first")).toBeNull();
+    expect(resolvePostStartObservationReceipt("env=a:b", "c", "second")).toEqual({
+      wallMs: 2_000,
+      monotonicMs: 20,
+    });
+  });
+
   it("exposes a monotonic clock reading", () => {
     expect(Number.isFinite(monotonicNowMs())).toBe(true);
   });

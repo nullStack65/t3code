@@ -56,7 +56,7 @@ export function monotonicNowMs(): number {
 }
 
 function threadKey(environmentId: string, threadId: string): string {
-  return `${environmentId}:${threadId}`;
+  return `${JSON.stringify(environmentId)}:${JSON.stringify(threadId)}`;
 }
 
 function makeReceipt(now: {
@@ -122,7 +122,7 @@ export function recordSnapshotObservationReceipts(
       monotonicMs,
     });
   }
-  const prefix = `${environmentId}:`;
+  const prefix = `${JSON.stringify(environmentId)}:`;
   for (const key of [...receiptsByThread.keys()]) {
     if (key.startsWith(prefix) && !present.has(key)) receiptsByThread.delete(key);
   }
