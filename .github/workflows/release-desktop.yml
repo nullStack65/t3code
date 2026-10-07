@@ -79,6 +79,12 @@ on:
         required: false
         default: true
         type: boolean
+      # Fork qualification can request a native inspection of the produced
+      # Intel DMG. Other reusable callers keep their existing artifact shape.
+      emit_macos_inspection:
+        required: false
+        default: false
+        type: boolean
       clerk_publishable_key:
         required: true
         type: string
@@ -554,6 +560,24 @@ jobs:
               mv "$manifest" "${manifest%.yml}-win-${{ inputs.arch }}.yml"
             done
           fi
+
+      # The Linux qualify job cannot mount a DMG. Emit its inspection from the
+      # native Mac runner and carry the digest-bound record with the DMG.
+      - name: Inspect macOS release artifact provenance
+        if: inputs.emit_macos_inspection && inputs.platform == 'mac'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-fork-candidate.ts \
+            --candidate-dir release-publish \
+            --version "$RELEASE_VERSION" \
+            --sha "$RELEASE_SHA" \
+            --repository "nullStack65/t3code" \
+            --targets mac \
+            --emit-inspection "release-publish/fork-inspection-evidence-macos-x64.json"
 
       - name: Collect resource monitor
         shell: bash

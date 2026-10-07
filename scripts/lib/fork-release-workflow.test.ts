@@ -189,3 +189,50 @@ it.effect("release-desktop binds provenance to the checked-out ref", () =>
     assert.include(text, 'T3CODE_RELEASE_BUILD: "1"');
   }),
 );
+
+it.effect("the fork release attaches native digest-bound Intel DMG inspection evidence", () =>
+  Effect.gen(function* () {
+    const fork = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const desktop = yield* Effect.promise(() => readWorkflow("release-desktop.yml"));
+    const intelMac = jobBlock(fork, "desktop_mac_x64");
+    const qualify = jobBlock(fork, "qualify");
+    const desktopInput = desktop.slice(
+      desktop.indexOf("      emit_macos_inspection:"),
+      desktop.indexOf("      clerk_publishable_key:"),
+    );
+
+    assert.include(intelMac, "emit_macos_inspection: true");
+    assert.include(desktopInput, "emit_macos_inspection:");
+    assert.include(desktopInput, "default: false");
+    const inspect = desktop.slice(
+      desktop.indexOf("- name: Inspect macOS release artifact provenance"),
+      desktop.indexOf("- name: Collect resource monitor"),
+    );
+    assert.include(inspect, "inputs.emit_macos_inspection && inputs.platform == 'mac'");
+    assert.include(inspect, "scripts/verify-fork-candidate.ts");
+    assert.include(inspect, "--candidate-dir release-publish");
+    assert.include(inspect, '--version "$RELEASE_VERSION"');
+    assert.include(inspect, '--sha "$RELEASE_SHA"');
+    assert.include(inspect, '--repository "nullStack65/t3code"');
+    assert.include(inspect, "--targets mac");
+    assert.include(inspect, "--emit-inspection");
+    assert.include(inspect, "fork-inspection-evidence-macos-x64.json");
+    assert.isBelow(
+      desktop.indexOf("- name: Inspect macOS release artifact provenance"),
+      desktop.indexOf("- name: Upload build artifacts"),
+    );
+    assert.include(
+      desktop.slice(desktop.indexOf("- name: Upload build artifacts")),
+      "release-publish/*",
+    );
+    const downloadDesktop = qualify.slice(
+      qualify.indexOf("- name: Download desktop artifacts"),
+      qualify.indexOf("- name: Download CLI archives"),
+    );
+    assert.include(downloadDesktop, "pattern: desktop-*");
+    assert.include(downloadDesktop, "merge-multiple: true");
+    assert.include(downloadDesktop, "path: candidate");
+    assert.include(qualify, "fork-inspection-evidence*.json");
+    assert.include(qualify, "--inspection-evidence");
+  }),
+);
