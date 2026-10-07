@@ -4,6 +4,14 @@ import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 // or the installed runtime tree changes incompatibly; launchers survive self-updates.
 export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
+/**
+ * Per-instance control token. The Windows SCM host generates a fresh value for
+ * every launch it starts and passes it here; the launcher writes it into the
+ * state it owns so a later control request can be bound to this exact instance
+ * rather than to a shared file name. Absent means no host controls this
+ * process (development, a manual `__service-launcher`, or POSIX signal stop).
+ */
+export const SERVICE_LAUNCHER_INSTANCE_ENV = "T3_SERVICE_LAUNCHER_INSTANCE";
 export const SERVICE_STATE_FILE = "service-state.json";
 /** Written by the launcher just before an explicit stop kills its child, so
     the child can tell "the service is going away" from "the launcher is about
@@ -14,6 +22,15 @@ export const SERVICE_STOP_MARKER_FILE = ".service-stopping";
     it when it starts (whoever restarted the service), so while it exists the
     service is known to be behind its unit and status reports it that way. */
 export const SERVICE_RESTART_PENDING_FILE = ".restart-pending";
+/**
+ * Private control-request file in the runtime directory. The Windows SCM host
+ * writes it to ask the launcher it owns to stop; it is distinct from
+ * {@link SERVICE_STOP_MARKER_FILE}, which only tells a child mid-update that no
+ * replacement server is coming. The request carries the per-instance token so a
+ * stale request from a prior launch can never drive a later one, and the
+ * launcher consumes (removes) it before acting.
+ */
+export const SERVICE_CONTROL_REQUEST_FILE = ".service-control.json";
 
 export interface PendingServiceUpdate {
   readonly id: string;
@@ -47,6 +64,15 @@ export type ServiceLauncherChildMessage =
   | {
       readonly type: "prepared";
       readonly updateId: string;
+    }
+  /** Sent once the managed child has drained its lifetime and is about to exit
+      in response to {@link ServiceLauncherParentMessage} `stop`. It is the
+      acknowledgement that a graceful stop completed, not a request to stop. The
+      `requestId` must echo the request, so an acknowledgement emitted for an
+      unrelated scope closure can never be read as this drain completing. */
+  | {
+      readonly type: "stopped";
+      readonly requestId: string;
     };
 
 export type ServiceLauncherParentMessage =
@@ -61,6 +87,15 @@ export type ServiceLauncherParentMessage =
   | {
       readonly type: "committed";
       readonly updateId: string;
+    }
+  /** Asks the managed child to run its own graceful shutdown and finalizers.
+      Used on platforms where a process signal is a hard kill (Windows), so the
+      launcher can join a real drain instead of terminating the child. The
+      `requestId` is unique per whole-service stop and must be echoed by the
+      child's `stopped` acknowledgement. */
+  | {
+      readonly type: "stop";
+      readonly requestId: string;
     };
 
 const SEMVER_NUMBER = "(?:0|[1-9]\\d*)";
@@ -249,7 +284,9 @@ export function decodeServiceLauncherChildMessage(
   }
   return value.type === "prepared" && typeof value.updateId === "string"
     ? { type: value.type, updateId: value.updateId }
-    : undefined;
+    : value.type === "stopped" && typeof value.requestId === "string" && value.requestId !== ""
+      ? { type: value.type, requestId: value.requestId }
+      : undefined;
 }
 
 export function decodeServiceLauncherParentMessage(
@@ -264,5 +301,45 @@ export function decodeServiceLauncherParentMessage(
   }
   return value.type === "committed" && typeof value.updateId === "string"
     ? { type: value.type, updateId: value.updateId }
-    : undefined;
+    : value.type === "stop" && typeof value.requestId === "string" && value.requestId !== ""
+      ? { type: value.type, requestId: value.requestId }
+      : undefined;
+}
+
+/**
+ * The private request the SCM host writes to the runtime directory to ask the
+ * launcher it owns to stop. `instance` binds it to one launcher launch; a
+ * request whose instance does not match the running launcher is stale and is
+ * consumed without effect.
+ */
+export interface ServiceLauncherControlRequest {
+  readonly protocol: typeof SERVICE_LAUNCHER_PROTOCOL;
+  readonly type: "stop";
+  readonly instance: string;
+  readonly requestId: string;
+}
+
+function decodeServiceLauncherControlRequest(
+  value: unknown,
+): ServiceLauncherControlRequest | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.protocol !== SERVICE_LAUNCHER_PROTOCOL || value.type !== "stop") return undefined;
+  if (typeof value.instance !== "string" || value.instance === "") return undefined;
+  if (typeof value.requestId !== "string" || value.requestId === "") return undefined;
+  return {
+    protocol: SERVICE_LAUNCHER_PROTOCOL,
+    type: "stop",
+    instance: value.instance,
+    requestId: value.requestId,
+  };
+}
+
+export function parseServiceLauncherControlRequest(
+  value: string,
+): ServiceLauncherControlRequest | undefined {
+  try {
+    return decodeServiceLauncherControlRequest(JSON.parse(value) as unknown);
+  } catch {
+    return undefined;
+  }
 }
