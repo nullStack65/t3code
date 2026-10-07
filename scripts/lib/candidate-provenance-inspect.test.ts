@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - This test creates disposable synthetic files and a stub executable to verify the host-only DMG extraction boundary.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
