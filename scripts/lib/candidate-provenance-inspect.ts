@@ -32,10 +32,7 @@ import * as NodePath from "node:path";
 import { extractFile } from "@electron/asar";
 
 import { BUILD_INFO_FILE_NAME, parseBuildInfo } from "./source-provenance.ts";
-import {
-  WSL_RUNTIME_ARCHIVE_NAME,
-  WSL_RUNTIME_ARCHIVE_HASH_NAME,
-} from "../build-desktop-artifact.ts";
+import { WSL_RUNTIME_ARCHIVE_NAME, WSL_RUNTIME_ARCHIVE_HASH_NAME } from "./wsl-runtime-artifact.ts";
 import {
   sha256Hex,
   type BundledServerRecord,
