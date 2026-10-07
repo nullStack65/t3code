@@ -932,10 +932,10 @@ it.live(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-// --- W1-B: non-OpenCode launch in a verified sparse checkout, incomplete probe warns ---------
+// --- W1-B: provider Git does not replace host Git for T3 sparse checks ----------------------
 
 it.live(
-  "W1-B: a non-OpenCode launch in a verified sparse checkout warns when the capability probe fails",
+  "W1-B: a non-OpenCode launch uses host Git for a verified sparse checkout",
   () =>
     Effect.gen(function* () {
       const base = yield* Effect.promise(() =>
@@ -1020,17 +1020,9 @@ it.live(
       }).pipe(Effect.provide(providerLayer));
 
       const warnings = yield* Ref.get(reported);
-      const sparseWarning = warnings.find(
-        (warning) => warning.code === "git-sparse-add-unsupported",
-      );
-      assert.isDefined(
-        sparseWarning,
-        `expected a sparse-checkout capability warning; got ${JSON.stringify(warnings)}`,
-      );
-      // The non-OpenCode path uses the sparse-checkout message, not the
-      // consumer-specific one.
-      assert.include(sparseWarning?.message ?? "", "sparse");
-      assert.notInclude(sparseWarning?.message ?? "", "OpenCode");
+      // This launch uses the host Git for T3's own checkpoint path. The
+      // deliberately limited provider Git is irrelevant to this consumer.
+      assert.deepStrictEqual(warnings, []);
 
       yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

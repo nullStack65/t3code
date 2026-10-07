@@ -115,6 +115,7 @@ const makeIntegrationFixture = (options?: {
       readonly configuredRoot?: string;
       readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
       readonly gitEnvironment?: NodeJS.ProcessEnv;
+      readonly providerGitEnvironment?: NodeJS.ProcessEnv;
     },
   ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
   readonly reportLaunchPreflightWarning?: (input: {

@@ -291,7 +291,10 @@ export interface ProviderServiceLiveOptions {
     options?: {
       readonly isSharedRoot?: boolean;
       readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
+      /** Host Git context used for T3's own VCS checks. */
       readonly gitEnvironment?: NodeJS.ProcessEnv;
+      /** Local provider Git context used for provider snapshot checks. */
+      readonly providerGitEnvironment?: NodeJS.ProcessEnv;
     },
   ) => Effect.Effect<LaunchPreflight.LaunchPreflightResult>;
 }
@@ -591,14 +594,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       input.providerInstanceId === undefined
         ? undefined
         : settings?.providerInstances[input.providerInstanceId]?.environment;
-    const gitEnvironment =
+    const providerGitEnvironment =
       instanceEnvironment === undefined || instanceEnvironment.length === 0
         ? undefined
         : mergeProviderInstanceEnvironment(instanceEnvironment);
     const result = yield* runLaunchPreflight(input.cwd, {
       ...(configuredRoot !== undefined ? { configuredRoot } : {}),
       ...(consumer !== undefined ? { consumer } : {}),
-      ...(gitEnvironment !== undefined ? { providerGitEnvironment: gitEnvironment } : {}),
+      ...(providerGitEnvironment !== undefined ? { providerGitEnvironment } : {}),
     }).pipe(
       Effect.catchCause(() =>
         Effect.succeed({
@@ -2662,11 +2665,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 // layer only needs the platform services (`FileSystem`, `Path`,
 // `ChildProcessSpawner`) already present in the server and test harnesses.
 const LaunchPreflightLive = LaunchPreflight.layer.pipe(Layer.provide(VcsProcess.layer));
-
-export const ProviderServiceLive = Layer.effect(
-  ProviderService.ProviderService,
-  makeProviderService(),
-).pipe(Layer.provide(LaunchPreflightLive));
 
 export function makeProviderServiceLive(options?: ProviderServiceLiveOptions) {
   return Layer.effect(ProviderService.ProviderService, makeProviderService(options)).pipe(

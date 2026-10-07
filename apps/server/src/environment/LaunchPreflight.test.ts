@@ -88,12 +88,16 @@ const input = (options: {
   readonly files?: Partial<LaunchPreflight.LaunchPreflightFileProbe>;
   readonly consumer?: LaunchPreflight.LaunchPreflightConsumer;
   readonly gitEnvironment?: NodeJS.ProcessEnv;
+  readonly providerGitEnvironment?: NodeJS.ProcessEnv;
 }): LaunchPreflight.LaunchPreflightInput => ({
   root: options.root ?? "/session-root",
   ...(options.isSharedRoot !== undefined ? { isSharedRoot: options.isSharedRoot } : {}),
   ...(options.configuredRoot !== undefined ? { configuredRoot: options.configuredRoot } : {}),
   ...(options.consumer !== undefined ? { consumer: options.consumer } : {}),
   ...(options.gitEnvironment !== undefined ? { gitEnvironment: options.gitEnvironment } : {}),
+  ...(options.providerGitEnvironment !== undefined
+    ? { providerGitEnvironment: options.providerGitEnvironment }
+    : {}),
   git: options.git ?? gitProbe(),
   files: {
     exists: () => Effect.succeed(false),
@@ -655,6 +659,41 @@ it.effect(
       assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
       assert.notInclude(codes(result), "git-sparse-add-unsupported");
     }),
+);
+
+it.effect("W1-B: verified sparse checkout probes host Git separately from provider snapshot Git", () =>
+  Effect.gen(function* () {
+    const hostEnvironment = { PATH: "/host-git" };
+    const providerEnvironment = { PATH: "/provider-git" };
+    const capabilityEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
+    const result = yield* run(
+      input({
+        root: "/repo",
+        consumer: { driver: "opencode", snapshotsEnabled: true },
+        gitEnvironment: hostEnvironment,
+        providerGitEnvironment: providerEnvironment,
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          isSparseCheckout: (_root, environment) => {
+            assert.strictEqual(environment, hostEnvironment);
+            return Effect.succeed(true);
+          },
+          probeSparseAdd: (_root, environment) => {
+            capabilityEnvironments.push(environment);
+            return environment === hostEnvironment
+              ? Effect.fail(probeError("failed", "host Git probe denied"))
+              : Effect.succeed("supported");
+          },
+        }),
+        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
+      }),
+    );
+
+    assert.deepStrictEqual(capabilityEnvironments, [hostEnvironment, providerEnvironment]);
+    assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
+    assert.include(result.warnings[0]?.message ?? "", "host Git probe denied");
+  }),
 );
 
 it.effect("W1-B: a hung capability probe for a verified sparse checkout warns (non-OpenCode)", () =>
@@ -1233,7 +1272,7 @@ it.live(
       };
       const warned = yield* preflight.run(repo, {
         consumer: ordinaryGitConsumer,
-        gitEnvironment: providerEnvironment,
+        providerGitEnvironment: providerEnvironment,
       });
       assert.deepStrictEqual(codes(warned), ["git-sparse-add-unsupported"]);
       assert.deepStrictEqual(severities(warned), ["warning"]);
@@ -1258,7 +1297,7 @@ it.live(
       // (OpenCode snapshot staging off), so an ordinary checkout is silent.
       const disabled = yield* preflight.run(repo, {
         consumer: { driver: "opencode", snapshotsEnabled: false },
-        gitEnvironment: providerEnvironment,
+        providerGitEnvironment: providerEnvironment,
       });
       assert.deepStrictEqual(disabled.findings, []);
 
@@ -1266,7 +1305,7 @@ it.live(
       // globally to T3 sessions.
       const otherConsumer = yield* preflight.run(repo, {
         consumer: { driver: "codex", snapshotsEnabled: true },
-        gitEnvironment: providerEnvironment,
+        providerGitEnvironment: providerEnvironment,
       });
       assert.deepStrictEqual(otherConsumer.findings, []);
 
@@ -1275,7 +1314,7 @@ it.live(
       yield* Effect.promise(() => NodeFSP.mkdir(plain, { recursive: true }));
       const nonGit = yield* preflight.run(plain, {
         consumer: ordinaryGitConsumer,
-        gitEnvironment: providerEnvironment,
+        providerGitEnvironment: providerEnvironment,
       });
       assert.deepStrictEqual(nonGit.findings, []);
 

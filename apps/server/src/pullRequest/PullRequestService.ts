@@ -161,6 +161,7 @@ const VIEWER_CACHE_CAPACITY = 32;
 export type PullRequestError = PullRequestUnavailableError | PullRequestOperationError;
 
 const routingCredential = Context.Reference<{
+  readonly accountId: string;
   readonly credentialFingerprint: string;
   readonly viewer: string;
 } | null>("t3/PullRequestService/routingCredential", { defaultValue: () => null });
@@ -305,6 +306,10 @@ const ACTION_ACCESS_REFUSALS: Record<PullRequestAction, string> = {
  */
 const REVIEWER_REQUEST_REFUSAL = "You need write access on this repository to ask for a review.";
 const LABEL_CHANGE_REFUSAL = "You need triage access on this repository to change its labels.";
+const OWNER_GITHUB_ACCOUNT_ID = "112618179";
+const OWNER_GITHUB_LOGIN = "nullstack65";
+const AMBIGUOUS_REVIEWER_REQUEST_REFUSAL =
+  "T3 can request only nullStack65 as a reviewer. The verified owner can remove pending reviewer assignments.";
 
 /** A project this page can read: its remote is on a host with an implementation. */
 export interface SupportedProject {
@@ -2314,40 +2319,78 @@ export const make = Effect.gen(function* () {
     );
 
   const requestReviewers: PullRequestService["Service"]["requestReviewers"] = (input) =>
-    requireProject(input).pipe(
-      Effect.flatMap((project): Effect.Effect<void, PullRequestError> => {
+    Effect.gen(function* () {
+      const invalid = () =>
+        new PullRequestOperationError({
+          operation: "requestReviewers",
+          detail: AMBIGUOUS_REVIEWER_REQUEST_REFUSAL,
+        });
+      const reviewer = input.reviewers.length === 1 ? input.reviewers[0] : undefined;
+      if (
+        input.reviewers.length === 0 ||
+        (input.requested &&
+          (reviewer?.kind !== "user" || reviewer.id.toLowerCase() !== OWNER_GITHUB_LOGIN))
+      ) {
+        return yield* invalid();
+      }
+      if (
+        input.expectedAccountId !== undefined &&
+        input.expectedAccountId !== OWNER_GITHUB_ACCOUNT_ID
+      ) {
+        return yield* invalid();
+      }
+
+      const project = yield* requireProject(input);
+      if (project.api.kind !== "github" || project.host.toLowerCase() !== "github.com") {
+        return yield* invalid();
+      }
+      const api = registry.get("github");
+      if (api?.withVerifiedCredential === undefined) return yield* invalid();
+
+      const perform = Effect.gen(function* () {
         if (!project.api.capabilities.reviewers.request) {
-          return Effect.fail(
-            new PullRequestOperationError({
-              operation: "requestReviewers",
-              detail: "This host cannot ask somebody for a review.",
-            }),
-          );
+          return yield* new PullRequestOperationError({
+            operation: "requestReviewers",
+            detail: "This host cannot ask somebody for a review.",
+          });
         }
-        return viewerPermissionsOf(project, input, "requestReviewers").pipe(
-          Effect.flatMap((viewer): Effect.Effect<void, PullRequestError> => {
-            if (!viewer.requestReviewers) {
-              return Effect.fail(
-                new PullRequestOperationError({
-                  operation: "requestReviewers",
-                  detail: REVIEWER_REQUEST_REFUSAL,
-                }),
-              );
-            }
-            return project.api
-              .setReviewerRequest({
-                cwd: project.project.workspaceRoot,
-                repository: project.repository,
-                host: project.host,
-                number: input.number,
-                reviewers: input.reviewers,
-                requested: input.requested,
-              })
-              .pipe(Effect.mapError(toPullRequestError("requestReviewers")));
-          }),
-        );
-      }),
-    );
+        const viewer = yield* viewerPermissionsOf(project, input, "requestReviewers");
+        if (!viewer.requestReviewers) {
+          return yield* new PullRequestOperationError({
+            operation: "requestReviewers",
+            detail: REVIEWER_REQUEST_REFUSAL,
+          });
+        }
+        yield* project.api
+          .setReviewerRequest({
+            cwd: project.project.workspaceRoot,
+            repository: project.repository,
+            host: project.host,
+            number: input.number,
+            reviewers: input.reviewers,
+            requested: input.requested,
+          })
+          .pipe(Effect.mapError(toPullRequestError("requestReviewers")));
+      });
+
+      const credential = yield* routingCredential;
+      if (credential !== null) {
+        if (credential.accountId !== OWNER_GITHUB_ACCOUNT_ID) return yield* invalid();
+        return yield* perform;
+      }
+      const result = yield* api
+        .withVerifiedCredential(
+          { cwd: project.project.workspaceRoot, host: project.host },
+          (identity) =>
+            identity.accountId === OWNER_GITHUB_ACCOUNT_ID &&
+            (input.expectedAccountId === undefined ||
+              identity.accountId === input.expectedAccountId)
+              ? perform.pipe(Effect.provideService(routingCredential, identity), Effect.result)
+              : Effect.fail(invalid()),
+        )
+        .pipe(Effect.catchTag("PullRequestProviderError", () => Effect.fail(invalid())));
+      return yield* Effect.fromResult(result);
+    });
 
   /**
    * The labels, like the reviewer candidates, are wanted only by somebody about to change them,

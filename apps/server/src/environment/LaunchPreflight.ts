@@ -139,7 +139,7 @@ export interface LaunchPreflightConsumer {
 }
 
 /** Whether the selected consumer/operation stages with `git add --sparse`. */
-export const consumerUsesSparseAdd = (consumer: LaunchPreflightConsumer | undefined): boolean =>
+const consumerUsesSparseAdd = (consumer: LaunchPreflightConsumer | undefined): boolean =>
   consumer !== undefined && consumer.driver === "opencode" && consumer.snapshotsEnabled === true;
 
 export interface LaunchPreflightRepoIdentity {
@@ -248,7 +248,7 @@ const samePath = (path: Path.Path, a: string | null, b: string): boolean =>
  * working directory (including `ServerConfig.cwd`) never declares one. An
  * unset or empty setting means every session is ordinary.
  */
-export const isConfiguredSharedSessionRoot = (
+const isConfiguredSharedSessionRoot = (
   path: Path.Path,
   cwd: string,
   configuredRoot: string | undefined,

@@ -26,7 +26,7 @@ export interface PendingLaunchPreflightWarning {
 }
 
 /** Cap on pending notices retained per working directory. */
-export const LAUNCH_PREFLIGHT_INBOX_LIMIT = 16;
+const LAUNCH_PREFLIGHT_INBOX_LIMIT = 16;
 
 export const LaunchPreflightWarningInbox = Context.Reference<
   Map<string, ReadonlyArray<PendingLaunchPreflightWarning>>
