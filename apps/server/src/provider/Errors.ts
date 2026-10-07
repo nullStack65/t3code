@@ -103,6 +103,26 @@ export class ProviderWorkspaceMissingError extends Schema.TaggedError<ProviderWo
 }
 
 /**
+ * ProviderLaunchPreflightBlockedError - The launch preflight proved the session
+ * cannot execute usefully (for example the resolved Git cannot start or lacks
+ * the capability T3 checkpoints require while the workspace is itself a
+ * repository). Carries the already-actionable user-facing message.
+ */
+export class ProviderLaunchPreflightBlockedError extends Schema.TaggedError<ProviderLaunchPreflightBlockedError>()(
+  "ProviderLaunchPreflightBlockedError",
+  {
+    threadId: Schema.String,
+    cwd: Schema.String,
+    code: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/**
  * ProviderValidationError - Invalid provider API input.
  */
 export class ProviderValidationError extends Schema.TaggedError<ProviderValidationError>()(
@@ -216,6 +236,7 @@ export type ProviderServiceError =
   | ProviderValidationError
   | ProviderUnsupportedError
   | ProviderWorkspaceMissingError
+  | ProviderLaunchPreflightBlockedError
   | ProviderInstanceNotFoundError
   | ProviderSessionNotFoundError
   | ProviderSessionDirectoryPersistenceError
