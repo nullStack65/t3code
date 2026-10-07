@@ -91,11 +91,11 @@ function parseOpenCodeResume(raw: unknown): { readonly sessionId: string } | und
 }
 
 /**
- * Whether an error definitively reports a missing session. Only a confirmed
- * miss may silently start a fresh session; any other failure (the SDK client
- * is `throwOnError: true`, so `session.get` rejects on every non-2xx) must
- * propagate, or a transient blip resets a live thread to an empty one — the
- * #3604 silent context loss. Decides on structured signals only, never free
+ * Whether an error definitively reports a missing session. A confirmed miss
+ * lets the caller report an absent requested continuation; any other failure
+ * (the SDK client is `throwOnError: true`, so `session.get` rejects on every
+ * non-2xx) must propagate rather than being misreported as missing.
+ * Decides on structured signals only, never free
  * text: a numeric 404 or the exact `NotFoundError` name, found via a bounded walk
  * over `cause`/`body`/`error`/`data`. An explicit non-404 status seals its
  * subtree so a wrapped "NotFound" name can't reclassify a real failure.
@@ -2882,11 +2882,12 @@ export function makeOpenCodeAdapter(
                 );
               }
               // Resume: re-adopt the session named by the durable cursor —
-              // OpenCode scopes history by session id. The probe recovers only
-              // a confirmed not-found (start fresh); transport/auth/server
-              // errors propagate instead of masking as a new empty session.
+              // OpenCode scopes history by session id. A confirmed not-found
+              // (or a malformed payload) for a requested resume is a failure,
+              // never an empty replacement; transport/auth/server errors
+              // propagate instead of masking as a new empty session.
               const resolved = yield* Effect.gen(function* () {
-                const adopted = resumeSessionId
+                const fetched = resumeSessionId
                   ? yield* runOpenCodeSdk("session.get", () =>
                       client.session.get({ sessionID: resumeSessionId }),
                     ).pipe(
@@ -2897,6 +2898,17 @@ export function makeOpenCodeAdapter(
                       ),
                     )
                   : undefined;
+
+                // The returned identity must round-trip EXACTLY to the id we
+                // requested. A blank, missing, non-string, or mismatched id is
+                // never this session: reusing or forking it would bind the
+                // thread to a different conversation. No trim/normalization is
+                // allowed to force a match, and no replacement session is
+                // minted; the resume check below fails visibly instead.
+                const adopted =
+                  fetched && typeof fetched.id === "string" && fetched.id === resumeSessionId
+                    ? fetched
+                    : undefined;
 
                 // Reuse in place only when the session still matches the
                 // requested cwd; on a cwd change it is forked below instead.
@@ -2946,11 +2958,28 @@ export function makeOpenCodeAdapter(
                   return { openCodeSession: forked, created: true };
                 }
 
+                // A resume id was supplied but the native session is confirmed
+                // absent (404/missing), the payload was unusable, or the server
+                // returned a different session identity. Minting or reusing a
+                // fresh session here would silently drop (or cross-wire) the
+                // conversation the caller asked to continue (#3604), so fail
+                // visibly instead. The user can explicitly start new work
+                // afterwards.
                 if (resumeSessionId) {
-                  yield* Effect.logWarning(
-                    `OpenCode session '${resumeSessionId}' no longer exists; starting a fresh session.`,
-                  );
+                  const returnedId =
+                    fetched && typeof fetched.id === "string" ? fetched.id : undefined;
+                  const detail =
+                    returnedId === undefined
+                      ? fetched
+                        ? `OpenCode session '${resumeSessionId}' returned a payload without a usable id; refusing to start a new session for a requested continuation.`
+                        : `OpenCode session '${resumeSessionId}' was not found; refusing to start a new session for a requested continuation.`
+                      : `OpenCode session.get requested '${resumeSessionId}' but returned a different session '${returnedId}'; refusing to reuse or fork a mismatched session for a requested continuation.`;
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "session.get",
+                    detail,
+                  });
                 }
+
                 const createdSession = yield* runOpenCodeSdk("session.create", () =>
                   client.session.create({
                     ...(input.title ? { title: input.title } : {}),

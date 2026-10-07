@@ -30,7 +30,7 @@ import {
   TurnId,
   type ProjectId,
   type ProviderInstanceId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ServerSettings as ServerSettingsValue,
@@ -95,6 +95,9 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import { resolveLaunchPreflightConsumer } from "../launchPreflightConsumer.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const CODEX_PROVIDER = ProviderDriverKind.make("codex");
+const CLAUDE_AGENT_PROVIDER = ProviderDriverKind.make("claudeAgent");
+const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 
 // Narrow-filesystem budget for the launch preflight directory checks, matching
 // the preflight's own per-operation bound so a stalled path cannot hold a launch.
@@ -550,6 +553,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const pathService = yield* Path.Path;
   const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
   const runLaunchPreflight = options?.launchPreflightRunner ?? launchPreflight.run;
+
+  /**
+   * Resolve the exact cwd used when an adapter permits an omitted cwd. Providers
+   * that require an explicit workspace keep rejecting omission as before.
+   * OpenCode resolves omission to ServerConfig.cwd even when connected to an
+   * external server; the consumer resolver excludes that server's Git from
+   * local provider capability checks.
+   */
+  const resolveDefaultProviderLaunchCwd = (provider: ProviderDriverKind): string | undefined => {
+    if (provider === CODEX_PROVIDER || provider === CLAUDE_AGENT_PROVIDER) {
+      return process.cwd();
+    }
+    if (provider === OPENCODE_PROVIDER) return serverConfig.cwd;
+    return undefined;
+  };
 
   /**
    * Runs the bounded launch preflight against the exact cwd a provider process
@@ -1483,11 +1501,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const launchCwd = persistedCwd ?? resolveDefaultProviderLaunchCwd(input.binding.provider);
 
-      if (persistedCwd) {
+      if (launchCwd !== undefined) {
         yield* guardProviderLaunch({
           threadId: input.binding.threadId,
-          cwd: persistedCwd,
+          cwd: launchCwd,
           provider: input.binding.provider,
           providerInstanceId: bindingInstanceId,
         });
@@ -1499,7 +1518,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId: input.binding.threadId,
           provider: input.binding.provider,
           providerInstanceId: bindingInstanceId,
-          ...(persistedCwd ? { cwd: persistedCwd } : {}),
+          ...(launchCwd !== undefined ? { cwd: launchCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
@@ -1688,11 +1707,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (persistedBinding?.providerInstanceId === resolvedInstanceId
             ? persistedBinding.resumeCursor
             : undefined);
-        const effectiveCwd =
+        const requestedCwd =
           input.cwd ??
           (persistedBinding?.providerInstanceId === resolvedInstanceId
             ? readPersistedCwd(persistedBinding.runtimePayload)
             : undefined);
+        const effectiveCwd = requestedCwd ?? resolveDefaultProviderLaunchCwd(resolvedProvider);
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":
@@ -1709,7 +1729,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               : effectiveCwd !== undefined &&
                   persistedBinding?.providerInstanceId === resolvedInstanceId
                 ? "persisted"
-                : "none",
+                : effectiveCwd !== undefined
+                  ? "adapter-default"
+                  : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         if (effectiveCwd !== undefined) {

@@ -389,8 +389,9 @@ it.live(
       const grokAdapter = yield* makeGrokAdapter(
         decodeGrokSettings({ binaryPath: wrapperPath }),
       ).pipe(
-        Effect.provide(ServerConfig.layerTest(cwd, cwd)),
-        Effect.provide(NodeServices.layer),
+        Effect.provide(
+          ServerConfig.layerTest(cwd, cwd).pipe(Layer.provideMerge(NodeServices.layer)),
+        ),
         Effect.orDie,
       );
       const registry = makeAdapterRegistryMock({
@@ -497,8 +498,7 @@ it.live("A3: a missing configured executable fails before model work", () =>
     const missingGrokAdapter = yield* makeGrokAdapter(
       decodeGrokSettings({ binaryPath: missing }),
     ).pipe(
-      Effect.provide(ServerConfig.layerTest(cwd, cwd)),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(ServerConfig.layerTest(cwd, cwd).pipe(Layer.provideMerge(NodeServices.layer))),
       Effect.orDie,
     );
     const registry = makeAdapterRegistryMock({

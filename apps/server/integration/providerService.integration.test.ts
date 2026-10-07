@@ -149,8 +149,9 @@ const makeIntegrationFixture = (options?: {
             [ProviderDriverKind.make("grok")]: yield* makeGrokAdapter(
               decodeGrokSettings({ binaryPath: options.grokBinaryPath }),
             ).pipe(
-              Effect.provide(ServerConfig.layerTest(cwd, cwd)),
-              Effect.provide(NodeServices.layer),
+              Effect.provide(
+                ServerConfig.layerTest(cwd, cwd).pipe(Layer.provideMerge(NodeServices.layer)),
+              ),
               Effect.orDie,
             ),
           };

@@ -206,7 +206,7 @@ jobs:
 
       - name: Check Rust formatting
         run: |
-          for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
+          for crate in resource-monitor kde-snap-shot hyprland-snap-shot windows-service-host; do
             cargo fmt --manifest-path "native/$crate/Cargo.toml" -- --check
           done
 
@@ -215,6 +215,14 @@ jobs:
           for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
             cargo test --locked --manifest-path "native/$crate/Cargo.toml"
           done
+
+      - name: Check portable Windows service host
+        run: cargo test --locked --features test-child --manifest-path native/windows-service-host/Cargo.toml
+
+      - name: Check Windows service host target
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          cargo check --locked --target x86_64-pc-windows-gnu --manifest-path native/windows-service-host/Cargo.toml
 
   # The static analysis below needs a macOS runner, which bills ~6.7x a Linux
   # minute, so gate it on the native sources it actually lints instead of paying

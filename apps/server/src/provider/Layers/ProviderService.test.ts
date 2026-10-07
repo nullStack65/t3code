@@ -11,6 +11,7 @@ import type {
   ProviderTurnStartResult,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  ServerSettingsError,
 } from "@t3tools/contracts";
 import {
   ASSISTANT_CITATION_MAX_TEXT_LENGTH,
@@ -44,6 +45,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -54,7 +56,9 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterProcessError,
   ProviderAdapterSessionNotFoundError,
+  ProviderLaunchPreflightBlockedError,
   ProviderUnsupportedError,
   ProviderValidationError,
   ProviderWorkspaceMissingError,
@@ -78,6 +82,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as LaunchPreflight from "../../environment/LaunchPreflight.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -419,6 +424,17 @@ function makeProviderServiceLayer(
     readonly supportsConversationRollback?: boolean;
     readonly analyticsLayer?: Layer.Layer<AnalyticsService.AnalyticsService>;
     readonly registry?: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService, ServerSettingsError>;
+    readonly launchPreflightRunner?: NonNullable<
+      Parameters<typeof makeProviderServiceLive>[0]
+    >["launchPreflightRunner"];
+    readonly reportLaunchPreflightWarning?: NonNullable<
+      Parameters<typeof makeProviderServiceLive>[0]
+    >["reportLaunchPreflightWarning"];
+    readonly serverConfigLayer?: Layer.Layer<
+      ServerConfig.ServerConfig,
+      PlatformError.PlatformError
+    >;
   } = {},
 ) {
   const codex = makeFakeCodexAdapter(CODEX_DRIVER, input.supportsConversationRollback);
@@ -446,12 +462,19 @@ function makeProviderServiceLayer(
 
   const layer = it.layer(
     Layer.mergeAll(
-      makeProviderServiceLive().pipe(
+      makeProviderServiceLive({
+        ...(input.launchPreflightRunner !== undefined
+          ? { launchPreflightRunner: input.launchPreflightRunner }
+          : {}),
+        ...(input.reportLaunchPreflightWarning !== undefined
+          ? { reportLaunchPreflightWarning: input.reportLaunchPreflightWarning }
+          : {}),
+      }).pipe(
         Layer.provide(NodeServices.layer),
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(defaultServerSettingsLayer),
-        Layer.provide(serverConfigTestLayer),
+        Layer.provide(input.settingsLayer ?? defaultServerSettingsLayer),
+        Layer.provide(input.serverConfigLayer ?? serverConfigTestLayer),
         Layer.provideMerge(input.analyticsLayer ?? AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -986,7 +1009,480 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+// The caller seam: a requested continuation whose native session is gone must
+// surface the adapter failure, without the service inventing a new session,
+// persisting a binding, or emitting a started receipt that would look like a
+// successful ready handoff.
+it.effect(
+  "propagates a missing-resume failure without persisting a new binding or a started receipt",
+  () => {
+    const recordedAnalytics = makeRecordingAnalytics();
+    const codex = makeFakeCodexAdapter();
+    const startSessionInputs: Array<ProviderSessionStartInput> = [];
+    const failingAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+      ...codex.adapter,
+      startSession: (input) =>
+        Effect.sync(() => {
+          startSessionInputs.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterProcessError({
+                provider: CODEX_DRIVER,
+                threadId: input.threadId,
+                detail:
+                  "OpenCode session 'ses_gone' was not found; refusing to start a new session for a requested continuation.",
+              }),
+            ),
+          ),
+        ),
+    };
+    const registry = makeStaticInstanceRegistry([[codexInstanceId, failingAdapter]]);
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+
+    return Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-missing-resume-caller");
+      const resumeCursor = { opaque: "ses_gone" };
+
+      const exit = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor,
+        }),
+      );
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(startSessionInputs.length, 1);
+      // The requested continuation was actually forwarded, and it did not fall
+      // back to an intentional new start at the service boundary.
+      assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, resumeCursor);
+      assert.equal(Option.isNone(yield* directory.getBinding(threadId)), true);
+      assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 0);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          makeProviderServiceLive().pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(providerAdapterLayer),
+            Layer.provide(directoryLayer),
+            Layer.provide(defaultServerSettingsLayer),
+            Layer.provide(serverConfigTestLayer),
+            Layer.provide(recordedAnalytics.layer),
+            Layer.provide(
+              Layer.succeed(
+                ProviderEventLoggers.ProviderEventLoggers,
+                ProviderEventLoggers.NoOpProviderEventLoggers,
+              ),
+            ),
+          ),
+          directoryLayer,
+          runtimeRepositoryLayer,
+          NodeServices.layer,
+        ),
+      ),
+    );
+  },
+);
+
+// The persisted-cursor boundary: when a prior session's binding is the only
+// surviving state (server restart / reaper, so the adapter has no in-memory
+// session), startSession must forward that cursor and, on a missing native
+// session, fail without clearing or replacing the binding, recording a started
+// success, or letting a follow-up turn reach the adapter.
+it.effect(
+  "fails a persisted-cursor continuation without clearing the binding, recording success, or sending a turn",
+  () => {
+    const recordedAnalytics = makeRecordingAnalytics();
+    const codex = makeFakeCodexAdapter(OPENCODE_DRIVER);
+    const startSessionInputs: Array<ProviderSessionStartInput> = [];
+    const sendTurnCalls: Array<ProviderSendTurnInput> = [];
+    const failingAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+      ...codex.adapter,
+      startSession: (input) =>
+        Effect.sync(() => {
+          startSessionInputs.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterProcessError({
+                provider: OPENCODE_DRIVER,
+                threadId: input.threadId,
+                detail:
+                  "OpenCode session 'ses_gone' was not found; refusing to start a new session for a requested continuation.",
+              }),
+            ),
+          ),
+        ),
+      sendTurn: (input) =>
+        Effect.sync(() => {
+          sendTurnCalls.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterSessionNotFoundError({
+                provider: OPENCODE_DRIVER,
+                threadId: input.threadId,
+              }),
+            ),
+          ),
+        ),
+    };
+    const registry = makeStaticInstanceRegistry([[openCodeInstanceId, failingAdapter]]);
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const cwd = fixtureCwd("opencode-persisted-gone");
+    const persistedCursor = { schemaVersion: 1, sessionId: "ses_gone" };
+
+    return Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-persisted-gone");
+
+      // Only the persisted binding survives; the service is asked to resume
+      // without an explicit input cursor.
+      yield* directory.upsert({
+        provider: OPENCODE_DRIVER,
+        providerInstanceId: openCodeInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: persistedCursor,
+        runtimePayload: { cwd },
+      });
+
+      const exit = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: OPENCODE_DRIVER,
+          providerInstanceId: openCodeInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        }),
+      );
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(startSessionInputs.length, 1);
+      // The persisted cursor — not a fresh start — is what reached the adapter.
+      assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, persistedCursor);
+
+      // Failure neither clears nor replaces the persisted binding.
+      const binding = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(binding), true);
+      const value = Option.getOrThrow(binding);
+      assert.deepStrictEqual(value.resumeCursor, persistedCursor);
+      assert.deepStrictEqual(value.runtimePayload, { cwd });
+      assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 0);
+
+      // A follow-up turn after the failure is not admitted to the adapter.
+      yield* provider.sendTurn({ threadId, input: "continue" }).pipe(Effect.exit);
+      assert.equal(sendTurnCalls.length, 0);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          makeProviderServiceLive().pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(providerAdapterLayer),
+            Layer.provide(directoryLayer),
+            Layer.provide(defaultServerSettingsLayer),
+            Layer.provide(serverConfigTestLayer),
+            Layer.provide(recordedAnalytics.layer),
+            Layer.provide(
+              Layer.succeed(
+                ProviderEventLoggers.ProviderEventLoggers,
+                ProviderEventLoggers.NoOpProviderEventLoggers,
+              ),
+            ),
+          ),
+          directoryLayer,
+          runtimeRepositoryLayer,
+          NodeServices.layer,
+        ),
+      ),
+    );
+  },
+);
+
+// Ordinary recovery when only the persisted binding survives: the service
+// must hand the persisted cursor to the adapter and keep it on the binding,
+// recording exactly one started success.
+it.effect("recovers a persisted-cursor continuation and records one started success", () => {
+  const recordedAnalytics = makeRecordingAnalytics();
+  const codex = makeFakeCodexAdapter(OPENCODE_DRIVER);
+  const startSessionInputs: Array<ProviderSessionStartInput> = [];
+  const adapter: ProviderAdapterShape<ProviderAdapterError> = {
+    ...codex.adapter,
+    startSession: (input) => {
+      startSessionInputs.push(input);
+      return codex.adapter.startSession(input);
+    },
+  };
+  const registry = makeStaticInstanceRegistry([[openCodeInstanceId, adapter]]);
+  const providerAdapterLayer = Layer.succeed(
+    ProviderAdapterRegistry.ProviderAdapterRegistry,
+    registry,
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const cwd = fixtureCwd("opencode-persisted-recovered");
+  const persistedCursor = { schemaVersion: 1, sessionId: "ses_persisted" };
+
+  return Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+    const provider = yield* ProviderService.ProviderService;
+    const threadId = asThreadId("thread-persisted-recovered");
+
+    yield* directory.upsert({
+      provider: OPENCODE_DRIVER,
+      providerInstanceId: openCodeInstanceId,
+      threadId,
+      runtimeMode: "full-access",
+      resumeCursor: persistedCursor,
+      runtimePayload: { cwd },
+    });
+
+    const session = yield* provider.startSession(threadId, {
+      provider: OPENCODE_DRIVER,
+      providerInstanceId: openCodeInstanceId,
+      threadId,
+      runtimeMode: "full-access",
+    });
+
+    assert.equal(startSessionInputs.length, 1);
+    assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, persistedCursor);
+    assert.deepStrictEqual(session.resumeCursor, persistedCursor);
+
+    const binding = yield* directory.getBinding(threadId);
+    assert.equal(Option.isSome(binding), true);
+    assert.deepStrictEqual(Option.getOrThrow(binding).resumeCursor, persistedCursor);
+    assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 1);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        makeProviderServiceLive().pipe(
+          Layer.provide(NodeServices.layer),
+          Layer.provide(providerAdapterLayer),
+          Layer.provide(directoryLayer),
+          Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(serverConfigTestLayer),
+          Layer.provide(recordedAnalytics.layer),
+          Layer.provide(
+            Layer.succeed(
+              ProviderEventLoggers.ProviderEventLoggers,
+              ProviderEventLoggers.NoOpProviderEventLoggers,
+            ),
+          ),
+        ),
+        directoryLayer,
+        runtimeRepositoryLayer,
+        NodeServices.layer,
+      ),
+    ),
+  );
+});
+
 const routing = makeProviderServiceLayer();
+
+const defaultCwdWarningRoots: Array<string> = [];
+const defaultCwdWarningReports: Array<{ readonly cwd: string; readonly code: string }> = [];
+const defaultCwdWarning = {
+  code: "git-probe-failed",
+  severity: "warning",
+  message: "Selected Git could not be confirmed.",
+} as const satisfies LaunchPreflight.LaunchPreflightFinding;
+const defaultCwdWarningResult = {
+  findings: [defaultCwdWarning],
+  warnings: [defaultCwdWarning],
+  blockers: [],
+} satisfies LaunchPreflight.LaunchPreflightResult;
+const defaultCwdWarningService = makeProviderServiceLayer({
+  launchPreflightRunner: (root) =>
+    Effect.sync(() => defaultCwdWarningRoots.push(root)).pipe(Effect.as(defaultCwdWarningResult)),
+  reportLaunchPreflightWarning: ({ cwd, code }) =>
+    Effect.sync(() => defaultCwdWarningReports.push({ cwd, code })).pipe(Effect.as(true)),
+});
+
+defaultCwdWarningService.layer("ProviderService default cwd", (it) => {
+  it.effect("preflights and passes the default cwd for a new Codex launch", () =>
+    Effect.gen(function* () {
+      defaultCwdWarningRoots.length = 0;
+      defaultCwdWarningReports.length = 0;
+      const threadId = asThreadId("default-cwd-new-codex");
+      const provider = yield* ProviderService.ProviderService;
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      assert.deepStrictEqual(defaultCwdWarningRoots, [process.cwd()]);
+      assert.deepStrictEqual(defaultCwdWarningReports, [
+        { cwd: process.cwd(), code: "git-probe-failed" },
+      ]);
+      assert.equal(session.cwd, process.cwd());
+      assert.equal(defaultCwdWarningService.codex.startSession.mock.calls.length, 1);
+      assert.equal(
+        defaultCwdWarningService.codex.startSession.mock.calls[0]?.[0].cwd,
+        process.cwd(),
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("uses the process cwd default for a new Claude Agent launch", () =>
+    Effect.gen(function* () {
+      defaultCwdWarningRoots.length = 0;
+      defaultCwdWarningReports.length = 0;
+      const threadId = asThreadId("default-cwd-new-claude");
+      const provider = yield* ProviderService.ProviderService;
+      const session = yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      assert.deepStrictEqual(defaultCwdWarningRoots, [process.cwd()]);
+      assert.deepStrictEqual(defaultCwdWarningReports, [
+        { cwd: process.cwd(), code: "git-probe-failed" },
+      ]);
+      assert.equal(session.cwd, process.cwd());
+      assert.equal(defaultCwdWarningService.claude.startSession.mock.calls.length, 1);
+      assert.equal(
+        defaultCwdWarningService.claude.startSession.mock.calls[0]?.[0].cwd,
+        process.cwd(),
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+});
+
+const defaultCwdResumeThreadId = asThreadId("default-cwd-resume-codex");
+const defaultCwdResumeBinding: ProviderSessionDirectory.ProviderRuntimeBinding = {
+  threadId: defaultCwdResumeThreadId,
+  provider: CODEX_DRIVER,
+  providerInstanceId: codexInstanceId,
+  status: "stopped",
+  runtimeMode: "full-access",
+  resumeCursor: { opaque: "resume-without-cwd" },
+  runtimePayload: { cwd: null },
+};
+const defaultCwdResumeDirectory: ProviderSessionDirectory.ProviderSessionDirectory["Service"] = {
+  upsert: () => Effect.void,
+  recordImportedTranscript: () => Effect.void,
+  getProvider: () => Effect.succeed(CODEX_DRIVER),
+  getBinding: () => Effect.succeed(Option.some(defaultCwdResumeBinding)),
+  listThreadIds: () => Effect.succeed([defaultCwdResumeThreadId]),
+  listBindings: () => Effect.succeed([]),
+};
+const defaultCwdBlocker = {
+  code: "git-startup-failed",
+  severity: "blocker",
+  message: "The default workspace cannot be used for this launch.",
+} as const satisfies LaunchPreflight.LaunchPreflightFinding;
+const defaultCwdBlockerResult = {
+  findings: [defaultCwdBlocker],
+  warnings: [],
+  blockers: [defaultCwdBlocker],
+} satisfies LaunchPreflight.LaunchPreflightResult;
+const defaultCwdResumeRoots: Array<string> = [];
+const defaultCwdResumeService = makeProviderServiceLayer({
+  directory: defaultCwdResumeDirectory,
+  launchPreflightRunner: (root) =>
+    Effect.sync(() => defaultCwdResumeRoots.push(root)).pipe(Effect.as(defaultCwdBlockerResult)),
+});
+
+defaultCwdResumeService.layer("ProviderService default cwd recovery", (it) => {
+  it.effect("preflights the default cwd before resuming a binding with no persisted cwd", () =>
+    Effect.gen(function* () {
+      defaultCwdResumeRoots.length = 0;
+      const provider = yield* ProviderService.ProviderService;
+      const failure = yield* provider
+        .sendTurn({ threadId: defaultCwdResumeThreadId, input: "resume the session" })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(failure, ProviderLaunchPreflightBlockedError);
+      assert.deepStrictEqual(defaultCwdResumeRoots, [process.cwd()]);
+      assert.equal(defaultCwdResumeService.codex.startSession.mock.calls.length, 0);
+    }),
+  );
+});
+
+const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
+const OPENCODE_INSTANCE_ID = ProviderInstanceId.make("opencode");
+const openCodeInstanceId = OPENCODE_INSTANCE_ID;
+const externalOpenCodeAdapter = makeFakeCodexAdapter(OPENCODE_DRIVER);
+const externalOpenCodeCwd = fixtureCwd("default-cwd-external-opencode");
+const externalOpenCodeRoots: Array<{
+  readonly root: string;
+  readonly snapshotsEnabled: boolean | undefined;
+  readonly providerGitEnvironment: NodeJS.ProcessEnv | undefined;
+}> = [];
+const externalOpenCodeService = makeProviderServiceLayer({
+  registry: makeAdapterRegistryMock({ [OPENCODE_DRIVER]: externalOpenCodeAdapter.adapter }),
+  settingsLayer: ServerSettings.ServerSettingsService.layerTest({
+    providerInstances: {
+      [OPENCODE_INSTANCE_ID]: {
+        driver: OPENCODE_DRIVER,
+        enabled: true,
+        config: { serverUrl: "https://opencode.example.test" },
+      },
+    },
+  }),
+  serverConfigLayer: ServerConfig.layerTest(externalOpenCodeCwd, process.cwd()).pipe(
+    Layer.provide(NodeServices.layer),
+  ),
+  launchPreflightRunner: (root, options) =>
+    Effect.sync(() =>
+      externalOpenCodeRoots.push({
+        root,
+        snapshotsEnabled: options?.consumer?.snapshotsEnabled,
+        providerGitEnvironment: options?.providerGitEnvironment,
+      }),
+    ).pipe(Effect.as({ findings: [], warnings: [], blockers: [] })),
+});
+
+externalOpenCodeService.layer("ProviderService external OpenCode default cwd", (it) => {
+  it.effect("preflights OpenCode's default directory while excluding external-provider Git", () =>
+    Effect.gen(function* () {
+      externalOpenCodeRoots.length = 0;
+      const threadId = asThreadId("default-cwd-external-opencode");
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: OPENCODE_DRIVER,
+        providerInstanceId: OPENCODE_INSTANCE_ID,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      assert.deepStrictEqual(externalOpenCodeRoots, [
+        { root: externalOpenCodeCwd, snapshotsEnabled: false, providerGitEnvironment: undefined },
+      ]);
+      assert.equal(
+        externalOpenCodeAdapter.startSession.mock.calls[0]?.[0].cwd,
+        externalOpenCodeCwd,
+      );
+    }),
+  );
+});
 
 const customCompactionDriver = ProviderDriverKind.make("custom-compaction-provider");
 const nativeCompactionInstanceId = ProviderInstanceId.make("native-compaction");
