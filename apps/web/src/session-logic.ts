@@ -482,6 +482,9 @@ export function deriveWorkLogEntries(
     if (activity.kind === "task.started" && !isAgentTaskStartedActivity(activity)) continue;
     if (activity.kind === "task.updated") continue;
     if (activity.kind === "tool.progress") continue;
+    // Delivery-only nudge for the post-start observation; carries no user
+    // content and must never render as a work-log row.
+    if (activity.kind === "post-start-observation") continue;
     if (activity.kind === "context-window.updated") continue;
     if (activity.kind === "turn.plan.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;

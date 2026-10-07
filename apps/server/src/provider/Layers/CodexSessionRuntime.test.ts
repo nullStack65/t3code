@@ -19,10 +19,34 @@ import {
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
   readCodexThread,
+  readRouteFields,
   rollbackCodexThread,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Codex notification routing", () => {
+  it("carries the command/file item id and the MCP progress item id", () => {
+    for (const method of [
+      "item/commandExecution/outputDelta",
+      "item/fileChange/outputDelta",
+      "item/mcpToolCall/progress",
+    ] as const) {
+      const route = readRouteFields({
+        method,
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          delta: "output",
+          message: "working",
+        },
+      } as unknown as Parameters<typeof readRouteFields>[0]);
+      NodeAssert.equal(route.turnId, "turn-1");
+      NodeAssert.equal(route.itemId, "item-1");
+    }
+  });
+});
 
 describe("Codex thread history", () => {
   for (const numTurns of [1, 2, 3, 5]) {
