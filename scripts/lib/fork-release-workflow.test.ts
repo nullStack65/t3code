@@ -1,5 +1,9 @@
-// @effect-diagnostics nodeBuiltinImport:off - Reads the workflow files as text to assert the job graph.
+// @effect-diagnostics nodeBuiltinImport:off - Reads and executes inline workflow checks in scratch fixtures.
+import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, it } from "@effect/vitest";
@@ -35,6 +39,77 @@ const inlineList = (block: string, key: string): string[] => {
 
 const scalar = (block: string, key: string): string | undefined =>
   new RegExp(`^\\s*${key}:\\s*(.+)$`, "m").exec(block)?.[1]?.trim();
+
+/** Reads a step's actual block-scalar shell script from its workflow job. */
+function stepScript(block: string, name: string): string {
+  const lines = block.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === `      - name: ${name}`);
+  assert.notEqual(start, -1, `step ${name} not found`);
+  const run = lines.findIndex((line, index) => index > start && line === "        run: |");
+  assert.notEqual(run, -1, `step ${name} has no run block`);
+  const body: string[] = [];
+  for (let index = run + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line !== "" && !line.startsWith("          ")) break;
+    body.push(line === "" ? "" : line.slice(10));
+  }
+  return body.join("\n");
+}
+
+/** Extracts the inline Node program executed by a workflow step. */
+function inlineNodeProgram(script: string): string {
+  const match = /^node -e '\n([\s\S]*?)\n'$/m.exec(script);
+  assert.isNotNull(match, "workflow step must execute its inline Node program");
+  return match[1]!;
+}
+
+function runNodeProgram(
+  program: string,
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+): NodeChildProcess.SpawnSyncReturns<string> {
+  return NodeChildProcess.spawnSync(process.execPath, ["-e", program], {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+}
+
+function scratchCandidate(
+  overrides: {
+    readonly identity?: Readonly<Record<string, unknown>> | undefined;
+    readonly manifest?: Readonly<Record<string, unknown>> | undefined;
+  } = {},
+): string {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fork-release-receipt-"));
+  const candidate = NodePath.join(root, "candidate");
+  NodeFS.mkdirSync(candidate);
+  const manifest = {
+    repository: "nullStack65/t3code",
+    version: "0.0.43",
+    sourceSha: "a".repeat(40),
+    workflowRunId: "123456789",
+    workflowRunAttempt: "2",
+    ...overrides.manifest,
+  };
+  const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  NodeFS.writeFileSync(NodePath.join(candidate, "fork-release-manifest.json"), manifestBytes);
+  const identity = {
+    runId: "123456789",
+    runAttempt: "2",
+    repository: "nullStack65/t3code",
+    version: "0.0.43",
+    sourceSha: "a".repeat(40),
+    manifestSha256: NodeCrypto.createHash("sha256").update(manifestBytes).digest("hex"),
+    ...overrides.identity,
+  };
+  NodeFS.writeFileSync(
+    NodePath.join(candidate, "candidate-identity.json"),
+    `${JSON.stringify(identity, null, 2)}\n`,
+  );
+  return root;
+}
 
 it.effect("the qualify job depends on the optional arm64 job and handles skipped", () =>
   Effect.gen(function* () {
@@ -136,8 +211,130 @@ it.effect("promotion consumes the frozen candidate identity and requires reviewe
     const receipts = jobBlock(text, "receipts");
     assert.include(receipts, "upload_receipts");
     assert.include(receipts, "receipts_source_run_id");
+    assert.include(text, "native_receipts_json");
     assert.include(receipts, "fork-release-native-receipts");
     assert.include(receipts, "upload-artifact");
+  }),
+);
+
+it.effect(
+  "receipt import binds bounded supplied JSON to the exact frozen candidate without rebuilding",
+  () =>
+    Effect.gen(function* () {
+      const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+      const receipts = jobBlock(text, "receipts");
+      assert.deepEqual(inlineList(receipts, "needs"), ["preflight"]);
+      assert.include(receipts, "inputs.upload_receipts");
+      assert.notInclude(receipts, "needs.qualify");
+      assert.include(receipts, "RECEIPTS_JSON: ${{ inputs.native_receipts_json }}");
+      assert.include(receipts, 'Buffer.byteLength(raw, "utf8") > 32 * 1024');
+      assert.include(receipts, 'flag: "wx"');
+      assert.include(receipts, "identity[key] !== value");
+      assert.include(receipts, "digest !== identity.manifestSha256");
+      assert.include(receipts, "workflowRunAttempt");
+      assert.include(receipts, "--native-receipts fork-native-receipts.json");
+      assert.include(receipts, "--require-native-receipts");
+      assert.isBelow(
+        receipts.indexOf("--require-native-receipts"),
+        receipts.indexOf("name: Upload native acceptance receipts"),
+      );
+      assert.notInclude(receipts, "build-cli-archive.ts");
+      assert.notInclude(receipts, "build-desktop-artifact.ts");
+      for (const job of [
+        "bundle",
+        "cli_linux_x64",
+        "desktop_win_x64",
+        "desktop_mac_x64",
+        "desktop_mac_arm64",
+        "qualify",
+      ]) {
+        assert.include(
+          jobBlock(text, job),
+          "inputs.upload_receipts",
+          `${job} must stay out of receipt imports`,
+        );
+      }
+    }),
+);
+
+it.effect("the workflow candidate-binding program rejects identity and digest tampering", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const receipts = jobBlock(text, "receipts");
+    const program = inlineNodeProgram(
+      stepScript(receipts, "Bind the downloaded candidate to its recorded identity"),
+    );
+    const env = {
+      CANDIDATE_RUN_ID: "123456789",
+      RELEASE_VERSION: "0.0.43",
+      RELEASE_SHA: "a".repeat(40),
+    };
+
+    const validRoot = scratchCandidate();
+    try {
+      const result = runNodeProgram(program, validRoot, env);
+      assert.equal(result.status, 0, result.stderr);
+    } finally {
+      NodeFS.rmSync(validRoot, { recursive: true, force: true });
+    }
+
+    const tamperingCases = [
+      { name: "run ID", identity: { runId: "987654321" } },
+      { name: "repository", manifest: { repository: "other/repository" } },
+      { name: "source SHA", identity: { sourceSha: "b".repeat(40) } },
+      { name: "version", manifest: { version: "0.0.44" } },
+      { name: "attempt", identity: { runAttempt: "3" } },
+      { name: "manifest digest", identity: { manifestSha256: "0".repeat(64) } },
+    ];
+    for (const testCase of tamperingCases) {
+      const root = scratchCandidate({
+        identity: testCase.identity,
+        manifest: testCase.manifest,
+      });
+      try {
+        const result = runNodeProgram(program, root, env);
+        assert.notEqual(result.status, 0, `tampered ${testCase.name} was accepted`);
+      } finally {
+        NodeFS.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  }),
+);
+
+it.effect("the workflow receipt-input program rejects missing, oversized, and malformed JSON", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const receipts = jobBlock(text, "receipts");
+    const program = inlineNodeProgram(stepScript(receipts, "Write the supplied native receipts"));
+    const invalidInputs = [
+      { name: "missing payload", value: "" },
+      { name: "UTF-8 oversized payload", value: "é".repeat(16_385) },
+      { name: "malformed JSON", value: "[" },
+      { name: "non-array JSON", value: "{}" },
+    ];
+    for (const input of invalidInputs) {
+      const root = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "fork-release-receipt-input-"),
+      );
+      try {
+        const result = runNodeProgram(program, root, { RECEIPTS_JSON: input.value });
+        assert.notEqual(result.status, 0, `${input.name} was accepted`);
+      } finally {
+        NodeFS.rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fork-release-receipt-input-"));
+    try {
+      const result = runNodeProgram(program, root, { RECEIPTS_JSON: "[]" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(root, "fork-native-receipts.json"), "utf8"),
+        "[]\n",
+      );
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
   }),
 );
 

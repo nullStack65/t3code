@@ -283,12 +283,19 @@ Rules:
 6. Native acceptance on real Windows/WSL and Intel macOS hardware. Each target
    binds to its own installer/runtime asset and its digest; a receipt for the
    wrong artifact, or a conflicting FAIL beside a PASS, is rejected. Record the
-   accepted bytes as `fork-native-receipts.json` and import them by dispatching
-   the **Fork release** workflow with `upload_receipts: true` and
-   `receipts_source_run_id` = the candidate run id. That job downloads the
-   candidate identity, validates the receipts against it, and uploads the
-   `fork-release-native-receipts` artifact on the _import_ run. A changed or
-   rebuilt asset invalidates its previous receipt.
+   actual results in a JSON array of native receipts. Dispatch the **Fork
+   release** workflow using the same `sha` and `version` as the qualified
+   candidate, with `upload_receipts: true`, `receipts_source_run_id` set to the
+   candidate run id, and `native_receipts_json` set to the JSON array (maximum
+   32 KiB). Each entry carries `schemaVersion`, `owner`, `target`, `sourceSha`,
+   `version`, `assetName`, `assetSha256`, and `result` (`pass` or `fail`); do not
+   report a pass until that target's real native acceptance has completed. The
+   import job downloads that run's candidate and checks its run ID, source,
+   version, repository, attempt, and manifest SHA-256 before checking every
+   receipt against the frozen asset digest and target. It does not rebuild or
+   modify the candidate. On success, it uploads `fork-release-native-receipts`
+   on the _import_ run. A changed or rebuilt asset invalidates its previous
+   receipt.
 7. Re-run with `publish: true`, `candidate_run_id` set to the qualifying run,
    and `receipt_run_id` set to the import run (defaults to `candidate_run_id`).
    Promotion downloads the frozen candidate, binds it to its recorded
