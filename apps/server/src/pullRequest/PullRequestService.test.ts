@@ -2984,7 +2984,7 @@ it.effect(
         }),
       );
       assert.strictEqual(botError._tag, "PullRequestOperationError");
-      assert.include(botError.message, "Other reviewer requests");
+      assert.include(botError.message, "can request only nullStack65");
       assert.isFalse(asked);
     }),
 );
