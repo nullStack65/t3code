@@ -14,7 +14,7 @@ import type { BootServiceStep } from "./bootService.ts";
 export const WINDOWS_BOOT_SERVICE_NAME = "T3Code";
 /** The T3-owned SCM host, compiled from `native/windows-service-host` and shipped
     beside the pinned runtime. Never a generic wrapper. */
-export const WINDOWS_SERVICE_HELPER_FILE = "t3-windows-service-host.exe";
+const WINDOWS_SERVICE_HELPER_FILE = "t3-windows-service-host.exe";
 
 export interface WindowsBootServiceBinding {
   /** Absolute path to the shipped `t3-windows-service-host.exe`. */

@@ -319,7 +319,7 @@ export interface ServiceLauncherControlRequest {
   readonly requestId: string;
 }
 
-export function decodeServiceLauncherControlRequest(
+function decodeServiceLauncherControlRequest(
   value: unknown,
 ): ServiceLauncherControlRequest | undefined {
   if (!isRecord(value)) return undefined;
