@@ -54,6 +54,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterProcessError,
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -104,6 +105,8 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
+const openCodeInstanceId = ProviderInstanceId.make("opencode");
 
 const assistantQuoteText = 'Keep the shared parser for "résumé".\nPreserve line breaks.';
 const assistantCitation = {
@@ -985,6 +988,295 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     assert.equal(codex.startSession.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+// The caller seam: a requested continuation whose native session is gone must
+// surface the adapter failure, without the service inventing a new session,
+// persisting a binding, or emitting a started receipt that would look like a
+// successful ready handoff.
+it.effect(
+  "propagates a missing-resume failure without persisting a new binding or a started receipt",
+  () => {
+    const recordedAnalytics = makeRecordingAnalytics();
+    const codex = makeFakeCodexAdapter();
+    const startSessionInputs: Array<ProviderSessionStartInput> = [];
+    const failingAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+      ...codex.adapter,
+      startSession: (input) =>
+        Effect.sync(() => {
+          startSessionInputs.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterProcessError({
+                provider: CODEX_DRIVER,
+                threadId: input.threadId,
+                detail:
+                  "OpenCode session 'ses_gone' was not found; refusing to start a new session for a requested continuation.",
+              }),
+            ),
+          ),
+        ),
+    };
+    const registry = makeStaticInstanceRegistry([[codexInstanceId, failingAdapter]]);
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+
+    return Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-missing-resume-caller");
+      const resumeCursor = { opaque: "ses_gone" };
+
+      const exit = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor,
+        }),
+      );
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(startSessionInputs.length, 1);
+      // The requested continuation was actually forwarded, and it did not fall
+      // back to an intentional new start at the service boundary.
+      assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, resumeCursor);
+      assert.equal(Option.isNone(yield* directory.getBinding(threadId)), true);
+      assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 0);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          makeProviderServiceLive().pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(providerAdapterLayer),
+            Layer.provide(directoryLayer),
+            Layer.provide(defaultServerSettingsLayer),
+            Layer.provide(serverConfigTestLayer),
+            Layer.provide(recordedAnalytics.layer),
+            Layer.provide(
+              Layer.succeed(
+                ProviderEventLoggers.ProviderEventLoggers,
+                ProviderEventLoggers.NoOpProviderEventLoggers,
+              ),
+            ),
+          ),
+          directoryLayer,
+          runtimeRepositoryLayer,
+          NodeServices.layer,
+        ),
+      ),
+    );
+  },
+);
+
+// The persisted-cursor boundary: when a prior session's binding is the only
+// surviving state (server restart / reaper, so the adapter has no in-memory
+// session), startSession must forward that cursor and, on a missing native
+// session, fail without clearing or replacing the binding, recording a started
+// success, or letting a follow-up turn reach the adapter.
+it.effect(
+  "fails a persisted-cursor continuation without clearing the binding, recording success, or sending a turn",
+  () => {
+    const recordedAnalytics = makeRecordingAnalytics();
+    const codex = makeFakeCodexAdapter(OPENCODE_DRIVER);
+    const startSessionInputs: Array<ProviderSessionStartInput> = [];
+    const sendTurnCalls: Array<ProviderSendTurnInput> = [];
+    const failingAdapter: ProviderAdapterShape<ProviderAdapterError> = {
+      ...codex.adapter,
+      startSession: (input) =>
+        Effect.sync(() => {
+          startSessionInputs.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterProcessError({
+                provider: OPENCODE_DRIVER,
+                threadId: input.threadId,
+                detail:
+                  "OpenCode session 'ses_gone' was not found; refusing to start a new session for a requested continuation.",
+              }),
+            ),
+          ),
+        ),
+      sendTurn: (input) =>
+        Effect.sync(() => {
+          sendTurnCalls.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderAdapterSessionNotFoundError({
+                provider: OPENCODE_DRIVER,
+                threadId: input.threadId,
+              }),
+            ),
+          ),
+        ),
+    };
+    const registry = makeStaticInstanceRegistry([[openCodeInstanceId, failingAdapter]]);
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const cwd = fixtureCwd("opencode-persisted-gone");
+    const persistedCursor = { schemaVersion: 1, sessionId: "ses_gone" };
+
+    return Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-persisted-gone");
+
+      // Only the persisted binding survives; the service is asked to resume
+      // without an explicit input cursor.
+      yield* directory.upsert({
+        provider: OPENCODE_DRIVER,
+        providerInstanceId: openCodeInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: persistedCursor,
+        runtimePayload: { cwd },
+      });
+
+      const exit = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: OPENCODE_DRIVER,
+          providerInstanceId: openCodeInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        }),
+      );
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(startSessionInputs.length, 1);
+      // The persisted cursor — not a fresh start — is what reached the adapter.
+      assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, persistedCursor);
+
+      // Failure neither clears nor replaces the persisted binding.
+      const binding = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(binding), true);
+      const value = Option.getOrThrow(binding);
+      assert.deepStrictEqual(value.resumeCursor, persistedCursor);
+      assert.deepStrictEqual(value.runtimePayload, { cwd });
+      assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 0);
+
+      // A follow-up turn after the failure is not admitted to the adapter.
+      yield* provider.sendTurn({ threadId, input: "continue" }).pipe(Effect.exit);
+      assert.equal(sendTurnCalls.length, 0);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          makeProviderServiceLive().pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(providerAdapterLayer),
+            Layer.provide(directoryLayer),
+            Layer.provide(defaultServerSettingsLayer),
+            Layer.provide(serverConfigTestLayer),
+            Layer.provide(recordedAnalytics.layer),
+            Layer.provide(
+              Layer.succeed(
+                ProviderEventLoggers.ProviderEventLoggers,
+                ProviderEventLoggers.NoOpProviderEventLoggers,
+              ),
+            ),
+          ),
+          directoryLayer,
+          runtimeRepositoryLayer,
+          NodeServices.layer,
+        ),
+      ),
+    );
+  },
+);
+
+// Ordinary recovery when only the persisted binding survives: the service
+// must hand the persisted cursor to the adapter and keep it on the binding,
+// recording exactly one started success.
+it.effect("recovers a persisted-cursor continuation and records one started success", () => {
+  const recordedAnalytics = makeRecordingAnalytics();
+  const codex = makeFakeCodexAdapter(OPENCODE_DRIVER);
+  const startSessionInputs: Array<ProviderSessionStartInput> = [];
+  const adapter: ProviderAdapterShape<ProviderAdapterError> = {
+    ...codex.adapter,
+    startSession: (input) => {
+      startSessionInputs.push(input);
+      return codex.adapter.startSession(input);
+    },
+  };
+  const registry = makeStaticInstanceRegistry([[openCodeInstanceId, adapter]]);
+  const providerAdapterLayer = Layer.succeed(
+    ProviderAdapterRegistry.ProviderAdapterRegistry,
+    registry,
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const cwd = fixtureCwd("opencode-persisted-recovered");
+  const persistedCursor = { schemaVersion: 1, sessionId: "ses_persisted" };
+
+  return Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+    const provider = yield* ProviderService.ProviderService;
+    const threadId = asThreadId("thread-persisted-recovered");
+
+    yield* directory.upsert({
+      provider: OPENCODE_DRIVER,
+      providerInstanceId: openCodeInstanceId,
+      threadId,
+      runtimeMode: "full-access",
+      resumeCursor: persistedCursor,
+      runtimePayload: { cwd },
+    });
+
+    const session = yield* provider.startSession(threadId, {
+      provider: OPENCODE_DRIVER,
+      providerInstanceId: openCodeInstanceId,
+      threadId,
+      runtimeMode: "full-access",
+    });
+
+    assert.equal(startSessionInputs.length, 1);
+    assert.deepStrictEqual(startSessionInputs[0]?.resumeCursor, persistedCursor);
+    assert.deepStrictEqual(session.resumeCursor, persistedCursor);
+
+    const binding = yield* directory.getBinding(threadId);
+    assert.equal(Option.isSome(binding), true);
+    assert.deepStrictEqual(Option.getOrThrow(binding).resumeCursor, persistedCursor);
+    assert.equal(recordedAnalytics.eventsByName("provider.session.started").length, 1);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        makeProviderServiceLive().pipe(
+          Layer.provide(NodeServices.layer),
+          Layer.provide(providerAdapterLayer),
+          Layer.provide(directoryLayer),
+          Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(serverConfigTestLayer),
+          Layer.provide(recordedAnalytics.layer),
+          Layer.provide(
+            Layer.succeed(
+              ProviderEventLoggers.ProviderEventLoggers,
+              ProviderEventLoggers.NoOpProviderEventLoggers,
+            ),
+          ),
+        ),
+        directoryLayer,
+        runtimeRepositoryLayer,
+        NodeServices.layer,
+      ),
+    ),
+  );
+});
 
 const routing = makeProviderServiceLayer();
 
