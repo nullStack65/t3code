@@ -2,8 +2,8 @@
 //!
 //! `StartServiceCtrlDispatcherW` connects this process to the service control
 //! manager. It must run on the process's main thread. `ServiceMain` runs on an
-//! SCM-owned thread and must not block: it registers the extended control
-//! handler, starts the supervisor, and returns when the service stops.
+//! SCM-owned thread: it promptly registers the extended control handler, runs
+//! the supervisor, and returns when the service stops.
 //!
 //! The control handler only records intent and wakes the supervisor through a
 //! channel; it never waits on the child. This is what keeps control handling

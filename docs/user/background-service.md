@@ -57,15 +57,13 @@ Mac logged in and awake for unattended remote access. Installing over SSH while
 nobody is logged in at the Mac's screen can fail at the final start step; the
 service is still installed and will start at the next login.
 
-Windows registers the service with the Service Control Manager through the
-T3-owned `t3-windows-service-host.exe`, which runs the pinned launcher under a
-job object. Setup needs an explicit, qualified service account
-(`DOMAIN\user` or `user@domain`) in `T3_SERVICE_ACCOUNT`; T3 never installs the
-workload as LocalSystem. The host binary ships beside the pinned runtime in a
-packaged release, so a copy without it refuses instead of installing a partial
-service. Windows support stays disabled until the packaged helper and a real
-SCM run are qualified; `t3 service status` reports the SCM state honestly until
-then.
+The Windows service integration is a candidate and is not available to users
+until a packaged release includes `t3-windows-service-host.exe` beside the
+pinned runtime and the release has been qualified against the Service Control
+Manager. The host runs the pinned launcher under a job object. Setup requires
+an explicit, qualified service account (`DOMAIN\user` or `user@domain`) in
+`T3_SERVICE_ACCOUNT`; T3 never installs the workload as LocalSystem. A copy
+without the helper refuses setup instead of installing a partial service.
 
 T3 Connect can offer service installation during setup, but the two are managed
 separately. Signing out of T3 Connect does not stop or uninstall the service.
