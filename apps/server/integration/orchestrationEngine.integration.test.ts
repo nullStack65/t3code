@@ -20,6 +20,7 @@ import {
 import { assert, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { TestTurnResponse } from "./TestProviderAdapter.integration.ts";
@@ -180,6 +181,63 @@ const startTurn = (input: {
     runtimeMode: "approval-required",
     createdAt: input.createdAt ?? nowIso(),
   });
+
+it.live("uses the runtime ProviderService during serialized resume admission", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-resume-admission-session"),
+        threadId: THREAD_ID,
+        session: {
+          threadId: THREAD_ID,
+          status: "ready",
+          providerName: CODEX_PROVIDER,
+          providerInstanceId: defaultInstanceIdForDriver(CODEX_PROVIDER),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: nowIso(),
+        },
+        createdAt: nowIso(),
+      });
+      const beforeSequence = yield* harness.engine.latestSequence;
+      const error = yield* harness.engine
+        .dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-resume-admission-incompatible-route"),
+          threadId: THREAD_ID,
+          message: {
+            messageId: asMessageId("msg-resume-admission-incompatible-route"),
+            role: "user",
+            text: "This route must be rejected before message ingestion",
+            attachments: [],
+          },
+          modelSelection: {
+            instanceId: defaultInstanceIdForDriver(CLAUDE_AGENT_PROVIDER),
+            model: DEFAULT_MODEL_BY_PROVIDER[CLAUDE_AGENT_PROVIDER] ?? DEFAULT_MODEL,
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: nowIso(),
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "OrchestrationCommandInvariantError");
+      assert.match(error.message, /No message was ingested/);
+      assert.equal(yield* harness.engine.latestSequence, beforeSequence);
+      const thread = Option.getOrNull(yield* harness.snapshotQuery.getThreadDetailById(THREAD_ID));
+      assert.equal(thread?.session?.status, "ready");
+      assert.equal(
+        thread?.messages.some(
+          (message) => message.id === "msg-resume-admission-incompatible-route",
+        ),
+        false,
+      );
+    }),
+  ),
+);
 
 it.live("runs a single turn end-to-end and persists checkpoint state in sqlite + git", () =>
   withHarness((harness) =>

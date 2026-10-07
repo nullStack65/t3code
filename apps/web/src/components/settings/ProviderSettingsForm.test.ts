@@ -16,8 +16,20 @@ describe("ProviderSettingsForm helpers", () => {
       "binaryPath",
       "homePath",
       "shadowHomePath",
+      "modelCatalogMode",
       "launchArgs",
     ]);
+
+    expect(
+      deriveProviderSettingsFields(codex!).find((field) => field.key === "modelCatalogMode"),
+    ).toMatchObject({
+      control: "select",
+      clearWhenEmpty: "omit",
+      options: [
+        { value: "app-server", label: "Codex app-server" },
+        { value: "custom-only", label: "Custom models only" },
+      ],
+    });
   });
 
   it("sources labels and descriptions from schema annotations", () => {

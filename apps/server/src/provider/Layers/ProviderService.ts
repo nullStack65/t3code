@@ -1657,9 +1657,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
         if (
-          persistedBinding?.provider === resolvedProvider &&
+          persistedBinding !== undefined &&
           persistedBinding.providerInstanceId !== resolvedInstanceId &&
-          (input.resumeCursor != null || persistedBinding.resumeCursor != null)
+          (input.resumeCursor != null ||
+            (persistedBinding.provider === resolvedProvider &&
+              persistedBinding.resumeCursor != null))
         ) {
           const previousInstanceId = yield* requireBindingInstanceId(
             "ProviderService.startSession",
@@ -1667,13 +1669,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
           const previousInfo = yield* registry.getInstanceInfo(previousInstanceId);
           if (
+            previousInfo.driverKind !== instanceInfo.driverKind ||
             previousInfo.continuationIdentity.continuationKey !==
-            instanceInfo.continuationIdentity.continuationKey
+              instanceInfo.continuationIdentity.continuationKey
           ) {
-            return yield* toValidationError(
-              "ProviderService.startSession",
-              `Thread '${threadId}' cannot switch from instance '${previousInstanceId}' to '${resolvedInstanceId}' because their provider resume state is incompatible.`,
-            );
+            return yield* new ProviderValidationError({
+              operation: "ProviderService.startSession",
+              reason: "incompatible-resume-route",
+              issue: `Thread '${threadId}' cannot resume from provider instance '${previousInstanceId}' (${previousInfo.driverKind}) on '${resolvedInstanceId}' (${instanceInfo.driverKind}) because their provider continuation state is incompatible.`,
+            });
           }
         }
         const effectiveResumeCursor =

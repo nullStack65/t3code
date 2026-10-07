@@ -286,6 +286,19 @@ function appendCustomCodexModels(
   return customEntries.length === 0 ? models : [...models, ...customEntries];
 }
 
+/**
+ * Scope the generic app-server catalog to the backend represented by this
+ * provider instance. Proxy-backed Codex instances can opt into a strict
+ * custom catalog when the app-server list is broader than the routed backend.
+ */
+export function resolveCodexProviderModels(
+  models: ReadonlyArray<ServerProviderModel>,
+  customModels: ReadonlyArray<CustomModelSetting>,
+  modelCatalogMode: CodexSettings["modelCatalogMode"],
+): ReadonlyArray<ServerProviderModel> {
+  return appendCustomCodexModels(modelCatalogMode === "custom-only" ? [] : models, customModels);
+}
+
 function parseCodexSkillsListResponse(
   response: CodexSchema.V2SkillsListResponse,
   cwd: string,
@@ -415,6 +428,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly launchArgs?: string;
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
+  readonly modelCatalogMode?: CodexSettings["modelCatalogMode"];
   readonly environment?: NodeJS.ProcessEnv;
 }) {
   const { client, initialize } = yield* withCodexAppServerClient(input);
@@ -438,7 +452,9 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
-      requestAllCodexModels(client),
+      input.modelCatalogMode === "custom-only"
+        ? Effect.succeed<ReadonlyArray<ServerProviderModel>>([])
+        : requestAllCodexModels(client),
       // Usage is an enrichment: a failure or a slow answer degrades to "no
       // usage this probe" rather than costing the account and models.
       client.request("account/rateLimits/read", undefined).pipe(
@@ -468,7 +484,11 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     rateLimits,
     version,
     models: applyPreferredCodexDefaultModel(
-      appendCustomCodexModels(models, input.customModels ?? []),
+      resolveCodexProviderModels(
+        models,
+        input.customModels ?? [],
+        input.modelCatalogMode ?? "app-server",
+      ),
     ),
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
   } satisfies CodexAppServerProviderSnapshot;
@@ -566,6 +586,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly launchArgs?: string;
     readonly cwd: string;
     readonly customModels: ReadonlyArray<CustomModelSetting>;
+    readonly modelCatalogMode?: CodexSettings["modelCatalogMode"];
     readonly environment?: NodeJS.ProcessEnv;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
@@ -605,6 +626,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
+    modelCatalogMode: codexSettings.modelCatalogMode,
     environment: resolvedEnvironment,
   }).pipe(
     Effect.scoped,

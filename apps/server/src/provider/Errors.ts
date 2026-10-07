@@ -60,6 +60,7 @@ export class ProviderAdapterRequestError extends Schema.TaggedError<ProviderAdap
     provider: Schema.String,
     method: Schema.String,
     detail: Schema.String,
+    reason: Schema.optional(Schema.Literal("incompatible-resume-route")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -129,6 +130,7 @@ export class ProviderValidationError extends Schema.TaggedError<ProviderValidati
   {
     operation: Schema.String,
     issue: Schema.String,
+    reason: Schema.optional(Schema.Literal("incompatible-resume-route")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
