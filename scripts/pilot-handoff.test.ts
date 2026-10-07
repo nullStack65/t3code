@@ -477,22 +477,51 @@ describe("bounded measurement recipe", () => {
       await NodeFSP.mkdir(root, { recursive: true });
       const clock = await makeClock(root);
       const out = NodePath.join(root, "out");
+      const probePidFile = NodePath.join(root, "probe.pid");
+      let probePid: number | undefined;
       const started = Date.now();
-      const result = await runSh(fixture.measure, {
-        ...process.env,
-        CLOCK: NodePath.join(root, "clock"),
-        MEASURE_NOW: clock,
-        MEASURE_SLEEP: "true",
-        MEASURE_MAX_SECONDS: "2",
-        MEASURE_PROBE_TIMEOUT: "1",
-        MEASURE_PROBE: "sleep 30",
-        MEASURE_OUT: out,
-      });
-      const elapsed = Date.now() - started;
-      expect(result.code).toBe(0);
-      expect(elapsed).toBeLessThan(10_000);
-      const log = await NodeFSP.readFile(NodePath.join(out, "monitor.log"), "utf8");
-      expect(log).toContain("unavailable");
+      try {
+        const result = await runSh(fixture.measure, {
+          ...process.env,
+          CLOCK: NodePath.join(root, "clock"),
+          MEASURE_NOW: clock,
+          MEASURE_SLEEP: "true",
+          MEASURE_MAX_SECONDS: "2",
+          MEASURE_PROBE_TIMEOUT: "1",
+          MEASURE_PROBE: 'sleep 30 & echo "$!" > "$PROBE_PID_FILE"; wait',
+          PROBE_PID_FILE: probePidFile,
+          MEASURE_OUT: out,
+        });
+        const elapsed = Date.now() - started;
+        expect(result.code).toBe(0);
+        expect(elapsed).toBeLessThan(10_000);
+        probePid = Number(await NodeFSP.readFile(probePidFile, "utf8"));
+        expect(Number.isInteger(probePid) && probePid > 1).toBe(true);
+
+        let probeExited = false;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          const stat = await NodeFSP.readFile(`/proc/${probePid}/stat`, "utf8").catch(() => "");
+          const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+          if (!stat || state === "Z" || state === "X") {
+            probeExited = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(probeExited).toBe(true);
+        const log = await NodeFSP.readFile(NodePath.join(out, "monitor.log"), "utf8");
+        expect(log).toContain("unavailable");
+      } finally {
+        const pidToStop =
+          probePid ?? Number(await NodeFSP.readFile(probePidFile, "utf8").catch(() => ""));
+        if (Number.isInteger(pidToStop) && pidToStop > 1) {
+          try {
+            process.kill(pidToStop, "SIGKILL");
+          } catch {
+            // The timeout already terminated the exact probe PID.
+          }
+        }
+      }
     } finally {
       await fixture.cleanup();
     }

@@ -224,24 +224,21 @@ available; memory pressure (PSI) is recorded where available.
 ```sh
 #!/bin/sh
 # Bounded one-week sampler. Reads only counters; never prompts, args, or content.
+if ! command -v timeout >/dev/null 2>&1 || ! timeout --version 2>/dev/null | grep -q 'GNU coreutils'; then
+  echo "GNU coreutils timeout is required for bounded probes" >&2
+  exit 1
+fi
 interval="${MEASURE_INTERVAL:-60}"; max_seconds="${MEASURE_MAX_SECONDS:-604800}"
 cap_bytes="${MEASURE_CAP_BYTES:-52428800}"; probe_timeout="${MEASURE_PROBE_TIMEOUT:-5}"
 proc_root="${MEASURE_PROC_ROOT:-/proc}"
 out="${MEASURE_OUT:-$HOME/t3-opencode-pilot-$(date +%Y%m%dT%H%M%SZ)}"
 now="${MEASURE_NOW:-date +%s}"; nap="${MEASURE_SLEEP:-sleep}"
 
-# Run a probe in the background and kill it if it outlives probe_timeout.
+# timeout runs each probe in its own process group and kills the whole group
+# when it exceeds probe_timeout, so grandchildren cannot outlive the sampler.
 bounded() {
-  secs="$1"; shift; "$@" & pid=$!
-  ticks=0; limit=$((secs * 10))
-  while kill -0 "$pid" 2>/dev/null; do
-    ticks=$((ticks + 1))
-    if [ "$ticks" -gt "$limit" ]; then
-      kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 124
-    fi
-    sleep 0.1
-  done
-  wait "$pid"
+  secs="$1"; shift
+  timeout --signal=TERM --kill-after=1s "${secs}s" "$@"
 }
 
 mkdir -p "$out"; log="$out/monitor.log"; total=0

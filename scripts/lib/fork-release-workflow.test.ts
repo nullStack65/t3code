@@ -151,6 +151,19 @@ it.effect("preflight selects source before setup-vp install to keep the job depe
   }),
 );
 
+it.effect("SEA build uses vp exec for both the pinned Node proof and build", () =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
+    const linux = jobBlock(text, "cli_linux_x64");
+    assert.include(linux, 'VP_NODE_VERSION: "26.8.2"');
+    assert.include(linux, "vp exec --filter t3 -- node --version");
+    assert.include(linux, "vp exec --filter t3 -- node -e '");
+    assert.include(linux, "vp exec --filter t3 -- node scripts/cli.ts build-exe --verbose");
+    assert.notInclude(linux, "vp run --filter t3 exec --");
+    assert.notInclude(linux, "node apps/server/scripts/cli.ts build-exe --verbose");
+  }),
+);
+
 it.effect("publication promotes a candidate by run id and never rebuilds", () =>
   Effect.gen(function* () {
     const text = yield* Effect.promise(() => readWorkflow("fork-release.yml"));
