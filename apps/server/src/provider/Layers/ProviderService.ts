@@ -55,6 +55,7 @@ import * as Stream from "effect/Stream";
 
 import { appendUserInputAttachmentPaths } from "../userInputAttachments.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import type { RouteSelectionMetadata } from "../../usage/routeMetadata.ts";
 import * as ServerConfig from "../../config.ts";
 import * as DeviceService from "../../device/DeviceService.ts";
 import { ensureAgentDeviceShim } from "../../device/AgentDeviceShim.ts";
@@ -325,6 +326,27 @@ function turnEffort(modelSelection: ProviderSendTurnInput["modelSelection"]): st
     getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
     getModelSelectionStringOptionValue(modelSelection, "effort")
   );
+}
+
+/**
+ * The route T3 was actually asked to run at session start. This is the
+ * *requested* selection only: the observed model comes from measured usage and
+ * is never copied from here. Extra options (agent/variant) are deliberately
+ * excluded because they are not a portable effort value.
+ */
+function requestedRouteOf(
+  provider: ProviderDriverKind,
+  modelSelection: ModelSelection | null | undefined,
+): RouteSelectionMetadata {
+  const model =
+    typeof modelSelection?.model === "string" && modelSelection.model.trim().length > 0
+      ? modelSelection.model.trim()
+      : null;
+  const effort =
+    getModelSelectionStringOptionValue(modelSelection, "reasoningEffort")?.trim() ||
+    getModelSelectionStringOptionValue(modelSelection, "effort")?.trim() ||
+    null;
+  return { provider, model, effort };
 }
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
@@ -1054,7 +1076,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     session: ProviderSession,
     threadId: ThreadId,
     extra?: {
-      readonly modelSelection?: unknown;
+      readonly modelSelection?: ModelSelection | null | undefined;
       readonly continueAfterServerUpdate?: TurnId;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
@@ -1073,6 +1095,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         status: toRuntimeStatus(session),
         ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
         runtimePayload: toRuntimePayloadFromSession(session, extra),
+        requestedRoute: requestedRouteOf(session.provider, extra?.modelSelection),
       });
     });
 
@@ -1436,9 +1459,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
         if (
-          persistedBinding?.provider === resolvedProvider &&
+          persistedBinding !== undefined &&
           persistedBinding.providerInstanceId !== resolvedInstanceId &&
-          (input.resumeCursor != null || persistedBinding.resumeCursor != null)
+          (input.resumeCursor != null ||
+            (persistedBinding.provider === resolvedProvider &&
+              persistedBinding.resumeCursor != null))
         ) {
           const previousInstanceId = yield* requireBindingInstanceId(
             "ProviderService.startSession",
@@ -1446,13 +1471,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
           const previousInfo = yield* registry.getInstanceInfo(previousInstanceId);
           if (
+            previousInfo.driverKind !== instanceInfo.driverKind ||
             previousInfo.continuationIdentity.continuationKey !==
-            instanceInfo.continuationIdentity.continuationKey
+              instanceInfo.continuationIdentity.continuationKey
           ) {
-            return yield* toValidationError(
-              "ProviderService.startSession",
-              `Thread '${threadId}' cannot switch from instance '${previousInstanceId}' to '${resolvedInstanceId}' because their provider resume state is incompatible.`,
-            );
+            return yield* new ProviderValidationError({
+              operation: "ProviderService.startSession",
+              reason: "incompatible-resume-route",
+              issue: `Thread '${threadId}' cannot resume from provider instance '${previousInstanceId}' (${previousInfo.driverKind}) on '${resolvedInstanceId}' (${instanceInfo.driverKind}) because their provider continuation state is incompatible.`,
+            });
           }
         }
         const effectiveResumeCursor =

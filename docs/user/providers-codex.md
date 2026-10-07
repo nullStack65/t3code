@@ -1,6 +1,13 @@
 # Codex
 
 For one account, use the default Codex provider with your normal Codex login.
+
+Codex normally offers every model reported by its app-server. If an instance
+routes through a proxy with a narrower catalog, set **Model catalog** to
+**Custom models only** and add only the model IDs that backend can serve. This
+prevents the generic app-server catalog from advertising models on the wrong
+route; it does not verify account or backend entitlement.
+
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 

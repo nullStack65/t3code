@@ -62,6 +62,7 @@ import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -11025,6 +11026,48 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         const createdAt = "2026-01-01T00:00:00.000Z";
         const wsUrl = yield* getWsServerUrl("/ws");
+        const callbackBootstrapResult = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.exit(
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make("cmd-bound-callback-bootstrap-refused"),
+                threadId: ThreadId.make("thread-bound-callback-bootstrap"),
+                message: {
+                  messageId: MessageId.make("msg-bound-callback-bootstrap"),
+                  role: "user",
+                  text: "Preserve callback result",
+                  attachments: [],
+                },
+                modelSelection: defaultModelSelection,
+                routeBinding: {
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                bootstrap: {
+                  createThread: {
+                    projectId: defaultProjectId,
+                    title: "Callback Thread",
+                    modelSelection: defaultModelSelection,
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    branch: null,
+                    worktreePath: null,
+                    createdAt,
+                  },
+                },
+                createdAt,
+              }),
+            ),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(callbackBootstrapResult));
+        assert.deepEqual(dispatchedCommands, []);
+        assert.deepEqual(bootstrapGitOperations, []);
+        assert.equal(runForThread.mock.calls.length, 0);
         const response = yield* Effect.scoped(
           withWsRpcClient(wsUrl, (client) =>
             client[ORCHESTRATION_WS_METHODS.dispatchCommand]({

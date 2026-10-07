@@ -14,7 +14,16 @@
     },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification runs directly.
-      "entry": ["knip-schemas.ts", "mobile-native-client.ts"],
+      // These are documented operator entrypoints for fork candidate build,
+      // promotion, and artifact staging; they are intentionally invoked by
+      // release operators/workflows rather than imported by workspace code.
+      "entry": [
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "build-fork-candidate.ts",
+        "promote-fork-candidate.ts",
+        "stage-candidate-asset.ts",
+      ],
     },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.

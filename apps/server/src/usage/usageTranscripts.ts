@@ -8,6 +8,66 @@
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
+/**
+ * Whether the source actually measured tokens, as opposed to handing us a
+ * container we normalised to zeros.
+ *
+ * - `observed` — at least one recognised token field held a valid value. An
+ *   explicit `0` is a real measured zero and stays `observed`. Whether the
+ *   measurement is complete is a separate axis; see
+ *   {@link UsageMeasurementCompleteness}.
+ * - `empty` — a usage container existed but carried no recognised token field
+ *   (for example Claude's `usage: {}`). Numeric totals are zero, but that is a
+ *   missing measurement, not a measured zero.
+ * - `invalid` — one or more recognised token fields were present but none held
+ *   a valid value (`null`, a string, a negative number). This is a malformed
+ *   observation, not an absent one.
+ * - `unavailable` — the presence information was erased before we saw the
+ *   record (a legacy cache row). The zeros may be real or may be missing; we
+ *   must not classify them either way.
+ */
+export type UsageMeasurement = "observed" | "empty" | "invalid" | "unavailable";
+
+/**
+ * Whether an `observed` measurement covered every field the provider requires.
+ *
+ * - `complete` — every required field was present and held a valid value, and
+ *   no recognised field was invalid. An explicit all-zero usage object is a
+ *   complete measurement.
+ * - `partial` — at least one required field was absent or invalid, or a
+ *   recognised field held an invalid value. The valid subset is still a real
+ *   measurement and its totals are a lower bound, never a complete one.
+ *
+ * Absent on a record means `complete` for backward compatibility with callers
+ * that predate this axis; the parsers always set it for `observed`.
+ */
+export type UsageMeasurementCompleteness = "complete" | "partial";
+
+/**
+ * How far a declared `dedupeKey` can be trusted on its own.
+ *
+ * - `global` — the key is a globally qualified native observation id (Claude's
+ *   `message.id:requestId`, Grok's `sessionId:promptId:model`). Equal keys name
+ *   the same observation, so a copy at another path is the same event.
+ * - `source-local` — the key is only meaningful within its native session or
+ *   occurrence (the scan's Codex occurrence key). It must be qualified by the
+ *   native session before it can identify an event, so equal keys in two
+ *   sessions are two observations, not one.
+ *
+ * Absent defaults to `global`.
+ */
+export type DedupeKeyScope = "global" | "source-local";
+
+/**
+ * How a record relates to other records for the same identity.
+ *
+ * - `delta` — an additive increment (the default for every parser here).
+ * - `snapshot` — a cumulative observation that *replaces* an earlier value for
+ *   the same identity rather than adding to it. A source that defines updates
+ *   sets this; the projection then keeps the newest instead of summing.
+ */
+export type UsageObservationScope = "delta" | "snapshot";
+
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
@@ -20,6 +80,80 @@ export interface UsageRecord {
    * unique and needs no dedup.
    */
   readonly dedupeKey: string | null;
+  /**
+   * Native provider request id, when the source exposes one. Claude Code writes
+   * a `requestId` per API response. `undefined`/absent must never be read as a
+   * request count of one: the source either has the id or it does not.
+   *
+   * Deliberately separate from {@link dedupeKey}, which is a de-duplication
+   * composite and not a guaranteed provider request id.
+   */
+  readonly providerRequestId?: string | null;
+  /**
+   * Native provider message id, when the source exposes one. Claude Code's
+   * `message.id` identifies one assistant response; it is not a prompt id.
+   */
+  readonly providerMessageId?: string | null;
+  /**
+   * Native prompt id, when the source exposes one. Grok Build's
+   * `turn_completed.prompt_id` identifies the user prompt a turn answers.
+   */
+  readonly promptId?: string | null;
+  /**
+   * Whether the source actually measured this record. Absent means the parser
+   * observed recognised fields; a legacy cache row sets `unavailable`
+   * explicitly. See {@link UsageMeasurement}.
+   */
+  readonly measurement?: UsageMeasurement;
+  /**
+   * Whether an `observed` measurement covered every required field. Only
+   * meaningful for `observed`; absent means `complete`. See
+   * {@link UsageMeasurementCompleteness}.
+   */
+  readonly measurementCompleteness?: UsageMeasurementCompleteness;
+  /**
+   * Count of recognised token fields that were present but held an invalid
+   * value. Distinguishes a `partial` measurement with an invalid value from one
+   * with an absent field; absent/`0` means no invalid value was seen.
+   */
+  readonly invalidTokenFields?: number;
+  /**
+   * `false` when the source erased native identity before we saw it (a legacy
+   * cache row). Kept apart from the numeric totals so identity availability is
+   * never recovered from token magnitude. Absent means the identity is as the
+   * source wrote it.
+   */
+  readonly identityAvailable?: boolean;
+  /**
+   * How far `dedupeKey` can be trusted on its own. Absent means `global`. See
+   * {@link DedupeKeyScope}.
+   */
+  readonly dedupeKeyScope?: DedupeKeyScope;
+  /** Additive increment or replaceable snapshot. Absent means `delta`. */
+  readonly scope?: UsageObservationScope;
+}
+
+/**
+ * The occurrence-aware identity seam.
+ *
+ * Two records with the same value here are the same *event shape* in the same
+ * session. Callers append a per-delivery occurrence index to distinguish
+ * repeated equal events from a re-delivery of one event: a copy of a rollout
+ * restarts its occurrence counter, so the copy lands on the same composite key
+ * and is de-duplicated, while two genuine equal events in one file land on
+ * different keys and are both kept. This is the identity the scan cache stamps
+ * onto otherwise-keyless records (see `UsageService`); it is deliberately
+ * separate from the native request/message/prompt ids, which are reporting
+ * values and not delivery identity.
+ */
+export function usageEventOccurrenceBaseKey(record: UsageRecord): string {
+  return JSON.stringify([
+    record.provider,
+    record.sessionId,
+    record.timestampMs,
+    record.model,
+    record.totals,
+  ]);
 }
 
 const EMPTY_TOTALS: UsageTokenTotals = {
@@ -32,6 +166,54 @@ const EMPTY_TOTALS: UsageTokenTotals = {
 
 function int(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+/** A token field is valid only as a finite, non-negative number. */
+function isValidTokenValue(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+interface TokenFieldClassification {
+  readonly measurement: UsageMeasurement;
+  readonly completeness?: UsageMeasurementCompleteness;
+  readonly invalidTokenFields: number;
+}
+
+/**
+ * Classifies a provider usage object by field validity and completeness.
+ *
+ * Property presence alone is not enough: a field holding `null`, a string, or
+ * a negative number is present but invalid, and a usage object missing a
+ * required field is a valid known subset rather than a complete measurement.
+ * The valid subset is preserved; only the classification says it is partial.
+ */
+function classifyTokenFields(
+  fields: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): TokenFieldClassification {
+  let recognized = 0;
+  let validRequired = 0;
+  let validAny = 0;
+  let invalidTokenFields = 0;
+  for (const field of [...required, ...optional]) {
+    if (!Object.hasOwn(fields, field)) continue;
+    recognized += 1;
+    if (isValidTokenValue(fields[field])) {
+      validAny += 1;
+      if (required.includes(field)) validRequired += 1;
+    } else {
+      invalidTokenFields += 1;
+    }
+  }
+  if (recognized === 0) return { measurement: "empty", invalidTokenFields: 0 };
+  if (validAny === 0) return { measurement: "invalid", invalidTokenFields };
+  const complete = validRequired === required.length && invalidTokenFields === 0;
+  return {
+    measurement: "observed",
+    completeness: complete ? "complete" : "partial",
+    invalidTokenFields,
+  };
 }
 
 function parseTimestampMs(value: unknown): number | null {
@@ -89,6 +271,19 @@ function grokCostTicksToUsd(ticks: unknown): number | null {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Token fields that make a Claude `usage` object an actual measurement.
+ *
+ * `input_tokens` and `output_tokens` are the measurement; the cache fields are
+ * genuinely optional and Anthropic omits them when zero, so their absence does
+ * not make an otherwise complete record partial.
+ */
+const CLAUDE_REQUIRED_USAGE_FIELDS = ["input_tokens", "output_tokens"] as const;
+const CLAUDE_OPTIONAL_USAGE_FIELDS = [
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+] as const;
+
+/**
  * Parses one line of a Claude Code transcript.
  *
  * T3 Code writes one record per assistant *content block*, and every one of
@@ -131,6 +326,16 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 
   const cost = record["costUSD"];
 
+  // `usage: {}` normalises to zeros but is not a measured zero; a field holding
+  // `null`, a string, or a negative number is invalid; a missing required field
+  // leaves a valid known subset that is only `partial`. Only actual values
+  // decide this, never property presence or a nonzero total.
+  const classification = classifyTokenFields(
+    usageRecord,
+    CLAUDE_REQUIRED_USAGE_FIELDS,
+    CLAUDE_OPTIONAL_USAGE_FIELDS,
+  );
+
   return {
     provider: "claude",
     timestampMs,
@@ -146,6 +351,22 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     },
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     dedupeKey,
+    // Namespaced identity, kept apart from `dedupeKey`. A user prompt can span
+    // several assistant messages (tool continuation), so these count provider
+    // requests; no prompt id exists in this source.
+    providerRequestId: requestId,
+    providerMessageId: messageId,
+    promptId: null,
+    measurement: classification.measurement,
+    ...(classification.completeness === undefined
+      ? {}
+      : { measurementCompleteness: classification.completeness }),
+    ...(classification.invalidTokenFields === 0
+      ? {}
+      : { invalidTokenFields: classification.invalidTokenFields }),
+    // A Claude message/request pair is a globally qualified native observation
+    // id: the same response copied into another transcript is the same event.
+    dedupeKeyScope: "global",
   };
 }
 
@@ -279,6 +500,17 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     state.suppressingForkCopies = false;
   }
 
+  // Classify before deciding to emit. A measured zero or an all-invalid payload
+  // is still evidence about the session, so a zero subtotal must not drop it
+  // before the projection can label it. Only a container with no recognised
+  // token field at all is no-usage and is not emitted.
+  const classification = classifyTokenFields(
+    lastRecord,
+    ["input_tokens", "output_tokens"],
+    ["cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"],
+  );
+  if (classification.measurement === "empty") return null;
+
   const inputTokens = int(lastRecord["input_tokens"]);
   const cachedInputTokens = int(lastRecord["cached_input_tokens"]);
   const cacheCreationTokens = int(lastRecord["cache_write_input_tokens"]);
@@ -294,8 +526,6 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     reasoningTokens: Math.min(outputTokens, int(lastRecord["reasoning_output_tokens"])),
   };
 
-  if (totalTokens(totals) === 0) return null;
-
   return {
     provider: "codex",
     timestampMs,
@@ -307,6 +537,21 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     // Events surviving the fork-copy suppression above are unique to this
     // rollout, so they need no global dedup.
     dedupeKey: null,
+    // A `token_count` delta is a turn-level increment with no request or prompt
+    // id. Request counts must never be inferred from it.
+    providerRequestId: null,
+    providerMessageId: null,
+    promptId: null,
+    measurement: classification.measurement,
+    ...(classification.completeness === undefined
+      ? {}
+      : { measurementCompleteness: classification.completeness }),
+    ...(classification.invalidTokenFields === 0
+      ? {}
+      : { invalidTokenFields: classification.invalidTokenFields }),
+    // The scan's occurrence key is only meaningful within this session, so a
+    // caller stamping it must qualify it with the native session.
+    dedupeKeyScope: "source-local",
   };
 }
 
@@ -321,6 +566,7 @@ interface GrokUsageTotals {
   readonly cacheCreationTokens: number;
   readonly reasoningTokens: number;
   readonly costUsdTicks: number | null;
+  readonly classification: TokenFieldClassification;
 }
 
 function readGrokUsageTotals(value: unknown): GrokUsageTotals | null {
@@ -336,6 +582,11 @@ function readGrokUsageTotals(value: unknown): GrokUsageTotals | null {
       typeof record["costUsdTicks"] === "number" && Number.isFinite(record["costUsdTicks"])
         ? record["costUsdTicks"]
         : null,
+    classification: classifyTokenFields(
+      record,
+      ["inputTokens", "outputTokens"],
+      ["cachedReadTokens", "cacheCreationTokens", "reasoningTokens"],
+    ),
   };
 }
 
@@ -424,7 +675,10 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
   }
 
   if (modelEntries.length === 0) {
-    if (totalTokens(grokTotalsToUsage(topLevel)) === 0) return [];
+    // Only a usage container with no recognised token field is no-usage. A
+    // measured zero or an all-invalid payload is retained so its quality
+    // reaches the projection instead of vanishing at a zero subtotal.
+    if (topLevel.classification.measurement === "empty") return [];
     return [
       {
         provider: "grok",
@@ -435,6 +689,20 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
         reportedCostUsd: grokCostTicksToUsd(topLevel.costUsdTicks),
         // No prompt id means we cannot tell two same-second updates apart.
         dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:grok`,
+        // Grok identifies the prompt, not the API request.
+        providerRequestId: null,
+        providerMessageId: null,
+        promptId,
+        measurement: topLevel.classification.measurement,
+        ...(topLevel.classification.completeness === undefined
+          ? {}
+          : { measurementCompleteness: topLevel.classification.completeness }),
+        ...(topLevel.classification.invalidTokenFields === 0
+          ? {}
+          : { invalidTokenFields: topLevel.classification.invalidTokenFields }),
+        // `sessionId:promptId:model` is a session-qualified native observation
+        // id: the same turn copied into another transcript is the same event.
+        dedupeKeyScope: "global",
       },
     ];
   }
@@ -446,26 +714,35 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
   //    by token share among the unticked models only.
   // 3. When no model has per-model ticks, remaining equals the full
   //    aggregate and every emitted model gets a token-share slice.
-  // Zero-token rows are never emitted and never count toward used ticks.
+  // An explicit per-model cost reduces the aggregate no matter its token total,
+  // for any row that is actually emitted; skipping an emitted zero-token ticked
+  // row would let the same ticks be pro-rated onto its siblings. A row that is
+  // not emitted (no recognised token field) does not reduce the aggregate, so
+  // its ticks stay available to the emitted rows. A zero-token unticked row has
+  // no share to receive.
   const topLevelCostUsd = grokCostTicksToUsd(topLevel.costUsdTicks);
   let usedTickedCostUsd = 0;
   let untickedTokenDenominator = 0;
   for (const entry of modelEntries) {
+    const emitted = entry.totals.classification.measurement !== "empty";
+    if (emitted && entry.totals.costUsdTicks !== null) {
+      usedTickedCostUsd += grokCostTicksToUsd(entry.totals.costUsdTicks) ?? 0;
+      continue;
+    }
     const tokens = totalTokens(grokTotalsToUsage(entry.totals));
     if (tokens === 0) continue;
-    if (entry.totals.costUsdTicks !== null) {
-      usedTickedCostUsd += grokCostTicksToUsd(entry.totals.costUsdTicks) ?? 0;
-    } else {
-      untickedTokenDenominator += tokens;
-    }
+    untickedTokenDenominator += tokens;
   }
   const remainingCostUsd =
     topLevelCostUsd === null ? null : Math.max(0, topLevelCostUsd - usedTickedCostUsd);
 
   const results: UsageRecord[] = [];
   for (const entry of modelEntries) {
+    // Same rule as the aggregate path: retain a measured zero or an invalid
+    // per-model observation; only a container with no recognised field is
+    // no-usage.
+    if (entry.totals.classification.measurement === "empty") continue;
     const totals = grokTotalsToUsage(entry.totals);
-    if (totalTokens(totals) === 0) continue;
 
     let reportedCostUsd = grokCostTicksToUsd(entry.totals.costUsdTicks);
     if (reportedCostUsd === null && remainingCostUsd !== null && untickedTokenDenominator > 0) {
@@ -480,6 +757,18 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
       totals,
       reportedCostUsd,
       dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:${entry.model}`,
+      // Grok identifies the prompt, not the API request.
+      providerRequestId: null,
+      providerMessageId: null,
+      promptId,
+      measurement: entry.totals.classification.measurement,
+      ...(entry.totals.classification.completeness === undefined
+        ? {}
+        : { measurementCompleteness: entry.totals.classification.completeness }),
+      ...(entry.totals.classification.invalidTokenFields === 0
+        ? {}
+        : { invalidTokenFields: entry.totals.classification.invalidTokenFields }),
+      dedupeKeyScope: "global",
     });
   }
   return results;

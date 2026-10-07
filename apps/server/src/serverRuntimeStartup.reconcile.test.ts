@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type OrchestrationCommand,
   type OrchestrationSessionStatus,
+  type ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderSendTurnInput,
@@ -54,6 +55,16 @@ const makeThread = (
   },
 });
 
+const makeLiveProviderSession = (threadId: ThreadId): ProviderSession => ({
+  provider: ProviderDriverKind.make("codex"),
+  providerInstanceId,
+  status: "running",
+  runtimeMode: "full-access",
+  threadId,
+  createdAt: updatedAt,
+  updatedAt,
+});
+
 const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
   ({
     startSession: () => Effect.die("unused"),
@@ -63,7 +74,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     respondToRequest: () => Effect.die("unused"),
     respondToUserInput: () => Effect.die("unused"),
     stopSession: () => Effect.die("unused"),
-    listSessions: () => Effect.succeed(liveThreadIds.map((threadId) => ({ threadId }) as never)),
+    listSessions: () => Effect.succeed(liveThreadIds.map(makeLiveProviderSession)),
     getCapabilities: () => Effect.die("unused"),
     assertConversationRollbackSupported: () => Effect.die("unused"),
     getInstanceInfo: () => Effect.die("unused"),
@@ -512,13 +523,23 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
     updatedAt,
   );
   const live = makeThread("thread-live", "running", TurnId.make("turn-live"));
+  const legacyLive = Object.fromEntries(
+    Object.entries(live.session).filter(([key]) => key !== "providerInstanceId"),
+  ) as unknown as typeof live.session;
   const settled = makeThread("thread-ready", "ready");
   const dispatched: OrchestrationCommand[] = [];
   const bindingReads: ThreadId[] = [];
   const upserts: ProviderSessionDirectory.ProviderRuntimeBinding[] = [];
 
   return runReconciliation({
-    threads: [starting, running, staleActiveTurn, archived, live, settled],
+    threads: [
+      starting,
+      running,
+      staleActiveTurn,
+      archived,
+      { ...live, session: legacyLive },
+      settled,
+    ],
     liveThreadIds: [live.id],
     directory: {
       getBinding: (candidate) =>
@@ -555,8 +576,16 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
         assert.deepStrictEqual(bindingReads, orphanIds);
         assert.deepStrictEqual(
           dispatched.map((command) => command.type === "thread.session.set" && command.threadId),
-          orphanIds,
+          [live.id, ...orphanIds],
         );
+        const refreshedLive = dispatched[0]!;
+        assert.equal(refreshedLive.type, "thread.session.set");
+        if (refreshedLive.type === "thread.session.set") {
+          assert.deepStrictEqual(refreshedLive.session, {
+            ...legacyLive,
+            providerInstanceId,
+          });
+        }
         assert.deepStrictEqual(
           dispatched.map((command) =>
             command.type === "thread.session.set"
@@ -566,7 +595,10 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
                 }
               : null,
           ),
-          orphanIds.map(() => ({ status: "error" as const, activeTurnId: null })),
+          [
+            { status: "running" as const, activeTurnId: TurnId.make("turn-live") },
+            ...orphanIds.map(() => ({ status: "error" as const, activeTurnId: null })),
+          ],
         );
         assert.equal(upserts.length, orphanIds.length);
         for (const binding of upserts) {
@@ -584,6 +616,44 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
           );
           assert.deepStrictEqual(binding.resumeCursor, { cursor: binding.threadId });
         }
+      }),
+    ),
+  );
+});
+
+it.effect("leaves a live legacy session unresolved when its actual instance is unavailable", () => {
+  const live = makeThread("thread-live-legacy-unresolved", "running", TurnId.make("turn-live"));
+  const legacySession = Object.fromEntries(
+    Object.entries(live.session).filter(([key]) => key !== "providerInstanceId"),
+  ) as unknown as typeof live.session;
+  const liveProviderSession: ProviderSession = {
+    ...makeLiveProviderSession(live.id),
+    providerInstanceId: undefined,
+  };
+  const dispatched: OrchestrationCommand[] = [];
+
+  return runReconciliation({
+    threads: [{ ...live, session: legacySession }],
+    providerService: {
+      ...makeProviderService(),
+      listSessions: () => Effect.succeed([liveProviderSession]),
+    },
+    directory: {
+      getBinding: () => Effect.die("unused for live session"),
+      upsert: () => Effect.die("unused for live session"),
+      recordImportedTranscript: () => Effect.die("unused for live session"),
+      getProvider: () => Effect.die("unused for live session"),
+      listThreadIds: () => Effect.die("unused for live session"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: dispatched.length })),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.deepStrictEqual(dispatched, []);
+        assert.equal(legacySession.status, "running");
+        assert.equal("providerInstanceId" in legacySession, false);
       }),
     ),
   );
