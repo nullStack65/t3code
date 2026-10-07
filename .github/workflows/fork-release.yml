@@ -437,6 +437,7 @@ jobs:
       resource_key: darwin-x64
       cli_archive: false
       relay_client_tracing: false
+      emit_macos_inspection: true
 
   desktop_mac_arm64:
     name: Desktop macOS arm64

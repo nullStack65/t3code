@@ -294,7 +294,10 @@ function inspectMacDmg(dmg: string, scratch: string): PackagedProvenanceRecord |
   if (sevenZip === undefined) return undefined;
   const dir = NodeFS.mkdtempSync(NodePath.join(scratch, "dmg-"));
   const status = run(sevenZip, ["x", "-y", `-o${dir}`, dmg], { allowFailure: true });
-  return status === 0 ? readAsarBuildInfoInTree(dir) : null;
+  // A failed 7-Zip extraction did not inspect the DMG. Leave it available for
+  // digest-bound evidence from the native Mac runner; a successful extraction
+  // with missing or invalid app metadata still remains an observed failure.
+  return status === 0 ? readAsarBuildInfoInTree(dir) : undefined;
 }
 
 export interface InspectCandidateInput {
