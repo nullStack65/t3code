@@ -802,6 +802,8 @@ const makeServerLayer = Layer.unwrap(
       runtimeStateLayer.pipe(Layer.provide(launcherLayer)),
       tailscaleServeLayer,
       cloudDesiredLinkReconcileLayer,
+      // Additive: lets a launcher-owned process drain on an IPC stop request.
+      ServiceLauncherClient.managedShutdownLayer,
     );
 
     return serverApplicationLayer.pipe(
