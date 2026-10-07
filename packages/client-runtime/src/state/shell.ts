@@ -24,6 +24,7 @@ import { subscribeDynamic } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
+import { recordSnapshotObservationReceipts } from "./postStartObservationReceipt.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 
@@ -173,6 +174,13 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     }
     yield* Ref.set(awaitingCompletion, waiting);
     if (next === initial) return;
+    // Stamp each accepted observation with the client instant it actually
+    // arrived, in the state path itself, before the new state is observable, so
+    // the receipt basis is independent of notification preferences and mounted
+    // views and a consumer reacting to the state change never races it.
+    if (Option.isSome(next.snapshot)) {
+      recordSnapshotObservationReceipts(environmentId, next.snapshot.value.threads);
+    }
     yield* SubscriptionRef.set(state, next);
     if (receivedSnapshot) {
       const session = yield* Ref.get(activeSubscriptionSession);

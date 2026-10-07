@@ -38,6 +38,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "../src/orchestration/L
 import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
+import * as ThreadPostStartActivity from "../src/orchestration/ThreadPostStartActivity.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
@@ -85,6 +86,7 @@ const orchestrationEngineLayer = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(ThreadBackgroundLiveness.layer),
   Layer.provide(ThreadPlanProgress.layer),
+  Layer.provideMerge(ThreadPostStartActivity.layer),
   Layer.provide(OrchestrationEventStoreLive),
   Layer.provideMerge(OrchestrationCommandReceiptRepositoryLive),
   Layer.provide(RepositoryIdentityResolver.layer),
@@ -934,96 +936,92 @@ it.live(
 
 // --- W1-B: provider Git does not replace host Git for T3 sparse checks ----------------------
 
-it.live(
-  "W1-B: a non-OpenCode launch uses host Git for a verified sparse checkout",
-  () =>
-    Effect.gen(function* () {
-      const base = yield* Effect.promise(() =>
-        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w1b-sparse-")),
-      );
-      const repo = NodePath.join(base, "repo");
-      const providerBin = NodePath.join(base, "provider-bin");
-      yield* Effect.promise(() => NodeFSP.mkdir(repo, { recursive: true }));
-      yield* Effect.promise(() => NodeFSP.mkdir(providerBin, { recursive: true }));
-      const realGit = resolveRealGitPath();
-      writeSparseLessGit(providerBin, realGit);
-      const git = (args: ReadonlyArray<string>) =>
-        Effect.promise(async () => {
-          NodeChildProcess.execFileSync(realGit, args, { cwd: repo });
-        });
-      yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(repo, "src"), { recursive: true }));
-      yield* git(["init", "-q"]);
-      yield* git(["config", "user.name", "Test"]);
-      yield* git(["config", "user.email", "test@test.com"]);
-      yield* Effect.promise(() =>
-        NodeFSP.writeFile(NodePath.join(repo, "src", "file.txt"), "hi\n"),
-      );
-      yield* git(["add", "."]);
-      yield* git(["commit", "-q", "-m", "initial"]);
-      // A real sparse checkout makes `git add --sparse` relevant for T3's own
-      // checkpoint path, independent of the selected (non-OpenCode) consumer.
-      yield* git(["sparse-checkout", "set", "src"]);
-
-      const harness = yield* makeTestProviderAdapterHarness();
-      const registry = makeAdapterRegistryMock({
-        [ProviderDriverKind.make("codex")]: harness.adapter,
+it.live("W1-B: a non-OpenCode launch uses host Git for a verified sparse checkout", () =>
+  Effect.gen(function* () {
+    const base = yield* Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-w1b-sparse-")),
+    );
+    const repo = NodePath.join(base, "repo");
+    const providerBin = NodePath.join(base, "provider-bin");
+    yield* Effect.promise(() => NodeFSP.mkdir(repo, { recursive: true }));
+    yield* Effect.promise(() => NodeFSP.mkdir(providerBin, { recursive: true }));
+    const realGit = resolveRealGitPath();
+    writeSparseLessGit(providerBin, realGit);
+    const git = (args: ReadonlyArray<string>) =>
+      Effect.promise(async () => {
+        NodeChildProcess.execFileSync(realGit, args, { cwd: repo });
       });
-      const reported = yield* Ref.make<
-        ReadonlyArray<{ readonly code: string; readonly message: string }>
-      >([]);
-      const inbox = new Map<
-        string,
-        ReadonlyArray<{
-          readonly code: LaunchPreflight.LaunchPreflightFindingCode;
-          readonly message: string;
-        }>
-      >();
-      const shared = Layer.mergeAll(
-        ProviderSessionDirectoryLive.pipe(Layer.provide(ProviderSessionRuntime.layer)),
-        Layer.succeed(ProviderAdapterRegistry, registry),
-        Layer.succeed(LaunchPreflightWarningInbox, inbox),
-        ServerConfig.layerTest(repo, repo).pipe(Layer.provide(NodeServices.layer)),
-        ServerSettingsService.layerTest({
-          ...DEFAULT_SERVER_SETTINGS,
-          providerInstances: {
-            [ProviderInstanceId.make("codex")]: {
-              driver: ProviderDriverKind.make("codex"),
-              enabled: true,
-              environment: [
-                {
-                  name: "PATH",
-                  value: `${providerBin}${NodePath.delimiter}${process.env.PATH ?? ""}`,
-                  sensitive: false,
-                },
-              ],
-            },
+    yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(repo, "src"), { recursive: true }));
+    yield* git(["init", "-q"]);
+    yield* git(["config", "user.name", "Test"]);
+    yield* git(["config", "user.email", "test@test.com"]);
+    yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(repo, "src", "file.txt"), "hi\n"));
+    yield* git(["add", "."]);
+    yield* git(["commit", "-q", "-m", "initial"]);
+    // A real sparse checkout makes `git add --sparse` relevant for T3's own
+    // checkpoint path, independent of the selected (non-OpenCode) consumer.
+    yield* git(["sparse-checkout", "set", "src"]);
+
+    const harness = yield* makeTestProviderAdapterHarness();
+    const registry = makeAdapterRegistryMock({
+      [ProviderDriverKind.make("codex")]: harness.adapter,
+    });
+    const reported = yield* Ref.make<
+      ReadonlyArray<{ readonly code: string; readonly message: string }>
+    >([]);
+    const inbox = new Map<
+      string,
+      ReadonlyArray<{
+        readonly code: LaunchPreflight.LaunchPreflightFindingCode;
+        readonly message: string;
+      }>
+    >();
+    const shared = Layer.mergeAll(
+      ProviderSessionDirectoryLive.pipe(Layer.provide(ProviderSessionRuntime.layer)),
+      Layer.succeed(ProviderAdapterRegistry, registry),
+      Layer.succeed(LaunchPreflightWarningInbox, inbox),
+      ServerConfig.layerTest(repo, repo).pipe(Layer.provide(NodeServices.layer)),
+      ServerSettingsService.layerTest({
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            environment: [
+              {
+                name: "PATH",
+                value: `${providerBin}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+                sensitive: false,
+              },
+            ],
           },
-        }),
-        AnalyticsService.layerTest,
-        Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
-      ).pipe(Layer.provide(SqlitePersistenceMemory));
-      const providerLayer = makeProviderServiceLive({
-        reportLaunchPreflightWarning: ({ code, message }) =>
-          Ref.update(reported, (current) => [...current, { code, message }]).pipe(Effect.as(true)),
-      }).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(shared));
+        },
+      }),
+      AnalyticsService.layerTest,
+      Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+    ).pipe(Layer.provide(SqlitePersistenceMemory));
+    const providerLayer = makeProviderServiceLive({
+      reportLaunchPreflightWarning: ({ code, message }) =>
+        Ref.update(reported, (current) => [...current, { code, message }]).pipe(Effect.as(true)),
+    }).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(shared));
 
-      yield* Effect.gen(function* () {
-        const provider = yield* ProviderService;
-        const threadId = ThreadId.make("w1b-sparse");
-        yield* provider.startSession(threadId, {
-          threadId,
-          provider: ProviderDriverKind.make("codex"),
-          providerInstanceId: codexInstanceId,
-          cwd: repo,
-          runtimeMode: "full-access",
-        });
-      }).pipe(Effect.provide(providerLayer));
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = ThreadId.make("w1b-sparse");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: repo,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(providerLayer));
 
-      const warnings = yield* Ref.get(reported);
-      // This launch uses the host Git for T3's own checkpoint path. The
-      // deliberately limited provider Git is irrelevant to this consumer.
-      assert.deepStrictEqual(warnings, []);
+    const warnings = yield* Ref.get(reported);
+    // This launch uses the host Git for T3's own checkpoint path. The
+    // deliberately limited provider Git is irrelevant to this consumer.
+    assert.deepStrictEqual(warnings, []);
 
-      yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -661,39 +661,41 @@ it.effect(
     }),
 );
 
-it.effect("W1-B: verified sparse checkout probes host Git separately from provider snapshot Git", () =>
-  Effect.gen(function* () {
-    const hostEnvironment = { PATH: "/host-git" };
-    const providerEnvironment = { PATH: "/provider-git" };
-    const capabilityEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
-    const result = yield* run(
-      input({
-        root: "/repo",
-        consumer: { driver: "opencode", snapshotsEnabled: true },
-        gitEnvironment: hostEnvironment,
-        providerGitEnvironment: providerEnvironment,
-        git: gitProbe({
-          resolveIdentity: () =>
-            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
-          isSparseCheckout: (_root, environment) => {
-            assert.strictEqual(environment, hostEnvironment);
-            return Effect.succeed(true);
-          },
-          probeSparseAdd: (_root, environment) => {
-            capabilityEnvironments.push(environment);
-            return environment === hostEnvironment
-              ? Effect.fail(probeError("failed", "host Git probe denied"))
-              : Effect.succeed("supported");
-          },
+it.effect(
+  "W1-B: verified sparse checkout probes host Git separately from provider snapshot Git",
+  () =>
+    Effect.gen(function* () {
+      const hostEnvironment = { PATH: "/host-git" };
+      const providerEnvironment = { PATH: "/provider-git" };
+      const capabilityEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
+      const result = yield* run(
+        input({
+          root: "/repo",
+          consumer: { driver: "opencode", snapshotsEnabled: true },
+          gitEnvironment: hostEnvironment,
+          providerGitEnvironment: providerEnvironment,
+          git: gitProbe({
+            resolveIdentity: () =>
+              Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+            isSparseCheckout: (_root, environment) => {
+              assert.strictEqual(environment, hostEnvironment);
+              return Effect.succeed(true);
+            },
+            probeSparseAdd: (_root, environment) => {
+              capabilityEnvironments.push(environment);
+              return environment === hostEnvironment
+                ? Effect.fail(probeError("failed", "host Git probe denied"))
+                : Effect.succeed("supported");
+            },
+          }),
+          files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
         }),
-        files: { exists: (target) => Effect.succeed(target === "/repo/.git") },
-      }),
-    );
+      );
 
-    assert.deepStrictEqual(capabilityEnvironments, [hostEnvironment, providerEnvironment]);
-    assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
-    assert.include(result.warnings[0]?.message ?? "", "host Git probe denied");
-  }),
+      assert.deepStrictEqual(capabilityEnvironments, [hostEnvironment, providerEnvironment]);
+      assert.deepStrictEqual(codes(result), ["git-probe-failed"]);
+      assert.include(result.warnings[0]?.message ?? "", "host Git probe denied");
+    }),
 );
 
 it.effect("W1-B: a hung capability probe for a verified sparse checkout warns (non-OpenCode)", () =>

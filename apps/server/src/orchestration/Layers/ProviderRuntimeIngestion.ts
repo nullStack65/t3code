@@ -46,6 +46,7 @@ import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/La
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
+import { ThreadPostStartActivityService } from "../ThreadPostStartActivity.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderRuntimeIngestionService,
@@ -1019,6 +1020,7 @@ export function runtimeEventToActivities(
 const make = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
+  const threadPostStartActivity = yield* ThreadPostStartActivityService;
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -1033,6 +1035,51 @@ const make = Effect.gen(function* () {
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
+
+  // Post-start delivery: buffered `turn`-mode content and parent tool
+  // heartbeats advance the in-memory observation without dispatching an
+  // activity row, so an already-subscribed shell never refetches and can
+  // falsely warn while generation continues. Nudge the existing activity/shell
+  // delivery path with a coalesced, user-invisible append, bounded per thread
+  // so it is never per-token or per-delta.
+  const POST_START_DELIVERY_INTERVAL_MS = 10_000;
+  const lastPostStartDeliveryAtMs = new Map<string, number>();
+  const nudgePostStartDelivery = (
+    threadId: ThreadId,
+    event: ProviderRuntimeEvent,
+    turnId: TurnId | null,
+    observedAt: string,
+  ) =>
+    Effect.gen(function* () {
+      const nowMs = yield* Clock.currentTimeMillis;
+      const last = lastPostStartDeliveryAtMs.get(threadId) ?? Number.NEGATIVE_INFINITY;
+      if (nowMs - last < POST_START_DELIVERY_INTERVAL_MS) return;
+      lastPostStartDeliveryAtMs.set(threadId, nowMs);
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: yield* providerCommandId(event, "post-start-observation"),
+          threadId,
+          activity: {
+            id: EventId.make(`post-start-observation:${threadId}`),
+            tone: "info",
+            kind: "post-start-observation",
+            summary: "Provider progress",
+            payload: {},
+            turnId,
+            createdAt: observedAt,
+          },
+          createdAt: observedAt,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("post-start observation delivery nudge failed", {
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+    });
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1757,13 +1804,19 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
-      if (
-        event.type === "content.delta" &&
-        event.payload.streamKind !== "assistant_text" &&
-        event.payload.streamKind !== "reasoning_text" &&
-        event.payload.streamKind !== "reasoning_summary_text"
-      ) {
-        return;
+      // Assistant/reasoning text and canonical Codex command/file output are
+      // observed as provider progress below. Other content deltas (plan text,
+      // unknown stream kinds) cannot change thread state and return before
+      // hydration.
+      if (event.type === "content.delta") {
+        const streamKind = event.payload.streamKind;
+        const isText =
+          streamKind === "assistant_text" ||
+          streamKind === "reasoning_text" ||
+          streamKind === "reasoning_summary_text";
+        const isCanonicalToolOutput =
+          streamKind === "command_output" || streamKind === "file_change_output";
+        if (!isText && !isCanonicalToolOutput) return;
       }
 
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
@@ -1839,6 +1892,79 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
+
+      // Post-start observation. Record on the server clock before any dispatch
+      // so the live record and the delivered shell agree, and scope it to the
+      // current turn so a superseded turn's late traffic cannot refresh it.
+      // The observation is recorded for content text and ephemeral parent tool
+      // heartbeats (which never become persisted rows) as well as persisted
+      // activity rows.
+      const observedAt = DateTime.formatIso(yield* DateTime.now);
+      const observationTurnId = eventTurnId ?? activeTurnId ?? null;
+      const observationAllowed = !conflictsWithActiveTurn;
+      if (event.type === "turn.started" && shouldApplyThreadLifecycle) {
+        // A newly accepted turn supersedes the previous one: reset the record
+        // so the new turn cannot inherit outstanding tools or completion
+        // memory, and stale old-turn traffic is rejected by identity.
+        threadPostStartActivity.beginTurn(thread.id, eventTurnId ?? null);
+      }
+      if (observationAllowed) {
+        const streamKind = event.type === "content.delta" ? event.payload.streamKind : undefined;
+        const isContentProgress =
+          event.type === "content.delta" &&
+          event.payload.delta.length > 0 &&
+          (streamKind === "assistant_text" ||
+            streamKind === "reasoning_text" ||
+            streamKind === "reasoning_summary_text");
+        // Canonical Codex command/file execution output is real progress even
+        // though it never becomes a persisted row. Observe it on the server
+        // clock and, when the event names the command/file item, advance that
+        // tool so its age keeps moving.
+        const isCanonicalToolOutput =
+          event.type === "content.delta" &&
+          event.payload.delta.length > 0 &&
+          (streamKind === "command_output" || streamKind === "file_change_output");
+        // Parent-conversation tool heartbeats (Claude `tool.progress` with no
+        // taskId, Codex MCP progress carrying only a summary) are intentionally
+        // dropped from persisted activities; observe them directly so liveness
+        // does not depend on persistence. Correlation uses the canonical event
+        // item id when present, not one provider's payload alias.
+        const heartbeatToolId = event.itemId !== undefined ? String(event.itemId) : undefined;
+        const isEphemeralToolHeartbeat =
+          event.type === "tool.progress" &&
+          (event.payload.toolUseId !== undefined || heartbeatToolId !== undefined);
+        if (isContentProgress) {
+          threadPostStartActivity.recordContentProgress(thread.id, observedAt, observationTurnId);
+        }
+        if (isCanonicalToolOutput) {
+          threadPostStartActivity.recordActivity(
+            thread.id,
+            observedAt,
+            {
+              kind: "tool.progress",
+              payload: heartbeatToolId !== undefined ? { toolCallId: heartbeatToolId } : {},
+            },
+            observationTurnId,
+          );
+        }
+        if (isEphemeralToolHeartbeat) {
+          threadPostStartActivity.recordActivity(
+            thread.id,
+            observedAt,
+            {
+              kind: "tool.progress",
+              payload: {
+                ...event.payload,
+                ...(heartbeatToolId !== undefined ? { toolCallId: heartbeatToolId } : {}),
+              },
+            },
+            observationTurnId,
+          );
+        }
+        if (isContentProgress || isCanonicalToolOutput || isEphemeralToolHeartbeat) {
+          yield* nudgePostStartDelivery(thread.id, event, observationTurnId, observedAt);
+        }
+      }
 
       if (
         event.type === "session.started" ||
@@ -2579,6 +2705,11 @@ const make = Effect.gen(function* () {
       }
 
       const activities = runtimeEventToActivities(activityEvent, taskTitle);
+      // Persisted activity rows feed the same live observation, scoped to the
+      // turn the event named so a stale row cannot refresh a newer turn.
+      for (const activity of activities) {
+        threadPostStartActivity.recordActivity(thread.id, observedAt, activity, observationTurnId);
+      }
       yield* Effect.forEach(activities, (activity) =>
         providerCommandId(event, "thread-activity-append").pipe(
           Effect.flatMap((commandId) =>
@@ -2592,9 +2723,28 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+      // The turn is over: drop the live observation so the settled shell does
+      // not keep advertising provider progress. Only the accepted lifecycle
+      // owner may clear: a delayed completion rejected for a superseded turn
+      // must not erase the current turn's evidence.
+      if (event.type === "session.exited") {
+        threadPostStartActivity.clearThread(thread.id);
+      } else if (isTerminalTurn && shouldApplyThreadLifecycle) {
+        threadPostStartActivity.clearThread(thread.id, observationTurnId);
+      }
     });
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  // The request is accepted before the provider is sent: session is `starting`
+  // with `activeTurnId` null. Anchor post-start ownership here so late traffic
+  // from the turn that just ended cannot recreate live evidence for the new
+  // request (it would otherwise look like the new request's own progress).
+  const processDomainEvent = (event: TurnStartRequestedDomainEvent) =>
+    Effect.sync(() => {
+      threadPostStartActivity.beginPendingRequest(
+        event.payload.threadId,
+        String(event.payload.messageId),
+      );
+    });
 
   // Records a mid-turn placeholder checkpoint for a provider diff. Runs on the
   // lifecycle worker, after repository detection, so the running-turn check
