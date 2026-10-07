@@ -9,11 +9,11 @@ import {
   type OrchestrationEvent,
   type ProviderInstanceConfig,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -729,7 +729,7 @@ const writeSparseLessGit = (binDir: string, realGit: string): void => {
   writeFakeCli({
     directory: binDir,
     name: "git",
-    platform: process.platform,
+    platform: HostProcessPlatform.defaultValue(),
     source: [
       'import { spawnSync } from "node:child_process";',
       "const args = process.argv.slice(2);",
@@ -745,9 +745,13 @@ const writeSparseLessGit = (binDir: string, realGit: string): void => {
 };
 
 const resolveRealGitPath = (): string =>
-  NodeChildProcess.execFileSync(process.platform === "win32" ? "where.exe" : "which", ["git"], {
-    encoding: "utf8",
-  })
+  NodeChildProcess.execFileSync(
+    HostProcessPlatform.defaultValue() === "win32" ? "where.exe" : "which",
+    ["git"],
+    {
+      encoding: "utf8",
+    },
+  )
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => line.length > 0) ?? "git";
@@ -864,7 +868,11 @@ it.live(
       // A Windows junction (or a POSIX directory symlink) is a real alias of the
       // same physical directory; the lexical spellings differ.
       yield* Effect.promise(() =>
-        NodeFSP.symlink(realRoot, aliasRoot, process.platform === "win32" ? "junction" : "dir"),
+        NodeFSP.symlink(
+          realRoot,
+          aliasRoot,
+          HostProcessPlatform.defaultValue() === "win32" ? "junction" : "dir",
+        ),
       );
       yield* Effect.promise(async () => {
         NodeChildProcess.execFileSync(resolveRealGitPath(), ["init", "-q"], { cwd: realRoot });

@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { assert, it } from "@effect/vitest";
 import { CheckpointRef } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -22,7 +23,8 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { writeFakeCli } from "../testUtils/fakeCli.ts";
 import * as LaunchPreflight from "./LaunchPreflight.ts";
 
-const isWindows = process.platform === "win32";
+const hostPlatform = HostProcessPlatform.defaultValue();
+const isWindows = hostPlatform === "win32";
 
 /** Resolves the real Git executable the same way on every host. */
 const resolveRealGitPath = (): string => {
@@ -49,7 +51,7 @@ const writeGitStub = (binDir: string, body: string, realGit: string): string => 
     directory: binDir,
     name: "git",
     source: body.replaceAll("__REAL_GIT__", JSON.stringify(realGit)),
-    platform: process.platform,
+    platform: hostPlatform,
   });
 };
 
@@ -1279,4 +1281,52 @@ it.live(
 
       yield* Effect.promise(() => NodeFSP.rm(base, { recursive: true, force: true }));
     }).pipe(Effect.provide(E3PreflightLayer)),
+);
+
+it.effect("provider Git failure never blocks healthy T3 VCS Git", () =>
+  Effect.gen(function* () {
+    const providerEnv = { PATH: "/provider-only" };
+    const result = yield* run({
+      ...input({
+        root: "/repo",
+        consumer: { driver: "opencode", snapshotsEnabled: true },
+        git: gitProbe({
+          version: (_root, env) =>
+            env === providerEnv ? Effect.fail(probeError("unavailable")) : Effect.succeed("2.55.0"),
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          probeSparseAdd: (_root, env) =>
+            env === providerEnv
+              ? Effect.fail(probeError("unavailable"))
+              : Effect.succeed("supported"),
+        }),
+        files: { exists: () => Effect.succeed(true) },
+      }),
+      providerGitEnvironment: providerEnv,
+    });
+    assert.deepStrictEqual(result.blockers, []);
+    assert.include(codes(result), "git-probe-failed");
+  }),
+);
+
+it.effect("T3 sparse capability uses host Git when provider snapshots are disabled", () =>
+  Effect.gen(function* () {
+    const providerEnv = { PATH: "/provider-only" };
+    const result = yield* run({
+      ...input({
+        root: "/repo",
+        consumer: { driver: "opencode", snapshotsEnabled: false },
+        git: gitProbe({
+          resolveIdentity: () =>
+            Effect.succeed(identity({ state: "ok", topLevel: "/repo", commonDir: "/repo/.git" })),
+          isSparseCheckout: () => Effect.succeed(true),
+          probeSparseAdd: (_root, env) =>
+            Effect.succeed(env === providerEnv ? "supported" : "unsupported"),
+        }),
+      }),
+      providerGitEnvironment: providerEnv,
+    });
+    assert.include(codes(result), "git-sparse-add-unsupported");
+    assert.include(result.warnings[0]?.message ?? "", "T3 Code");
+  }),
 );

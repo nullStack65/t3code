@@ -213,10 +213,11 @@ export interface LaunchPreflightInput {
    */
   readonly consumer?: LaunchPreflightConsumer;
   /**
-   * The environment the selected provider launch actually resolves `git` with
-   * (the same environment the adapter inherits). Absent means the host env.
+   * The environment T3 VCS resolves `git` with. Absent means the host env.
    */
   readonly gitEnvironment?: NodeJS.ProcessEnv;
+  /** Local provider snapshot Git; T3 VCS continues to use gitEnvironment or the host. */
+  readonly providerGitEnvironment?: NodeJS.ProcessEnv;
 }
 
 const parseGitVersion = (output: string): string | null =>
@@ -515,21 +516,32 @@ export const runLaunchPreflight = (
         // unknown rather than assumed.
         const sparseCheckoutVerified =
           sparseConfigOutcome._tag === "ok" && sparseConfigOutcome.value;
-        const sparseApplicable = requiredByConsumer || sparseCheckoutVerified;
-        if (sparseApplicable) {
-          const sparseOutcome = yield* input.git
-            .probeSparseAdd(input.root, input.gitEnvironment)
-            .pipe(
-              Effect.map((state) => ({ _tag: "ok" as const, state })),
-              Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
-              Effect.timeoutOption(GIT_PROBE_TIMEOUT),
-              Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
-            );
+        const capabilityTargets = [
+          ...(sparseCheckoutVerified ||
+          (requiredByConsumer && input.providerGitEnvironment === undefined)
+            ? [
+                {
+                  env: input.gitEnvironment,
+                  provider: requiredByConsumer && input.providerGitEnvironment === undefined,
+                },
+              ]
+            : []),
+          ...(requiredByConsumer && input.providerGitEnvironment !== undefined
+            ? [{ env: input.providerGitEnvironment, provider: true }]
+            : []),
+        ];
+        for (const target of capabilityTargets) {
+          const sparseOutcome = yield* input.git.probeSparseAdd(input.root, target.env).pipe(
+            Effect.map((state) => ({ _tag: "ok" as const, state })),
+            Effect.catch((error) => Effect.succeed({ _tag: "error" as const, error })),
+            Effect.timeoutOption(GIT_PROBE_TIMEOUT),
+            Effect.map(Option.getOrElse(() => ({ _tag: "timeout" as const }))),
+          );
           if (sparseOutcome._tag === "ok" && sparseOutcome.state === "unsupported") {
             yield* add({
               code: "git-sparse-add-unsupported",
               severity: "warning",
-              message: requiredByConsumer
+              message: target.provider
                 ? "The selected OpenCode session snapshots this repository with `git add --sparse`, but the " +
                   "Git this launch resolves does not support `--sparse`. Staging changed and untracked files " +
                   "for a snapshot will fail, so snapshots may be incomplete. Install a newer Git (or disable " +
@@ -679,6 +691,8 @@ export class LaunchPreflight extends Context.Service<
         readonly configuredRoot?: string;
         readonly consumer?: LaunchPreflightConsumer;
         readonly gitEnvironment?: NodeJS.ProcessEnv;
+        /** Local provider snapshot Git; T3 VCS continues to use gitEnvironment or the host. */
+        readonly providerGitEnvironment?: NodeJS.ProcessEnv;
       },
     ) => Effect.Effect<LaunchPreflightResult>;
   }
@@ -856,6 +870,9 @@ export const make = Effect.gen(function* () {
         ...(options?.consumer !== undefined ? { consumer: options.consumer } : {}),
         ...(options?.gitEnvironment !== undefined
           ? { gitEnvironment: options.gitEnvironment }
+          : {}),
+        ...(options?.providerGitEnvironment !== undefined
+          ? { providerGitEnvironment: options.providerGitEnvironment }
           : {}),
       }).pipe(Effect.provideService(Path.Path, path)),
   });

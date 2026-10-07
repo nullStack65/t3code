@@ -541,6 +541,30 @@ it.live("a launch-preflight warning is reported and the session still starts onc
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.live("an unexpected preflight failure warns and starts the provider once", () =>
+  Effect.gen(function* () {
+    const reported = yield* Ref.make<ReadonlyArray<string>>([]);
+    const fixture = yield* makeIntegrationFixture({
+      launchPreflightRunner: () => Effect.die("unexpected probe failure"),
+      reportLaunchPreflightWarning: ({ code }) =>
+        Ref.update(reported, (current) => [...current, code]).pipe(Effect.as(true)),
+    });
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = ThreadId.make("thread-preflight-defect");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+      });
+      assert.equal(fixture.harness.getStartCount(), 1);
+      assert.deepStrictEqual(yield* Ref.get(reported), ["git-probe-failed"]);
+    }).pipe(Effect.provide(fixture.layer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live("the same repository at the server cwd is ordinary by default", () =>
   Effect.gen(function* () {
     const seen: Array<{ readonly isSharedRoot?: boolean; readonly configuredRoot?: string }> = [];
@@ -636,7 +660,7 @@ it.live("the launch preflight inspects the selected provider environment", () =>
     const sentinel = "envchk-integration-sentinel";
     const captured: Array<{
       readonly consumer?: LaunchPreflight.LaunchPreflightConsumer | undefined;
-      readonly gitEnvironment?: NodeJS.ProcessEnv | undefined;
+      readonly providerGitEnvironment?: NodeJS.ProcessEnv | undefined;
     }> = [];
     const fixture = yield* makeIntegrationFixture({
       settings: {
@@ -651,7 +675,10 @@ it.live("the launch preflight inspects the selected provider environment", () =>
         },
       },
       launchPreflightRunner: (_root, options) => {
-        captured.push({ consumer: options?.consumer, gitEnvironment: options?.gitEnvironment });
+        captured.push({
+          consumer: options?.consumer,
+          providerGitEnvironment: options?.providerGitEnvironment,
+        });
         return Effect.succeed(findingResult([]));
       },
     });
@@ -673,7 +700,7 @@ it.live("the launch preflight inspects the selected provider environment", () =>
     // The launch environment is the selected provider environment layered over
     // the host: the sentinel and PATH come from the instance (replacement),
     // while unrelated host variables are inherited.
-    const environment = captured[0]?.gitEnvironment;
+    const environment = captured[0]?.providerGitEnvironment;
     assert.isDefined(environment);
     assert.strictEqual(environment?.ENVCHK_SENTINEL, sentinel);
     assert.strictEqual(environment?.PATH, providerBin);

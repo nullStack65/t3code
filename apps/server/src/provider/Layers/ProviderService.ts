@@ -598,12 +598,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const result = yield* runLaunchPreflight(input.cwd, {
       ...(configuredRoot !== undefined ? { configuredRoot } : {}),
       ...(consumer !== undefined ? { consumer } : {}),
-      ...(gitEnvironment !== undefined ? { gitEnvironment } : {}),
+      ...(gitEnvironment !== undefined ? { providerGitEnvironment: gitEnvironment } : {}),
     }).pipe(
       Effect.catchCause(() =>
         Effect.succeed({
-          findings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
-          warnings: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
+          findings: [
+            {
+              code: "git-probe-failed" as const,
+              severity: "warning" as const,
+              message:
+                "The launch preflight could not finish. Check the server logs and Git installation; the session can still start.",
+            },
+          ],
+          warnings: [
+            {
+              code: "git-probe-failed" as const,
+              severity: "warning" as const,
+              message:
+                "The launch preflight could not finish. Check the server logs and Git installation; the session can still start.",
+            },
+          ],
           blockers: [] as ReadonlyArray<LaunchPreflight.LaunchPreflightFinding>,
         }),
       ),
