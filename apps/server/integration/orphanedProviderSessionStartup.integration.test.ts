@@ -48,6 +48,7 @@ import * as AnalyticsService from "../src/telemetry/AnalyticsService.ts";
 import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 
+// These fixtures hydrate pre-existing provider sessions; no new coding worktree is launched.
 const providerInstanceId = ProviderInstanceId.make("codex");
 const projectId = ProjectId.make("project-startup-orphan");
 const threadId = ThreadId.make("thread-startup-orphan");
@@ -62,6 +63,11 @@ const makePersistedRuntimeLayer = (dbPath: string) => {
   const persistence = makeSqlitePersistenceLive(dbPath);
   const orchestration = OrchestrationLayerLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolver.layer),
+    Layer.provide(
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-startup-orphan")),
+      }),
+    ),
     Layer.provideMerge(persistence),
   );
   const directory = ProviderSessionDirectoryLive.pipe(
@@ -92,6 +98,9 @@ const startupDependencies = Layer.mergeAll(
       platform: { os: "linux", arch: "x64" },
       capabilities: {},
     } as never),
+  }),
+  Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+    getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-startup-orphan")),
   }),
   Layer.mock(EnvironmentAuth.EnvironmentAuth)({
     issueStartupPairingUrl: (baseUrl: string) => Effect.succeed(`${baseUrl}/pair`),
@@ -174,6 +183,7 @@ it.effect(
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
         yield* engine.dispatch({
@@ -226,6 +236,7 @@ it.effect(
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
         yield* engine.dispatch({
@@ -411,6 +422,7 @@ it.effect.each(["opt-in desktop restart", "marked remote update"] as const)(
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
         yield* engine.dispatch({

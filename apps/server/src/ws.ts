@@ -1,3 +1,4 @@
+import { coordinationWorkspacePath, safeThreadPathSegment } from "./project/ThreadWorktree.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -15,6 +16,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
@@ -178,6 +180,32 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+
+const threadCreateLeases = new Map<
+  string,
+  { readonly semaphore: Semaphore.Semaphore; users: number }
+>();
+const withThreadCreateLease = <A, E, R>(
+  threadId: string,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.suspend(() => {
+    const lease = threadCreateLeases.get(threadId) ?? {
+      semaphore: Semaphore.makeUnsafe(1),
+      users: 0,
+    };
+    threadCreateLeases.set(threadId, lease);
+    lease.users++;
+    return lease.semaphore.withPermit(effect).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          lease.users--;
+          if (lease.users === 0) threadCreateLeases.delete(threadId);
+        }),
+      ),
+    );
+  });
+
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1088,12 +1116,111 @@ const makeWsRpcLayer = (
                 "A destination-bound callback cannot use thread bootstrap. No setup or message was ingested; submit it to the existing destination thread after correcting its route.",
             });
           }
-          const bootstrap = command.bootstrap;
+          let bootstrap = command.bootstrap;
+          if (bootstrap?.createThread) {
+            const create = bootstrap.createThread;
+            const scope = create.executionScope ?? "coding";
+            const project = yield* projectionSnapshotQuery
+              .getProjectShellById(create.projectId)
+              .pipe(
+                Effect.map(Option.getOrNull),
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Cannot resolve destination project"),
+                ),
+              );
+            if (!project)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "Destination project is missing.",
+              });
+            if (scope === "coordinator") {
+              if (bootstrap.prepareWorktree) {
+                return yield* new OrchestrationDispatchCommandError({
+                  message: "Coordinator threads cannot request a repository worktree.",
+                });
+              }
+              const cwd = yield* Effect.gen(function* () {
+                const fs = yield* FileSystem.FileSystem;
+                const path = yield* Path.Path;
+                const cwd = coordinationWorkspacePath(config.stateDir, command.threadId, path);
+                yield* fs.makeDirectory(cwd, { recursive: true });
+                return cwd;
+              }).pipe(
+                Effect.provide(normalizerContext),
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Cannot prepare coordinator workspace"),
+                ),
+              );
+              bootstrap = {
+                ...bootstrap,
+                createThread: {
+                  ...create,
+                  executionScope: scope,
+                  branch: null,
+                  worktreePath: cwd,
+                },
+              };
+            } else {
+              if (
+                bootstrap.prepareWorktree &&
+                bootstrap.prepareWorktree.projectCwd !== project.workspaceRoot
+              ) {
+                return yield* new OrchestrationDispatchCommandError({
+                  message:
+                    "Worktree allocation must use the destination project's local repository path.",
+                });
+              }
+              if (create.worktreePath === null) {
+                bootstrap = {
+                  ...bootstrap,
+                  createThread: { ...create, executionScope: scope },
+                  prepareWorktree: {
+                    ...(bootstrap.prepareWorktree ?? {
+                      projectCwd: project.workspaceRoot,
+                      baseBranch: create.branch ?? "HEAD",
+                      branch: `t3/thread-${safeThreadPathSegment(command.threadId)}`,
+                    }),
+                    requireWorktree: true,
+                  },
+                };
+              } else {
+                bootstrap = { ...bootstrap, createThread: { ...create, executionScope: scope } };
+              }
+            }
+          } else if (bootstrap?.prepareWorktree) {
+            const thread = yield* projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
+              Effect.map(Option.getOrNull),
+              Effect.mapError((cause) =>
+                toDispatchCommandError(cause, "Cannot resolve destination thread"),
+              ),
+            );
+            if (thread?.executionScope === "coding") {
+              const project = yield* projectionSnapshotQuery
+                .getProjectShellById(thread.projectId)
+                .pipe(
+                  Effect.map(Option.getOrNull),
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Cannot resolve destination project"),
+                  ),
+                );
+              if (!project || project.workspaceRoot !== bootstrap.prepareWorktree.projectCwd) {
+                return yield* new OrchestrationDispatchCommandError({
+                  message:
+                    "Worktree allocation must use the destination project's local repository path.",
+                });
+              }
+              bootstrap = {
+                ...bootstrap,
+                prepareWorktree: { ...bootstrap.prepareWorktree, requireWorktree: true },
+              };
+            }
+          }
           const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
           let createdThread = false;
           let targetProjectId = bootstrap?.createThread?.projectId;
           let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
           let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
+          let allocatedWorktreeThisAttempt = false;
+          let acceptedHandoff = false;
           // The setup script's terminal, once started. Cancel closes only this
           // one so terminals the user opened meanwhile survive.
           let setupTerminalId: string | null = null;
@@ -1123,7 +1250,7 @@ const makeWsRpcLayer = (
               });
             });
           const cleanupCreatedThread = () =>
-            createdThread
+            createdThread && !acceptedHandoff
               ? serverCommandId("bootstrap-thread-delete").pipe(
                   Effect.flatMap((commandId) =>
                     dispatchFromClient({
@@ -1429,7 +1556,10 @@ const makeWsRpcLayer = (
               );
             }
 
-            if (bootstrap?.createThread) {
+            if (
+              bootstrap?.createThread &&
+              (bootstrap.createThread.executionScope === "coordinator" || !prepareWorktree)
+            ) {
               const created = yield* dispatchFromClient({
                 type: "thread.create",
                 commandId: yield* serverCommandId("bootstrap-thread-create"),
@@ -1441,6 +1571,7 @@ const makeWsRpcLayer = (
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
+                executionScope: bootstrap.createThread.executionScope ?? "coding",
                 createdAt: bootstrap.createThread.createdAt,
               });
               // The successful create is a fence in the engine command queue:
@@ -1506,74 +1637,88 @@ const makeWsRpcLayer = (
                 threadId,
                 projectId: targetProjectId ?? null,
               });
-              const worktree = yield* gitWorkflow.createWorktree(
-                {
-                  cwd: prepareWorktree.projectCwd,
-                  refName: worktreeBaseRef,
-                  newRefName: prepareWorktree.branch,
-                  baseRefName: prepareWorktree.baseBranch,
-                  path: null,
-                },
-                {
-                  submodules,
-                  progress: {
-                    // Git has registered the directory at this point, so a
-                    // cancel during the submodule step can still remove it.
-                    onWorktreeClaimed: (path) =>
-                      Effect.sync(() => {
-                        targetWorktreePath = path;
-                      }),
-                    onCheckoutProgress: ({ percent, completed, total }) => {
-                      checkoutTotal = total;
-                      return worktreeSetupTracker.stage(threadId, "checkout", {
-                        percent,
-                        detail: `${completed.toLocaleString("en-US")} / ${total.toLocaleString("en-US")} files`,
-                      });
-                    },
-                    onSubmodulesStarted: () =>
-                      worktreeSetupTracker
-                        .stageStatus(
-                          threadId,
-                          "checkout",
-                          "done",
-                          checkoutTotal === null
-                            ? null
-                            : `${checkoutTotal.toLocaleString("en-US")} files`,
-                        )
-                        .pipe(
-                          Effect.andThen(
-                            worktreeSetupTracker.stageStatus(threadId, "submodules", "running"),
-                          ),
-                        ),
-                    onSubmodulesDisabled: ({ source }) =>
-                      worktreeSetupTracker.stageStatus(
-                        threadId,
-                        "submodules",
-                        "skipped",
-                        `disabled in ${source}`,
-                      ),
-                    onSubmoduleLine: (line) => {
-                      const submodulePath = /Submodule path '([^']+)'/.exec(line)?.[1];
-                      return submodulePath === undefined
-                        ? Effect.void
-                        : worktreeSetupTracker.stage(threadId, "submodules", {
-                            detail: submodulePath,
-                          });
-                    },
-                    onSubmodulesFinished: ({ ok, detail }) =>
-                      worktreeSetupTracker.stageStatus(
-                        threadId,
-                        "submodules",
-                        ok ? "done" : "warning",
-                        ok ? undefined : (detail ?? "submodule checkout failed"),
-                      ),
-                  },
-                },
+              const fs = yield* FileSystem.FileSystem;
+              const path = yield* Path.Path;
+              let branch = prepareWorktree.branch ?? `t3/thread-${safeThreadPathSegment(threadId)}`;
+              let worktreePath = path.join(
+                config.worktreesDir,
+                path.basename(prepareWorktree.projectCwd),
+                branch.replaceAll("/", "-"),
               );
+              const existingWorktree = yield* fs.exists(worktreePath);
+              if (!existingWorktree) {
+                const worktree = yield* gitWorkflow.createWorktree(
+                  {
+                    cwd: prepareWorktree.projectCwd,
+                    refName: worktreeBaseRef,
+                    newRefName: branch,
+                    baseRefName: prepareWorktree.baseBranch,
+                    path: worktreePath,
+                  },
+                  {
+                    submodules,
+                    progress: {
+                      // Git has registered the directory at this point, so a
+                      // cancel during the submodule step can still remove it.
+                      onWorktreeClaimed: (path) =>
+                        Effect.sync(() => {
+                          targetWorktreePath = path;
+                          allocatedWorktreeThisAttempt = true;
+                        }),
+                      onCheckoutProgress: ({ percent, completed, total }) => {
+                        checkoutTotal = total;
+                        return worktreeSetupTracker.stage(threadId, "checkout", {
+                          percent,
+                          detail: `${completed.toLocaleString("en-US")} / ${total.toLocaleString("en-US")} files`,
+                        });
+                      },
+                      onSubmodulesStarted: () =>
+                        worktreeSetupTracker
+                          .stageStatus(
+                            threadId,
+                            "checkout",
+                            "done",
+                            checkoutTotal === null
+                              ? null
+                              : `${checkoutTotal.toLocaleString("en-US")} files`,
+                          )
+                          .pipe(
+                            Effect.andThen(
+                              worktreeSetupTracker.stageStatus(threadId, "submodules", "running"),
+                            ),
+                          ),
+                      onSubmodulesDisabled: ({ source }) =>
+                        worktreeSetupTracker.stageStatus(
+                          threadId,
+                          "submodules",
+                          "skipped",
+                          `disabled in ${source}`,
+                        ),
+                      onSubmoduleLine: (line) => {
+                        const submodulePath = /Submodule path '([^']+)'/.exec(line)?.[1];
+                        return submodulePath === undefined
+                          ? Effect.void
+                          : worktreeSetupTracker.stage(threadId, "submodules", {
+                              detail: submodulePath,
+                            });
+                      },
+                      onSubmodulesFinished: ({ ok, detail }) =>
+                        worktreeSetupTracker.stageStatus(
+                          threadId,
+                          "submodules",
+                          ok ? "done" : "warning",
+                          ok ? undefined : (detail ?? "submodule checkout failed"),
+                        ),
+                    },
+                  },
+                );
+                branch = worktree.worktree.refName;
+                worktreePath = worktree.worktree.path;
+              }
               const checkoutEndedAt = yield* nowIso;
               yield* worktreeSetupTracker.update(threadId, (snapshot) => ({
                 ...snapshot,
-                worktreePath: worktree.worktree.path,
+                worktreePath,
                 stages: snapshot.stages.map((stage) => {
                   if (stage.id === "checkout" && stage.status === "running") {
                     return {
@@ -1593,12 +1738,66 @@ const makeWsRpcLayer = (
                   return stage;
                 }),
               }));
-              targetWorktreePath = worktree.worktree.path;
+              targetWorktreePath = worktreePath;
+              if (bootstrap?.createThread && !createdThread) {
+                const created = yield* dispatchFromClient({
+                  type: "thread.create",
+                  commandId: yield* serverCommandId("bootstrap-thread-create"),
+                  threadId: command.threadId,
+                  projectId: bootstrap.createThread.projectId,
+                  title: bootstrap.createThread.title,
+                  modelSelection: bootstrap.createThread.modelSelection,
+                  runtimeMode: bootstrap.createThread.runtimeMode,
+                  interactionMode: bootstrap.createThread.interactionMode,
+                  branch,
+                  worktreePath: targetWorktreePath,
+                  executionScope: "coding",
+                  createdAt: bootstrap.createThread.createdAt,
+                });
+                createdThread = true;
+                yield* threadDeletionReactor.drainThrough(created.sequence);
+                yield* dispatchFromClient({
+                  type: "thread.message.user.append",
+                  commandId: yield* serverCommandId("bootstrap-thread-message"),
+                  threadId: command.threadId,
+                  message: {
+                    messageId: command.message.messageId,
+                    text: command.message.text,
+                    attachments: command.message.attachments,
+                    ...(command.message.context !== undefined
+                      ? { context: command.message.context }
+                      : {}),
+                  },
+                  createdAt: command.createdAt,
+                });
+                if (tracked) {
+                  const running = yield* worktreeSetupTracker.get(threadId);
+                  if (running) yield* recordWorktreeSetup(running);
+                  const preparingAt = yield* nowIso;
+                  yield* dispatchFromClient({
+                    type: "thread.session.set",
+                    commandId: yield* serverCommandId("bootstrap-thread-preparing"),
+                    threadId,
+                    session: {
+                      threadId,
+                      status: "starting",
+                      providerName: null,
+                      providerInstanceId: bootstrap.createThread.modelSelection.instanceId,
+                      runtimeMode: command.runtimeMode,
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: preparingAt,
+                    },
+                    createdAt: preparingAt,
+                  });
+                  preparingSessionSet = true;
+                }
+              }
               yield* dispatchFromClient({
                 type: "thread.meta.update",
                 commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
                 threadId,
-                branch: worktree.worktree.refName,
+                branch,
                 worktreePath: targetWorktreePath,
               });
               yield* refreshGitStatus(targetWorktreePath);
@@ -1613,6 +1812,9 @@ const makeWsRpcLayer = (
             const started = yield* Effect.uninterruptible(
               dispatchFromClient(finalTurnStartCommand),
             );
+            // The agent has accepted the turn. Later setup-card bookkeeping
+            // must not roll back an accepted thread or its worktree.
+            acceptedHandoff = true;
             yield* track(worktreeSetupTracker.stageStatus(threadId, "agent", "done"));
             // An async setup script outlives the handoff: the snapshot stays
             // running so the client keeps its row next to the agent's work,
@@ -1699,7 +1901,10 @@ const makeWsRpcLayer = (
                     })
                   : Effect.void;
                 const removeCreatedWorktree =
-                  tracked && targetWorktreePath && bootstrap?.prepareWorktree
+                  !acceptedHandoff &&
+                  allocatedWorktreeThisAttempt &&
+                  targetWorktreePath &&
+                  bootstrap?.prepareWorktree
                     ? closeSetupTerminal.pipe(
                         Effect.ignoreCause({ log: true }),
                         Effect.andThen(
@@ -1781,15 +1986,104 @@ const makeWsRpcLayer = (
             : settledBootstrapProgram;
 
           return yield* runBootstrap;
-        });
+        }).pipe(
+          Effect.provideContext(normalizerContext),
+          Effect.mapError((cause) =>
+            toDispatchCommandError(cause, "Failed to prepare destination worktree"),
+          ),
+        );
+
+      const prepareDirectThreadCreate = Effect.fnUntraced(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.create" }>,
+      ) {
+        // History import preserves the provider's recorded cwd, and is not a new coding launch.
+        const existing = yield* projectionSnapshotQuery.getThreadShellById(command.threadId);
+        // Replay reaches the existing command receipt without allocating again.
+        if (Option.isSome(existing) || command.historyImport === true) return command;
+        const executionScope = command.executionScope ?? "coding";
+        if (executionScope !== "coding") {
+          if (executionScope === "coordinator" && command.worktreePath === null) {
+            const cwd = yield* Effect.gen(function* () {
+              const fs = yield* FileSystem.FileSystem;
+              const path = yield* Path.Path;
+              const cwd = coordinationWorkspacePath(config.stateDir, command.threadId, path);
+              yield* fs.makeDirectory(cwd, { recursive: true });
+              return cwd;
+            }).pipe(Effect.provide(normalizerContext));
+            return { ...command, executionScope, worktreePath: cwd };
+          }
+          return { ...command, executionScope };
+        }
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(command.projectId)
+          .pipe(Effect.map(Option.getOrNull));
+        if (!project)
+          return yield* new OrchestrationDispatchCommandError({
+            message: "Destination project is missing.",
+          });
+        let branch = command.branch;
+        let worktreePath = command.worktreePath;
+        if (worktreePath === null) {
+          const refName = branch ?? "HEAD";
+          if (
+            !(yield* gitWorkflow.isRepository(project.workspaceRoot)) ||
+            !(yield* gitWorkflow.hasCommit({ cwd: project.workspaceRoot, refName }))
+          ) {
+            return yield* new OrchestrationDispatchCommandError({
+              message:
+                "Coding requires a Git repository with a committed base. Select a repository project or choose Coordinator for noncoding work.",
+            });
+          }
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          branch = `t3/thread-${safeThreadPathSegment(command.threadId)}`;
+          worktreePath = path.join(
+            config.worktreesDir,
+            path.basename(project.workspaceRoot),
+            branch.replaceAll("/", "-"),
+          );
+          if (!(yield* fs.exists(worktreePath))) {
+            const worktree = yield* gitWorkflow.createWorktree({
+              cwd: project.workspaceRoot,
+              refName,
+              newRefName: branch,
+              baseRefName: refName,
+              path: worktreePath,
+            });
+            worktreePath = worktree.worktree.path;
+          }
+        }
+        return { ...command, executionScope, branch, worktreePath };
+      });
 
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
+        if (
+          normalizedCommand.type === "thread.create" &&
+          normalizedCommand.historyImport === true
+        ) {
+          return Effect.fail(
+            new OrchestrationDispatchCommandError({
+              message: "History imports are reserved for the server's internal session importer.",
+            }),
+          );
+        }
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
-            : dispatchFromClient(normalizedCommand).pipe(
+            ? withThreadCreateLease(
+                normalizedCommand.threadId,
+                dispatchBootstrapTurnStart(normalizedCommand),
+              )
+            : (normalizedCommand.type === "thread.create"
+                ? withThreadCreateLease(
+                    normalizedCommand.threadId,
+                    prepareDirectThreadCreate(normalizedCommand).pipe(
+                      Effect.flatMap(dispatchFromClient),
+                    ),
+                  ).pipe(Effect.provideContext(normalizerContext))
+                : dispatchFromClient(normalizedCommand)
+              ).pipe(
                 Effect.tap(({ sequence }) =>
                   // Returning from thread.create is the handoff point at which
                   // clients may start resources for the new incarnation. Use

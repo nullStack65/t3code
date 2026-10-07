@@ -2,6 +2,7 @@
 import {
   CommandId,
   GrokSettings,
+  EnvironmentId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -58,11 +59,16 @@ import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapt
 import { ServerSettingsService } from "../src/serverSettings.ts";
 import { execScriptSource, writeFakeCli } from "../src/testUtils/fakeCli.ts";
 import { AnalyticsService } from "../src/telemetry/AnalyticsService.ts";
+import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import { makeTestProviderAdapterHarness } from "./TestProviderAdapter.integration.ts";
 
 const codexInstanceId = ProviderInstanceId.make("codex");
 const grokInstanceId = ProviderInstanceId.make("grok");
+const serverEnvironmentIdentityTestLayer = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  { getEnvironmentId: Effect.succeed(EnvironmentId.make("launch-preflight-delivery-test")) },
+);
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const findingResult = (
@@ -92,6 +98,7 @@ const orchestrationEngineLayer = Layer.mergeAll(
   Layer.provide(RepositoryIdentityResolver.layer),
   Layer.provide(SqlitePersistenceMemory),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-a3-engine-" })),
+  Layer.provideMerge(serverEnvironmentIdentityTestLayer),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -103,6 +110,7 @@ const makeWorkspaceDirectory = Effect.gen(function* () {
   return cwd;
 }).pipe(Effect.provide(NodeServices.layer));
 
+// Both Engine-only thread seeds are legacy fixtures; provider startup is driven explicitly below.
 it.live(
   "A3: the production reporter delivers a real pre-thread warning through the real subscription",
   () =>
@@ -210,6 +218,7 @@ it.live(
           interactionMode: "default",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt: "2026-09-28T00:00:00.000Z",
         });
 
@@ -445,6 +454,7 @@ it.live(
           interactionMode: "default",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt: "2026-09-28T00:00:00.000Z",
         });
         const session = yield* provider.startSession(threadId, {

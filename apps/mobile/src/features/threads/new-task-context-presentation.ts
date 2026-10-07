@@ -1,13 +1,25 @@
 type WorkspaceMode = "local" | "worktree";
 
+/** Every newly created coding thread receives a server-owned worktree. */
+export function newThreadCreationPreparesWorktree(
+  input:
+    | {
+        readonly executionScope?: "coding" | "coordinator" | null;
+        readonly workspaceMode?: WorkspaceMode;
+      }
+    | null
+    | undefined,
+): boolean {
+  return input !== null && input !== undefined && input.executionScope !== "coordinator";
+}
+
 export function resolveNewTaskWorkspaceLabel(input: {
   readonly workspaceMode: WorkspaceMode;
-  readonly worktreePath: string | null;
-}): "Current checkout" | "Current worktree" | "New worktree" {
+}): "Coding worktree" | "New worktree" {
   if (input.workspaceMode === "worktree") {
     return "New worktree";
   }
-  return input.worktreePath ? "Current worktree" : "Current checkout";
+  return "Coding worktree";
 }
 
 export function resolveNewTaskBranchWorktreePath(input: {
