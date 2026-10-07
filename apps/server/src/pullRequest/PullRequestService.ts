@@ -2320,54 +2320,76 @@ export const make = Effect.gen(function* () {
 
   const requestReviewers: PullRequestService["Service"]["requestReviewers"] = (input) =>
     Effect.gen(function* () {
+      const invalid = () =>
+        new PullRequestOperationError({
+          operation: "requestReviewers",
+          detail: AMBIGUOUS_REVIEWER_REQUEST_REFUSAL,
+        });
       const reviewer = input.reviewers.length === 1 ? input.reviewers[0] : undefined;
       if (
-        input.expectedAccountId !== OWNER_GITHUB_ACCOUNT_ID ||
-        reviewer?.kind !== "user" ||
-        reviewer.id.toLowerCase() !== OWNER_GITHUB_LOGIN
+        input.reviewers.length === 0 ||
+        (input.requested &&
+          (reviewer?.kind !== "user" || reviewer.id.toLowerCase() !== OWNER_GITHUB_LOGIN))
       ) {
-        return yield* new PullRequestOperationError({
-          operation: "requestReviewers",
-          detail: AMBIGUOUS_REVIEWER_REQUEST_REFUSAL,
-        });
+        return yield* invalid();
       }
-      const credential = yield* routingCredential;
-      if (credential?.accountId !== OWNER_GITHUB_ACCOUNT_ID) {
-        return yield* new PullRequestOperationError({
-          operation: "requestReviewers",
-          detail: AMBIGUOUS_REVIEWER_REQUEST_REFUSAL,
-        });
+      if (
+        input.expectedAccountId !== undefined &&
+        input.expectedAccountId !== OWNER_GITHUB_ACCOUNT_ID
+      ) {
+        return yield* invalid();
       }
+
       const project = yield* requireProject(input);
-      if (project.api.kind !== "github") {
-        return yield* new PullRequestOperationError({
-          operation: "requestReviewers",
-          detail: AMBIGUOUS_REVIEWER_REQUEST_REFUSAL,
-        });
+      if (project.api.kind !== "github" || project.host.toLowerCase() !== "github.com") {
+        return yield* invalid();
       }
-      if (!project.api.capabilities.reviewers.request) {
-        return yield* new PullRequestOperationError({
-          operation: "requestReviewers",
-          detail: "This host cannot ask somebody for a review.",
-        });
+      const api = registry.get("github");
+      if (api?.withVerifiedCredential === undefined) return yield* invalid();
+
+      const perform = Effect.gen(function* () {
+        if (!project.api.capabilities.reviewers.request) {
+          return yield* new PullRequestOperationError({
+            operation: "requestReviewers",
+            detail: "This host cannot ask somebody for a review.",
+          });
+        }
+        const viewer = yield* viewerPermissionsOf(project, input, "requestReviewers");
+        if (!viewer.requestReviewers) {
+          return yield* new PullRequestOperationError({
+            operation: "requestReviewers",
+            detail: REVIEWER_REQUEST_REFUSAL,
+          });
+        }
+        yield* project.api
+          .setReviewerRequest({
+            cwd: project.project.workspaceRoot,
+            repository: project.repository,
+            host: project.host,
+            number: input.number,
+            reviewers: input.reviewers,
+            requested: input.requested,
+          })
+          .pipe(Effect.mapError(toPullRequestError("requestReviewers")));
+      });
+
+      const credential = yield* routingCredential;
+      if (credential !== null) {
+        if (credential.accountId !== OWNER_GITHUB_ACCOUNT_ID) return yield* invalid();
+        return yield* perform;
       }
-      const viewer = yield* viewerPermissionsOf(project, input, "requestReviewers");
-      if (!viewer.requestReviewers) {
-        return yield* new PullRequestOperationError({
-          operation: "requestReviewers",
-          detail: REVIEWER_REQUEST_REFUSAL,
-        });
-      }
-      yield* project.api
-        .setReviewerRequest({
-          cwd: project.project.workspaceRoot,
-          repository: project.repository,
-          host: project.host,
-          number: input.number,
-          reviewers: input.reviewers,
-          requested: input.requested,
-        })
-        .pipe(Effect.mapError(toPullRequestError("requestReviewers")));
+      const result = yield* api
+        .withVerifiedCredential(
+          { cwd: project.project.workspaceRoot, host: project.host },
+          (identity) =>
+            identity.accountId === OWNER_GITHUB_ACCOUNT_ID &&
+            (input.expectedAccountId === undefined ||
+              identity.accountId === input.expectedAccountId)
+              ? perform.pipe(Effect.provideService(routingCredential, identity), Effect.result)
+              : Effect.fail(invalid()),
+        )
+        .pipe(Effect.catchTag("PullRequestProviderError", () => Effect.fail(invalid())));
+      return yield* Effect.fromResult(result);
     });
 
   /**

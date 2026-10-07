@@ -2991,7 +2991,10 @@ it.effect(
 
 it.effect("allows a verified owner reviewer mutation through the existing provider path", () =>
   Effect.gen(function* () {
-    let sent: ReadonlyArray<{ id: string; kind: "user" | "team" }> = [];
+    const sent: Array<{
+      reviewers: ReadonlyArray<{ id: string; kind: "user" | "team" }>;
+      requested: boolean;
+    }> = [];
     const service = yield* makeService({
       projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
       providers: [
@@ -3011,7 +3014,7 @@ it.effect("allows a verified owner reviewer mutation through the existing provid
               requestReviewers: true,
             }),
           setReviewerRequest: (input) => {
-            sent = input.reviewers;
+            sent.push({ reviewers: input.reviewers, requested: input.requested });
             return Effect.void;
           },
         }),
@@ -3021,20 +3024,28 @@ it.effect("allows a verified owner reviewer mutation through the existing provid
       projectId: "p1" as ProjectId,
       repository: "acme/web",
       number: 1,
-      host: "github.com",
-      expectedAccountId: "112618179",
     };
 
-    yield* service.withRoutingCredential(
-      reference,
-      service.requestReviewers({
-        ...reference,
-        reviewers: [{ id: "nullStack65", kind: "user" }],
-        requested: true,
-      }),
-    );
+    yield* service.requestReviewers({
+      ...reference,
+      reviewers: [{ id: "nullStack65", kind: "user" }],
+      requested: true,
+    });
 
-    assert.deepStrictEqual(sent, [{ id: "nullStack65", kind: "user" }]);
+    yield* service.requestReviewers({
+      ...reference,
+      expectedAccountId: "112618179",
+      reviewers: [{ id: "octocat", kind: "user" }, { id: "reviewers", kind: "team" }],
+      requested: false,
+    });
+
+    assert.deepStrictEqual(sent, [
+      { reviewers: [{ id: "nullStack65", kind: "user" }], requested: true },
+      {
+        reviewers: [{ id: "octocat", kind: "user" }, { id: "reviewers", kind: "team" }],
+        requested: false,
+      },
+    ]);
   }),
 );
 
