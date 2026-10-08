@@ -60,7 +60,13 @@ describe("ProviderSettingsForm helpers", () => {
       "agentId",
       "commandPath",
       "authMethodId",
+      "rootSessionReplacement",
     ]);
+    expect(deriveProviderSettingsFields(acpRegistry!).at(-1)).toMatchObject({
+      key: "rootSessionReplacement",
+      control: "switch",
+      defaultBooleanValue: false,
+    });
   });
 
   it("derives a select control with its choices for the Antigravity sign-in method", () => {
