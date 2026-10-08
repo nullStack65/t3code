@@ -73,7 +73,30 @@ const modelSelection = (model: string): ModelSelection => ({
 interface FakePi {
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly emit: (record: PiRpcRecord) => Effect.Effect<void>;
+  /** Inject exactly one stdout chunk, without adding delimiters. */
+  readonly emitRaw: (chunk: string | Uint8Array) => Effect.Effect<void>;
+  /** Emit all records as newline-delimited JSON in one stdout chunk. */
+  readonly emitBatch: (records: ReadonlyArray<PiRpcRecord>) => Effect.Effect<void>;
   readonly takeRequest: (type: string) => Effect.Effect<PiRpcRecord>;
+  /** Wait for the get_state request that was explicitly deferred. */
+  readonly takeDeferredState: Effect.Effect<PiRpcRecord>;
+  /** Hold the next switch_session response until explicitly resolved. */
+  readonly deferNextSwitch: () => void;
+  /** Capture the actual deferred switch request, including its generated id. */
+  readonly takeDeferredSwitch: Effect.Effect<PiRpcRecord>;
+  /**
+   * Resolve the oldest held switch and emit before/response/after in one chunk.
+   * Defaults preserve the normal successful ack, including any queued veto.
+   * Returns the emitted response for explicit duplicate-response injection.
+   */
+  readonly resolveDeferredSwitch: (options?: {
+    readonly success?: boolean;
+    readonly cancelled?: boolean;
+    readonly command?: string;
+    readonly error?: unknown;
+    readonly before?: ReadonlyArray<PiRpcRecord>;
+    readonly after?: ReadonlyArray<PiRpcRecord>;
+  }) => Effect.Effect<PiRpcRecord>;
   /** Data returned by the next `get_entries` acks, consumed in order. */
   readonly queueEntries: (data: unknown) => void;
   /** Data returned by the next active-branch `get_messages` acks. */
@@ -96,6 +119,12 @@ interface FakePi {
   readonly queueCommands: (data: unknown) => void;
   /** Make the next `get_commands` ack fail. */
   readonly failNextCommands: () => void;
+  /** Make the next abort request return a negative RPC response. */
+  readonly failNextAbort: () => void;
+  /** Hold the next abort response while native events accumulate. */
+  readonly deferNextAbort: () => void;
+  readonly takeDeferredAbort: Effect.Effect<PiRpcRecord>;
+  readonly resolveDeferredAbort: (success?: boolean) => Effect.Effect<void>;
   /** Close the fake process stdout stream. */
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
@@ -111,6 +140,13 @@ interface FakePi {
 const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const requests = yield* Queue.unbounded<PiRpcRecord>();
+  const deferredStateRequests = yield* Queue.unbounded<PiRpcRecord>();
+  const deferredSwitchRequests = yield* Queue.unbounded<PiRpcRecord>();
+  const deferredAbortRequests = yield* Queue.unbounded<PiRpcRecord>();
+  const pendingSwitches: Array<{
+    readonly request: PiRpcRecord;
+    readonly cancelled: boolean;
+  }> = [];
   const entriesQueue: Array<unknown> = [];
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<unknown> = [];
@@ -119,14 +155,29 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
+  let deferSwitch = false;
   let failState = false;
+  let failAbort = false;
+  let deferAbort = false;
+  let deferredAbortRequest: PiRpcRecord | undefined;
   let vetoSwitch = false;
+  let currentModel: { provider: string; id: string } | null = null;
+  let currentSessionFile = FAKE_SESSION_FILE;
   let stdinBuffer = "";
 
   const emit = (record: PiRpcRecord) =>
     Queue.offer(stdout, new TextEncoder().encode(`${encodeJsonLine(record)}\n`)).pipe(
       Effect.asVoid,
     );
+
+  const emitRaw = (chunk: string | Uint8Array): Effect.Effect<void> =>
+    Queue.offer(
+      stdout,
+      typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk.slice(),
+    ).pipe(Effect.asVoid);
+
+  const emitBatch = (records: ReadonlyArray<PiRpcRecord>): Effect.Effect<void> =>
+    emitRaw(records.map((record) => `${encodeJsonLine(record)}\n`).join(""));
 
   const respondTo = (record: PiRpcRecord): PiRpcRecord | null => {
     if (typeof record["id"] !== "string") return null;
@@ -142,21 +193,33 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
           failState = false;
           return { ...base, success: false, error: "state unavailable" };
         }
+        const queuedState = stateQueue.shift();
         return {
           ...base,
-          data: stateQueue.shift() ?? {
-            model: null,
+          data: {
+            model: currentModel,
             thinkingLevel: "medium",
             isStreaming: false,
             isCompacting: false,
+            pendingMessageCount: 0,
             autoCompactionEnabled: true,
-            sessionFile: FAKE_SESSION_FILE,
+            sessionFile: currentSessionFile,
             sessionId: "abc",
+            ...(queuedState !== null && typeof queuedState === "object" ? queuedState : {}),
           },
         };
+      case "set_model":
+        currentModel = {
+          provider: String(record["provider"]),
+          id: String(record["modelId"]),
+        };
+        return { ...base, data: { model: currentModel } };
       case "switch_session": {
         const cancelled = vetoSwitch;
         vetoSwitch = false;
+        if (!cancelled && typeof record["sessionPath"] === "string") {
+          currentSessionFile = record["sessionPath"];
+        }
         return { ...base, data: { cancelled } };
       }
       case "get_entries":
@@ -167,6 +230,12 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: statsQueue.shift() ?? {} };
       case "get_commands":
         return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
+      case "abort":
+        if (failAbort) {
+          failAbort = false;
+          return { ...base, success: false, error: "abort rejected" };
+        }
+        return base;
       case "fork":
         return { ...base, data: { cancelled: false, message: "forked" } };
       default:
@@ -185,14 +254,25 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         if (line.length === 0) continue;
         const record = decodeJsonLine(line) as PiRpcRecord;
         allRequests.push(record);
-        yield* Queue.offer(requests, record);
         if (record["type"] === "get_state" && deferState) {
           deferState = false;
           deferredStateRequest = record;
-          continue;
+          yield* Queue.offer(deferredStateRequests, record);
+        } else if (record["type"] === "switch_session" && deferSwitch) {
+          deferSwitch = false;
+          assert.isString(record["id"]);
+          pendingSwitches.push({ request: record, cancelled: vetoSwitch });
+          vetoSwitch = false;
+          yield* Queue.offer(deferredSwitchRequests, record);
+        } else if (record["type"] === "abort" && deferAbort) {
+          deferAbort = false;
+          deferredAbortRequest = record;
+          yield* Queue.offer(deferredAbortRequests, record);
+        } else {
+          const response = respondTo(record);
+          if (response !== null) yield* emit(response);
         }
-        const response = respondTo(record);
-        if (response !== null) yield* emit(response);
+        yield* Queue.offer(requests, record);
       }
     });
 
@@ -235,7 +315,39 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   return {
     spawner,
     emit,
+    emitRaw,
+    emitBatch,
     takeRequest,
+    takeDeferredState: Queue.take(deferredStateRequests),
+    deferNextSwitch: () => {
+      deferSwitch = true;
+    },
+    takeDeferredSwitch: Queue.take(deferredSwitchRequests),
+    resolveDeferredSwitch: (options = {}) =>
+      Effect.gen(function* () {
+        const pending = pendingSwitches[0];
+        assert.isDefined(pending);
+        const record = pending!.request;
+        assert.isString(record["id"]);
+        const success = options.success ?? true;
+        const cancelled = options.cancelled ?? pending!.cancelled;
+        const response: PiRpcRecord = {
+          type: "response",
+          id: record["id"],
+          command: options.command ?? "switch_session",
+          success,
+          data: { cancelled },
+          ...(success ? {} : { error: options.error ?? "switch unavailable" }),
+        };
+        const batch = [...(options.before ?? []), response, ...(options.after ?? [])];
+        const chunk = batch.map((item) => `${encodeJsonLine(item)}\n`).join("");
+        pendingSwitches.shift();
+        if (success && !cancelled && typeof record["sessionPath"] === "string") {
+          currentSessionFile = record["sessionPath"];
+        }
+        yield* emitRaw(chunk);
+        return response;
+      }),
     queueEntries: (data) => entriesQueue.push(data),
     queueMessages: (data) => messagesQueue.push(data),
     deferNextState: () => {
@@ -265,6 +377,26 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
+    failNextAbort: () => {
+      failAbort = true;
+    },
+    deferNextAbort: () => {
+      deferAbort = true;
+    },
+    takeDeferredAbort: Queue.take(deferredAbortRequests),
+    resolveDeferredAbort: (success = true) =>
+      Effect.gen(function* () {
+        const record = deferredAbortRequest;
+        assert.isDefined(record);
+        deferredAbortRequest = undefined;
+        yield* emit({
+          type: "response",
+          id: record!["id"],
+          command: "abort",
+          success,
+          ...(success ? {} : { error: "abort rejected" }),
+        });
+      }),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -381,6 +513,28 @@ const startTurn = Effect.fnUntraced(function* (
   });
 });
 
+const errorText = (error: unknown): string => {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+    parts.push(String(current));
+    if (typeof current !== "object" || current === null) break;
+    if (Cause.isCause(current)) {
+      parts.push(Cause.pretty(current));
+      if ("error" in current) {
+        current = current.error;
+        continue;
+      }
+    }
+    if ("cause" in current) {
+      current = current.cause;
+      continue;
+    }
+    break;
+  }
+  return parts.join("\n");
+};
+
 const expectModelFailure = (errorMessage: string) =>
   Effect.gen(function* () {
     const fake = yield* makeFakePi;
@@ -421,6 +575,415 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(testLayer));
 
 describe("PiAdapterV2", () => {
+  it.effect("refuses a stale explicit model before sending and allows a clean retry", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.queueState({
+        model: { provider: "wrong", id: "stale" },
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+        sessionFile: FAKE_SESSION_FILE,
+      });
+      const refused = yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "should not run",
+        modelSelection("openai/gpt-5"),
+      ).pipe(Effect.flip);
+      assert.match(errorText(refused), /readiness model does not match/);
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "prompt").length, 0);
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "compact").length, 0);
+
+      fake.queueState({
+        model: { provider: "openai", id: "gpt-5" },
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+        sessionFile: FAKE_SESSION_FILE,
+      });
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "retry works",
+        modelSelection("openai/gpt-5"),
+        2,
+      );
+      assert.equal((yield* fake.takeRequest("prompt"))["message"], "retry works");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("blocks prompt and compact after a startup extension error", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.deferNextState();
+      const started = yield* startTurn(runtime, providerThread).pipe(Effect.forkScoped);
+      yield* fake.takeDeferredState;
+      yield* fake.emit({
+        type: "extension_error",
+        extensionPath: "/workspace/omp-extension.ts",
+        event: "before_agent_start",
+        error: "startup hook failed",
+      });
+      yield* fake.resolveDeferredState({
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+        sessionFile: FAKE_SESSION_FILE,
+      });
+      const promptResult = yield* Effect.exit(Fiber.join(started));
+      assert.isTrue(promptResult._tag === "Failure");
+      if (promptResult._tag === "Failure") {
+        assert.match(errorText(promptResult.cause), /startup extension failure/);
+      }
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "prompt").length, 0);
+      const compactResult = yield* Effect.exit(
+        startTurn(runtime, providerThread, "default", [], "/compact", undefined, 2),
+      );
+      assert.isTrue(compactResult._tag === "Failure");
+      if (compactResult._tag === "Failure") {
+        assert.match(errorText(compactResult.cause), /startup extension failure/);
+      }
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "prompt").length, 0);
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "compact").length, 0);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("latches a startup extension error during deferred readiness", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.deferNextState();
+      const started = yield* startTurn(runtime, providerThread).pipe(Effect.forkScoped);
+      yield* fake.takeDeferredState;
+      yield* fake.emit({
+        type: "extension_error",
+        extensionPath: "/workspace/omp-extension.ts",
+        event: "before_agent_start",
+        error: "deferred startup hook failed",
+      });
+      yield* fake.resolveDeferredState({
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+        sessionFile: FAKE_SESSION_FILE,
+      });
+      const result = yield* Effect.exit(Fiber.join(started));
+      assert.isTrue(result._tag === "Failure");
+      if (result._tag === "Failure") {
+        assert.match(errorText(result.cause), /deferred startup hook failed/);
+      }
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "prompt").length, 0);
+      assert.equal(fake.allRequests().filter((request) => request["type"] === "compact").length, 0);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("aborts an active turn after a before_agent_start extension error", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "captured prompt");
+      assert.equal((yield* fake.takeRequest("prompt")).message, "captured prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "extension_error",
+        extensionPath: "/workspace/omp-extension.ts",
+        event: "before_agent_start",
+        error: "active startup hook failed",
+      });
+
+      assert.equal((yield* fake.takeRequest("abort")).type, "abort");
+      const diagnostic = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
+      );
+      assert.isTrue(
+        diagnostic.type === "turn_item.updated" &&
+          diagnostic.turnItem.type === "error" &&
+          diagnostic.turnItem.failure.retryable === false &&
+          diagnostic.turnItem.failure.message.includes("active startup hook failed"),
+      );
+
+      yield* fake.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        terminal.type === "turn.terminal" &&
+          terminal.status === "failed" &&
+          terminal.failure.message.includes("active startup hook failed") &&
+          terminal.failure.retryable === false,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("terminates Pi and preserves the startup failure when abort is rejected", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "captured prompt");
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.failNextAbort();
+      yield* fake.emit({
+        type: "extension_error",
+        extensionPath: "/workspace/omp-extension.ts",
+        event: "before_agent_start",
+        error: "abort fallback startup failure",
+      });
+
+      assert.equal((yield* fake.takeRequest("abort")).type, "abort");
+      // Model the process exit after the failed abort so transport teardown
+      // finalizes the active turn through the fallback path.
+      yield* fake.closeStdout;
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        terminal.type === "turn.terminal" &&
+          terminal.status === "failed" &&
+          terminal.failure.message.includes("abort fallback startup failure") &&
+          terminal.failure.retryable === false,
+      );
+      const stopped = yield* takeEvent(
+        (event) =>
+          event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+      );
+      assert.equal(stopped.type, "provider_session.updated");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps a startup failure through queued retry and compaction recovery events", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "captured prompt");
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.deferNextAbort();
+      yield* fake.emitBatch([
+        {
+          type: "extension_error",
+          extensionPath: "/workspace/omp-extension.ts",
+          event: "before_agent_start",
+          error: "queued recovery startup failure",
+        },
+        { type: "auto_retry_start", attempt: 1, maxAttempts: 2, errorMessage: "temporary" },
+        { type: "auto_retry_end", attempt: 1, success: true },
+        { type: "compaction_start" },
+        {
+          type: "compaction_end",
+          willRetry: true,
+          result: { summary: "recovered context", estimatedTokensAfter: 12 },
+        },
+        { type: "agent_settled" },
+      ]);
+
+      yield* fake.takeDeferredAbort;
+      yield* fake.resolveDeferredAbort();
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        terminal.type === "turn.terminal" &&
+          terminal.status === "failed" &&
+          terminal.failure.message.includes("queued recovery startup failure") &&
+          terminal.failure.retryable === false,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("protects parser-admitted prompt writes and recovers after a session reset", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      fake.deferNextState();
+      const starting = yield* startTurn(runtime, providerThread).pipe(Effect.forkScoped);
+      yield* fake.takeDeferredState;
+      yield* fake.resolveDeferredState({
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+        sessionFile: FAKE_SESSION_FILE,
+      });
+      yield* fake.emit({
+        type: "extension_error",
+        extensionPath: "/workspace/omp-extension.ts",
+        event: "before_agent_start",
+        error: "parser-admitted startup failure",
+      });
+      const result = yield* Effect.exit(Fiber.join(starting));
+      assert.isTrue(result._tag === "Failure");
+      assert.equal(fake.allRequests().filter((request) => request.type === "prompt").length, 0);
+
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "ui-positive",
+        method: "confirm",
+        title: "Continue?",
+        message: "The dialog remains ordinary transport.",
+      });
+      const pending = yield* takeEvent(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+      );
+      if (pending.type !== "runtime_request.updated") return;
+      yield* runtime.respondToRuntimeRequest({
+        requestId: pending.runtimeRequest.id,
+        decision: "accept",
+      });
+      const dialogResponse = yield* fake.takeRequest("extension_ui_response");
+      assert.equal(dialogResponse.type, "extension_ui_response");
+      assert.equal(dialogResponse.id, "ui-positive");
+      assert.equal(dialogResponse.confirmed, true);
+
+      yield* runtime.resumeThread({ providerThread });
+      yield* fake.takeRequest("switch_session");
+      yield* startTurn(runtime, providerThread, "default", [], "clean recovery");
+      assert.equal((yield* fake.takeRequest("prompt"))["message"], "clean recovery");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("restores the prior compact flag when parser intake refuses a steer", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      if (running.type !== "provider_turn.updated") return;
+      yield* fake.emit({ type: "agent_start" });
+
+      fake.deferNextState();
+      const steering = yield* runtime
+        .steerTurn({
+          threadId: THREAD_ID,
+          runId: RunId.make("run:thread-pi-test:1"),
+          providerThread,
+          providerTurnId: running.providerTurn.id,
+          message: {
+            messageId: "message:thread-pi-test:parser-compact" as never,
+            text: "/compact parser race",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        })
+        .pipe(Effect.forkScoped);
+      yield* fake.takeDeferredState;
+      yield* fake.resolveDeferredState({
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+        sessionFile: FAKE_SESSION_FILE,
+      });
+      yield* fake.emit({
+        type: "extension_error",
+        extensionPath: "/workspace/omp-extension.ts",
+        event: "before_agent_start",
+        error: "steer compact refused",
+      });
+      const result = yield* Effect.exit(Fiber.join(steering));
+      assert.isTrue(result._tag === "Failure");
+      assert.equal(fake.allRequests().filter((request) => request.type === "compact").length, 0);
+
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: running.providerTurn.id });
+      assert.equal((yield* fake.takeRequest("abort")).type, "abort");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects every nonzero or malformed pending message count", () =>
+    Effect.gen(function* () {
+      for (const pendingMessageCount of [undefined, "0", -1, 1]) {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.queueState({
+          isStreaming: false,
+          isCompacting: false,
+          pendingMessageCount,
+          sessionFile: FAKE_SESSION_FILE,
+        });
+        fake.queueState({
+          isStreaming: false,
+          isCompacting: false,
+          pendingMessageCount,
+          sessionFile: FAKE_SESSION_FILE,
+        });
+        const promptFailure = yield* startTurn(runtime, providerThread).pipe(Effect.flip);
+        assert.match(errorText(promptFailure), /not positively ready/);
+        const compactFailure = yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          "/compact",
+          undefined,
+          2,
+        ).pipe(Effect.flip);
+        assert.match(errorText(compactFailure), /not positively ready/);
+        assert.equal(
+          fake.allRequests().filter((request) => request["type"] === "prompt").length,
+          0,
+        );
+        assert.equal(
+          fake.allRequests().filter((request) => request["type"] === "compact").length,
+          0,
+        );
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("stops provider-initiated work that has no T3 turn owner", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -1616,7 +2179,7 @@ describe("PiAdapterV2", () => {
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const { runtime } = yield* openRuntime(fake);
-      fake.queueState({ sessionId: "not-a-session-file" });
+      fake.queueState({ sessionId: "not-a-session-file", sessionFile: undefined });
       const result = yield* runtime
         .ensureThread({
           threadId: THREAD_ID,
@@ -2372,6 +2935,8 @@ describe("PiRpc framing", () => {
   it.effect("reassembles records across chunk boundaries and strips CR", () =>
     Effect.gen(function* () {
       const stdout = yield* Queue.unbounded<Uint8Array>();
+      const stdin = yield* Queue.unbounded<Uint8Array>();
+      let intakeFailure: string | undefined;
       const spawner = ChildProcessSpawner.make(() =>
         Effect.succeed(
           ChildProcessSpawner.makeHandle({
@@ -2380,7 +2945,7 @@ describe("PiRpc framing", () => {
             isRunning: Effect.succeed(true),
             kill: () => Effect.void,
             unref: Effect.succeed(Effect.void),
-            stdin: Sink.drain,
+            stdin: Sink.forEach((chunk) => Queue.offer(stdin, chunk)),
             stdout: Stream.fromQueue(stdout),
             stderr: Stream.empty,
             all: Stream.empty,
@@ -2394,6 +2959,12 @@ describe("PiRpc framing", () => {
         args: ["--mode", "rpc"],
         cwd: undefined,
         env: {},
+        onEventIntake: (record) => {
+          if (record.type === "extension_error" && record.event === "before_agent_start") {
+            intakeFailure = "startup extension failure";
+          }
+        },
+        protectedSendGuard: () => intakeFailure,
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
       const push = (text: string) =>
@@ -2404,6 +2975,23 @@ describe("PiRpc framing", () => {
       yield* push("x".repeat(8 * 1024 * 1024));
       yield* push('x{"type":"must_not_emit"}\n{"type":"after_oversized"}\n');
 
+      yield* push('{"type":"extension_error","event":"before_agent_start"}\n');
+      yield* Effect.yieldNow;
+      const refused = yield* connection
+        .send({ type: "prompt", message: "must not write" }, { protected: true })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "protected-send");
+      assert.equal(refused.detail, "startup extension failure");
+      assert.equal((yield* Queue.poll(stdin))._tag, "None");
+
+      yield* connection.send({ type: "extension_ui_response", id: "dialog", confirmed: true });
+      const ordinaryWrite = yield* Queue.take(stdin);
+      assert.deepEqual(decodeJsonLine(new TextDecoder().decode(ordinaryWrite)), {
+        type: "extension_ui_response",
+        id: "dialog",
+        confirmed: true,
+      });
+
       const first = yield* Queue.take(connection.events);
       assert.equal(first["type"], "agent_start");
       const second = yield* Queue.take(connection.events);
@@ -2413,6 +3001,361 @@ describe("PiRpc framing", () => {
       assert.equal((yield* Queue.take(connection.events))["type"], "after_oversized");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("does not re-latch a pre-response error while switched state is deferred", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.deferNextSwitch();
+      fake.deferNextState();
+      const resuming = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkScoped);
+      const switchRequest = yield* fake.takeDeferredSwitch;
+      assert.isString(switchRequest.id);
+      const response = yield* fake.resolveDeferredSwitch({
+        command: "get_state",
+        before: [
+          {
+            type: "extension_error",
+            event: "before_agent_start",
+            error: "outgoing startup error",
+          },
+        ],
+        after: [
+          {
+            type: "extension_ui_request",
+            id: "stale-drained",
+            method: "confirm",
+            title: "Continue after switching?",
+          },
+        ],
+      });
+      assert.equal(response.id, switchRequest.id);
+      yield* fake.takeDeferredState;
+      const pending = yield* takeEvent(
+        (event) =>
+          event.type === "runtime_request.updated" &&
+          event.runtimeRequest.nativeRequestRef?.nativeId === "stale-drained",
+      );
+      assert.equal(pending.type, "runtime_request.updated");
+      if (pending.type !== "runtime_request.updated") throw new Error("Missing switch dialog");
+      yield* runtime.respondToRuntimeRequest({
+        requestId: pending.runtimeRequest.id,
+        decision: "accept",
+      });
+      const dialog = yield* fake.takeRequest("extension_ui_response");
+      assert.equal(dialog.id, "stale-drained");
+      assert.equal(dialog.confirmed, true);
+      yield* fake.resolveDeferredState({
+        sessionFile: FAKE_SESSION_FILE,
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+      });
+      const resumed = yield* Fiber.join(resuming);
+      const result = yield* Effect.exit(
+        startTurn(runtime, resumed, "default", [], "clean boundary"),
+      );
+      assert.equal(result._tag, "Success");
+      assert.equal((yield* fake.takeRequest("prompt")).message, "clean boundary");
+      assert.equal(fake.allRequests().filter((request) => request.type === "prompt").length, 1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "delivers an ordinary idle extension error on the next turn and permits later compact work",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* fake.emitBatch([
+          {
+            type: "extension_error",
+            extensionPath: "/workspace/idle-notification.ts",
+            event: "session_start",
+            error: "idle notification handler failed",
+          },
+          {
+            type: "extension_ui_request",
+            id: "idle-error-drained",
+            method: "confirm",
+            title: "Continue after the idle diagnostic?",
+          },
+        ]);
+        // The following dialog is handled by the same sequential event pump,
+        // establishing that the preceding error was handled without a turn.
+        const pending = yield* takeEvent(
+          (event) =>
+            event.type === "runtime_request.updated" &&
+            event.runtimeRequest.nativeRequestRef?.nativeId === "idle-error-drained",
+        );
+        if (pending.type !== "runtime_request.updated") throw new Error("Missing idle dialog");
+        assert.equal(pending.runtimeRequest.providerTurnId, null);
+        yield* runtime.respondToRuntimeRequest({
+          requestId: pending.runtimeRequest.id,
+          decision: "accept",
+        });
+        const dialog = yield* fake.takeRequest("extension_ui_response");
+        assert.equal(dialog.id, "idle-error-drained");
+        assert.equal(dialog.confirmed, true);
+
+        yield* startTurn(runtime, providerThread, "default", [], "work after idle diagnostic");
+        assert.equal((yield* fake.takeRequest("prompt")).message, "work after idle diagnostic");
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        if (running.type !== "provider_turn.updated") throw new Error("Missing running turn");
+        const diagnostic = yield* takeEvent(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
+        );
+        if (diagnostic.type !== "turn_item.updated" || diagnostic.turnItem.type !== "error") {
+          throw new Error("Missing idle extension diagnostic");
+        }
+        assert.equal(diagnostic.turnItem.providerTurnId, running.providerTurn.id);
+        assert.equal(diagnostic.turnItem.status, "failed");
+        assert.equal(diagnostic.turnItem.title, "idle-notification");
+        assert.equal(
+          diagnostic.turnItem.failure.message,
+          "idle-notification failed during session_start.\n\nidle notification handler failed",
+        );
+        yield* fake.emitBatch([{ type: "agent_start" }, { type: "agent_settled" }]);
+        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          terminal.type === "turn.terminal" &&
+            terminal.providerTurnId === running.providerTurn.id &&
+            terminal.status === "completed" &&
+            terminal.failure === null,
+        );
+
+        yield* startTurn(runtime, providerThread, "default", [], "/compact", undefined, 2);
+        assert.equal((yield* fake.takeRequest("compact")).type, "compact");
+        yield* fake.emit({ type: "response", command: "compact", success: true });
+        const compactTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          compactTerminal.type === "turn.terminal" &&
+            compactTerminal.providerTurnId !== running.providerTurn.id &&
+            compactTerminal.status === "completed" &&
+            compactTerminal.failure === null,
+        );
+        assert.equal(fake.allRequests().filter((request) => request.type === "prompt").length, 1);
+        assert.equal(fake.allRequests().filter((request) => request.type === "compact").length, 1);
+        assert.equal(
+          fake.allRequests().filter((request) => request.type === "switch_session").length,
+          0,
+        );
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("preserves a post-response startup error across deferred switch refresh", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.deferNextSwitch();
+      fake.deferNextState();
+      const resuming = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkScoped);
+      const switchRequest = yield* fake.takeDeferredSwitch;
+      const response = yield* fake.resolveDeferredSwitch({
+        after: [
+          {
+            type: "extension_error",
+            event: "before_agent_start",
+            error: "incoming startup error",
+          },
+          {
+            type: "extension_ui_request",
+            id: "incoming-drained",
+            method: "confirm",
+            title: "Incoming session dialog",
+          },
+        ],
+      });
+      assert.equal(response.id, switchRequest.id);
+      yield* fake.takeDeferredState;
+      const pending = yield* takeEvent(
+        (event) =>
+          event.type === "runtime_request.updated" &&
+          event.runtimeRequest.nativeRequestRef?.nativeId === "incoming-drained",
+      );
+      assert.equal(pending.type, "runtime_request.updated");
+      if (pending.type !== "runtime_request.updated") throw new Error("Missing incoming dialog");
+      yield* runtime.respondToRuntimeRequest({
+        requestId: pending.runtimeRequest.id,
+        decision: "accept",
+      });
+      assert.equal((yield* fake.takeRequest("extension_ui_response")).confirmed, true);
+      yield* fake.emitBatch([
+        response,
+        {
+          type: "response",
+          id: "unmatched-switch-response",
+          command: "switch_session",
+          success: true,
+          data: { cancelled: false },
+        },
+      ]);
+      yield* fake.resolveDeferredState({
+        sessionFile: FAKE_SESSION_FILE,
+        isStreaming: false,
+        isCompacting: false,
+        pendingMessageCount: 0,
+      });
+      const resumed = yield* Fiber.join(resuming);
+      for (const text of ["must refuse incoming prompt", "/compact"]) {
+        const result = yield* Effect.exit(startTurn(runtime, resumed, "default", [], text));
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.match(errorText(result.cause), /incoming startup error/);
+        }
+      }
+      assert.equal(
+        fake
+          .allRequests()
+          .filter((request) => request.type === "prompt" || request.type === "compact").length,
+        0,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  for (const mode of ["start", "steer"] as const) {
+    for (const text of ["refused raw prompt", "/compact raw refusal"]) {
+      it.effect(`refuses ${mode} ${text} after split and coalesced parser intake`, () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          const { runtime, takeEvent } = yield* openRuntime(fake);
+          const providerThread = yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          let providerTurnId: OrchestrationV2ProviderTurn["id"] | undefined;
+          if (mode === "steer") {
+            yield* startTurn(runtime, providerThread);
+            yield* fake.takeRequest("prompt");
+            const running = yield* takeEvent(
+              (event) =>
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            );
+            assert.equal(running.type, "provider_turn.updated");
+            if (running.type !== "provider_turn.updated") throw new Error("Missing active turn");
+            providerTurnId = running.providerTurn.id;
+          }
+          const writesBefore = fake.allRequests().length;
+          fake.deferNextState();
+          const work =
+            mode === "start"
+              ? startTurn(runtime, providerThread, "default", [], text)
+              : runtime.steerTurn({
+                  threadId: THREAD_ID,
+                  runId: RunId.make("run:thread-pi-test:1"),
+                  providerThread,
+                  providerTurnId: providerTurnId!,
+                  message: {
+                    messageId: "message:raw-refusal" as never,
+                    text,
+                    attachments: [],
+                    createdBy: "user",
+                    creationSource: "web",
+                  },
+                });
+          const working = yield* work.pipe(Effect.forkScoped);
+          const stateRequest = yield* fake.takeDeferredState;
+          yield* fake.emitRaw('{"type":"extension_');
+          yield* fake.emitRaw(
+            'error","event":"before_agent_start","error":"raw startup failure"}\r\n' +
+              encodeJsonLine({
+                type: "response",
+                id: stateRequest.id,
+                command: "get_state",
+                success: true,
+                data: {
+                  sessionFile: FAKE_SESSION_FILE,
+                  isStreaming: false,
+                  isCompacting: false,
+                  pendingMessageCount: 0,
+                },
+              }) +
+              "\n",
+          );
+          const result = yield* Effect.exit(Fiber.join(working));
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.match(errorText(result.cause), /raw startup failure/);
+          }
+          assert.equal(
+            fake
+              .allRequests()
+              .slice(writesBefore)
+              .filter((request) => request.type === "prompt" || request.type === "compact").length,
+            0,
+          );
+          if (mode === "steer") {
+            yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+            assert.equal((yield* fake.takeRequest("abort")).type, "abort");
+          }
+        }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      );
+    }
+  }
+
+  for (const outcome of ["cancelled", "failed"] as const) {
+    it.effect(`retains outgoing startup failure after a ${outcome} switch`, () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.deferNextSwitch();
+        const resuming = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkScoped);
+        yield* fake.takeDeferredSwitch;
+        yield* fake.resolveDeferredSwitch({
+          success: outcome !== "failed",
+          cancelled: outcome === "cancelled",
+          before: [
+            {
+              type: "extension_error",
+              event: "before_agent_start",
+              error: "outgoing failure retained",
+            },
+          ],
+        });
+        const resumeResult = yield* Effect.exit(Fiber.join(resuming));
+        assert.equal(resumeResult._tag, "Failure");
+        for (const text of ["refused after unsuccessful switch", "/compact"]) {
+          const result = yield* Effect.exit(
+            startTurn(runtime, providerThread, "default", [], text),
+          );
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.match(errorText(result.cause), /outgoing failure retained/);
+          }
+        }
+        assert.equal(
+          fake
+            .allRequests()
+            .filter((request) => request.type === "prompt" || request.type === "compact").length,
+          0,
+        );
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+  }
 });
 
 // This fails before a provider transcript exists, so a replay fixture is not

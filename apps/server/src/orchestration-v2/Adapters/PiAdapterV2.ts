@@ -348,6 +348,8 @@ interface ActivePiTurn {
   manualCompactInFlight: boolean;
   activeCompaction: PiCompactionState | null;
   activeProviderRetry: PiProviderRetryState | null;
+  /** A startup hook failure remains the turn's terminal cause through retries. */
+  startupExtensionFailure: ReturnType<typeof makeProviderFailure> | null;
   failure: ReturnType<typeof makeProviderFailure> | null;
 }
 
@@ -402,6 +404,24 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? options.serverConfig.cwd;
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const outOfTurnExtensionErrors: Array<PiRpcRecord> = [];
+      let startupExtensionFailure: PiRpcRecord | null = null;
+      const latchedExtensionErrors = new Set<PiRpcRecord>();
+      let extensionErrorGeneration = 0;
+      const extensionErrorGenerations = new WeakMap<PiRpcRecord, number>();
+      const isCurrentExtensionError = (event: PiRpcRecord): boolean =>
+        extensionErrorGenerations.get(event) === extensionErrorGeneration;
+      const extensionErrorDetail = (event: PiRpcRecord): string => {
+        const extensionName = piExtensionDisplayName(recordString(event, "extensionPath"));
+        const extensionEvent = recordString(event, "event");
+        const detail = recordString(event, "error")?.trim();
+        return [
+          `${extensionName} failed${extensionEvent === undefined ? "" : ` during ${extensionEvent}`}.`,
+          detail === undefined || detail.length === 0 ? undefined : detail.slice(0, 2_000),
+        ]
+          .filter((part): part is string => part !== undefined)
+          .join("\n\n");
+      };
       const provideCacheFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
         effect.pipe(
           Effect.provideService(FileSystem.FileSystem, options.fileSystem),
@@ -436,6 +456,28 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         args: launch.args,
         cwd,
         env: launch.env,
+        onEventIntake: (event) => {
+          if (event["type"] === "extension_error") {
+            extensionErrorGenerations.set(event, extensionErrorGeneration);
+            if (recordString(event, "event") === "before_agent_start") {
+              startupExtensionFailure ??= event;
+            }
+          }
+        },
+        onSessionSwitch: () => {
+          // Advance at correlated response intake, before the request resumes
+          // or any following native error is published.
+          extensionErrorGeneration += 1;
+          startupExtensionFailure = null;
+          outOfTurnExtensionErrors.length = 0;
+          latchedExtensionErrors.clear();
+        },
+        protectedSendGuard: () => {
+          const failure = startupExtensionFailure;
+          return failure === null
+            ? undefined
+            : `Pi startup extension failure prevents provider work: ${extensionErrorDetail(failure)}`;
+        },
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, options.spawner),
         Effect.mapError(
@@ -493,8 +535,9 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       let appliedThinking: string | null = null;
       /** Last thread title synced into pi's session name (`/resume` listing). */
       let appliedSessionName: string | null = null;
-      /** Extension failures raised during startup are attached to the next turn. */
-      const outOfTurnExtensionErrors: Array<PiRpcRecord> = [];
+      // A before_agent_start failure belongs to this native session until a
+      // successful session switch. Do not drain its admission latch merely
+      // because the event pump has attached the diagnostic to a turn.
       /**
        * Leaf entry id of the pi session tree as of the last turn boundary.
        * Turn-start user entries are located relative to it, giving each
@@ -1287,10 +1330,16 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       });
 
       const emitExtensionError = Effect.fnUntraced(function* (event: PiRpcRecord) {
+        // This runs under the session permit: intake may have advanced the
+        // generation while the event pump was waiting to acquire it.
+        if (!isCurrentExtensionError(event)) return;
+        if (recordString(event, "event") === "before_agent_start") {
+          startupExtensionFailure ??= event;
+        }
         const state = threadState;
         const turn = state?.activeTurn ?? null;
         if (turn === null) {
-          outOfTurnExtensionErrors.push(event);
+          if (!latchedExtensionErrors.delete(event)) outOfTurnExtensionErrors.push(event);
           return;
         }
         const emittedAt = yield* DateTime.now;
@@ -1322,6 +1371,77 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             failure,
           },
         });
+        if (extensionEvent === "before_agent_start") {
+          turn.startupExtensionFailure = failure;
+          turn.failure = failure;
+          yield* request({ type: "abort" }, 2_000).pipe(
+            Effect.matchEffect({
+              onSuccess: () => Effect.void,
+              onFailure: () =>
+                Effect.gen(function* () {
+                  // A failed abort cannot establish containment. Tear down the
+                  // native process and keep this extension failure terminal.
+                  stopRequested = true;
+                  yield* connection.terminate;
+                }),
+            }),
+          );
+        }
+      });
+
+      /** Check Pi's current native carrier before allowing provider work. */
+      const admitProviderWork = Effect.fnUntraced(function* (
+        modelSelection: ModelSelection,
+        requireIdle: boolean,
+      ) {
+        const state = threadState;
+        if (state === null) return yield* protocolError("Pi session has no registered thread");
+        if (startupExtensionFailure !== null) {
+          return yield* protocolError(
+            `Pi startup extension failure prevents provider work: ${extensionErrorDetail(startupExtensionFailure)}`,
+          );
+        }
+        const nativeState = yield* request({ type: "get_state" });
+        // A correlated readiness response can resolve before an earlier
+        // native event reaches the intake fiber. Give that queued event a
+        // turn to latch a startup failure before the protected send check.
+        yield* Effect.yieldNow;
+        if (
+          recordString(nativeState, "sessionFile") !==
+          state.providerThread.nativeThreadRef?.nativeId
+        ) {
+          return yield* protocolError(
+            "Pi readiness is for a different native session",
+            nativeState,
+          );
+        }
+        if (
+          requireIdle &&
+          (recordField(nativeState, "isStreaming") !== false ||
+            recordField(nativeState, "isCompacting") !== false ||
+            recordNumber(nativeState, "pendingMessageCount") !== 0)
+        ) {
+          return yield* protocolError(
+            "Pi session is not positively ready for provider work",
+            nativeState,
+          );
+        }
+        // The default alias intentionally does not claim a model. Explicit
+        // selections must be confirmed by Pi's current state after set_model.
+        if (modelSelection.model !== PI_INHERIT_MODEL_SLUG) {
+          const selected = parsePiModelSlug(modelSelection.model);
+          const current = recordField(nativeState, "model");
+          if (
+            selected === null ||
+            recordString(current, "provider") !== selected.provider ||
+            recordString(current, "id") !== selected.modelId
+          ) {
+            return yield* protocolError(
+              `Pi readiness model does not match '${modelSelection.model}'`,
+              nativeState,
+            );
+          }
+        }
       });
 
       // ── turn lifecycle ────────────────────────────────────
@@ -1400,7 +1520,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
-        const failure = turn.interrupted ? null : turn.failure;
+        const failure = turn.interrupted ? null : (turn.startupExtensionFailure ?? turn.failure);
         yield* emit({
           type: "provider_turn.updated",
           driver: PI_PROVIDER,
@@ -1576,7 +1696,11 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
-            if (recordString(message, "stopReason") === "error" && turn.failure === null) {
+            if (
+              recordString(message, "stopReason") === "error" &&
+              turn.failure === null &&
+              turn.startupExtensionFailure === null
+            ) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? "Pi reported a model error.",
                 class: "provider_error",
@@ -1644,7 +1768,9 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             // that failure only when Pi confirms that compaction will retry;
             // a successful non-retrying compaction must not erase an exhausted
             // provider retry.
-            if (event["willRetry"] === true) turn.failure = null;
+            if (event["willRetry"] === true && turn.startupExtensionFailure === null) {
+              turn.failure = null;
+            }
             turn.latestCompactionAfterTokens =
               nonNegativeInteger(result, "estimatedTokensAfter") ?? null;
             const summary = recordString(result, "summary");
@@ -1708,7 +1834,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                 yield* emitProviderRetry(turn, recoveredRetry, "completed", emittedAt);
                 turn.activeProviderRetry = null;
               }
-              turn.failure = null;
+              if (turn.startupExtensionFailure === null) turn.failure = null;
               return;
             }
             const failure = makeProviderFailure({
@@ -1731,7 +1857,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                 itemOrdinal(turn, `terminal-failure:${turn.providerTurn.id}`),
             } satisfies PiProviderRetryState;
             turn.activeProviderRetry = providerRetry;
-            turn.failure = failure;
+            if (turn.startupExtensionFailure === null) turn.failure = failure;
             yield* emitProviderRetry(turn, providerRetry, "failed", emittedAt);
             return;
           }
@@ -1784,7 +1910,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                 return;
               }
               if (!compactTurn.sawCompaction) {
-                compactTurn.failure = makeProviderFailure({
+                compactTurn.failure ??= makeProviderFailure({
                   message: recordString(event, "error") ?? "Pi compact failed.",
                   class: "provider_error",
                 });
@@ -1832,7 +1958,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                   ? turn
                   : null;
             if (failedTurn !== null) {
-              failedTurn.failure = makeProviderFailure({
+              failedTurn.failure ??= makeProviderFailure({
                 message: recordString(event, "error") ?? "Pi rejected the prompt.",
                 class: "provider_error",
               });
@@ -1884,7 +2010,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             if (
               recordField(data, "isStreaming") !== true &&
               recordField(data, "isCompacting") !== true &&
-              (recordNumber(data, "pendingMessageCount") ?? 0) === 0
+              recordNumber(data, "pendingMessageCount") === 0
             ) {
               turn.settleWhenIdle = false;
               if (state !== null) yield* finalizeTurn(state);
@@ -1899,6 +2025,13 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       yield* Effect.gen(function* () {
         while (true) {
           const event = yield* Queue.take(connection.events);
+          if (event.type === "extension_error") {
+            if (!isCurrentExtensionError(event)) continue;
+            if (threadState?.activeTurn === null) {
+              outOfTurnExtensionErrors.push(event);
+              latchedExtensionErrors.add(event);
+            }
+          }
           yield* sessionEventPermit.withPermits(1)(handleSessionEvent(event));
         }
       }).pipe(
@@ -1911,7 +2044,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               const state = threadState;
               const interrupted = state?.activeTurn?.interrupted === true;
               if (state?.activeTurn != null) {
-                state.activeTurn.failure = interrupted
+                state.activeTurn.failure ??= interrupted
                   ? null
                   : makeProviderFailure({
                       cause,
@@ -1981,6 +2114,8 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
           // binding before reading its state so a failed refresh cannot let a
           // later turn run against the old T3 thread and the new Pi session.
           threadState = null;
+          // Extension errors were reset at correlated response intake.
+          // Preserve any new-session errors received before this continuation.
           // These caches describe the session we just left. Clearing them
           // stops the next turn from treating this session as already
           // configured and skipping set_model or set_session_name.
@@ -2256,6 +2391,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               compactCommand === null
                 ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
                 : null;
+            yield* admitProviderWork(turnInput.modelSelection, true);
             const startedAt = yield* DateTime.now;
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
@@ -2294,6 +2430,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               manualCompactInFlight: compactCommand !== null,
               activeCompaction: null,
               activeProviderRetry: null,
+              startupExtensionFailure: null,
               failure: null,
             };
             // Only the install/send/start-event boundary excludes the event
@@ -2301,19 +2438,27 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             // project trust, login, and session-switch dialogs can be shown
             // and answered instead of deadlocking the caller.
             yield* Effect.gen(function* () {
+              if (startupExtensionFailure !== null) {
+                return yield* protocolError(
+                  `Pi startup extension failure prevents provider work: ${extensionErrorDetail(startupExtensionFailure)}`,
+                );
+              }
               state.activeTurn = activeTurn;
               if (compactCommand !== null) {
-                yield* connection.send(compactRpcRecord(compactCommand));
+                yield* connection.send(compactRpcRecord(compactCommand), { protected: true });
                 pendingCompactResponses.push({
                   providerTurnId: providerTurn.id,
                   kind: "turn_start",
                 });
               } else if (payload !== null) {
-                yield* connection.send({
-                  type: "prompt",
-                  message: payload.message,
-                  ...(payload.images.length === 0 ? {} : { images: payload.images }),
-                });
+                yield* connection.send(
+                  {
+                    type: "prompt",
+                    message: payload.message,
+                    ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                  },
+                  { protected: true },
+                );
                 pendingPromptResponses.push({
                   providerTurnId: providerTurn.id,
                   kind: "turn_start",
@@ -2372,6 +2517,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                     steerInput.message.attachments,
                   )
                 : null;
+            yield* admitProviderWork(turn.turnInput.modelSelection, false);
             // Prompt with streamingBehavior steer is atomic on Pi's side: it
             // queues during an active run and starts a new run if settlement
             // won the race. A direct `steer` sent after Pi became idle would
@@ -2384,20 +2530,37 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                 if (threadState?.activeTurn !== turn) {
                   return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
                 }
+                if (startupExtensionFailure !== null) {
+                  return yield* protocolError(
+                    `Pi startup extension failure prevents provider work: ${extensionErrorDetail(startupExtensionFailure)}`,
+                  );
+                }
                 if (compactCommand !== null) {
+                  const previousManualCompactInFlight = turn.manualCompactInFlight;
                   turn.manualCompactInFlight = true;
-                  yield* connection.send(compactRpcRecord(compactCommand));
+                  yield* connection
+                    .send(compactRpcRecord(compactCommand), { protected: true })
+                    .pipe(
+                      Effect.tapError(() =>
+                        Effect.sync(() => {
+                          turn.manualCompactInFlight = previousManualCompactInFlight;
+                        }),
+                      ),
+                    );
                   pendingCompactResponses.push({
                     providerTurnId: turn.providerTurn.id,
                     kind: "steer",
                   });
                 } else if (payload !== null) {
-                  yield* connection.send({
-                    type: "prompt",
-                    message: payload.message,
-                    streamingBehavior: "steer",
-                    ...(payload.images.length === 0 ? {} : { images: payload.images }),
-                  });
+                  yield* connection.send(
+                    {
+                      type: "prompt",
+                      message: payload.message,
+                      streamingBehavior: "steer",
+                      ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                    },
+                    { protected: true },
+                  );
                   pendingPromptResponses.push({
                     providerTurnId: turn.providerTurn.id,
                     kind: "steer",

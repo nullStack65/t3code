@@ -72,11 +72,24 @@ export interface PiRpcSpawnOptions {
   readonly args: ReadonlyArray<string>;
   readonly cwd: string | undefined;
   readonly env: NodeJS.ProcessEnv;
+  /** Observes native events before they are published to the consumer queue. */
+  readonly onEventIntake?: (record: PiRpcRecord) => void;
+  /** Observes a correlated successful, non-cancelled switch before resolving it. */
+  readonly onSessionSwitch?: () => void;
+  /** Rejects protected writes after native intake has latched a failure. */
+  readonly protectedSendGuard?: () => string | undefined;
+}
+
+export interface PiRpcSendOptions {
+  readonly protected?: boolean;
 }
 
 export interface PiRpcConnection {
   /** Fire-and-forget write (used for `extension_ui_response`). */
-  readonly send: (record: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
+  readonly send: (
+    record: PiRpcRecord,
+    options?: PiRpcSendOptions,
+  ) => Effect.Effect<void, PiRpcError>;
   /**
    * Correlated request: assigns an `id`, waits for the matching response
    * record, and returns its `data` (undefined when the command carries none).
@@ -104,6 +117,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE = Duration.seconds(1);
 
 interface PendingPiRequest {
+  readonly command: unknown;
   readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
 }
 
@@ -291,12 +305,18 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
         if (pending !== undefined) {
           pendingRequests.delete(record["id"]);
           if (record["success"] === true) {
+            if (
+              pending.command === "switch_session" &&
+              piRecordField(record["data"], "cancelled") !== true
+            ) {
+              options.onSessionSwitch?.();
+            }
             yield* Deferred.succeed(pending.deferred, record["data"]);
           } else {
             yield* Deferred.fail(
               pending.deferred,
               new PiRpcError({
-                operation: String(record["command"] ?? "request"),
+                operation: String(pending.command ?? "request"),
                 detail: summarizePiError(record["error"]),
                 ...(record["error"] === undefined ? {} : { cause: record["error"] }),
               }),
@@ -305,6 +325,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
           return;
         }
       }
+      options.onEventIntake?.(record);
       yield* Queue.offer(events, record);
     });
 
@@ -409,18 +430,29 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     Effect.forkIn(scope),
   );
 
-  const send = (record: PiRpcRecord): Effect.Effect<void, PiRpcError> =>
-    Effect.gen(function* () {
-      const accepted = yield* Queue.offer(
-        outgoing,
-        new TextEncoder().encode(`${encodeJsonLine(record)}\n`),
-      );
-      // A refused offer means `failTransport` already closed the queue, so the
-      // write can never land; surface the transport error instead of
-      // reporting a success the caller cannot rely on.
-      if (!accepted) {
-        return yield* Deferred.await(transportDown);
+  const send = (
+    record: PiRpcRecord,
+    sendOptions: PiRpcSendOptions = {},
+  ): Effect.Effect<void, PiRpcError> =>
+    Effect.suspend(() => {
+      if (sendOptions.protected === true) {
+        const detail = options.protectedSendGuard?.();
+        if (detail !== undefined) {
+          return Effect.fail(new PiRpcError({ operation: "protected-send", detail }));
+        }
       }
+      return Effect.gen(function* () {
+        const accepted = yield* Queue.offer(
+          outgoing,
+          new TextEncoder().encode(`${encodeJsonLine(record)}\n`),
+        );
+        // A refused offer means `failTransport` already closed the queue, so the
+        // write can never land; surface the transport error instead of
+        // reporting a success the caller cannot rely on.
+        if (!accepted) {
+          return yield* Deferred.await(transportDown);
+        }
+      });
     });
 
   const request = (
@@ -430,7 +462,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     Effect.gen(function* () {
       const id = `t3-${nextRequestId++}`;
       const deferred = yield* Deferred.make<unknown, PiRpcError>();
-      pendingRequests.set(id, { deferred });
+      pendingRequests.set(id, { command: record["type"], deferred });
       yield* send({ ...record, id }).pipe(
         Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
       );

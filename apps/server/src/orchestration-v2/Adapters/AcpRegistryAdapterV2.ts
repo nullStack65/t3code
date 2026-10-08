@@ -102,6 +102,10 @@ function makeAcpRegistryRuntime(options: AcpRegistryAdapterV2Options) {
                   ...resolved.spawn,
                   env: { ...resolved.spawn.env, ...processEnvironment },
                 },
+          // Generic per-instance opt-in: the operator declares that this agent
+          // replaces its root session on the same connection (see
+          // AcpSessionRuntimeOptions.adoptRootSessionReplacement).
+          ...(options.settings.rootSessionReplacement ? { adoptRootSessionReplacement: true } : {}),
           ...(options.settings.authMethodId ? { authMethodId: options.settings.authMethodId } : {}),
         }).pipe(
           Layer.provide(
