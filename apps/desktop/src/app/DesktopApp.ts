@@ -325,7 +325,9 @@ const startup = Effect.gen(function* () {
   yield* appIdentity.configure;
   yield* applicationMenu.configure;
   yield* updates.configure;
-  yield* DesktopRemoteUpdates.listen;
+  if (environment.isolationProfile === undefined) {
+    yield* DesktopRemoteUpdates.listen;
+  }
   yield* linuxUrlHandler.register;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
 }).pipe(Effect.withSpan("desktop.startup"));

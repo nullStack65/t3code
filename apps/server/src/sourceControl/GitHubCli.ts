@@ -16,6 +16,7 @@ import {
   type SourceControlRepositoryVisibility,
   type VcsError,
 } from "@t3tools/contracts";
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubGraphQlBudget from "./githubGraphQlBudget.ts";
@@ -402,6 +403,13 @@ export const make = Effect.gen(function* () {
 
   const executeRaw: GitHubCli["Service"]["execute"] = Effect.fn("GitHubCli.executeRaw")(
     function* (input) {
+      if (isIsolationProfileActive()) {
+        return yield* new GitHubCliAuthenticationError({
+          command: "gh",
+          cwd: input.cwd,
+          cause: new Error("GitHub CLI access is disabled in the isolation profile."),
+        });
+      }
       const credential = yield* PinnedGitHubCredential;
       if (credential !== null && !targetsVerifiedHost(input.args, credential.host)) {
         return yield* new GitHubCliCommandError({
