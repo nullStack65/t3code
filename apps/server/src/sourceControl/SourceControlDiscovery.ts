@@ -141,3 +141,28 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(SourceControlDiscovery, make);
+
+/** Isolation profiles report no external account discovery or host tool probes. */
+export const layerDisabled = Layer.succeed(
+  SourceControlDiscovery,
+  SourceControlDiscovery.of({
+    discover: Effect.succeed({
+      versionControlSystems: VCS_PROBES.map((entry) => ({
+        kind: entry.kind,
+        label: entry.label,
+        implemented: entry.implemented,
+        status: "missing" as const,
+        version: Option.none<string>(),
+        installHint: entry.installHint,
+        detail: Option.some(entry.installHint),
+      })),
+      sourceControlProviders: [],
+    }),
+  }),
+);
+
+export const layerForIsolationProfile = <E, R>(
+  isolationProfile: boolean,
+  makeLiveLayer: () => Layer.Layer<SourceControlDiscovery, E, R>,
+): Layer.Layer<SourceControlDiscovery, E, R> =>
+  isolationProfile ? layerDisabled : makeLiveLayer();

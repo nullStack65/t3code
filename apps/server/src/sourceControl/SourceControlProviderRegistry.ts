@@ -337,3 +337,16 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(SourceControlProviderRegistry, make);
+
+/** Isolation profiles expose no credential-backed remote source control services. */
+export const layerDisabled = Layer.succeed(
+  SourceControlProviderRegistry,
+  SourceControlProviderRegistry.of({
+    resolveLink: () => undefined,
+    get: (kind) => Effect.succeed(unsupportedProvider(kind)),
+    resolveHandle: () =>
+      Effect.succeed({ provider: unsupportedProvider("unknown"), context: null }),
+    resolve: () => Effect.succeed(unsupportedProvider("unknown")),
+    discover: Effect.succeed([]),
+  }),
+);

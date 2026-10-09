@@ -19,6 +19,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -443,8 +444,10 @@ export const make = Effect.gen(function* () {
       const settings = yield* desktopSettings.get;
       const currentNetworkInterfaces = yield* readNetworkInterfaces;
       const resolved = resolveRuntimeState({
-        requestedMode: settings.serverExposureMode,
-        settings,
+        requestedMode: isIsolationProfileActive() ? "local-only" : settings.serverExposureMode,
+        settings: isIsolationProfileActive()
+          ? { ...settings, serverExposureMode: "local-only", tailscaleServeEnabled: false }
+          : settings,
         port,
         networkInterfaces: currentNetworkInterfaces,
         advertisedHostOverride: config.desktopLanHostOverride,
@@ -459,6 +462,9 @@ export const make = Effect.gen(function* () {
   ) {
     yield* Effect.annotateCurrentSpan({ mode });
     const previous = yield* Ref.get(stateRef);
+    if (isIsolationProfileActive() && mode !== "local-only") {
+      return yield* new DesktopServerExposureNoNetworkAddressError({ port: previous.port });
+    }
     const currentSettings = yield* desktopSettings.get;
     const nextSettings = {
       ...currentSettings,
@@ -541,7 +547,10 @@ export const make = Effect.gen(function* () {
     // Don't spawn the Tailscale CLI when the user hasn't opted into any
     // network exposure. The spawn itself triggers a macOS "Other apps"
     // TCC prompt on Mac App Store Tailscale builds.
-    if (state.mode !== "network-accessible" && !state.tailscaleServeEnabled) {
+    if (
+      isIsolationProfileActive() ||
+      (state.mode !== "network-accessible" && !state.tailscaleServeEnabled)
+    ) {
       return coreEndpoints;
     }
 

@@ -6,13 +6,13 @@ import * as Result from "effect/Result";
 import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Semaphore from "effect/Semaphore";
-import * as NodeOS from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - fj storage paths use explicit Windows and POSIX layouts, independently of this process's platform.
 import * as NodePath from "node:path";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { effectiveHomeDirectory, isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 import type { SourceControlProviderContext } from "./SourceControlProvider.ts";
@@ -218,39 +218,50 @@ export const make = Effect.gen(function* () {
   const authLock = yield* Semaphore.make(1);
   const authenticated = new Map<string, { token: string; time: number }>();
   const execute: ForgejoCli["Service"]["execute"] = (input) =>
-    process
-      .run({
-        ...input,
-        operation: "ForgejoCli.execute",
-        command: input.command ?? "tea",
-        timeoutMs: input.timeoutMs ?? 30_000,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new ForgejoCliError({
-              command: input.command ?? "tea",
-              cwd: input.cwd,
-              ...(input.command === "fj" ? {} : { cause }),
-              ...(cause._tag === "VcsProcessSpawnError"
-                ? { reason: "missing-cli" as const }
-                : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
-                  ? { reason: "authentication" as const }
-                  : {}),
-              detail:
-                cause._tag === "VcsProcessSpawnError"
-                  ? "Install Forgejo CLI (`fj` 0.6 or later) or Gitea CLI (`tea` 0.16 or later) and retry."
-                  : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
-                    ? "Authenticate this server with `fj auth login`, `fj auth add-token`, or `tea login add`."
-                    : "Forgejo CLI command failed.",
-            }),
-        ),
-      );
+    isIsolationProfileActive()
+      ? Effect.fail(
+          new ForgejoCliError({
+            command: input.command ?? "tea",
+            cwd: input.cwd,
+            reason: "authentication",
+            detail: "Forgejo CLI access is disabled in the isolation profile.",
+          }),
+        )
+      : process
+          .run({
+            ...input,
+            operation: "ForgejoCli.execute",
+            command: input.command ?? "tea",
+            timeoutMs: input.timeoutMs ?? 30_000,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ForgejoCliError({
+                  command: input.command ?? "tea",
+                  cwd: input.cwd,
+                  ...(input.command === "fj" ? {} : { cause }),
+                  ...(cause._tag === "VcsProcessSpawnError"
+                    ? { reason: "missing-cli" as const }
+                    : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
+                      ? { reason: "authentication" as const }
+                      : {}),
+                  detail:
+                    cause._tag === "VcsProcessSpawnError"
+                      ? "Install Forgejo CLI (`fj` 0.6 or later) or Gitea CLI (`tea` 0.16 or later) and retry."
+                      : cause._tag === "VcsProcessExitError" &&
+                          cause.failureKind === "authentication"
+                        ? "Authenticate this server with `fj auth login`, `fj auth add-token`, or `tea login add`."
+                        : "Forgejo CLI command failed.",
+                }),
+            ),
+          );
 
   const readKeys = Effect.fn("ForgejoCli.readKeys")(function* (cwd: string) {
+    if (isIsolationProfileActive()) return { hosts: {} };
     for (const path of forgejoKeysPaths({
       platform: yield* HostProcessPlatform,
-      home: NodeOS.homedir(),
+      home: effectiveHomeDirectory(globalThis.process.env, []),
       ...(globalThis.process.env.XDG_DATA_HOME
         ? { dataHome: globalThis.process.env.XDG_DATA_HOME }
         : {}),
@@ -318,6 +329,7 @@ export const make = Effect.gen(function* () {
   const listLogins: NonNullable<ForgejoCli["Service"]["listLogins"]> = Effect.fn(
     "ForgejoCli.listLogins",
   )(function* (input) {
+    if (isIsolationProfileActive()) return [];
     if (input.command === "fj") {
       const keys = yield* readKeys(input.cwd).pipe(Effect.result);
       if (Result.isFailure(keys)) {
@@ -632,6 +644,14 @@ export const make = Effect.gen(function* () {
   });
   const resolveRepository = (input: ForgejoRepositoryInput) => resolveTarget(input);
   const api = Effect.fn("ForgejoCli.api")(function* (input: ForgejoApiInput) {
+    if (isIsolationProfileActive()) {
+      return yield* new ForgejoCliError({
+        command: "tea",
+        cwd: input.cwd,
+        reason: "authentication",
+        detail: "Forgejo API access is disabled in the isolation profile.",
+      });
+    }
     const repository = yield* resolveTarget(
       input,
       input.path.replace(/^\/+/, "") === "user" && (!input.method || input.method === "GET"),

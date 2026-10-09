@@ -120,6 +120,34 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect("drops inherited OTLP destinations and headers in an isolation profile", () =>
+    Effect.gen(function* () {
+      const root = "/tmp/t3-profile";
+      const environment = yield* makeEnvironment(
+        {
+          isolationProfile: {
+            root,
+            homeDirectory: root,
+            appDataDirectory: `${root}/Library/Application Support`,
+            userDataDirectory: `${root}/userData`,
+            sessionDataDirectory: `${root}/sessionData`,
+            t3Home: `${root}/.t3`,
+          },
+        },
+        {
+          T3CODE_OTLP_TRACES_URL: "https://outside.invalid/traces",
+          T3CODE_OTLP_HEADERS: "authorization=Bearer%20account-token",
+        },
+      );
+
+      assert.deepEqual(environment.otlpTracesUrl, Option.none());
+      assert.deepEqual(environment.otlpMetricsUrl, Option.none());
+      assert.deepEqual(environment.otlpLogsUrl, Option.none());
+      assert.deepEqual(environment.otlpHeaders, Option.none());
+      assert.equal(environment.baseDir, `${root}/.t3`);
+    }),
+  );
+
   it.effect("uses the packaged Windows server sidecar as the backend root", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({

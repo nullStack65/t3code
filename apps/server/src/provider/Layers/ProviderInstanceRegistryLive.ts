@@ -52,6 +52,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import {
   ProviderInstanceRegistry,
   type ProviderInstanceRegistryShape,
@@ -128,6 +129,18 @@ const buildEntry = <R>(input: {
 > =>
   Effect.gen(function* () {
     const { driversById, parentScope, instanceId, rawInstanceId, entry } = input;
+    if (isIsolationProfileActive()) {
+      return {
+        kind: "unavailable" as const,
+        snapshot: yield* buildUnavailableProviderSnapshot({
+          driverKind: entry.driver,
+          instanceId,
+          displayName: entry.displayName,
+          accentColor: entry.accentColor,
+          reason: "Provider execution is disabled in the desktop isolation profile.",
+        }),
+      };
+    }
     const driver = driversById.get(entry.driver);
     if (!driver) {
       return {

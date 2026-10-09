@@ -69,3 +69,6 @@ export const layer = Layer.effect(PullRequestProviderRegistry, make).pipe(
   Layer.provide(BitbucketPullRequestApi.layer.pipe(Layer.provide(BitbucketApi.layer))),
   Layer.provide(AzureDevOpsPullRequestCli.layer.pipe(Layer.provide(AzureDevOpsCli.layer))),
 );
+
+/** Isolation profiles do not construct providers backed by external accounts. */
+export const layerDisabled = Layer.succeed(PullRequestProviderRegistry, fromProviders([]));
