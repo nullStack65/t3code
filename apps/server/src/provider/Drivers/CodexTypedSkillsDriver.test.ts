@@ -16,6 +16,7 @@ import {
 } from "./CodexTypedSkillsDriver.ts";
 
 const instanceId = ProviderInstanceId.make("governed-codex");
+const codexId = ProviderInstanceId.make("codex");
 const candidate = {
   directory: "/synthetic/never-read/candidate",
   sourceRepository: "nullStack65/closura-agent-config",
@@ -29,7 +30,7 @@ it("does not bootstrap a typed default or replace an explicit typed route with l
   expect(Object.values(defaults).some((entry) => entry.driver === "codex-typed-skills")).toBe(
     false,
   );
-  expect(defaults["codex"]?.driver).toBe("codex");
+  expect(defaults[codexId]?.driver).toBe("codex");
 
   const explicit = {
     driver: CodexTypedSkillsDriver.driverKind,
@@ -37,9 +38,9 @@ it("does not bootstrap a typed default or replace an explicit typed route with l
   };
   const hydrated = deriveProviderInstanceConfigMap({
     ...DEFAULT_SERVER_SETTINGS,
-    providerInstances: { codex: explicit },
+    providerInstances: { [codexId]: explicit },
   });
-  expect(hydrated["codex"]).toEqual(explicit);
+  expect(hydrated[codexId]).toEqual(explicit);
 });
 
 it.effect(
@@ -58,8 +59,12 @@ it.effect(
             displayName: undefined,
             enabled: true,
             environment: [
-              { name: "HOME", value: "/synthetic/uncontrolled-home" },
-              { name: "CODEX_HOME", value: "/synthetic/shared-skills-and-plugins" },
+              { name: "HOME", value: "/synthetic/uncontrolled-home", sensitive: false },
+              {
+                name: "CODEX_HOME",
+                value: "/synthetic/shared-skills-and-plugins",
+                sensitive: false,
+              },
             ],
             config: decodeSettings(config),
           }),
@@ -125,7 +130,7 @@ it.effect(
 
 it.effect("a build without this driver refuses instead of degrading to legacy Codex", () =>
   Effect.gen(function* () {
-    const { registry } = yield* makeProviderInstanceRegistry({
+    const { registry } = yield* makeProviderInstanceRegistry<never>({
       drivers: [],
       configMap: {
         [instanceId]: { driver: CodexTypedSkillsDriver.driverKind, config: { candidate } },
