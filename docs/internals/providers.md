@@ -130,6 +130,26 @@ could instead be discarded by an older schema. Never translate this driver to
 `codex` as a compatibility fallback. Legacy Codex and other providers remain
 ungoverned by this contract; selecting them is not governed activation.
 
+The legacy Codex adapter exposes a server-local `nativeObservation(threadId)`
+reader as an admission prerequisite. The runtime binds its spawned PID and fresh
+process generation to the owned stdio transport, initialization, opened provider
+thread and correlated turn response. Requested model/tier and provider-reported
+session model remain distinct from the unknown actual served model, generation,
+principal, harness build, billing, effort and fallback. It records no home,
+credentials or prompt content and changes no provider configuration.
+
+`capture(candidate)` binds an immutable request reference to the current
+observation; `resolve(capture, candidate)` consumes the original in-memory handle
+once, within five seconds, and refuses candidate or lifecycle drift. Serialized
+copies and handles from another runtime cannot establish provenance. New turns,
+route/model events, session/process closure, compaction and rollback revoke prior
+captures; compaction/rollback never attest that old instructions were erased.
+This is not a portable signed receipt or an exposed model/client RPC. Even current
+known-fact evidence returns `admissionAuthorized: false`: source/assignment
+authority, context containment and exclusive Skill discovery/read/invocation
+remain unqualified. An absent observer on an older runtime stays absent. No
+agent-config positive consumer or installation may infer eligibility from it.
+
 Positive support requires an independently trusted bridge to the canonical typed
 policy/source admission, actual per-process/turn route observation, exclusive
 discovery and every body/read/expansion path, and invalidation of retained context

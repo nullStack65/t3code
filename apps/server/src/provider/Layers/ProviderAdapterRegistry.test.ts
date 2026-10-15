@@ -31,6 +31,7 @@ const fakeCodexAdapter: CodexAdapter.CodexAdapterShape = {
   provider: CODEX_DRIVER,
   capabilities: { sessionModelSwitch: "in-session" },
   startSession: vi.fn(),
+  nativeObservation: vi.fn(() => Effect.succeed(undefined)),
   sendTurn: vi.fn(),
   interruptTurn: vi.fn(),
   respondToRequest: vi.fn(),
