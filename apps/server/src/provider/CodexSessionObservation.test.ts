@@ -1,9 +1,14 @@
 import { expect, it } from "@effect/vitest";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import { makeCodexSessionObservation } from "./CodexSessionObservation.ts";
+
+const json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeSync(json);
+const decodeJson = Schema.decodeUnknownSync(json);
 
 const candidate = {
   directory: "/synthetic/candidate-never-read",
@@ -68,7 +73,7 @@ it.effect("rejects forged, copied, cross-process and cross-thread captures", () 
       true,
       {},
       { ...capture },
-      JSON.parse(JSON.stringify(capture)),
+      decodeJson(encodeJson(capture)),
       { admissionAuthorized: true, nativeObservation: capture },
     ]) {
       expect(yield* owner.reader.resolve(forged, candidate)).toMatchObject({

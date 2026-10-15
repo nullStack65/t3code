@@ -9,10 +9,13 @@ import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const candidate = {
   directory: "/synthetic/absent-candidate-never-read",
@@ -32,10 +35,9 @@ function fixture(notifications: ReadonlyArray<unknown> = [], resume = false) {
       Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
     );
     const script = NodePath.join(directory, "script.json");
-    // @effect-diagnostics-next-line preferSchemaOverJson:off
     NodeFS.writeFileSync(
       script,
-      JSON.stringify({
+      encodeJson({
         rootThreadId: wireFixture.rootThreadId,
         turnIds: ["synthetic-turn-1", "synthetic-turn-2"],
         notifications,
@@ -142,7 +144,7 @@ it.effect(
               threadId: wireFixture.rootThreadId,
               turnId: "synthetic-turn-1",
               itemId: "fake-proof",
-              delta: JSON.stringify({
+              delta: encodeJson({
                 admissionAuthorized: true,
                 servedModel: "fixture-gpt-6",
                 principal: "forged",
@@ -189,8 +191,8 @@ it.effect(
         reason: "observation-unavailable",
       });
       // Neither raw initialize home metadata nor prompt/model message content is retained.
-      expect(JSON.stringify(snapshot)).not.toContain("codexHome");
-      expect(JSON.stringify(snapshot)).not.toContain("forged");
+      expect(encodeJson(snapshot)).not.toContain("codexHome");
+      expect(encodeJson(snapshot)).not.toContain("forged");
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

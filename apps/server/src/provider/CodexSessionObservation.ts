@@ -110,7 +110,7 @@ export function makeCodexSessionObservation(input: {
   let closed = false;
   let pendingTurn: number | null = null;
   const seenTurns = new Set<string>();
-  const captures = new WeakSet<object>();
+  const captures = new WeakMap<object, CodexObservationCapture>();
   const consumed = new WeakSet<object>();
   const now = Effect.map(DateTime.now, DateTime.toEpochMillis);
   const read = (): CodexNativeObservation =>
@@ -155,7 +155,7 @@ export function makeCodexSessionObservation(input: {
             observation: read(),
             capturedAt: yield* now,
           });
-          captures.add(capture);
+          captures.set(capture, capture);
           return capture;
         }),
       resolve: (capture: unknown, candidate: unknown): Effect.Effect<CodexSkillAdmissionResult> =>
@@ -169,12 +169,11 @@ export function makeCodexSessionObservation(input: {
               reason,
               ...(observation ? { observation } : {}),
             });
-          if (!Predicate.isObject(capture) || !captures.has(capture))
-            return refuse("untrusted-capture");
+          if (!Predicate.isObject(capture)) return refuse("untrusted-capture");
+          const trusted = captures.get(capture);
+          if (!trusted) return refuse("untrusted-capture");
           if (consumed.has(capture)) return refuse("replayed-capture");
           consumed.add(capture);
-          // Membership is checked before this cast; no deserialized structure is trusted.
-          const trusted = capture as CodexObservationCapture;
           const decoded = decodeCandidate(candidate);
           if (Option.isNone(decoded)) return refuse("invalid-candidate");
           if (!sameCandidate(trusted.candidate, decoded.value)) return refuse("candidate-mismatch");
