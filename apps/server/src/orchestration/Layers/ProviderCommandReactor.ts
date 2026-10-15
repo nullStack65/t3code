@@ -1,3 +1,7 @@
+import {
+  qualifyCoordinatorWorkspace,
+  qualifyThreadWorktree,
+} from "../../project/ThreadWorktree.ts";
 import { withWorkspaceLease } from "../../workspace/workspaceLease.ts";
 import {
   type ChatAttachment,
@@ -9,6 +13,7 @@ import {
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
+  type ThreadExecutionScope,
   type ProviderSession,
   type RuntimeMode,
   type TurnId,
@@ -34,6 +39,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import {
   ProviderAdapterProcessError,
@@ -213,6 +219,8 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  const environmentIdentity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+  const environmentId = yield* environmentIdentity.getEnvironmentId;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerAuthService = yield* ProviderAuthService;
@@ -482,8 +490,14 @@ const make = Effect.gen(function* () {
     readonly projectId: ProjectId;
     readonly branch: string | null;
     readonly worktreePath: string | null;
+    readonly executionScope?: ThreadExecutionScope | null | undefined;
   }) {
     const { worktreePath, branch } = thread;
+    // A coding assignment is immutable. Recreating a missing path after the
+    // user removed it could silently bind this thread to another checkout.
+    if (thread.executionScope === "coding") {
+      return;
+    }
     if (!worktreePath || !branch) {
       return;
     }
@@ -719,6 +733,57 @@ const make = Effect.gen(function* () {
       thread,
       projects: project ? [project] : [],
     });
+    // Recheck immediately before starting/resuming the provider; admission and execution
+    // are asynchronous, so a removed/rebound checkout cannot use a shared cwd fallback.
+    if (thread.executionScope === "coding") {
+      if (!project)
+        return yield* new ProviderAdapterRequestError({
+          provider: preferredProvider,
+          method: "thread.turn.start",
+          detail: "Coding project is missing.",
+        });
+      yield* qualifyThreadWorktree(
+        {
+          threadId,
+          projectCwd: project.workspaceRoot,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+        },
+        { environmentId },
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: preferredProvider,
+              method: "thread.turn.start",
+              detail:
+                cause instanceof Error ? cause.message : "Coding worktree qualification failed.",
+            }),
+        ),
+      );
+    } else if (thread.executionScope === "coordinator") {
+      if (!project)
+        return yield* new ProviderAdapterRequestError({
+          provider: preferredProvider,
+          method: "thread.turn.start",
+          detail: "Coordinator project is missing.",
+        });
+      yield* qualifyCoordinatorWorkspace(project.workspaceRoot, thread.worktreePath, thread.id, {
+        environmentId,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: preferredProvider,
+              method: "thread.turn.start",
+              detail:
+                cause instanceof Error
+                  ? cause.message
+                  : "Coordinator workspace qualification failed.",
+            }),
+        ),
+      );
+    }
     const refreshWorkspaceSnapshot = effectiveCwd
       ? providerRegistry
           .refreshWorkspaceSnapshot({ instanceId: desiredInstanceId, cwd: effectiveCwd })
@@ -1592,6 +1657,83 @@ const make = Effect.gen(function* () {
         yield* appendTurnStartFailure(
           "Callback destination route changed",
           `The business result is already preserved in this thread's history. Do not resend it. Review the existing message '${event.payload.messageId}' here, restore the intended route, then continue deliberately from its existing content.`,
+        );
+        return;
+      }
+    }
+
+    const latestThread = yield* resolveThreadShell(event.payload.threadId);
+    if (
+      latestThread?.executionScope === "coding" ||
+      latestThread?.executionScope === "coordinator"
+    ) {
+      const project = yield* resolveProject(latestThread.projectId);
+      if (!project) {
+        yield* handleTurnStartFailure(
+          Cause.fail(
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(latestThread.session?.providerName ?? undefined),
+              method: "thread.turn.start",
+              detail: "Thread destination project is missing.",
+            }),
+          ),
+        );
+        return;
+      }
+      const qualification = Effect.gen(function* () {
+        if (latestThread.executionScope === "coding") {
+          yield* qualifyThreadWorktree(
+            {
+              threadId: latestThread.id,
+              projectCwd: project.workspaceRoot,
+              worktreePath: latestThread.worktreePath,
+              branch: latestThread.branch,
+            },
+            { environmentId },
+          );
+        } else {
+          yield* qualifyCoordinatorWorkspace(
+            project.workspaceRoot,
+            latestThread.worktreePath,
+            latestThread.id,
+            { environmentId },
+          );
+        }
+        return true;
+      });
+      const qualified = yield* qualification.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(latestThread.session?.providerName ?? undefined),
+              method: "thread.turn.start",
+              detail:
+                cause instanceof Error ? cause.message : "Coding worktree qualification failed.",
+            }),
+        ),
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : recoverTurnStartFailure(cause).pipe(Effect.as(false)),
+        ),
+      );
+      if (!qualified) return;
+      const session = yield* providerService
+        .listSessions()
+        .pipe(
+          Effect.map((sessions) => sessions.find((candidate) => candidate.threadId === thread.id)),
+        );
+      const expectedCwd = path.resolve(latestThread.worktreePath ?? "");
+      if (!session?.cwd || path.resolve(session.cwd) !== expectedCwd) {
+        yield* handleTurnStartFailure(
+          Cause.fail(
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabel(latestThread.session?.providerName ?? undefined),
+              method: "thread.turn.start",
+              detail:
+                "The destination thread no longer has a provider session bound to its assigned worktree. The existing message is preserved; open the thread and retry after its workspace is repaired.",
+            }),
+          ),
         );
         return;
       }

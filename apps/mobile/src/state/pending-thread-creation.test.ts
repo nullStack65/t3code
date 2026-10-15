@@ -169,13 +169,14 @@ describe("pendingThreadCreationShell", () => {
       interactionMode: "default",
       branch: "main",
       worktreePath: null,
+      executionScope: "coding",
       latestTurn: null,
       session: null,
       latestUserMessageAt: creation.createdAt,
     });
   });
 
-  it("keeps a local task's explicit worktree path", () => {
+  it("does not expose a shared path before a dedicated coding worktree is assigned", () => {
     expect(
       pendingThreadCreationShell({
         ...creation,
@@ -185,7 +186,7 @@ describe("pendingThreadCreationShell", () => {
           worktreePath: "/repo/.worktrees/feature",
         },
       })?.worktreePath,
-    ).toBe("/repo/.worktrees/feature");
+    ).toBeNull();
   });
 
   it("returns null for a follow-up message or a creation without a model", () => {

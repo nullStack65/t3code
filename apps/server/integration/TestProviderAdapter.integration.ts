@@ -186,6 +186,10 @@ export interface TestProviderAdapterHarness {
   readonly queueTurnResponseForNextSession: (
     response: TestTurnResponse,
   ) => Effect.Effect<void, never>;
+  readonly queueTurnResponseForThreadStart: (
+    threadId: ThreadId,
+    response: TestTurnResponse,
+  ) => Effect.Effect<void, never>;
   readonly getStartCount: () => number;
   readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<number>;
   readonly getInterruptCalls: (threadId: ThreadId) => ReadonlyArray<TurnId | undefined>;
@@ -230,6 +234,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
     let eventCount = 0;
     const sessions = new Map<ThreadId, SessionState>();
     const queuedResponsesForNextSession: TestTurnResponse[] = [];
+    const queuedResponsesByStartingThread = new Map<ThreadId, TestTurnResponse[]>();
     const interruptCallsBySession = new Map<ThreadId, Array<TurnId | undefined>>();
     const approvalResponsesBySession = new Map<
       ThreadId,
@@ -281,7 +286,10 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
             turns: [],
           },
           turnCount: 0,
-          queuedResponses: queuedResponsesForNextSession.splice(0),
+          queuedResponses: [
+            ...queuedResponsesForNextSession.splice(0),
+            ...(queuedResponsesByStartingThread.get(threadId)?.splice(0) ?? []),
+          ],
           rollbackCalls: [],
         });
 
@@ -519,6 +527,16 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         queuedResponsesForNextSession.push(response);
       });
 
+    const queueTurnResponseForThreadStart = (
+      threadId: ThreadId,
+      response: TestTurnResponse,
+    ): Effect.Effect<void, never> =>
+      Effect.sync(() => {
+        const responses = queuedResponsesByStartingThread.get(threadId) ?? [];
+        responses.push(response);
+        queuedResponsesByStartingThread.set(threadId, responses);
+      });
+
     const getRollbackCalls = (threadId: ThreadId): ReadonlyArray<number> => {
       const state = sessions.get(threadId);
       if (!state) {
@@ -559,6 +577,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       provider,
       queueTurnResponse,
       queueTurnResponseForNextSession,
+      queueTurnResponseForThreadStart,
       getStartCount,
       getRollbackCalls,
       getInterruptCalls,

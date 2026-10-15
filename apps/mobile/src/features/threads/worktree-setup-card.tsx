@@ -259,7 +259,7 @@ function SetupDetailsSheet({
                 }}
                 className="min-h-11 justify-center px-2"
               >
-                <Text className="text-sm text-foreground">Work locally</Text>
+                <Text className="text-sm text-foreground">Retry as coding worktree</Text>
               </Pressable>
             ) : null}
           </View>

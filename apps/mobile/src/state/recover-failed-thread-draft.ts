@@ -7,6 +7,7 @@ import {
   flushComposerDrafts,
   getComposerDraftSnapshot,
   mergeComposerDraftContent,
+  updateComposerDraftSettings,
 } from "./use-composer-drafts";
 
 /** Move unsent setup edits into the restored task before reopening its editor. */
@@ -14,6 +15,11 @@ export async function recoverFailedThreadDraft(message: QueuedThreadMessage): Pr
   const sourceKey = scopedThreadKey(message.environmentId, message.threadId);
   const targetKey = restoredNewTaskDraftKey(message.messageId);
   const source = getComposerDraftSnapshot(sourceKey);
+  if (message.creation) {
+    updateComposerDraftSettings(targetKey, {
+      executionScope: message.creation.executionScope ?? "coding",
+    });
+  }
   if (source.text.length === 0 && source.attachments.length === 0) return;
 
   await mergeComposerDraftContent(targetKey, {
