@@ -49,7 +49,10 @@ export class CodexTypedSkillAdmissionRefused extends Schema.TaggedError<CodexTyp
  */
 export const CodexTypedSkillsDriver: ProviderDriver<typeof CodexTypedSkillsSettings.Type> = {
   driverKind: ProviderDriverKind.make("codex-typed-skills"),
-  metadata: { displayName: "Codex (typed Skill admission required)", supportsMultipleInstances: true },
+  metadata: {
+    displayName: "Codex (typed Skill admission required)",
+    supportsMultipleInstances: true,
+  },
   configSchema: CodexTypedSkillsSettings,
   defaultConfig: () => ({ candidate: null }),
   create: ({ instanceId }) => {
