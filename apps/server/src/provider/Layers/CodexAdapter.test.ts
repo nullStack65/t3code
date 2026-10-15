@@ -298,6 +298,19 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
     }),
   );
+  it.effect(
+    "does not synthesize observation evidence for an older runtime or missing session",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("observation-legacy-runtime");
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        NodeAssert.equal(yield* adapter.nativeObservation(threadId), undefined);
+        yield* adapter.stopSession(threadId);
+        const error = yield* Effect.flip(adapter.nativeObservation(threadId));
+        NodeAssert.equal(error._tag, "ProviderAdapterSessionNotFoundError");
+      }),
+  );
 });
 
 const sessionRuntimeFactory = makeRuntimeFactory();

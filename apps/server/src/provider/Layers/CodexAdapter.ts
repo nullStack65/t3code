@@ -66,7 +66,6 @@ import {
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
-  type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -2725,6 +2724,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       promptlessTurnContinuation: true,
     },
     startSession,
+    nativeObservation: (threadId) =>
+      requireSession(threadId).pipe(Effect.map((session) => session.runtime.nativeObservation)),
     sendTurn,
     compaction: { type: "native", start: compactThread },
     interruptTurn,

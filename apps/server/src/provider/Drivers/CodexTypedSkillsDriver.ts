@@ -4,16 +4,11 @@ import * as Schema from "effect/Schema";
 
 import { ProviderDriverError } from "../Errors.ts";
 import type { ProviderDriver } from "../ProviderDriver.ts";
+import { CodexTypedSkillCandidate } from "../CodexSessionObservation.ts";
+export { CodexTypedSkillCandidate } from "../CodexSessionObservation.ts";
 
 // A reference to an offline candidate is a request, never a trusted observation
 // or permission. In particular, review-only candidates cannot authorize a turn.
-export const CodexTypedSkillCandidate = Schema.Struct({
-  directory: Schema.NonEmptyString,
-  sourceRepository: Schema.Literal("nullStack65/closura-agent-config"),
-  sourceCommit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
-  admissionSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
-});
-
 export const CodexTypedSkillsSettings = Schema.Struct({
   candidate: Schema.NullOr(CodexTypedSkillCandidate).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),

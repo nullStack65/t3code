@@ -43,6 +43,10 @@ import {
   buildCodexDeveloperInstructions,
   type T3CodeToolAvailability,
 } from "../CodexDeveloperInstructions.ts";
+import {
+  makeCodexSessionObservation,
+  type CodexSessionObservationReader,
+} from "../CodexSessionObservation.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -206,6 +210,8 @@ export interface CodexThreadSnapshot {
 }
 
 export interface CodexSessionRuntimeShape {
+  /** Server-local evidence only; omitted by older/test runtimes, never inferred. */
+  readonly nativeObservation?: CodexSessionObservationReader;
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
   readonly sendTurn: (
@@ -1367,6 +1373,15 @@ export const makeCodexSessionRuntime = (
       );
 
     const sessionCreatedAt = yield* nowIso;
+    const observation = makeCodexSessionObservation({
+      threadId: options.threadId,
+      ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
+      pid: child.pid,
+      processGeneration: yield* randomUUIDv4("session-observation"),
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(observation.close));
     const initialSession = {
       provider: PROVIDER,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
@@ -1863,6 +1878,32 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        switch (notification.method) {
+          case "turn/started":
+          case "turn/completed":
+            observation.lifecycle(notification.params.threadId, notification.params.turn.id);
+            break;
+          case "model/rerouted":
+            observation.modelChanged(
+              notification.params.threadId,
+              notification.params.toModel,
+              "model-rerouted-notification",
+              notification.params.turnId,
+            );
+            break;
+          case "thread/settings/updated":
+            observation.modelChanged(
+              notification.params.threadId,
+              notification.params.threadSettings.model,
+              "thread-settings-notification",
+            );
+            break;
+          case "thread/closed": {
+            const current = yield* observation.reader.read;
+            if (notification.params.threadId === current.providerThreadId) observation.close();
+            break;
+          }
+        }
         const isMemoryConsolidationNotification =
           suppressMemoryConsolidationNotification(notification);
 
@@ -2404,6 +2445,7 @@ export const makeCodexSessionRuntime = (
     );
 
     yield* child.exitCode.pipe(
+      Effect.tap(() => Effect.sync(observation.close)),
       Effect.flatMap((exitCode) =>
         Ref.get(closedRef).pipe(
           Effect.flatMap((closed) => {
@@ -2433,6 +2475,7 @@ export const makeCodexSessionRuntime = (
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
       yield* client.request("initialize", buildCodexInitializeParams());
+      observation.initialized();
       yield* client.notify("initialized", undefined);
 
       const requestedModel = normalizeCodexModelSlug(options.model);
@@ -2448,6 +2491,7 @@ export const makeCodexSessionRuntime = (
       });
 
       const providerThreadId = opened.thread.id;
+      observation.opened(providerThreadId, opened.model, options.resumeCursor !== undefined);
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
@@ -2476,6 +2520,7 @@ export const makeCodexSessionRuntime = (
       if (alreadyClosed) {
         return;
       }
+      observation.close();
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
       yield* updateSession(sessionRef, {
@@ -2493,9 +2538,11 @@ export const makeCodexSessionRuntime = (
     });
 
     return {
+      nativeObservation: observation.reader,
       start,
       getSession: Ref.get(sessionRef),
       compactThread: Effect.gen(function* () {
+        observation.invalidate("compaction-does-not-attest-context-removal");
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/compact/start", { threadId: providerThreadId });
       }),
@@ -2531,7 +2578,10 @@ export const makeCodexSessionRuntime = (
               options.mcpCapabilities,
             ),
           });
-          const rawResponse = yield* client.raw.request("turn/start", params);
+          const observationGeneration = observation.beginTurn(normalizedModel, input.serviceTier);
+          const rawResponse = yield* client.raw
+            .request("turn/start", params)
+            .pipe(Effect.tapError(() => Effect.sync(observation.turnFailed)));
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
             Effect.mapError((error) =>
               CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
@@ -2542,6 +2592,7 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turn.id);
+          observation.acknowledgedTurn(observationGeneration, turnId);
           yield* updateSession(sessionRef, (session) => ({
             status: "running",
             // Codex accepts follow-ups while the current turn is still
@@ -2608,6 +2659,7 @@ export const makeCodexSessionRuntime = (
       }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {
+          observation.invalidate("rollback-does-not-attest-context-removal");
           const providerThreadId = yield* readProviderThreadId;
           const snapshot = yield* rollbackCodexThread(client, providerThreadId, numTurns);
           yield* updateSession(sessionRef, {
