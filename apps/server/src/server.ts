@@ -22,6 +22,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import {
   otlpTracesProxyRouteLayer,
   assetRouteLayer,
@@ -222,12 +223,32 @@ const ResourceDiagnosticsLayerLive = Layer.mergeAll(
   ProcessResourceMonitor.layer.pipe(Layer.provide(ResourceTelemetryLayerLive)),
 );
 
-const RelayClientLive = Layer.unwrap(
-  Effect.gen(function* () {
-    const config = yield* ServerConfig.ServerConfig;
-    return RelayClient.layerCloudflared({ baseDir: config.baseDir });
-  }),
-);
+const RelayClientLive = isIsolationProfileActive()
+  ? Layer.succeed(
+      RelayClient.RelayClient,
+      RelayClient.RelayClient.of({
+        resolve: Effect.succeed({ status: "missing", version: RelayClient.CLOUDFLARED_VERSION }),
+        install: Effect.fail(
+          new RelayClient.RelayClientInstallError({
+            reason: "unsupported_platform",
+            message: "Relay client installation is disabled in the isolation profile.",
+          }),
+        ),
+        installWithProgress: () =>
+          Effect.fail(
+            new RelayClient.RelayClientInstallError({
+              reason: "unsupported_platform",
+              message: "Relay client installation is disabled in the isolation profile.",
+            }),
+          ),
+      }),
+    )
+  : Layer.unwrap(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        return RelayClient.layerCloudflared({ baseDir: config.baseDir });
+      }),
+    );
 
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -259,7 +280,11 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(PullRequestSyncReactor.layer),
   Layer.provideMerge(ThreadPullRequestReactor.layer),
-  Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provideMerge(
+    isIsolationProfileActive()
+      ? AgentAwarenessRelay.layerDisabled
+      : AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer)),
+  ),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
@@ -292,19 +317,21 @@ const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
 );
 
-const SourceControlProviderRegistryLayerLive = SourceControlProviderRegistry.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      AzureDevOpsCli.layer,
-      BitbucketApi.layer,
-      GitHubCli.layer,
-      GitLabCli.layer,
-      ForgejoCli.layer,
-    ),
-  ),
-  Layer.provideMerge(GitVcsDriver.layer),
-  Layer.provideMerge(VcsDriverRegistryLayerLive),
-);
+const SourceControlProviderRegistryLayerLive = isIsolationProfileActive()
+  ? SourceControlProviderRegistry.layerDisabled
+  : SourceControlProviderRegistry.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          AzureDevOpsCli.layer,
+          BitbucketApi.layer,
+          GitHubCli.layer,
+          GitLabCli.layer,
+          ForgejoCli.layer,
+        ),
+      ),
+      Layer.provideMerge(GitVcsDriver.layer),
+      Layer.provideMerge(VcsDriverRegistryLayerLive),
+    );
 
 const RepositoryIdentityResolverLayerLive = Layer.effect(
   RepositoryIdentityResolver.RepositoryIdentityResolver,
@@ -343,7 +370,11 @@ const RepositoryIdentityResolverLayerLive = Layer.effect(
 ).pipe(Layer.provide(SourceControlProviderRegistryLayerLive), Layer.provide(ProcessRunner.layer));
 
 const PullRequestServiceLive = PullRequestService.layer.pipe(
-  Layer.provide(PullRequestProviderRegistry.layer),
+  Layer.provide(
+    isIsolationProfileActive()
+      ? PullRequestProviderRegistry.layerDisabled
+      : PullRequestProviderRegistry.layer,
+  ),
   // Where the viewed-file marks live for a host that keeps none of its own.
   Layer.provide(PullRequestFilesViewed.layer),
   Layer.provide(PullRequestReadCache.layer),
@@ -421,7 +452,9 @@ const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PortScannerLayerLive),
 );
 
-const DeviceLayerLive = DeviceService.layer.pipe(
+const DeviceLayerLive = (
+  isIsolationProfileActive() ? DeviceService.layerDisabled : DeviceService.layer
+).pipe(
   Layer.provide(ServerSettingsLayerLive),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NetService.layer),
@@ -455,13 +488,15 @@ const AuthLayerLive = EnvironmentAuth.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
-const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
-  RelayClientLive,
-  CloudManagedEndpointRuntime.layer.pipe(
-    Layer.provide(ServerSecretStore.layer),
-    Layer.provide(RelayClientLive),
-  ),
-);
+const CloudManagedEndpointRuntimeLive = isIsolationProfileActive()
+  ? CloudManagedEndpointRuntime.layerDisabled
+  : Layer.mergeAll(
+      RelayClientLive,
+      CloudManagedEndpointRuntime.layer.pipe(
+        Layer.provide(ServerSecretStore.layer),
+        Layer.provide(RelayClientLive),
+      ),
+    );
 
 // Build the orchestration engine with this same provider service instance so
 // serialized turn admission can resolve live route compatibility.
@@ -519,6 +554,7 @@ const AntigravityInstallationRefreshLive = Layer.effectDiscard(
 );
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+  Layer.provideMerge(RelayClientLive),
   Layer.provideMerge(AntigravityInstallationRefreshLive),
   Layer.provideMerge(ProviderAuthServiceLive),
   // Core Services
@@ -573,10 +609,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(
     Layer.mergeAll(
-      CloudCliTokenManager.layer.pipe(
-        Layer.provide(ServerSecretStore.layer),
-        Layer.provide(ExternalLauncher.layer),
-      ),
+      isIsolationProfileActive()
+        ? CloudCliTokenManager.layerDisabled
+        : CloudCliTokenManager.layer.pipe(
+            Layer.provide(ServerSecretStore.layer),
+            Layer.provide(ExternalLauncher.layer),
+          ),
       CloudManagedEndpointRuntimeLive,
     ),
   ),
@@ -687,62 +725,63 @@ const makeServerLayer = Layer.unwrap(
           ),
       ),
     );
-    const tailscaleServeLayer = config.tailscaleServeEnabled
-      ? Layer.effectDiscard(
-          Effect.acquireRelease(
-            Effect.gen(function* () {
-              yield* Deferred.succeed(tailscaleParked, undefined).pipe(Effect.orDie);
-              yield* awaitActivation;
-              const server = yield* HttpServer.HttpServer;
-              const address = server.address;
-              if (typeof address === "string" || !("port" in address)) {
-                return null;
-              }
+    const tailscaleServeLayer =
+      config.tailscaleServeEnabled && !isIsolationProfileActive()
+        ? Layer.effectDiscard(
+            Effect.acquireRelease(
+              Effect.gen(function* () {
+                yield* Deferred.succeed(tailscaleParked, undefined).pipe(Effect.orDie);
+                yield* awaitActivation;
+                const server = yield* HttpServer.HttpServer;
+                const address = server.address;
+                if (typeof address === "string" || !("port" in address)) {
+                  return null;
+                }
 
-              const localPort = address.port;
-              return yield* ensureTailscaleServe({
-                localPort,
-                servePort: config.tailscaleServePort,
-                localHost: "127.0.0.1",
-              }).pipe(
-                Effect.as({ localPort, servePort: config.tailscaleServePort }),
-                Effect.tap(() =>
-                  Effect.logInfo("Tailscale Serve configured", {
-                    localPort,
-                    servePort: config.tailscaleServePort,
-                  }),
-                ),
-                Effect.catch((cause) =>
-                  Effect.logWarning("Failed to configure Tailscale Serve", {
-                    cause,
-                    localPort,
-                    servePort: config.tailscaleServePort,
-                  }).pipe(Effect.as(null)),
-                ),
-              );
-            }),
-            (configured) =>
-              configured
-                ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
-                    Effect.tap(() =>
-                      Effect.logInfo("Tailscale Serve disabled", {
-                        servePort: configured.servePort,
-                      }),
-                    ),
-                    Effect.catch((cause) =>
-                      Effect.logWarning("Failed to disable Tailscale Serve", {
-                        cause,
-                        servePort: configured.servePort,
-                      }),
-                    ),
-                  )
-                : Effect.void,
-          ),
-        )
-      : Layer.empty;
+                const localPort = address.port;
+                return yield* ensureTailscaleServe({
+                  localPort,
+                  servePort: config.tailscaleServePort,
+                  localHost: "127.0.0.1",
+                }).pipe(
+                  Effect.as({ localPort, servePort: config.tailscaleServePort }),
+                  Effect.tap(() =>
+                    Effect.logInfo("Tailscale Serve configured", {
+                      localPort,
+                      servePort: config.tailscaleServePort,
+                    }),
+                  ),
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Failed to configure Tailscale Serve", {
+                      cause,
+                      localPort,
+                      servePort: config.tailscaleServePort,
+                    }).pipe(Effect.as(null)),
+                  ),
+                );
+              }),
+              (configured) =>
+                configured
+                  ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
+                      Effect.tap(() =>
+                        Effect.logInfo("Tailscale Serve disabled", {
+                          servePort: configured.servePort,
+                        }),
+                      ),
+                      Effect.catch((cause) =>
+                        Effect.logWarning("Failed to disable Tailscale Serve", {
+                          cause,
+                          servePort: configured.servePort,
+                        }),
+                      ),
+                    )
+                  : Effect.void,
+            ),
+          )
+        : Layer.empty;
     const cloudDesiredLinkReconcileLayer = Layer.effectDiscard(
       Effect.gen(function* () {
-        if (!hasCloudPublicConfig) {
+        if (!hasCloudPublicConfig || isIsolationProfileActive()) {
           yield* Deferred.succeed(cloudLinkParked, undefined).pipe(Effect.orDie);
           return;
         }
@@ -815,7 +854,9 @@ const makeServerLayer = Layer.unwrap(
           Deferred.await(runtimeStateParked),
           Deferred.await(cloudLinkParked),
           Deferred.await(routesReady),
-          ...(config.tailscaleServeEnabled ? [Deferred.await(tailscaleParked)] : []),
+          ...(config.tailscaleServeEnabled && !isIsolationProfileActive()
+            ? [Deferred.await(tailscaleParked)]
+            : []),
         ],
         { concurrency: "unbounded" },
       ).pipe(Effect.asVoid),

@@ -1,4 +1,5 @@
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { effectiveHomeDirectory, isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import {
   listLoginShellCandidates,
   mergePathEntries,
@@ -75,13 +76,15 @@ export const fixPath = Effect.fn("fixPath")(function* (): Effect.fn.Return<
 
   if (platform !== "darwin" && platform !== "linux") return;
 
-  yield* Effect.sync(() => hydratePosixHome(env)).pipe(
-    Effect.catchDefect((defect) =>
-      Effect.sync(() => {
-        logPathHydrationWarning("Failed to hydrate HOME from the user account.", defect);
-      }),
-    ),
-  );
+  if (!isIsolationProfileActive(env)) {
+    yield* Effect.sync(() => hydratePosixHome(env)).pipe(
+      Effect.catchDefect((defect) =>
+        Effect.sync(() => {
+          logPathHydrationWarning("Failed to hydrate HOME from the user account.", defect);
+        }),
+      ),
+    );
+  }
   yield* Effect.sync(() => hydratePosixPath(env, platform)).pipe(
     Effect.catchDefect((defect) =>
       Effect.sync(() => {
@@ -93,19 +96,21 @@ export const fixPath = Effect.fn("fixPath")(function* (): Effect.fn.Return<
 
 export const expandHomePath = Effect.fn(function* (input: string) {
   const { join } = yield* Path.Path;
+  const homeDirectory = effectiveHomeDirectory(process.env, []);
   if (input === "~") {
-    return NodeOS.homedir();
+    return homeDirectory;
   }
   if (input.startsWith("~/") || input.startsWith("~\\")) {
-    return join(NodeOS.homedir(), input.slice(2));
+    return join(homeDirectory, input.slice(2));
   }
   return input;
 });
 
 export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
   const { join, resolve } = yield* Path.Path;
+  const homeDirectory = effectiveHomeDirectory(process.env, []);
   if (!raw || raw.trim().length === 0) {
-    return join(NodeOS.homedir(), ".t3");
+    return join(homeDirectory, ".t3");
   }
   return resolve(yield* expandHomePath(raw.trim()));
 });
