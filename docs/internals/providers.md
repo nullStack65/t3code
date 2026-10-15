@@ -93,6 +93,64 @@ checkpoints but cannot roll back its conversation. The [checkpoint boundary](./o
 therefore rejects revert before touching files. Native permission and question option IDs must
 also survive normalization; a display label is not necessarily a valid reply.
 
+## Governed Skill admission is a separate route
+
+The reserved `codex-typed-skills` driver is a **refusal-only** input contract. It
+accepts an offline candidate reference under `providerInstances.<id>.config`:
+
+```json
+{
+  "driver": "codex-typed-skills",
+  "config": {
+    "candidate": {
+      "directory": "/disposable/candidate",
+      "sourceRepository": "nullStack65/closura-agent-config",
+      "sourceCommit": "<40 lowercase hex characters>",
+      "admissionSha256": "<64 lowercase hex characters>"
+    }
+  }
+}
+```
+
+These fields identify a request; they authenticate neither source nor route. The
+[driver](../../apps/server/src/provider/Drivers/CodexTypedSkillsDriver.ts) refuses
+before reading the candidate, materializing a home or returning any runtime,
+discovery, authentication or text-generation capability. The registry publishes
+an unavailable snapshot with empty models/skills. Its typed failure carries
+`admissionAuthorized: false` and `reason: native-boundary-unqualified`; this is a
+denied request, **not** an observed process/session/turn, signed attestation or a
+receipt suitable for positive route admission. Process identity, principal,
+served model, generation, effort, billing, availability, pin and fallback facts
+are unobserved on this refused route. Candidate, task, owner, attempt, freshness
+and effect claims cannot supply them. No candidate content enters model context.
+
+A distinct driver kind matters across versions: builds without it retain the
+existing unknown-driver refusal. An optional field added to legacy Codex settings
+could instead be discarded by an older schema. Never translate this driver to
+`codex` as a compatibility fallback. Legacy Codex and other providers remain
+ungoverned by this contract; selecting them is not governed activation.
+
+Positive support requires an independently trusted bridge to the canonical typed
+policy/source admission, actual per-process/turn route observation, exclusive
+discovery and every body/read/expansion path, and invalidation of retained context
+on request/model/generation/principal/harness/freshness changes. Offline session
+JSON, hashes, login metadata and the agent-config PR371 consistency predicate do
+not establish those capabilities or grant permissions. The agent-config runtime
+activation refusal must remain until those boundaries are implemented and
+independently qualified; the candidate reference above is not a consumer-enabling
+contract.
+
+Codex 0.162.1's supported `app-server generate-json-schema --out <fresh-directory>`
+exports `skills/list` with `cwds`/`forceReload` and `skills/extraRoots/set` with
+`extraRoots`. The latter is additive. Neither schema offers exclusive discovery
+or complete interception of native Skill expansion and arbitrary tool reads.
+Shadow homes share `skills` and `plugins`; ordinary full-access tools can read
+other source locations. Root enumeration/filtering cannot establish containment.
+The focused registry tests prove refusal and absence of capabilities, including
+reconciliation and old-build refusal. They do not prove positive Amnesia
+discovery/invocation, model-patch generation expiry, semantic request recognition,
+or installed/runtime behavior on Mac, Windows or Linux.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)
