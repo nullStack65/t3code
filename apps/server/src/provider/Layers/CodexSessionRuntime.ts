@@ -1878,32 +1878,6 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
-        switch (notification.method) {
-          case "turn/started":
-          case "turn/completed":
-            observation.lifecycle(notification.params.threadId, notification.params.turn.id);
-            break;
-          case "model/rerouted":
-            observation.modelChanged(
-              notification.params.threadId,
-              notification.params.toModel,
-              "model-rerouted-notification",
-              notification.params.turnId,
-            );
-            break;
-          case "thread/settings/updated":
-            observation.modelChanged(
-              notification.params.threadId,
-              notification.params.threadSettings.model,
-              "thread-settings-notification",
-            );
-            break;
-          case "thread/closed": {
-            const current = yield* observation.reader.read;
-            if (notification.params.threadId === current.providerThreadId) observation.close();
-            break;
-          }
-        }
         const isMemoryConsolidationNotification =
           suppressMemoryConsolidationNotification(notification);
 
@@ -2393,9 +2367,38 @@ export const makeCodexSessionRuntime = (
 
     const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
       client.handleServerNotification(method, (params) =>
-        Queue.offer(serverNotifications, makeCodexServerNotification(method, params)).pipe(
-          Effect.asVoid,
-        ),
+        Effect.gen(function* () {
+          const notification = makeCodexServerNotification(method, params);
+          // Revoke captures at decoded ingress. The event consumer can be held
+          // independently; enqueueing must never leave pre-event evidence current.
+          switch (notification.method) {
+            case "turn/started":
+            case "turn/completed":
+              observation.lifecycle(notification.params.threadId, notification.params.turn.id);
+              break;
+            case "model/rerouted":
+              observation.modelChanged(
+                notification.params.threadId,
+                notification.params.toModel,
+                "model-rerouted-notification",
+                notification.params.turnId,
+              );
+              break;
+            case "thread/settings/updated":
+              observation.modelChanged(
+                notification.params.threadId,
+                notification.params.threadSettings.model,
+                "thread-settings-notification",
+              );
+              break;
+            case "thread/closed": {
+              const current = yield* observation.reader.read;
+              if (notification.params.threadId === current.providerThreadId) observation.close();
+              break;
+            }
+          }
+          yield* Queue.offer(serverNotifications, notification);
+        }),
       );
 
     yield* Effect.forEach(

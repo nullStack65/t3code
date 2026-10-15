@@ -95,6 +95,15 @@ rl.on("line", (line) => {
     write({ id, result: fixture.responses.threadStart });
     return;
   }
+  if (method === "feedback/upload") {
+    for (const notification of script.notificationsOnFeedback ?? []) {
+      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
+    // The response is a deterministic ingress receipt: the real client's
+    // sequential decoder handles preceding notifications before resolving it.
+    write({ id, result: { threadId: script.rootThreadId } });
+    return;
+  }
   if (method === "thread/resume") {
     if (script.recordRequests) {
       NodeFS.appendFileSync(

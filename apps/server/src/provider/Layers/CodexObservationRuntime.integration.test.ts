@@ -8,6 +8,8 @@ import { expect, it } from "@effect/vitest";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -28,7 +30,11 @@ const peerPath = NodePath.join(
   `../testFixtures/codexCollabMockPeer.${HostProcessPlatform.defaultValue() === "win32" ? "cmd" : "sh"}`,
 );
 
-function fixture(notifications: ReadonlyArray<unknown> = [], resume = false) {
+function fixture(
+  notifications: ReadonlyArray<unknown> = [],
+  resume = false,
+  notificationsOnFeedback: ReadonlyArray<unknown> = [],
+) {
   return Effect.gen(function* () {
     const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-observation-"));
     yield* Effect.addFinalizer(() =>
@@ -41,6 +47,7 @@ function fixture(notifications: ReadonlyArray<unknown> = [], resume = false) {
         rootThreadId: wireFixture.rootThreadId,
         turnIds: ["synthetic-turn-1", "synthetic-turn-2"],
         notifications,
+        notificationsOnFeedback,
       }),
     );
     const runtime = yield* makeCodexSessionRuntime({
@@ -68,6 +75,82 @@ function fixture(notifications: ReadonlyArray<unknown> = [], resume = false) {
     return { runtime, reader: runtime.nativeObservation! };
   });
 }
+
+for (const notification of [
+  {
+    method: "model/rerouted",
+    params: {
+      threadId: wireFixture.rootThreadId,
+      turnId: "synthetic-turn-1",
+      fromModel: "fixture-gpt-6",
+      toModel: "reported-next",
+      reason: "highRiskCyberActivity",
+    },
+  },
+  {
+    method: "thread/settings/updated",
+    params: {
+      threadId: wireFixture.rootThreadId,
+      threadSettings: {
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        collaborationMode: { mode: "default", settings: { model: "reported-next" } },
+        cwd: "/synthetic",
+        model: "reported-next",
+        modelProvider: "openai",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      },
+    },
+  },
+  { method: "thread/closed", params: { threadId: wireFixture.rootThreadId } },
+])
+  it.effect(`revokes ${notification.method} at ingress while the event consumer is held`, () =>
+    Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
+      const consumerHeld = yield* Deferred.make<void>();
+      const releaseConsumer = yield* Deferred.make<void>();
+      let holdNextId = false;
+      const gatedCrypto = {
+        ...crypto,
+        randomUUIDv4: Effect.gen(function* () {
+          if (holdNextId) {
+            holdNextId = false;
+            yield* Deferred.succeed(consumerHeld, undefined);
+            yield* Deferred.await(releaseConsumer);
+          }
+          return yield* crypto.randomUUIDv4;
+        }),
+      };
+      const { runtime, reader } = yield* fixture([], false, [notification]).pipe(
+        Effect.provideService(Crypto.Crypto, gatedCrypto),
+      );
+      yield* runtime.start();
+      holdNextId = true;
+      yield* runtime.sendTurn({ input: "synthetic peer only" });
+      yield* Deferred.await(consumerHeld);
+      const before = yield* reader.capture(candidate);
+      // Only the synthetic peer receives this RPC. Its response proves the decoded
+      // ingress callbacks ran, while event UUID allocation still holds the consumer.
+      yield* runtime.uploadFeedback("synthetic ingress receipt; no external upload");
+      expect(yield* reader.resolve(before, candidate)).toMatchObject({
+        reason: "stale-generation",
+        admissionAuthorized: false,
+      });
+      const atIngress = yield* reader.read;
+      if (notification.method === "thread/closed") expect(atIngress.closed).toBe(true);
+      else expect(atIngress.reportedSessionModel?.value).toBe("reported-next");
+      const drained = yield* runtime.events.pipe(
+        Stream.filter((e) => e.method === notification.method),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* Deferred.succeed(releaseConsumer, undefined);
+      yield* Fiber.join(drained);
+      expect((yield* reader.read).revision).toBe(atIngress.revision);
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 
 it.effect(
   "observes the actual child/stdio/thread/turn path and invalidates next-turn and compaction reuse",
