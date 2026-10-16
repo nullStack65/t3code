@@ -781,6 +781,7 @@ function threadDetail(
 
 function threadRun(run: OrchestrationV2Run): OrchestratorMcpThreadRun {
   return {
+    ...(run.workAffiliation === undefined ? {} : { workAffiliation: run.workAffiliation }),
     runId: run.id,
     ordinal: run.ordinal,
     status: run.status,

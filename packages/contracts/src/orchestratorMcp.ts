@@ -31,6 +31,7 @@ import {
   OrchestrationV2RunStatus,
   OrchestrationV2WorkReference,
   OrchestrationV2WorkSource,
+  OrchestrationV2WorkAffiliation,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import {
@@ -396,6 +397,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
 export type OrchestratorMcpThreadDetail = typeof OrchestratorMcpThreadDetail.Type;
 
 export const OrchestratorMcpThreadRun = Schema.Struct({
+  workAffiliation: Schema.optional(OrchestrationV2WorkAffiliation),
   runId: RunId,
   ordinal: PositiveInt,
   status: OrchestrationV2RunStatus,

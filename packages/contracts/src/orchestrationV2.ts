@@ -547,10 +547,19 @@ export const OrchestrationV2WorkReference = Schema.Struct({
     Schema.isMaxLength(1024),
     Schema.isPattern(/^[A-Za-z][A-Za-z0-9+.-]*:[A-Za-z0-9._~:/%+#-]+$/),
   ),
+}).annotate({
+  description:
+    "Existing namespaced obligation or root-assignment reference, without task prose, credentials or URL queries. This records declared membership, not token allocation.",
 });
 export type OrchestrationV2WorkReference = typeof OrchestrationV2WorkReference.Type;
 
-export const OrchestrationV2WorkSource = Schema.Struct({ threadId: ThreadId, runId: RunId });
+export const OrchestrationV2WorkSource = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+}).annotate({
+  description:
+    "Exact persisted run whose established affiliation this work continues. Missing affiliation stays unknown; conversation lineage alone does not establish membership.",
+});
 export type OrchestrationV2WorkSource = typeof OrchestrationV2WorkSource.Type;
 
 export const OrchestrationV2WorkAffiliation = Schema.Struct({

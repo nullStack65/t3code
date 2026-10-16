@@ -4684,21 +4684,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "Work source conflicts with the referenced continuation.",
         });
       }
-      const sourceProjection =
+      const workSourceProjection =
         workSource === undefined
           ? undefined
           : workSource.threadId === command.threadId
             ? projection
-            : yield* getProjectionWithPendingEvents(workSource.threadId, events);
-      const sourceRun = sourceProjection?.runs.find((run) => run.id === workSource?.runId);
-      if (workSource !== undefined && sourceRun === undefined) {
+            : yield* projectionStore
+                .getThreadRecords(workSource.threadId, ["runs"], {
+                  runIds: [workSource.runId],
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestratorProjectionError({
+                        threadId: workSource.threadId,
+                        cause,
+                      }),
+                  ),
+                );
+      const affiliationSourceRun = workSourceProjection?.runs.find(
+        (run) => run.id === workSource?.runId,
+      );
+      if (workSource !== undefined && affiliationSourceRun === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: "Work source run is unavailable.",
         });
       }
-      const inherited = sourceRun?.workAffiliation;
+      const inherited = affiliationSourceRun?.workAffiliation;
       if (
         inherited !== undefined &&
         command.workReference !== undefined &&
