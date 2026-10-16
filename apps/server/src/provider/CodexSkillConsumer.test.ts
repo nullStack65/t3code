@@ -43,7 +43,7 @@ const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 if(args.includes('--verify')){const raw=fs.readFileSync(path.join(out,'admission.json'));const r=JSON.parse(raw);for(const [f,h] of Object.entries(r.files))if(hash(fs.readFileSync(path.join(out,f)))!==h)process.exit(2);if(JSON.parse(fs.readFileSync('contract.json')).verifyFailure)process.exit(3);console.log(JSON.stringify({state:'sandbox-files-verified',admission_sha256:hash(raw),live_installed:false,model_behavior_verified:false}));process.exit(0);}
 const fixture=JSON.parse(fs.readFileSync('contract.json','utf8')),phase=ctx.activation.phase;
 const patch=fixture.qualified.includes(JSON.stringify([ctx.provider,ctx.model,ctx.generation,ctx.harness_version]));
-const app=ctx.principal==='fixture-user',files={},decisions=[];
+const app=ctx.principal==='fixture-user'&&(!fixture.repository||ctx.repository===fixture.repository),files={},decisions=[];
 const appPath='.codex/skills/durable-app/SKILL.md',patchPath='patches/fix/SKILL.md';
 const activeApp=app&&phase==='request'&&ctx.activation.explicit.includes('durable-app');
 if(app)files[appPath]='---\nname: durable-app\ndescription: '+JSON.stringify(fixture.description)+'\n---\n'+(activeApp?'DURABLE_BODY':'');
@@ -62,6 +62,7 @@ function fixture(
     requalified?: boolean;
     tamper?: boolean;
     verifyFailure?: boolean;
+    repository?: string;
   } = {},
 ) {
   return Effect.gen(function* () {
@@ -102,6 +103,25 @@ function fixture(
       principal: { id: "fixture-user", emailSha256: hash("fixture@example.invalid") },
       generations: { "fixture-6": "gen6", "fixture-7": "gen7" },
     });
+
+    it.live(
+      "binds repository applicability to current checkout identity and excludes unknown or mismatched repositories",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture({ repository: "fixture/repo" });
+          const git = (...args: string[]) =>
+            NodeChildProcess.execFileSync("git", args, { cwd: f.dir, encoding: "utf8" });
+          git("config", "remote.origin.url", "https://github.com/fixture/repo.git");
+          expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual([
+            "fix",
+            "durable-app",
+          ]);
+          git("config", "remote.origin.url", "git@github.com:fixture/other.git");
+          expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
+          git("config", "--unset", "remote.origin.url");
+          expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
     const observer = makeCodexSessionObservation({
       threadId: ThreadId.make("fixture"),
       providerInstanceId: ProviderInstanceId.make("fixture-instance"),
