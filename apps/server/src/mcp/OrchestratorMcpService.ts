@@ -2600,6 +2600,8 @@ const make = Effect.gen(function* () {
             ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
             messageId,
             text: input.message,
+            ...(input.workReference === undefined ? {} : { workReference: input.workReference }),
+            ...(input.workSource === undefined ? {} : { workSource: input.workSource }),
             attachments: [],
             mode,
             createdBy: "agent",

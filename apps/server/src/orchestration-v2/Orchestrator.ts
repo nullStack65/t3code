@@ -42,6 +42,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
+  type OrchestrationV2WorkAffiliation,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadShellSnapshot,
@@ -4659,6 +4660,69 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
+      const continuationIds = [
+        command.restartContinuationOfRunId,
+        command.usageLimitContinuationOfRunId,
+        command.manualContinuationOfRunId,
+      ].filter((id): id is RunId => id !== undefined);
+      const workSource =
+        command.workSource ??
+        (continuationIds[0] === undefined
+          ? undefined
+          : {
+              threadId: command.threadId,
+              runId: continuationIds[0],
+            });
+      if (
+        continuationIds.some(
+          (id) => workSource?.threadId !== command.threadId || workSource.runId !== id,
+        )
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Work source conflicts with the referenced continuation.",
+        });
+      }
+      const sourceProjection =
+        workSource === undefined
+          ? undefined
+          : workSource.threadId === command.threadId
+            ? projection
+            : yield* getProjectionWithPendingEvents(workSource.threadId, events);
+      const sourceRun = sourceProjection?.runs.find((run) => run.id === workSource?.runId);
+      if (workSource !== undefined && sourceRun === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Work source run is unavailable.",
+        });
+      }
+      const inherited = sourceRun?.workAffiliation;
+      if (
+        inherited !== undefined &&
+        command.workReference !== undefined &&
+        (inherited.reference.kind !== command.workReference.kind ||
+          inherited.reference.ref !== command.workReference.ref)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Declared work reference conflicts with its source run.",
+        });
+      }
+      // Preserve only the immediate proven inheritance edge; the event graph
+      // retains earlier edges. Missing source affiliation never means zero work.
+      const workAffiliation: OrchestrationV2WorkAffiliation | undefined =
+        inherited !== undefined && workSource !== undefined
+          ? { ...inherited, inheritedFrom: workSource }
+          : command.workReference === undefined
+            ? undefined
+            : {
+                reference: command.workReference,
+                establishedBy: { threadId: command.threadId, messageId: command.messageId },
+              };
+
       const continuedTaskId = projection.runs.find(
         (run) => run.id === command.restartContinuationOfRunId,
       )?.delegatedTaskId;
@@ -4920,6 +4984,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             });
 
       if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
+        const workTargetRunId = dispatchMode.targetRunId;
+        const activeReference = projection.runs.find((run) => run.id === workTargetRunId)
+          ?.workAffiliation?.reference;
+        if (
+          (command.workReference !== undefined || command.workSource !== undefined) &&
+          (activeReference?.kind !== workAffiliation?.reference.kind ||
+            activeReference?.ref !== workAffiliation?.reference.ref)
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Steering cannot change a run's work affiliation.",
+          });
+        }
         yield* dispatchSteerIntoRun({
           command,
           events,
@@ -5098,6 +5176,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           completedAt: null,
           checkpointId: null,
           contextHandoffId: null,
+          ...(workAffiliation === undefined ? {} : { workAffiliation }),
           ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
           ...(command.restartContinuationOfRunId === undefined
             ? {}
@@ -5438,6 +5517,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           completedAt: null,
           checkpointId: null,
           contextHandoffId: legacyImportHandoff?.id ?? null,
+          ...(workAffiliation === undefined ? {} : { workAffiliation }),
           ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
           ...(command.restartContinuationOfRunId === undefined
             ? {}
@@ -6135,6 +6215,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           mergeBackHandoff?.id ??
           legacyImportRecoveryHandoff?.id ??
           null,
+        ...(workAffiliation === undefined ? {} : { workAffiliation }),
         ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
         ...(command.restartContinuationOfRunId === undefined
           ? {}
@@ -6812,6 +6893,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         text: command.task,
         attachments: [],
         modelSelection: command.modelSelection,
+        workSource: { threadId: command.parentThreadId, runId: parentRun.id },
         dispatchMode:
           command.workspaceStrategy === undefined
             ? { type: "start_immediately" }
