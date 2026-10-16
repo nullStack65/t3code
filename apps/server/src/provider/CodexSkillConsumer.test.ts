@@ -39,7 +39,7 @@ it("selects current natural-language requests while quotes and historical mentio
 const builder = String.raw`
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process');
 const args=process.argv.slice(2),ctx=JSON.parse(fs.readFileSync(args[args.indexOf('--context')+1],'utf8')),out=args[args.indexOf('--output')+1];
-const hash=x=>crypto.NodeCrypto.createHash('sha256').update(x).digest('hex');
+const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
 if(args.includes('--verify')){const raw=fs.readFileSync(path.join(out,'admission.json'));const r=JSON.parse(raw);for(const [f,h] of Object.entries(r.files))if(hash(fs.readFileSync(path.join(out,f)))!==h)process.exit(2);if(JSON.parse(fs.readFileSync('contract.json')).verifyFailure)process.exit(3);console.log(JSON.stringify({state:'sandbox-files-verified',admission_sha256:hash(raw),live_installed:false,model_behavior_verified:false}));process.exit(0);}
 const fixture=JSON.parse(fs.readFileSync('contract.json','utf8')),phase=ctx.activation.phase;
 const patch=fixture.qualified.includes(JSON.stringify([ctx.provider,ctx.model,ctx.generation,ctx.harness_version]));
@@ -51,7 +51,7 @@ decisions.push({id:'durable-app',discoverable:app,load:activeApp,runtime_admitte
 const activePatch=patch&&phase==='startup';if(activePatch)files[patchPath]='---\nname: fix\ndescription: Synthetic qualified patch\n---\nPATCH_BODY';
 decisions.push({id:'fix',discoverable:patch,load:activePatch,runtime_admitted:true,artifact_kind:'compatibility-patch',...(activePatch?{projected_path:patchPath}:{}),reasons:[patch?'qualified':'tuple-mismatch']});
 const loaded=decisions.filter(d=>d.load).map(d=>d.projected_path);files['.codex/AGENTS.md']='SOURCE_GENERATED_AGENTS\n'+loaded.join('\n');
-const receipt={schema_version:1,state:fixture.state??'runtime-admission-candidate',context:fixture.stale?{...ctx,model:'old'}:ctx,permissions_granted:false,installed:false,behavior_verified:false,source:{commit:cp.NodeChildProcess.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty:false},files:Object.fromEntries(Object.entries(files).map(([f,b])=>[f,hash(b)])),decisions,target_contract:{skills:'.codex/skills',instructions:'.codex/AGENTS.md',activation_paths:loaded}};
+const receipt={schema_version:1,state:fixture.state??'runtime-admission-candidate',context:fixture.stale?{...ctx,model:'old'}:ctx,permissions_granted:false,installed:false,behavior_verified:false,source:{commit:cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty:false},files:Object.fromEntries(Object.entries(files).map(([f,b])=>[f,hash(b)])),decisions,target_contract:{skills:'.codex/skills',instructions:'.codex/AGENTS.md',activation_paths:loaded}};
 fs.mkdirSync(out,{recursive:true});for(const [f,b]of Object.entries(files)){fs.mkdirSync(path.dirname(path.join(out,f)),{recursive:true});fs.writeFileSync(path.join(out,f),b);}if(fixture.tamper)fs.appendFileSync(path.join(out,'.codex/AGENTS.md'),'TAMPER');fs.writeFileSync(path.join(out,'admission.json'),JSON.stringify(receipt));console.log('{}');
 `;
 
