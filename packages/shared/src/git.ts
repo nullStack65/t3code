@@ -1,4 +1,5 @@
 import type {
+  ChangeRequest,
   VcsRef,
   SourceControlProviderInfo,
   VcsStatusLocalResult,
@@ -9,6 +10,29 @@ import type {
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
+
+export function parseRepositoryNameWithOwnerFromRemoteUrl(
+  url: string | null,
+  providerKind?: ChangeRequest["provider"],
+): string | null {
+  const trimmed = url?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const match =
+    /^(?:[^@/\s]+@[^:/\s]+:|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
+      trimmed,
+    );
+  const repositoryNameWithOwner = match?.[1]?.trim() ?? "";
+  // Forgejo HTTP paths can include an installation mount; its API always names owner/repo.
+  if (providerKind === "forgejo" && /^https?:\/\//iu.test(trimmed)) {
+    return repositoryNameWithOwner.length > 0
+      ? repositoryNameWithOwner.split("/").slice(-2).join("/")
+      : null;
+  }
+  return repositoryNameWithOwner.length > 0 ? repositoryNameWithOwner : null;
+}
 
 export const WORKTREE_BRANCH_PREFIX = "t3code";
 // Canonical form is `t3code/<8 hex>`. Older mobile builds generated `t3code/<uuid>`

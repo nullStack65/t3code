@@ -104,24 +104,6 @@ function fixture(
       generations: { "fixture-6": "gen6", "fixture-7": "gen7" },
     });
 
-    it.live(
-      "binds repository applicability to current checkout identity and excludes unknown or mismatched repositories",
-      () =>
-        Effect.gen(function* () {
-          const f = yield* fixture({ repository: "fixture/repo" });
-          const git = (...args: string[]) =>
-            NodeChildProcess.execFileSync("git", args, { cwd: f.dir, encoding: "utf8" });
-          git("config", "remote.origin.url", "https://github.com/fixture/repo.git");
-          expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual([
-            "fix",
-            "durable-app",
-          ]);
-          git("config", "remote.origin.url", "git@github.com:fixture/other.git");
-          expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
-          git("config", "--unset", "remote.origin.url");
-          expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
-        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-    );
     const observer = makeCodexSessionObservation({
       threadId: ThreadId.make("fixture"),
       providerInstanceId: ProviderInstanceId.make("fixture-instance"),
@@ -202,4 +184,20 @@ it.live("accepts a newly pinned requalified source and rejects stale or review-o
       reason: "source-head-or-worktree-changed",
     });
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.live(
+  "binds repository applicability to current checkout identity and excludes unknown or mismatched repositories",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ repository: "fixture/repo" });
+      const git = (...args: string[]) =>
+        NodeChildProcess.execFileSync("git", args, { cwd: f.dir, encoding: "utf8" });
+      git("config", "remote.origin.url", "https://github.com/fixture/repo.git");
+      expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix", "durable-app"]);
+      git("config", "remote.origin.url", "git@github.com:fixture/other.git");
+      expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
+      git("config", "--unset", "remote.origin.url");
+      expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

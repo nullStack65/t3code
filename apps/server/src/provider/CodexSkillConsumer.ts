@@ -10,7 +10,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { parseRepositoryNameWithOwnerFromRemoteUrl } from "../git/GitManager.ts";
+import { parseRepositoryNameWithOwnerFromRemoteUrl } from "@t3tools/shared/git";
 
 import type { CodexNativeObservation } from "./CodexSessionObservation.ts";
 import type { CurrentSkillRequest } from "./CurrentSkillRequest.ts";
@@ -155,7 +155,7 @@ export const makeCodexSkillConsumer = Effect.fn("makeCodexSkillConsumer")(functi
           ? source.principal.id
           : null;
       // Read the task checkout, not the canonical policy checkout or prompt.
-      // Reuse GitManager's identity parser; absent/unsupported origin stays unknown.
+      // Reuse the shared Git identity parser; absent/unsupported origin stays unknown.
       const repository = yield* run(
         "git",
         ["config", "--get", "remote.origin.url"],

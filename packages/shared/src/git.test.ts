@@ -8,6 +8,7 @@ import {
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
   parseOriginUrlFromGitConfig,
+  parseRepositoryNameWithOwnerFromRemoteUrl,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
 
@@ -272,5 +273,18 @@ describe("applyGitStatusStreamEvent", () => {
       behindCount: 1,
       pr: null,
     });
+  });
+});
+
+describe("parseRepositoryNameWithOwnerFromRemoteUrl", () => {
+  it.each([
+    [null, undefined, null],
+    ["/local/checkout", undefined, null],
+    ["git@github.com:owner/repo.git", undefined, "owner/repo"],
+    ["ssh://git@github.com/owner/repo.git", undefined, "owner/repo"],
+    ["https://gitlab.example/group/owner/repo.git", "gitlab", "group/owner/repo"],
+    ["https://forgejo.example/mount/owner/repo.git", "forgejo", "owner/repo"],
+  ] as const)("parses %s without importing server services", (url, kind, expected) => {
+    expect(parseRepositoryNameWithOwnerFromRemoteUrl(url, kind)).toBe(expected);
   });
 });
