@@ -3260,3 +3260,134 @@ it.effect("retains pre-execution delegation across a fresh runtime and replays i
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect.each(
+  (["preparing", "completed"] as const).flatMap((parentStatus) =>
+    [true, false].map((supplied) => ({ parentStatus, supplied })),
+  ),
+)(
+  "a delegated result wake retains exact source affiliation (parent=$parentStatus, supplied=$supplied)",
+  ({ parentStatus, supplied }) => {
+    const harness = makeHarness({ runSetup: () => Effect.never });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const sink = yield* EventSink.EventSinkV2;
+      const input = launchInput({
+        command: "command:work:wake-root",
+        thread: "thread:work:wake-root",
+        message: "Synthetic parent",
+      });
+      const prepared = yield* launches.launch({
+        ...input,
+        initialMessage: {
+          ...input.initialMessage!,
+          ...(supplied
+            ? { workReference: { kind: "obligation" as const, ref: "github:fixture/repo#42" } }
+            : {}),
+        },
+      });
+      const parent = (yield* threads.getThreadProjection(prepared.threadId)).runs[0]!;
+      const delivery = {
+        generation: 1,
+        messageId: MessageId.make("message:work:wake"),
+        taskIds: [],
+      };
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:work:wake-reserved"),
+            type: "run.updated",
+            threadId: prepared.threadId,
+            runId: parent.id,
+            occurredAt: now,
+            payload: {
+              ...parent,
+              status: parentStatus,
+              ...(parentStatus === "completed" ? { completedAt: now } : {}),
+              delegatedCompletion: { disposition: "open", nextGeneration: 2, delivery },
+            },
+          },
+        ],
+      });
+      const command = {
+        type: "message.dispatch" as const,
+        commandId: CommandId.make("command:work:wake"),
+        threadId: parent.threadId,
+        messageId: delivery.messageId,
+        text: "Delegated result",
+        attachments: [],
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+        dispatchMode: { type: "queue_after_active" as const },
+        delegatedCompletion: { parentRunId: parent.id, ...delivery },
+      };
+      const conflict = yield* threads
+        .dispatch({
+          ...command,
+          commandId: CommandId.make("command:work:wake-conflict"),
+          workSource: { threadId: parent.threadId, runId: RunId.make("run:unrelated") },
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(conflict));
+      yield* threads.dispatch(command);
+      const wake = (yield* threads.getThreadProjection(parent.threadId)).runs.find(
+        (run) => run.userMessageId === delivery.messageId,
+      )!;
+      assert.equal(wake.status, parentStatus === "preparing" ? "queued" : "starting");
+      const expected = supplied
+        ? {
+            ...parent.workAffiliation!,
+            inheritedFrom: { threadId: parent.threadId, runId: parent.id },
+          }
+        : undefined;
+      assert.deepEqual(wake.workAffiliation, expected);
+      const successor = yield* threads.sendToThread({
+        projectId,
+        commandId: CommandId.make("command:work:wake-successor"),
+        threadId: parent.threadId,
+        messageId: MessageId.make("message:work:wake-successor"),
+        text: "Explicit successor",
+        attachments: [],
+        mode: "queue",
+        createdBy: "agent",
+        creationSource: "mcp",
+        workSource: { threadId: parent.threadId, runId: wake.id },
+      });
+      assert.deepEqual(
+        successor.run.workAffiliation,
+        supplied
+          ? { ...expected!, inheritedFrom: { threadId: parent.threadId, runId: wake.id } }
+          : undefined,
+      );
+      if (parentStatus === "completed") {
+        const delegated = yield* threads.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make("command:work:wake-child"),
+          parentThreadId: parent.threadId,
+          parentRunId: wake.id,
+          parentNodeId: wake.rootNodeId!,
+          task: "Synthetic next-generation child",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          workspaceStrategy: { type: "root" },
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const child = delegated.storedEvents.find(
+          (stored) => stored.event.type === "run.created",
+        )?.event;
+        assert.equal(child?.type, "run.created");
+        if (child?.type === "run.created")
+          assert.deepEqual(
+            child.payload.workAffiliation,
+            supplied
+              ? { ...expected!, inheritedFrom: { threadId: parent.threadId, runId: wake.id } }
+              : undefined,
+          );
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);

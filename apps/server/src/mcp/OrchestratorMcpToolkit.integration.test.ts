@@ -1021,6 +1021,10 @@ describe("orchestrator MCP toolkit", () => {
               (run) => run.userMessageId === coalescedDelivery.messageId,
             );
             expect(queuedCoalescedRun?.status).toBe("queued");
+            expect(queuedCoalescedRun?.workAffiliation).toEqual({
+              ...parentRun.workAffiliation!,
+              inheritedFrom: { threadId: parentThreadId, runId: parentRun.id },
+            });
             if (queuedCoalescedRun === undefined) {
               return yield* Effect.die(new Error("Queued coalesced delivery missing."));
             }
