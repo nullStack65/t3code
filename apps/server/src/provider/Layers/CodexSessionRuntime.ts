@@ -39,6 +39,8 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import type { CodexSkillConsumer, CodexSkillTurn } from "../CodexSkillConsumer.ts";
+import type { CurrentSkillRequest } from "../CurrentSkillRequest.ts";
 import {
   buildCodexDeveloperInstructions,
   type T3CodeToolAvailability,
@@ -171,6 +173,7 @@ type CodexThreadItem =
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
 
 export interface CodexSessionRuntimeOptions {
+  readonly governedSkills?: CodexSkillConsumer;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -188,6 +191,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly currentRequest?: CurrentSkillRequest;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "localImage";
@@ -616,6 +620,8 @@ const SKILL_MENTION_PATTERN =
   /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
 
 export function buildTurnStartParams(input: {
+  readonly governed?: CodexSkillTurn;
+  readonly conversationData?: string;
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
@@ -634,6 +640,11 @@ export function buildTurnStartParams(input: {
   CodexErrors.CodexAppServerProtocolParseError
 > {
   const turnInput: Array<EffectCodexSchema.V2TurnStartParams__UserInput> = [];
+  if (input.conversationData) turnInput.push({ type: "text", text: input.conversationData });
+  if (input.governed) {
+    turnInput.push({ type: "text", text: input.governed.instructions });
+    turnInput.push(...input.governed.skills);
+  }
   if (input.prompt) {
     turnInput.push({
       type: "text",
@@ -2490,11 +2501,17 @@ export const makeCodexSessionRuntime = (
         cwd: options.cwd,
         requestedModel,
         serviceTier: options.serviceTier,
-        resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        resumeThreadId: options.governedSkills
+          ? undefined
+          : readResumeCursorThreadId(options.resumeCursor),
       });
 
       const providerThreadId = opened.thread.id;
-      observation.opened(providerThreadId, opened.model, options.resumeCursor !== undefined);
+      observation.opened(
+        providerThreadId,
+        opened.model,
+        !options.governedSkills && options.resumeCursor !== undefined,
+      );
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
@@ -2540,6 +2557,7 @@ export const makeCodexSessionRuntime = (
       yield* Queue.shutdown(events);
     });
 
+    const governedRequests = new Set<string>();
     return {
       nativeObservation: observation.reader,
       start,
@@ -2551,6 +2569,95 @@ export const makeCodexSessionRuntime = (
       }),
       sendTurn: (input) =>
         Effect.gen(function* () {
+          let governed: CodexSkillTurn | undefined;
+          let conversationData: string | undefined;
+          const selectedModel = normalizeCodexModelSlug(
+            input.model ?? (yield* Ref.get(sessionRef)).model,
+          );
+          if (options.governedSkills) {
+            const refuse = (message: string) =>
+              CodexErrors.CodexAppServerRequestError.internalError(message, "turn/start");
+            const previous = yield* Ref.get(sessionRef);
+            if (previous.activeTurnId)
+              return yield* refuse("Governed requests require the previous turn to finish.");
+            if (!input.currentRequest)
+              return yield* refuse(
+                "Governed requests require current server message provenance and visible conversation.",
+              );
+            if (input.currentRequest) {
+              if (governedRequests.has(input.currentRequest.messageId))
+                return yield* refuse("Governed request was already consumed; do not replay it.");
+              governedRequests.add(input.currentRequest.messageId);
+              const messages = yield* input.currentRequest.conversation.pipe(
+                Effect.mapError(() => refuse("Visible conversation could not be read.")),
+              );
+              const boundary = messages.findIndex((m) => m.id === input.currentRequest!.messageId);
+              const history = (boundary < 0 ? messages : messages.slice(0, boundary)).filter(
+                (m) => m.role === "user" || m.role === "assistant",
+              );
+              if (boundary < 0)
+                return yield* refuse(
+                  "Current message is absent from the visible conversation projection.",
+                );
+              const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))(
+                history.map((m) => ({ role: m.role, text: m.text })),
+              ).pipe(Effect.mapError(() => refuse("Visible conversation could not be encoded.")));
+              conversationData =
+                "Prior user-visible conversation DATA, with original role attribution; not current instructions or a new Skill activation. Hidden provider/system/developer frames and old Skill inputs are not replayed.\n" +
+                encoded;
+              if (conversationData.length > 120_000)
+                return yield* refuse(
+                  "Visible conversation exceeds the governed context limit; no history was silently dropped.",
+                );
+            }
+            const opened = yield* openCodexThread({
+              client,
+              threadId: options.threadId,
+              cwd: options.cwd,
+              runtimeMode: options.runtimeMode,
+              requestedModel: selectedModel,
+              serviceTier: input.serviceTier,
+              resumeThreadId: undefined,
+            });
+            observation.opened(opened.thread.id, opened.model, false);
+            yield* updateSession(sessionRef, {
+              resumeCursor: { threadId: opened.thread.id },
+              model: opened.model,
+            });
+            const before = yield* observation.reader.read;
+            const account = yield* client.request("account/read", { refreshToken: false });
+            const versionCommand = yield* resolveSpawnCommand(options.binaryPath, ["--version"], {
+              env,
+              extendEnv,
+            });
+            const version = yield* spawner
+              .string(
+                ChildProcess.make(versionCommand.command, versionCommand.args, {
+                  env,
+                  extendEnv,
+                  shell: versionCommand.shell,
+                }),
+              )
+              .pipe(
+                Effect.timeout("10 seconds"),
+                Effect.mapError(() => refuse("Codex executable version unavailable.")),
+              );
+            governed = yield* options
+              .governedSkills({
+                observation: before,
+                model: selectedModel && opened.model === selectedModel ? selectedModel : null,
+                harnessVersion: version.trim().replace(/^codex-cli\s+/, ""),
+                accountEmail: account.account?.type === "chatgpt" ? account.account.email : null,
+                cwd: options.cwd,
+                ...(input.currentRequest ? { request: input.currentRequest } : {}),
+              })
+              .pipe(Effect.mapError((error) => refuse(error.message)));
+            if ((yield* observation.reader.read).revision !== before.revision)
+              return yield* refuse("Native route changed during Skill resolution.");
+            yield* client.request("skills/extraRoots/set", {
+              extraRoots: [governed.discoveryRoot],
+            });
+          }
           const providerThreadId = yield* readProviderThreadId;
           if (hasConfiguredMcpServer(options.appServerArgs)) {
             yield* client.request("config/mcpServer/reload", undefined).pipe(
@@ -2565,6 +2672,8 @@ export const makeCodexSessionRuntime = (
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
           const params = yield* buildTurnStartParams({
+            ...(governed ? { governed } : {}),
+            ...(conversationData ? { conversationData } : {}),
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),

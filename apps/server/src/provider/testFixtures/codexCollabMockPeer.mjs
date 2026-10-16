@@ -17,6 +17,8 @@ const script = JSON.parse(NodeFS.readFileSync(process.env.T3_CODEX_COLLAB_SCRIPT
 
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
+let threadStartCount = 0;
+let currentThreadId = script.rootThreadId;
 let activeTurn;
 // Server->client requests the runtime must answer (approval prompts), keyed
 // by the numeric JSON-RPC id this peer allocated for them.
@@ -30,6 +32,12 @@ rl.on("line", (line) => {
     return;
   }
   const { id, method } = message;
+  if (script.recordAllRequests && method) {
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.allRequests`,
+      `${JSON.stringify({ method, params: message.params })}\n`,
+    );
+  }
   if (openServerRequests.has(id)) {
     // The runtime answered an approval request. Record the response so tests
     // can assert settlement behavior, then emit serverRequest/resolved as a
@@ -84,7 +92,10 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "account/read") {
-    write({ id, result: { account: { type: "apiKey" }, requiresOpenaiAuth: false } });
+    write({
+      id,
+      result: { account: script.account ?? { type: "apiKey" }, requiresOpenaiAuth: false },
+    });
     return;
   }
   if (method === "skills/list" || method === "model/list") {
@@ -92,7 +103,18 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/start") {
-    write({ id, result: fixture.responses.threadStart });
+    threadStartCount++;
+    if (script.freshThreads) {
+      currentThreadId = `${script.rootThreadId}-fresh-${threadStartCount}`;
+      write({
+        id,
+        result: {
+          ...fixture.responses.threadStart,
+          model: message.params.model ?? fixture.responses.threadStart.model,
+          thread: { ...fixture.responses.threadStart.thread, id: currentThreadId },
+        },
+      });
+    } else write({ id, result: fixture.responses.threadStart });
     return;
   }
   if (method === "feedback/upload") {
@@ -160,7 +182,7 @@ rl.on("line", (line) => {
     activeTurn = turn;
     turnStartCount += 1;
     write({ id, result: { ...fixture.responses.turnStart, turn } });
-    const rootThreadId = script.rootThreadId;
+    const rootThreadId = currentThreadId;
     if (script.onlyFirstTurnStarts !== true || turnStartCount === 1) {
       write({
         jsonrpc: "2.0",
