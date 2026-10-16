@@ -6,6 +6,7 @@ import { expect, it } from "@effect/vitest";
 import { MessageId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
@@ -116,6 +117,9 @@ it.effect(
           }),
       });
       yield* runtime.start();
+      expect(
+        yield* Effect.flip(runtime.sendTurn({ input: "No current server message provenance" })),
+      ).toMatchObject({ _tag: "CodexAppServerRequestError" });
       const history = [
         { id: MessageId.make("csv"), role: "user", text: "Export the report as CSV." },
         { id: MessageId.make("correction"), role: "user", text: "Use semicolons, not commas." },
@@ -209,3 +213,82 @@ it.effect(
       ).toMatchObject({ _tag: "CodexAppServerRequestError" });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+for (const ingress of ["resolution", "extraRoots"] as const) {
+  it.live(`withholds native turn input after route drift during ${ingress}`, () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-drift-" });
+      const script = NodePath.join(directory, "script.json");
+      const notification = {
+        method: "model/rerouted",
+        params: {
+          threadId: "synthetic-drift-fresh-2",
+          turnId: "no-turn-yet",
+          fromModel: "fixture-6",
+          toModel: "fixture-7",
+          reason: "highRiskCyberActivity",
+        },
+      };
+      yield* fs.writeFileString(
+        script,
+        encode({
+          rootThreadId: "synthetic-drift",
+          freshThreads: true,
+          recordAllRequests: true,
+          notifications: [],
+          notificationsOnFeedback: ingress === "resolution" ? [notification] : [],
+          notificationsOnExtraRoots: ingress === "extraRoots" ? [notification] : [],
+        }),
+      );
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("synthetic-drift"),
+        binaryPath: peer,
+        cwd: directory,
+        runtimeMode: "approval-required",
+        model: "fixture-6",
+        environment: {
+          PATH: process.env.PATH,
+          SystemRoot: process.env.SystemRoot,
+          ComSpec: process.env.ComSpec,
+          PATHEXT: process.env.PATHEXT,
+          HOME: directory,
+          USERPROFILE: directory,
+          CODEX_HOME: directory,
+          T3_CODEX_COLLAB_SCRIPT: script,
+        },
+        governedSkills: () =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+            return { discoveryRoot: directory, instructions: "OLD_PATCH_INPUT", skills: [] };
+          }),
+      });
+      yield* runtime.start();
+      const messageId = MessageId.make("current");
+      const result = yield* runtime
+        .sendTurn({
+          input: "Current request",
+          currentRequest: {
+            messageId,
+            text: "Current request",
+            activationAllowed: true,
+            conversation: Effect.succeed([
+              { id: messageId, role: "user", text: "Current request" },
+            ]),
+          },
+        })
+        .pipe(Effect.flip, Effect.forkScoped);
+      yield* Deferred.await(entered);
+      if (ingress === "resolution") yield* runtime.uploadFeedback("synthetic ingress receipt only");
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(result)).toMatchObject({ _tag: "CodexAppServerRequestError" });
+      const requests = NodeFS.readFileSync(script + ".allRequests", "utf8")
+        .trim()
+        .split("\n");
+      expect(requests.some((line) => line.includes('"method":"turn/start"'))).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+}

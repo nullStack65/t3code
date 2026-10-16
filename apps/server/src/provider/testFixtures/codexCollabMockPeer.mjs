@@ -102,6 +102,13 @@ rl.on("line", (line) => {
     write({ id, result: { data: [] } });
     return;
   }
+  if (method === "skills/extraRoots/set") {
+    for (const notification of script.notificationsOnExtraRoots ?? []) {
+      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
+    write({ id, result: {} });
+    return;
+  }
   if (method === "thread/start") {
     threadStartCount++;
     if (script.freshThreads) {

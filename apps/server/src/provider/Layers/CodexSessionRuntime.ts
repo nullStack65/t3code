@@ -2570,6 +2570,7 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           let governed: CodexSkillTurn | undefined;
+          let governedRevision: number | undefined;
           let conversationData: string | undefined;
           const selectedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
@@ -2625,6 +2626,7 @@ export const makeCodexSessionRuntime = (
               model: opened.model,
             });
             const before = yield* observation.reader.read;
+            governedRevision = before.revision;
             const account = yield* client.request("account/read", { refreshToken: false });
             const versionCommand = yield* resolveSpawnCommand(options.binaryPath, ["--version"], {
               env,
@@ -2690,6 +2692,14 @@ export const makeCodexSessionRuntime = (
               options.mcpCapabilities,
             ),
           });
+          if (
+            governedRevision !== undefined &&
+            (yield* observation.reader.read).revision !== governedRevision
+          )
+            return yield* CodexErrors.CodexAppServerRequestError.internalError(
+              "Native route changed before governed turn submission.",
+              "turn/start",
+            );
           const observationGeneration = observation.beginTurn(normalizedModel, input.serviceTier);
           const rawResponse = yield* client.raw
             .request("turn/start", params)
