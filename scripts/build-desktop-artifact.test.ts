@@ -1328,11 +1328,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
-  it.effect.skipIf(Effect.runSync(HostProcess.Platform) === "win32")(
+  it.effect(
     "terminates actual macOS probe process groups on timeout and cancellation before cleanup",
-    () =>
+    (ctx) =>
       Effect.scoped(
         Effect.gen(function* () {
+          if ((yield* HostProcess.Platform) === "win32") {
+            return ctx.skip("macOS compile probe uses POSIX process-group termination");
+          }
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
