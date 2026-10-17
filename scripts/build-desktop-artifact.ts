@@ -389,6 +389,7 @@ export class MacDesktopBuildPrerequisitesMissingError extends Schema.TaggedError
   {
     missing: Schema.Array(Schema.String),
     rustTargets: Schema.Array(Schema.String),
+    diagnostic: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
@@ -400,6 +401,7 @@ export class MacDesktopBuildPrerequisitesMissingError extends Schema.TaggedError
     return [
       "macOS desktop build prerequisites are missing:",
       details,
+      ...(this.diagnostic ? ["", this.diagnostic] : []),
       "",
       "Install Apple's build tools with:",
       "  xcode-select --install",
@@ -1886,6 +1888,94 @@ export const preflightLinuxDesktopBuild = Effect.fn("preflightLinuxDesktopBuild"
   }
 });
 
+// Use the rebuild's own node-gyp and Electron common.gypi rather than guessing
+// clang/SDK versions or duplicating gyp's CC/CXX, xcode-select and target rules.
+// Only object targets are built; nothing is linked or executed.
+const preflightMacNativeCompile = Effect.fn("preflightMacNativeCompile")(function* (
+  arch: "arm64" | "x64",
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* HostProcess.HomeDirectory;
+  const nodeGyp = yield* Effect.try(() => {
+    let require = NodeModule.createRequire(
+      new URL("../apps/desktop/package.json", import.meta.url),
+    );
+    for (const dependency of ["electron-builder", "app-builder-lib", "@electron/rebuild"]) {
+      require = NodeModule.createRequire(require.resolve(dependency));
+    }
+    return require.resolve("node-gyp/bin/node-gyp.js");
+  });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mac-native-preflight-" });
+  yield* fs.writeFileString(
+    path.join(directory, "binding.gyp"),
+    yield* encodeJsonString({
+      targets: [{ target_name: "native_probe", sources: ["probe.cc", "probe_c.c"] }],
+    }),
+  );
+  yield* fs.writeFileString(
+    path.join(directory, "probe.cc"),
+    [
+      "#include <node_api.h>",
+      "#include <v8.h>",
+      "#include <span>",
+      "static_assert(std::span<int>::extent == std::dynamic_extent);",
+    ].join("\n"),
+  );
+  yield* fs.writeFileString(path.join(directory, "probe_c.c"), "#include <stdlib.h>\n");
+  // electron-builder removes empty environment entries before launching the
+  // sequential @electron/rebuild worker, whose header cache is .electron-gyp.
+  // On a cold cache, configure performs the rebuild's normal header preparation
+  // here, before bundling, rather than downloading/installing another toolchain.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== ""));
+  for (const [operation, args] of [
+    [
+      "configure",
+      [
+        "configure",
+        "--runtime=electron",
+        `--target=${desktopPackageJson.dependencies.electron}`,
+        `--arch=${arch}`,
+        "--dist-url=https://www.electronjs.org/headers",
+        `--devdir=${path.join(home, ".electron-gyp")}`,
+        "--verbose",
+      ],
+    ],
+    ["compile", ["build", "t3-native-compile", "--verbose"]],
+  ] as const) {
+    const label = `macOS ${arch} Electron native preflight ${operation}`;
+    yield* runCommand(
+      ChildProcess.make(process.execPath, [nodeGyp, ...args], {
+        cwd: directory,
+        env,
+      }),
+      { label, verbose: false },
+    ).pipe(
+      Effect.timeoutOrElse({
+        duration: "60 seconds",
+        orElse: () =>
+          Effect.fail(
+            new BuildCommandFailedError({
+              command: label,
+              exitCode: -1,
+              stderrTail: "Timed out after 60 seconds",
+            }),
+          ),
+      }),
+    );
+    if (operation === "configure") {
+      // The single generated target owns OBJS. Let make expand its actual
+      // Debug/Release paths; the normal addon target would also link a binary.
+      const makefile = path.join(directory, "build", "Makefile");
+      const generated = yield* fs.readFileString(makefile);
+      yield* fs.writeFileString(
+        makefile,
+        `${generated}\n.PHONY: t3-native-compile\nt3-native-compile: $(OBJS)\n`,
+      );
+    }
+  }
+});
+
 export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(function* (
   arch: typeof BuildArch.Type,
 ) {
@@ -1903,8 +1993,10 @@ export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(fu
               Effect.map((results) => results.every(Boolean)),
             ),
           ]).pipe(Effect.map(([cargo, targets]) => cargo && targets)),
-      clang: desktopBuildProbeSucceeds(ChildProcess.make("clang", ["--version"]), "clang"),
-      make: desktopBuildProbeSucceeds(ChildProcess.make("make", ["--version"]), "make"),
+      make: desktopBuildProbeSucceeds(
+        ChildProcess.make(process.env.MAKE || "make", ["--version"]),
+        "make",
+      ),
       sips: desktopBuildProbeSucceeds(ChildProcess.make("sips", ["--help"]), "sips"),
       iconutil: desktopBuildProbeSucceeds(
         ChildProcess.make("xcrun", ["--find", "iconutil"]),
@@ -1918,10 +2010,23 @@ export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(fu
     { concurrency: "unbounded" },
   );
   const missing = MAC_DESKTOP_BUILD_PREREQUISITES.filter(
-    (requirement) => !checks[requirement.id],
+    (requirement) => requirement.id !== "clang" && !checks[requirement.id],
   ).map((requirement) => requirement.id);
   if (missing.length > 0) {
     return yield* new MacDesktopBuildPrerequisitesMissingError({ missing, rustTargets });
+  }
+  for (const targetArch of arch === "universal" ? (["arm64", "x64"] as const) : [arch]) {
+    yield* preflightMacNativeCompile(targetArch).pipe(
+      Effect.scoped,
+      Effect.mapError(
+        (error) =>
+          new MacDesktopBuildPrerequisitesMissingError({
+            missing: ["clang"],
+            rustTargets,
+            diagnostic: String(error),
+          }),
+      ),
+    );
   }
 });
 
@@ -3533,7 +3638,7 @@ export const validateWindowsPackagedPayload = Effect.fn(
   return { packagedAppDir, fileCount, unpackedFiles } as const;
 });
 
-const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+export const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   options: ResolvedBuildOptions,
 ) {
   const repoRoot = yield* RepoRoot;
