@@ -2524,6 +2524,10 @@ export const makeCodexSessionRuntime = (
       observation.initialized();
       yield* client.notify("initialized", undefined);
 
+      // Native startup can announce account/updated while the first account
+      // read completes. Observe that readiness before opening the governed
+      // context; request-time reads and ingress revocation still fence drift.
+      if (options.governedSkills) yield* client.request("account/read", { refreshToken: false });
       const requestedModel = normalizeCodexModelSlug(options.model);
 
       const opened = yield* openCodexThread({

@@ -176,12 +176,23 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "account/read") {
-    if (script.collabOnFinalAccount && accountReadCount === 3) writePreviousRootCollaboration();
+    if (
+      (accountReadCount === 0 && script.accountUpdateOnFirstRead) ||
+      script.accountUpdatesOnReads?.includes(accountReadCount)
+    )
+      write({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } });
+    if (accountReadCount === 0 && script.accountErrorOnFirstRead) {
+      accountReadCount++;
+      write({ id, error: { code: -32000, message: "synthetic account unavailable" } });
+      return;
+    }
+    if (script.collabOnFinalAccount && accountReadCount === 4) writePreviousRootCollaboration();
     write({
       id,
       result: {
-        account: script.accounts?.[Math.min(accountReadCount, script.accounts.length - 1)] ??
-          script.account ?? { type: "apiKey" },
+        account: script.accounts
+          ? script.accounts[Math.min(accountReadCount, script.accounts.length - 1)]
+          : (script.account ?? { type: "apiKey" }),
         requiresOpenaiAuth: false,
       },
     });

@@ -157,8 +157,10 @@ it.live(
         expect(next.skills.map((s) => s.name)).toEqual(["durable-app"]);
         expect(next.instructions).not.toContain("patches/fix");
       }
-      const wrongUser = yield* consume({ ...facts, accountEmail: null });
-      expect(wrongUser.skills.map((s) => s.name)).toEqual(["fix"]);
+      for (const accountEmail of [null, "other@example.invalid"]) {
+        const wrongUser = yield* consume({ ...facts, accountEmail });
+        expect(wrongUser.skills.map((s) => s.name)).toEqual(["fix"]);
+      }
       const quote = yield* consume({
         ...facts,
         request: { ...facts.request, text: 'Explain "act like I have amnesia".' },

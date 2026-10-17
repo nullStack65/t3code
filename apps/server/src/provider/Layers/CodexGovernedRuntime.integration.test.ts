@@ -246,6 +246,8 @@ for (const change of ["model", "account", "silentAccount"] as const) {
             recordAllRequests: true,
             notifications: [],
             accounts: [
+              // Startup readiness, then this request's initial and final reads.
+              { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
               { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
               {
                 type: "chatgpt",
@@ -548,5 +550,123 @@ for (const [ingress, reader] of [
         yield* runtime.close;
         expect(candidates.some((p) => NodeFS.existsSync(p))).toBe(false);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+}
+
+for (const mode of [
+  "governed",
+  "unavailable",
+  "legacy",
+  "during-read",
+  "final-update",
+  "final-null",
+] as const) {
+  it.live(`startup account readiness ${mode}`, () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-account-readiness-" });
+      const script = NodePath.join(directory, "script.json");
+      yield* fs.writeFileString(
+        script,
+        encode({
+          rootThreadId: "readiness",
+          freshThreads: true,
+          recordAllRequests: true,
+          notifications: [],
+          accountUpdateOnFirstRead: true,
+          accountErrorOnFirstRead: mode === "unavailable" || mode === "legacy",
+          account: { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
+          accountUpdatesOnReads: mode === "during-read" ? [1] : mode === "final-update" ? [2] : [],
+          ...(mode === "final-null"
+            ? {
+                accounts: [
+                  { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
+                  { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
+                  null,
+                ],
+              }
+            : {}),
+        }),
+      );
+      const facts: CodexSkillTurnFacts[] = [];
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("readiness"),
+        binaryPath: peer,
+        cwd: directory,
+        runtimeMode: "approval-required",
+        model: "fixture-6",
+        environment: {
+          PATH: process.env.PATH,
+          SystemRoot: process.env.SystemRoot,
+          ComSpec: process.env.ComSpec,
+          PATHEXT: process.env.PATHEXT,
+          HOME: directory,
+          USERPROFILE: directory,
+          CODEX_HOME: directory,
+          T3_CODEX_COLLAB_SCRIPT: script,
+        },
+        ...(mode === "legacy"
+          ? {}
+          : {
+              governedSkills: (current: CodexSkillTurnFacts) =>
+                Effect.sync(() => {
+                  facts.push(current);
+                  return {
+                    discoveryRoot: directory,
+                    instructions: "CURRENT_GUIDANCE",
+                    skills: [
+                      {
+                        type: "skill" as const,
+                        name: "fixture",
+                        path: NodePath.join(directory, "SKILL.md"),
+                      },
+                    ],
+                  };
+                }),
+            }),
+      });
+      if (mode === "unavailable") {
+        expect((yield* runtime.start().pipe(Effect.exit))._tag).toBe("Failure");
+      } else {
+        yield* runtime.start();
+        if (mode !== "legacy") {
+          const id = MessageId.make("readiness-current");
+          const send = runtime.sendTurn({
+            input: "Current request",
+            currentRequest: {
+              messageId: id,
+              text: "Current request",
+              activationAllowed: true,
+              conversation: Effect.succeed([{ id, role: "user", text: "Current request" }]),
+            },
+          });
+          if (mode === "governed") {
+            const done = yield* Stream.runHead(
+              runtime.events.pipe(Stream.filter((e) => e.method === "turn/completed")),
+            ).pipe(Effect.forkScoped);
+            yield* send;
+            yield* Fiber.join(done);
+          } else expect((yield* send.pipe(Effect.exit))._tag).toBe("Failure");
+          expect(facts).toHaveLength(1);
+          expect(facts[0]?.accountEmail).toBe("fixture@example.invalid");
+          expect(facts[0]?.observation.invalidated).toBe(null);
+        }
+      }
+      const methods = (yield* decodeRequestMethods(
+        NodeFS.readFileSync(script + ".allRequests", "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => decode(line)),
+      )).map((r) => r.method);
+      if (mode === "legacy") expect(methods).not.toContain("account/read");
+      else {
+        expect(methods.indexOf("account/read")).toBeLessThan(
+          methods.indexOf("thread/start") === -1 ? methods.length : methods.indexOf("thread/start"),
+        );
+        expect(methods.filter((m) => m === "turn/start")).toHaveLength(mode === "governed" ? 1 : 0);
+        if (mode === "unavailable") expect(methods).not.toContain("thread/start");
+      }
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 }
