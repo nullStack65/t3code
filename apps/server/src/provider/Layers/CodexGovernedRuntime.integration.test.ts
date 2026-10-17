@@ -421,13 +421,29 @@ for (const mode of ["completed", "active", "failed", "cancelled", "uncertain"] a
   );
 }
 
-for (const ingress of ["Detach", "Reattach", "FinalAccount"] as const) {
+for (const [ingress, reader] of [
+  ["Detach", "tool"],
+  ["Detach", "activity-started"],
+  ["Detach", "activity-completed"],
+  ["Detach", "thread-spawn"],
+  ["Detach", "foreign-turn"],
+  ["Detach", "root-path"],
+  ["Detach", "root-slash"],
+  ["Detach", "root-id"],
+  ["Detach", "root-thread"],
+  ["Detach", "root-started"],
+  ["Reattach", "tool"],
+  ["FinalAccount", "tool"],
+] as const) {
+  const shouldRefuse = !reader.startsWith("root-");
   it.live(
-    `late collaboration during ${ingress} preserves reader files and refuses submission`,
+    `late ${reader} during ${ingress} ${shouldRefuse ? "preserves readers and refuses submission" : "allows root-only continuation"}`,
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-retirement-" });
+        const directory = yield* fs.makeTempDirectoryScoped({
+          prefix: "t3-governed-retirement-",
+        });
         const script = NodePath.join(directory, "script.json");
         yield* fs.writeFileString(
           script,
@@ -437,6 +453,7 @@ for (const ingress of ["Detach", "Reattach", "FinalAccount"] as const) {
             recordAllRequests: true,
             notifications: [],
             [`collabOn${ingress}`]: true,
+            collabReader: reader,
           }),
         );
         const candidates: string[] = [];
@@ -459,7 +476,9 @@ for (const ingress of ["Detach", "Reattach", "FinalAccount"] as const) {
           },
           governedSkills: () =>
             Effect.gen(function* () {
-              const root = yield* fs.makeTempDirectoryScoped({ prefix: "owned-reader-candidate-" });
+              const root = yield* fs.makeTempDirectoryScoped({
+                prefix: "owned-reader-candidate-",
+              });
               candidates.push(root);
               yield* fs.writeFileString(NodePath.join(root, "SKILL.md"), "READER_BODY");
               yield* Effect.addFinalizer(() =>
@@ -471,7 +490,7 @@ for (const ingress of ["Detach", "Reattach", "FinalAccount"] as const) {
                     expect(error).toMatchObject({ code: "ESRCH" });
                     stopped = true;
                   }
-                  expect(stopped).toBe(true);
+                  if (shouldRefuse) expect(stopped).toBe(true);
                   expect(NodeFS.readFileSync(NodePath.join(root, "SKILL.md"), "utf8")).toBe(
                     "READER_BODY",
                   );
@@ -504,20 +523,28 @@ for (const ingress of ["Detach", "Reattach", "FinalAccount"] as const) {
         yield* send(0);
         yield* Fiber.join(completed);
         const second = yield* send(1).pipe(Effect.exit);
-        expect(NodeFS.readFileSync(NodePath.join(candidates[0]!, "SKILL.md"), "utf8")).toBe(
-          "READER_BODY",
-        );
-        expect(second._tag).toBe("Failure");
-        expect(candidates).toHaveLength(ingress === "Detach" ? 1 : 2);
-        for (const root of candidates)
-          expect(NodeFS.readFileSync(NodePath.join(root, "SKILL.md"), "utf8")).toBe("READER_BODY");
-        expect((yield* send(2).pipe(Effect.exit))._tag).toBe("Failure");
+        if (shouldRefuse) {
+          expect(NodeFS.readFileSync(NodePath.join(candidates[0]!, "SKILL.md"), "utf8")).toBe(
+            "READER_BODY",
+          );
+          expect(second._tag).toBe("Failure");
+          expect(candidates).toHaveLength(ingress === "Detach" ? 1 : 2);
+          for (const root of candidates)
+            expect(NodeFS.readFileSync(NodePath.join(root, "SKILL.md"), "utf8")).toBe(
+              "READER_BODY",
+            );
+          expect((yield* send(2).pipe(Effect.exit))._tag).toBe("Failure");
+        } else {
+          expect(second._tag).toBe("Success");
+          expect(NodeFS.existsSync(candidates[0]!)).toBe(false);
+          expect(NodeFS.existsSync(candidates[1]!)).toBe(true);
+        }
         const requests = NodeFS.readFileSync(script + ".allRequests", "utf8")
           .trim()
           .split("\n")
           .map((line) => decode(line));
         const turns = yield* decodeRequestMethods(requests);
-        expect(turns.filter((r) => r.method === "turn/start")).toHaveLength(1);
+        expect(turns.filter((r) => r.method === "turn/start")).toHaveLength(shouldRefuse ? 1 : 2);
         yield* runtime.close;
         expect(candidates.some((p) => NodeFS.existsSync(p))).toBe(false);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

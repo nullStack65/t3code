@@ -134,7 +134,22 @@ and reported status. It omits hidden system/developer frames and old Skill input
 Missing current-message identity or oversized visible history refuses rather than
 silently dropping the conversation. Earlier attachments are not replayed. A source
 or observed lifecycle change during resolution refuses; already consumed request
-IDs cannot be retried in that runtime. Accepted T3 history is preserved. Candidates belong to request scopes: preparation failure/cancellation removes them; completed inputs retire after a new context detaches old discovery. Active or uncertain submitted inputs stay intact until native readers stop. Uncertain submissions or native collaboration require a provider restart before another governed request; process disposal stops readers before removing their files. Account updates revoke applicability at decoded ingress, and account identity is reread immediately before submission. Intent/task-context activation and capability/condition/native-data positives remain unsupported; unknown inputs continue to exclude dependent policies.
+IDs cannot be retried in that runtime. Accepted T3 history is preserved.
+
+Candidates belong to request scopes: failures or cancellation before discovery
+exposure remove their files. Once discovery is exposed, failed or uncertain
+preparation retains inputs until process disposal. Completed sequential-root inputs
+retire at the reader-state check immediately before scope cleanup, after a fresh
+context has detached old discovery and finished preparation. Collaboration decoded
+before that decision preserves reader inputs and requires a provider restart.
+Collaboration first observed after retirement commits prevents an as-yet
+unsubmitted turn and requires restart, but cannot undo already-committed file
+removal or revoke a previously submitted turn; this is not an atomic native reader
+lease. Active and uncertain inputs stay intact until process
+disposal stops readers before removing files. Account updates revoke applicability
+at decoded ingress, and account identity is reread immediately before submission.
+Intent/task-context activation and capability/condition/native-data positives
+remain unsupported; unknown inputs continue to exclude dependent policies.
 
 This route governs the inputs T3 constructs, not arbitrary filesystem reads or all
 provider discovery. Codex 0.162.1's `skills/extraRoots/set` is additive; shared homes,

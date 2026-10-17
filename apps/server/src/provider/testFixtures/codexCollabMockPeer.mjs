@@ -25,11 +25,72 @@ let activeTurn;
 // by the numeric JSON-RPC id this peer allocated for them.
 const openServerRequests = new Map();
 const writePreviousRootCollaboration = () => {
+  const previousThreadId = `${script.rootThreadId}-fresh-${threadStartCount - 1}`;
+  const reader = script.collabReader ?? "tool";
+  if (reader === "thread-spawn" || reader === "root-thread" || reader === "root-started") {
+    write({
+      method: "thread/started",
+      params: {
+        thread: {
+          ...fixture.responses.threadStart.thread,
+          id: reader.startsWith("thread-") ? "still-reading" : currentThreadId,
+          parentThreadId: previousThreadId,
+          source:
+            reader === "root-started"
+              ? "cli"
+              : {
+                  subAgent: {
+                    thread_spawn: {
+                      depth: 1,
+                      parent_thread_id: previousThreadId,
+                      agent_path: "/root/reader",
+                    },
+                  },
+                },
+        },
+      },
+    });
+    return;
+  }
+  if (reader === "foreign-turn") {
+    write({
+      method: "turn/started",
+      params: {
+        threadId: "still-reading",
+        turn: {
+          ...fixture.responses.turnStart.turn,
+          id: "child-turn",
+          status: "inProgress",
+        },
+      },
+    });
+    return;
+  }
+  if (reader !== "tool") {
+    const started = reader === "activity-started";
+    write({
+      method: started ? "item/started" : "item/completed",
+      params: {
+        threadId: previousThreadId,
+        turnId: activeTurn.id,
+        [started ? "startedAtMs" : "completedAtMs"]: 1,
+        item: {
+          type: "subAgentActivity",
+          id: "observed-reader",
+          kind: "started",
+          agentThreadId: reader === "root-id" ? currentThreadId : "still-reading",
+          agentPath:
+            reader === "root-path" ? "/root" : reader === "root-slash" ? "/" : "/root/reader",
+        },
+      },
+    });
+    return;
+  }
   write({
     method: "item/started",
     params: {
-      threadId: `${script.rootThreadId}-fresh-${threadStartCount - 1}`,
-      turnId: "previous-turn",
+      threadId: previousThreadId,
+      turnId: activeTurn.id,
       startedAtMs: 1,
       item: {
         type: "collabAgentToolCall",

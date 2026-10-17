@@ -1039,6 +1039,41 @@ function readThreadSpawnSource(thread: { readonly source: unknown }):
   };
 }
 
+// Share the native reader signals with registration, pre-registration live-turn
+// tracking and governed ingress. Root-self activity must not become a child.
+function readCodexChildReader(
+  notification: CodexServerNotification,
+  rootThreadId: string | undefined,
+) {
+  if (notification.method === "thread/started") {
+    const thread = notification.params.thread;
+    const spawn = readThreadSpawnSource(thread);
+    if (spawn) return { kind: "thread" as const, thread, spawn, child: thread.id !== rootThreadId };
+  }
+  if (notification.method === "item/started" || notification.method === "item/completed") {
+    const item = notification.params.item;
+    if (item.type === "collabAgentToolCall") return { kind: "tool" as const, item, child: true };
+    if (item.type === "subAgentActivity")
+      return {
+        kind: "activity" as const,
+        item,
+        child:
+          item.agentThreadId !== rootThreadId &&
+          item.agentPath !== "/root" &&
+          item.agentPath !== "/",
+      };
+  }
+  // The existing Stop path tracks a foreign live turn even before registration.
+  if (notification.method === "turn/started")
+    return {
+      kind: "turn" as const,
+      child: rootThreadId !== undefined && notification.params.threadId !== rootThreadId,
+      threadId: notification.params.threadId,
+      turnId: notification.params.turn.id,
+    };
+  return undefined;
+}
+
 function rememberCollabReceiverTurns(
   collabReceiverTurns: Map<string, TurnId>,
   notification: CodexServerNotification,
@@ -1048,15 +1083,10 @@ function rememberCollabReceiverTurns(
     return;
   }
 
-  if (notification.method !== "item/started" && notification.method !== "item/completed") {
-    return;
-  }
+  const reader = readCodexChildReader(notification, undefined);
+  if (reader?.kind !== "tool") return;
 
-  if (notification.params.item.type !== "collabAgentToolCall") {
-    return;
-  }
-
-  for (const receiverThreadId of notification.params.item.receiverThreadIds) {
+  for (const receiverThreadId of reader.item.receiverThreadIds) {
     collabReceiverTurns.set(receiverThreadId, parentTurnId);
   }
 }
@@ -1604,18 +1634,15 @@ export const makeCodexSessionRuntime = (
      */
     const interceptCollabChildNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        const rootProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+        const reader = readCodexChildReader(notification, rootProviderThreadId);
+        if (reader && (reader.kind === "thread" || reader.kind === "activity") && !reader.child)
+          return false;
+        if (notification.method === "thread/started" && reader?.kind !== "thread") return false;
         // Registration path 1: child thread announces itself with a
         // subAgent thread_spawn source.
-        if (notification.method === "thread/started") {
-          const thread = notification.params.thread;
-          const spawn = readThreadSpawnSource(thread);
-          if (!spawn) {
-            return false;
-          }
-          const rootProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
-          if (thread.id === rootProviderThreadId) {
-            return false;
-          }
+        if (reader?.kind === "thread") {
+          const { thread, spawn } = reader;
           // Merge with any subAgentActivity registration that got here
           // first. spawnTurnId is REGISTRATION-time-only on both paths: for
           // an already-known child we keep its value (set or unset) — a
@@ -1660,25 +1687,8 @@ export const makeCodexSessionRuntime = (
 
         // Registration path 2: parent-side subAgentActivity item names the
         // child thread (may arrive before or after thread/started).
-        if (
-          (notification.method === "item/started" || notification.method === "item/completed") &&
-          notification.params.item.type === "subAgentActivity"
-        ) {
-          const item = notification.params.item;
-          // Never register the session's ROOT thread as its own child. The
-          // wire emits subAgentActivity {agentPath: "/root", interacted}
-          // about the root during collab runs; registering it intercepted
-          // every subsequent root notification — including the final
-          // assistant message and turn/completed — so the thread hung
-          // "working" after all subagents finished (live-probe finding).
-          const rootProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
-          if (
-            item.agentThreadId === rootProviderThreadId ||
-            item.agentPath === "/root" ||
-            item.agentPath === "/"
-          ) {
-            return false;
-          }
+        if (reader?.kind === "activity") {
+          const { item } = reader;
           const activitySpawnTurnId = (yield* Ref.get(sessionRef)).activeTurnId ?? undefined;
           yield* Ref.update(collabChildAgentsRef, (current) => {
             const existing = current.get(item.agentThreadId);
@@ -1960,18 +1970,13 @@ export const makeCodexSessionRuntime = (
           // false-positive entry costs one ignored RPC at worst.
           const foreignThreadId = readNotificationThreadId(notification);
           if (foreignThreadId !== undefined) {
-            if (notification.method === "turn/started") {
-              const foreignTurnId =
-                typeof (notification.params as { turn?: { id?: unknown } }).turn?.id === "string"
-                  ? (notification.params as { turn: { id: string } }).turn.id
-                  : undefined;
-              if (foreignTurnId) {
-                yield* Ref.update(collabChildLiveTurnsRef, (current) => {
-                  const next = new Map(current);
-                  next.set(foreignThreadId, foreignTurnId);
-                  return next;
-                });
-              }
+            const reader = readCodexChildReader(notification, suppressRootId);
+            if (reader?.kind === "turn") {
+              yield* Ref.update(collabChildLiveTurnsRef, (current) => {
+                const next = new Map(current);
+                next.set(reader.threadId, reader.turnId);
+                return next;
+              });
             } else if (
               notification.method === "turn/completed" ||
               notification.method === "thread/closed"
@@ -2402,8 +2407,8 @@ export const makeCodexSessionRuntime = (
           // independently; enqueueing must never leave pre-event evidence current.
           if (
             options.governedSkills &&
-            (notification.method === "item/started" || notification.method === "item/completed") &&
-            notification.params.item.type === "collabAgentToolCall"
+            readCodexChildReader(notification, currentProviderThreadId(yield* Ref.get(sessionRef)))
+              ?.child
           )
             governedChildReaders = true;
           switch (notification.method) {
