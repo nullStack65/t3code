@@ -5,12 +5,15 @@ import { useAppearancePreferences } from "../features/settings/appearance/Appear
 import { cn } from "../lib/cn";
 import { AppText } from "./AppText";
 import { SymbolView } from "./AppSymbol";
+import { useAndroidControlSizing } from "./useAndroidControlSizing";
 
 /** Shared geometry for Material navigation and selection lists. Group rows in one card. */
 export function MaterialListRow({
   title,
   titleClassName,
   subtitle,
+  subtitleNumberOfLines,
+  subtitleEllipsizeMode,
   leading,
   trailing,
   className,
@@ -19,10 +22,13 @@ export function MaterialListRow({
   readonly title: string;
   readonly titleClassName?: string;
   readonly subtitle?: string | null;
+  readonly subtitleNumberOfLines?: ComponentProps<typeof AppText>["numberOfLines"];
+  readonly subtitleEllipsizeMode?: ComponentProps<typeof AppText>["ellipsizeMode"];
   readonly leading?: ReactNode;
   readonly trailing?: ReactNode;
 }) {
   const { themeVariables } = useAppearancePreferences();
+  const { smallIconSize } = useAndroidControlSizing();
   return (
     <Pressable
       accessibilityRole="button"
@@ -44,7 +50,11 @@ export function MaterialListRow({
           {title}
         </AppText>
         {subtitle ? (
-          <AppText className="text-sm text-foreground-muted" numberOfLines={2}>
+          <AppText
+            className="text-sm text-foreground-muted"
+            ellipsizeMode={subtitleEllipsizeMode}
+            numberOfLines={subtitleNumberOfLines ?? 2}
+          >
             {subtitle}
           </AppText>
         ) : null}
@@ -52,7 +62,7 @@ export function MaterialListRow({
       {trailing !== undefined ? (
         trailing
       ) : !props.disabled ? (
-        <SymbolView name="chevron.right" size={16} tintColorClassName="accent-chevron" />
+        <SymbolView name="chevron.right" size={smallIconSize} tintColorClassName="accent-chevron" />
       ) : null}
     </Pressable>
   );

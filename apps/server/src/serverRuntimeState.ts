@@ -4,13 +4,14 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { writeFileStringAtomically } from "./atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import type * as ServerConfig from "./config.ts";
 import { formatHostForUrl, isWildcardHost } from "./startupAccess.ts";
 
 export const PersistedServerRuntimeState = Schema.Struct({
   version: Schema.Literal(1),
   pid: Schema.Int,
+  ownerId: Schema.optional(Schema.String),
   host: Schema.optional(Schema.String),
   port: Schema.Int,
   origin: Schema.String,
@@ -119,6 +120,7 @@ export const clearPersistedServerRuntimeState = (path: string) =>
  * alive.
  */
 export const isProcessAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -142,7 +144,7 @@ export const readPersistedServerRuntimeState = (path: string) =>
                   cause,
                 }),
               ),
-        onSuccess: (contents) => Effect.succeed(Option.some(contents)),
+        onSuccess: (contents) => Effect.succeedSome(contents),
       }),
     );
     if (Option.isNone(raw)) {
@@ -155,7 +157,7 @@ export const readPersistedServerRuntimeState = (path: string) =>
     }
 
     return yield* decodePersistedServerRuntimeState(trimmed).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.mapError(
         (cause) =>
           new ServerRuntimeStateError({

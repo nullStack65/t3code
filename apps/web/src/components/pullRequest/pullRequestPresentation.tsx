@@ -9,6 +9,7 @@ import type {
   PullRequestReviewDecision,
   PullRequestState,
 } from "@t3tools/contracts";
+import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import {
   CircleCheckIcon,
   CircleDashedIcon,
@@ -23,6 +24,7 @@ import { Children, type CSSProperties, isValidElement, type ReactNode, useState 
 import { cn } from "~/lib/utils";
 
 import { Badge } from "../ui/badge";
+import { InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { PullRequestReviewOutcome } from "./pullRequestDetail.logic";
 import { pullRequestLabelColor } from "./pullRequestList.logic";
@@ -427,7 +429,7 @@ export function PullRequestActorAvatar({
     <span
       aria-hidden
       className={cn(
-        "flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[8px] font-medium text-muted-foreground",
+        "flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-3xs font-medium text-muted-foreground",
         className,
       )}
     >
@@ -445,51 +447,56 @@ export function PullRequestActorAvatar({
   );
 }
 
-/** GitHub attributes work from a deleted account to "ghost"; say the same word everywhere. */
+/**
+ * GitHub attributes work from a deleted account to "ghost"; say the same word everywhere.
+ *
+ * An actor as a login beside its avatar, or as the avatar alone. With a profile URL the actor
+ * is an inline link; `className` places it and never restyles it.
+ */
 export function PullRequestActorLabel({
   actor,
   className,
-  labelClassName,
+  variant = "label",
   tooltip = true,
   profileUrl,
 }: {
   actor: PullRequestActor | null;
   className?: string;
-  labelClassName?: string;
+  variant?: "label" | "avatar";
   tooltip?: boolean;
   profileUrl?: string | null;
 }) {
   const login = actor?.login ?? "ghost";
   const label = (
-    <>
+    <span className={cn("flex min-w-0 items-center", variant === "label" && "gap-1.5")}>
       <PullRequestActorAvatar actor={actor} />
-      <span className={cn("truncate", labelClassName)}>{login}</span>
-    </>
+      <span className={variant === "label" ? "truncate font-medium text-foreground" : "sr-only"}>
+        {login}
+      </span>
+    </span>
   );
-  if (!tooltip) {
-    return <span className={cn("flex min-w-0 items-center gap-1.5", className)}>{label}</span>;
-  }
+  const placement = cn("flex min-w-0 shrink", className);
+  if (!tooltip) return <span className={placement}>{label}</span>;
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           profileUrl ? (
-            <a
-              href={profileUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label={`Open ${login}'s profile`}
+            <InlineButton
+              className={placement}
+              render={
+                <a
+                  href={profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Open ${login}'s profile`}
+                />
+              }
             />
           ) : (
-            <span />
+            <span className={placement} />
           )
         }
-        className={cn(
-          "flex min-w-0 items-center gap-1.5",
-          profileUrl &&
-            "cursor-pointer rounded-sm underline-offset-2 outline-none hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-          className,
-        )}
       >
         {label}
       </TooltipTrigger>
@@ -518,8 +525,8 @@ export function PullRequestDiffStat({
   }
   return (
     <span className={cn("inline-flex items-baseline gap-1 tabular-nums", className)}>
-      <span className="text-diff-addition-foreground">+{additions.toLocaleString()}</span>
-      <span className="text-diff-deletion">-{deletions.toLocaleString()}</span>
+      <span className="text-diff-addition-foreground">+{formatDiffCount(additions)}</span>
+      <span className="text-diff-deletion">-{formatDiffCount(deletions)}</span>
     </span>
   );
 }

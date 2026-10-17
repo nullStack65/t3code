@@ -1,106 +1,91 @@
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
-import { StrictMode, useEffect, type ReactNode } from "react";
-import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import type { ScopedSettingsPatch } from "./scopedSettings";
+import { reactHookHarness as hooks } from "../../test/reactHookHarness";
 
 const state = vi.hoisted(() => ({
-  settings: {} as Record<string, unknown>,
-  confirm: vi.fn<() => Promise<boolean>>(),
-  updateSettings: vi.fn<(patch: ScopedSettingsPatch) => void>(),
-  labels: [] as string[],
-  restore: null as (() => Promise<void>) | null,
+  settings: null as UnifiedSettings | null,
+  update: vi.fn(),
+  confirm: vi.fn(),
 }));
 
-vi.mock("../../hooks/useTheme", () => ({
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  const { reactHookHarness } = await import("../../test/reactHookHarness");
+  return {
+    ...actual,
+    useCallback: reactHookHarness.useCallback,
+    useMemo: reactHookHarness.useMemo,
+  };
+});
+
+vi.mock("react/compiler-runtime", async () => {
+  const { reactHookHarness } = await import("../../test/reactHookHarness");
+  return { c: reactHookHarness.useMemoCache };
+});
+
+vi.mock("../../hooks/useTheme", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../hooks/useTheme")>()),
   useTheme: () => ({
     theme: "system",
-    setTheme: () => true,
     followSystem: true,
-    setFollowSystem: () => true,
-    setThemeHalf: () => true,
-    clearThemeHalves: () => true,
     themeHalves: null,
+    setTheme: vi.fn(),
+    setFollowSystem: vi.fn(),
+    setThemeHalf: vi.fn(),
+    clearThemeHalves: vi.fn(),
   }),
   readThemePreference: () => "system",
   readThemeHalves: () => null,
   readAppearanceModePreference: () => "system",
 }));
 
-vi.mock("./useScopedSettings", () => ({
+vi.mock("./useScopedSettings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./useScopedSettings")>()),
   useScopedSettings: () => state.settings,
-  useUpdateScopedSettings: () => state.updateSettings,
+  useUpdateScopedSettings: () => state.update,
 }));
 
-vi.mock("../../localApi", () => ({
+vi.mock("../../localApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../localApi")>()),
   readLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
-  ensureLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
-}));
-
-vi.mock("../ui/toast", () => ({
-  toastManager: { add: vi.fn() },
-  stackedThreadToast: (toast: unknown) => toast,
 }));
 
 import { useSettingsRestore } from "./SettingsPanels";
 
-function Harness(): ReactNode {
-  const { changedSettingLabels, restoreDefaults } = useSettingsRestore();
-  useEffect(() => {
-    state.labels = changedSettingLabels;
-    state.restore = restoreDefaults;
-  });
-  return null;
-}
-
-let renderer: ReactTestRenderer | null;
-
 beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  state.settings = { ...DEFAULT_UNIFIED_SETTINGS, generateThreadTitles: false };
-  state.confirm.mockReset().mockResolvedValue(true);
-  state.updateSettings.mockReset();
-  act(() => {
-    renderer = create(
-      <StrictMode>
-        <Harness />
-      </StrictMode>,
-    );
-  });
+  hooks.reset();
+  vi.clearAllMocks();
+  state.settings = { ...DEFAULT_UNIFIED_SETTINGS };
+  state.confirm.mockResolvedValue(true);
 });
 
-afterEach(async () => {
-  await act(async () => renderer?.unmount());
-  renderer = null;
-  vi.unstubAllGlobals();
-});
+describe("restoring V2 settings", () => {
+  it.each([
+    ["persistComposerContextStrip", "Composer context"],
+    ["autoResumeLimitedThreads", "Auto-resume limited threads"],
+    ["snoozeLimitedThreads", "Snooze limited threads"],
+  ] as const)("restores %s when it is the only changed setting", async (key, label) => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, [key]: true };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
 
-describe("global Restore device defaults", () => {
-  it("reports AI thread titles as changed and resets them to their default", async () => {
-    expect(state.labels).toContain("AI thread titles");
+    expect(restore.changedSettingLabels).toEqual([label]);
+    await restore.restoreDefaults();
 
-    await act(async () => {
-      await state.restore?.();
-    });
-
-    expect(state.confirm).toHaveBeenCalledTimes(1);
-    expect(state.updateSettings).toHaveBeenCalledTimes(1);
-    const patch = state.updateSettings.mock.calls[0]![0];
-    expect(patch.generateThreadTitles).toBe(true);
-    expect(patch.generateThreadTitles).toBe(DEFAULT_UNIFIED_SETTINGS.generateThreadTitles);
+    expect(state.confirm.mock.calls[0]?.[0]).toContain(label);
+    expect(state.update).toHaveBeenCalledOnce();
+    expect(state.update.mock.calls[0]?.[0][key]).toBe(DEFAULT_UNIFIED_SETTINGS[key]);
   });
 
-  it("does not report AI thread titles when the setting is already at its default", () => {
-    state.settings = { ...DEFAULT_UNIFIED_SETTINGS };
-    act(() => {
-      renderer!.update(
-        <StrictMode>
-          <Harness />
-        </StrictMode>,
-      );
-    });
+  it("does not reset settings after cancellation", async () => {
+    state.settings = { ...DEFAULT_UNIFIED_SETTINGS, autoResumeLimitedThreads: true };
+    state.confirm.mockResolvedValue(false);
+    hooks.beginRender();
 
-    expect(state.labels).not.toContain("AI thread titles");
+    await useSettingsRestore().restoreDefaults();
+
+    expect(state.confirm).toHaveBeenCalledOnce();
+    expect(state.update).not.toHaveBeenCalled();
   });
 });

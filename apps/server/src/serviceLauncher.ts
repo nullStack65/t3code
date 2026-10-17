@@ -22,11 +22,8 @@ import {
   compareExactServiceVersions,
   decodeServiceLauncherChildMessage,
   isExactServiceVersion,
-  parseServiceLauncherControlRequest,
   parseServiceState,
-  SERVICE_CONTROL_REQUEST_FILE,
   SERVICE_LAUNCHER_CONTEXT_ENV,
-  SERVICE_LAUNCHER_INSTANCE_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_STATE_FILE,
   SERVICE_RESTART_PENDING_FILE,
@@ -34,14 +31,19 @@ import {
 } from "./cloud/serviceProtocol.ts";
 
 const HANDOFF_DELAY_MS = 2_000;
-const PREPARED_TIMEOUT_MS = 120_000;
+/**
+ * How long a trial has to report prepared. Migrations and the open-time
+ * `PRAGMA optimize` count toward it and scale with the database: tens of GB on
+ * a cold page cache take minutes. They run synchronously on the child's main
+ * thread, so it cannot report progress meanwhile. A missed window rolls back
+ * the database, so the next attempt pays the same cost. Crashes are caught at
+ * exit; this only bounds a trial that is alive but stuck.
+ */
+export const PREPARED_TIMEOUT_MS = 30 * 60_000;
 const TERMINATE_GRACE_MS = 5_000;
-/** Bound on how long a Windows whole-service stop waits for the managed child
-    to drain and acknowledge before it force-terminates the process. */
-const STOP_ACK_TIMEOUT_MS = 10_000;
-/** How often a managed launcher looks for a host control request. Bounded and
-    cheap; a file read is ~microseconds and the timer is cleared at exit. */
-const CONTROL_POLL_MS = 200;
+// Matches SERVER_EXIT_CODE_STATE_DIR_OWNED in contracts. The standalone
+// launcher stays independent of the Effect-backed contracts package.
+const STATE_DIR_OWNED_EXIT_CODE = 78;
 
 type TerminalStatus = "committed" | "rolled-back" | "failed";
 type ChildRole = "active" | "trial";
@@ -115,6 +117,147 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+function runCp(args: ReadonlyArray<string>): Promise<boolean> {
+  return new Promise((resolve) => {
+    NodeChildProcess.execFile("cp", args, (error) => resolve(error === null));
+  });
+}
+
+/**
+ * Copies a database file as a copy-on-write clone where the filesystem has
+ * them (APFS via `cp -c`, btrfs/XFS reflinks via `cp --reflink=auto`), which
+ * takes no extra space and finishes instantly for a database of tens of GB.
+ * Node's own clone flag is not used: on macOS `fs.copyFile` falls back to a
+ * full copy. Anywhere cloning is unavailable, or `cp` fails, this is a
+ * regular copy.
+ */
+async function copyDatabaseFile(source: string, destination: string): Promise<void> {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+  const platform = process.platform;
+  // `cp -c` replaces the destination with a new file, which would cut a
+  // hard-linked database off from its other links; copy into it instead.
+  const hardLinked =
+    platform === "darwin" &&
+    ((await NodeFSP.stat(destination).catch(() => undefined))?.nlink ?? 1) > 1;
+  const args =
+    platform === "darwin" && !hardLinked
+      ? ["-c", source, destination]
+      : platform === "linux"
+        ? ["--reflink=auto", source, destination]
+        : undefined;
+  if (args === undefined || !(await runCp(args))) await NodeFSP.copyFile(source, destination);
+}
+
+const GIB = 1024 ** 3;
+/**
+ * Clones share blocks, but the trial server diverges from them as it writes,
+ * migrations included, so a cloned backup still needs room for that churn.
+ */
+const CLONED_BACKUP_MIN_HEADROOM_BYTES = GIB;
+const CLONED_BACKUP_HEADROOM_FRACTION = 0.1;
+
+/**
+ * Stats of the database and its existing sidecars, following symlinks. A main
+ * file that cannot be read is an error.
+ */
+async function statDatabaseFiles(dbPath: string): Promise<ReadonlyArray<NodeFS.Stats>> {
+  const stats: Array<NodeFS.Stats> = [];
+  for (const suffix of DB_FILE_SUFFIXES) {
+    const stat = await NodeFSP.stat(`${dbPath}${suffix}`).catch((cause: unknown) => {
+      if (suffix !== "" && (cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw cause;
+    });
+    if (stat !== undefined) stats.push(stat);
+  }
+  return stats;
+}
+
+/**
+ * Whether `copyDatabaseFile` will clone the database into the backup
+ * directory rather than copy it.
+ * - macOS: `cp -c` clones within one APFS volume and silently copies
+ *   anywhere else, so every existing database file must share the backup
+ *   directory's device, whose filesystem type must match the system volume's,
+ *   which is always APFS.
+ * - Linux: clone each existing database file with `cp --reflink=always`,
+ *   which fails instead of copying when a file cannot be reflinked (another
+ *   filesystem, or a btrfs file marked No_COW), then discard the clones.
+ * - Elsewhere: never.
+ */
+async function backupCanClone(dbPath: string, backupRoot: string): Promise<boolean> {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+  const platform = process.platform;
+  if (platform === "darwin") {
+    const [backupDirectory, backupFs, systemFs] = await Promise.all([
+      NodeFSP.stat(backupRoot),
+      NodeFSP.statfs(backupRoot),
+      NodeFSP.statfs("/"),
+    ]);
+    if (backupFs.type !== systemFs.type) return false;
+    // A file linked from another volume is caught because `stat` follows
+    // symlinks. A hard-linked file is restored by a full copy, so it needs the
+    // full space.
+    return (await statDatabaseFiles(dbPath)).every(
+      (source) => source.dev === backupDirectory.dev && source.nlink === 1,
+    );
+  }
+  if (platform !== "linux") return false;
+  const probe = NodePath.join(backupRoot, `.clone-probe-${NodeCrypto.randomUUID()}`);
+  try {
+    for (const suffix of DB_FILE_SUFFIXES) {
+      const source = `${dbPath}${suffix}`;
+      if (suffix !== "" && !(await pathExists(source))) continue;
+      if (!(await runCp(["--reflink=always", source, `${probe}${suffix}`]))) return false;
+    }
+    return true;
+  } finally {
+    for (const suffix of DB_FILE_SUFFIXES) {
+      await NodeFSP.rm(`${probe}${suffix}`, { force: true }).catch(() => undefined);
+    }
+  }
+}
+
+export interface BackupSpaceProbe {
+  readonly readFreeBytes: (directory: string) => Promise<number>;
+  readonly canClone: (dbPath: string, backupRoot: string) => Promise<boolean>;
+}
+
+const filesystemBackupSpaceProbe: BackupSpaceProbe = {
+  readFreeBytes: async (directory) => {
+    const stats = await NodeFSP.statfs(directory);
+    return stats.bavail * stats.bsize;
+  },
+  canClone: backupCanClone,
+};
+
+/**
+ * Returns a client-visible reason when the pre-update database backup cannot
+ * fit, or undefined when it can. Runs before the server is stopped so a full
+ * disk refuses the update instead of causing an outage and a cold restart.
+ * Throws when the database or the filesystem cannot be inspected.
+ */
+export async function databaseBackupBlocker(
+  baseDir: string,
+  dbPath: string,
+  probe: Partial<BackupSpaceProbe> = {},
+): Promise<string | undefined> {
+  const { readFreeBytes, canClone } = { ...filesystemBackupSpaceProbe, ...probe };
+  const backupRoot = NodePath.join(baseDir, "runtime", "db-backup");
+  await NodeFSP.mkdir(backupRoot, { recursive: true, mode: 0o700 });
+  const [files, free] = await Promise.all([statDatabaseFiles(dbPath), readFreeBytes(backupRoot)]);
+  const size = files.reduce((total, file) => total + file.size, 0);
+  const fullCopyBytes = size * 1.05;
+  if (free >= fullCopyBytes) return undefined;
+  const clonedBytes = Math.max(
+    CLONED_BACKUP_MIN_HEADROOM_BYTES,
+    size * CLONED_BACKUP_HEADROOM_FRACTION,
+  );
+  const needed = (await canClone(dbPath, backupRoot)) ? clonedBytes : fullCopyBytes;
+  if (free >= needed) return undefined;
+  const gb = (bytes: number) => (bytes / GIB).toFixed(1);
+  return `Not enough free disk space to back up the database before updating: ${gb(needed)} GB needed, ${gb(free)} GB free. Free up disk space and try again. The server was not stopped.`;
+}
+
 /**
  * Snapshots the database once per update before the first trial. A completed
  * backup is never overwritten because a restarted launcher may be looking at
@@ -132,7 +275,7 @@ async function backupDatabaseOnce(baseDir: string, pending: PendingServiceUpdate
       const source = `${pending.dbPath}${suffix}`;
       if (suffix !== "" && !(await pathExists(source))) continue;
       const destination = databaseBackupFile(stagingDir, suffix);
-      await NodeFSP.copyFile(source, destination);
+      await copyDatabaseFile(source, destination);
       await syncFile(destination);
     }
     await NodeFSP.rename(stagingDir, backupDir);
@@ -163,6 +306,34 @@ async function markDatabaseRestorePending(backupDir: string): Promise<void> {
   }
 }
 
+/**
+ * The file a restore writes for `path`: where its symlinks lead, even when the
+ * last target is missing, as after a crash between `cp -c` removing a file
+ * and cloning over it.
+ */
+async function restoreTarget(path: string): Promise<string> {
+  let current = path;
+  for (let hops = 0; hops < 40; hops++) {
+    try {
+      return await NodeFSP.realpath(current);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+    const link = await NodeFSP.readlink(current).catch((cause: unknown) => {
+      const code = (cause as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EINVAL") return undefined;
+      throw cause;
+    });
+    if (link === undefined) return current;
+    // Joined without normalizing: a `..` in the link must follow directory links
+    // the way the filesystem does, not cancel a path segment.
+    current = NodePath.isAbsolute(link)
+      ? link
+      : `${await NodeFSP.realpath(NodePath.dirname(current))}${NodePath.sep}${link}`;
+  }
+  throw new Error(`Too many symbolic links resolving ${path}.`);
+}
+
 /** Restore is retryable after any process crash while the backup directory remains. */
 async function restoreDatabaseBackup(
   baseDir: string,
@@ -172,17 +343,22 @@ async function restoreDatabaseBackup(
   if (!(await pathExists(backupDir))) return;
 
   await markDatabaseRestorePending(backupDir);
+  const directories = new Set([NodePath.dirname(pending.dbPath)]);
   for (const suffix of DB_FILE_SUFFIXES) {
-    const target = `${pending.dbPath}${suffix}`;
+    const livePath = `${pending.dbPath}${suffix}`;
     const source = databaseBackupFile(backupDir, suffix);
     if (await pathExists(source)) {
-      await NodeFSP.copyFile(source, target);
+      // A clone replaces its destination, so restore into the file a symlinked
+      // database resolves to and keep the link itself.
+      const target = await restoreTarget(livePath);
+      await copyDatabaseFile(source, target);
       await syncFile(target);
+      directories.add(NodePath.dirname(target));
     } else {
-      await NodeFSP.rm(target, { force: true });
+      await NodeFSP.rm(livePath, { force: true });
     }
   }
-  await syncDirectory(NodePath.dirname(pending.dbPath));
+  for (const directory of directories) await syncDirectory(directory);
 }
 
 async function discardDatabaseBackup(baseDir: string, updateId: string): Promise<void> {
@@ -267,66 +443,6 @@ function waitForExit(child: NodeChildProcess.ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
-/**
- * How a bounded request for a child's own drain ended. The caller keeps these
- * distinct because they call for different actions: `exited` needs no force,
- * `timed-out` and `channel-unavailable` still need the bounded force fallback.
- */
-export type GracefulStopOutcome =
-  | { readonly status: "exited"; readonly acknowledged: boolean }
-  | { readonly status: "timed-out"; readonly acknowledged: boolean }
-  | { readonly status: "channel-unavailable" };
-
-/**
- * Asks the managed child to run its own graceful shutdown over the existing IPC
- * channel and waits, bounded, for the child to actually exit. An
- * acknowledgement is recorded but never used as proof of a completed drain: it
- * can be emitted from a scope finalizer that runs before every other resource
- * has drained, so acting on it would authorize an unnecessary hard kill. The
- * child's own exit is the truth; the caller still force-terminates when the
- * bound expires, so the process is never left running. Only meaningful where a
- * signal is a hard kill (Windows); POSIX keeps its signal-driven path.
- */
-export function requestGracefulChildStop(
-  child: NodeChildProcess.ChildProcess,
-  requestId: string,
-): Promise<GracefulStopOutcome> {
-  if (!child.connected || child.send === undefined) {
-    return Promise.resolve({ status: "channel-unavailable" });
-  }
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve({ status: "exited", acknowledged: false });
-  }
-  return new Promise<GracefulStopOutcome>((resolve) => {
-    let settled = false;
-    let acknowledged = false;
-    let timer: NodeJS.Timeout;
-    function finish(outcome: GracefulStopOutcome) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.off("message", onMessage);
-      child.off("exit", onExit);
-      resolve(outcome);
-    }
-    function onMessage(value: unknown) {
-      const reply = decodeServiceLauncherChildMessage(value);
-      // Only the acknowledgement for this exact request counts; one emitted
-      // during an unrelated scope closure must not be read as this drain.
-      if (reply?.type === "stopped" && reply.requestId === requestId) acknowledged = true;
-    }
-    function onExit() {
-      finish({ status: "exited", acknowledged });
-    }
-    timer = setTimeout(() => finish({ status: "timed-out", acknowledged }), STOP_ACK_TIMEOUT_MS);
-    child.on("message", onMessage);
-    child.on("exit", onExit);
-    sendMessage(child, { type: "stop", requestId }).catch(() =>
-      finish({ status: "channel-unavailable" }),
-    );
-  });
-}
-
 async function terminateChild(
   child: NodeChildProcess.ChildProcess,
   signal: NodeJS.Signals = "SIGTERM",
@@ -345,60 +461,29 @@ const stopMarkerPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_STOP_MARKER_FILE);
 const restartPendingPath = (baseDir: string) =>
   NodePath.join(baseDir, "runtime", SERVICE_RESTART_PENDING_FILE);
-const controlRequestPath = (baseDir: string) =>
-  NodePath.join(baseDir, "runtime", SERVICE_CONTROL_REQUEST_FILE);
-
-export interface LauncherControlOptions {
-  /** Per-instance token the host passed at spawn; binds requests to this run. */
-  readonly instance: string;
-  /** Overridable for tests; production uses {@link CONTROL_POLL_MS}. */
-  readonly pollIntervalMs?: number;
-}
-
-export interface LauncherOptions {
-  /** Private host control channel; absent keeps the signal-only path. */
-  readonly control?: LauncherControlOptions;
-  /**
-   * How the pinned runtime entry is executed. A production runtime is a native
-   * executable run directly; the tests stand one up as a Node script, which
-   * Windows cannot exec through an OS shebang, so the interpreter is explicit
-   * rather than left to the platform.
-   */
-  readonly runtimeInterpreter?: string;
-  /**
-   * Force the IPC drain path that Windows uses for a whole-service stop (a
-   * process signal there is a hard kill). Defaults to the host platform; the
-   * override lets that production branch be exercised on another host.
-   */
-  readonly gracefulIpcStop?: boolean;
-}
 
 export class Launcher {
   readonly #baseDir: string;
   readonly #statePath: string;
-  readonly #control: LauncherControlOptions | undefined;
-  readonly #runtimeInterpreter: string | undefined;
-  readonly #gracefulIpcStop: boolean;
   #state: ServiceState;
   #child: ManagedChild | null = null;
   #timer: NodeJS.Timeout | undefined;
-  #controlTimer: NodeJS.Timeout | undefined;
   #transitions: Promise<void> = Promise.resolve();
   #stopRequested = false;
   #stopping = false;
   #done = false;
-  #consumingControl = false;
-  #requestCounter = 0;
   readonly #completion = Promise.withResolvers<void>();
+  readonly #backupSpaceProbe: Partial<BackupSpaceProbe> | undefined;
 
-  constructor(baseDir: string, state: ServiceState, options: LauncherOptions = {}) {
+  constructor(
+    baseDir: string,
+    state: ServiceState,
+    options: { readonly backupSpaceProbe?: Partial<BackupSpaceProbe> } = {},
+  ) {
     this.#baseDir = baseDir;
+    this.#backupSpaceProbe = options.backupSpaceProbe;
     this.#statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
     this.#state = state;
-    this.#control = options.control;
-    this.#runtimeInterpreter = options.runtimeInterpreter;
-    // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
-    this.#gracefulIpcStop = options.gracefulIpcStop ?? process.platform === "win32";
   }
 
   async run(): Promise<void> {
@@ -406,66 +491,12 @@ export class Launcher {
     const onSigint = () => void this.stop("SIGINT");
     process.once("SIGTERM", onSigterm);
     process.once("SIGINT", onSigint);
-    if (this.#control !== undefined) this.#startControlPolling();
     try {
       this.#enqueue(() => this.#recover());
       await this.#completion.promise;
     } finally {
       process.off("SIGTERM", onSigterm);
       process.off("SIGINT", onSigint);
-      clearInterval(this.#controlTimer);
-      this.#controlTimer = undefined;
-    }
-  }
-
-  /**
-   * Watches the private control request the host owns. A request is bound to
-   * this launch by its instance token; a request with any other token is stale
-   * (from a previous launch or another home) and is consumed without effect.
-   *
-   * Delivery is claim-based: a single consumer renames the request to a private
-   * claim path before decoding it, so overlapping polls cannot both act on one
-   * request, a request written while a poll is in flight is never deleted
-   * unread, and the rename publishes complete contents (the host writes
-   * atomically). A claimed request is removed after decoding.
-   */
-  #startControlPolling(): void {
-    const poll = () => {
-      void this.#consumeControlRequest();
-    };
-    void this.#consumeControlRequest();
-    this.#controlTimer = setInterval(poll, this.#control?.pollIntervalMs ?? CONTROL_POLL_MS);
-  }
-
-  async #consumeControlRequest(): Promise<void> {
-    if (this.#consumingControl) return;
-    this.#consumingControl = true;
-    try {
-      const requestPath = controlRequestPath(this.#baseDir);
-      const claimPath = `${requestPath}.claim-${NodeCrypto.randomUUID()}`;
-      try {
-        // Atomic claim: exactly one consumer wins; a missing file means no
-        // request is pending.
-        await NodeFSP.rename(requestPath, claimPath);
-      } catch {
-        return;
-      }
-      let contents: string;
-      try {
-        contents = await NodeFSP.readFile(claimPath, "utf8");
-      } catch {
-        return;
-      } finally {
-        await NodeFSP.rm(claimPath, { force: true }).catch(() => undefined);
-      }
-      const request = parseServiceLauncherControlRequest(contents);
-      if (request === undefined || request.instance !== this.#control?.instance) {
-        // Stale, foreign or malformed: claimed and removed, act on nothing.
-        return;
-      }
-      void this.stop("SIGTERM");
-    } finally {
-      this.#consumingControl = false;
     }
   }
 
@@ -513,23 +544,7 @@ export class Launcher {
       this.#stopping = true;
       const child = this.#child?.process;
       this.#child = null;
-      if (child !== undefined) {
-        // Windows cannot deliver a graceful signal: request the child's own
-        // lifetime drain over IPC first and wait, bounded, for its actual exit.
-        // Only a non-exit (timeout or an unavailable channel) still needs the
-        // force fallback; an early acknowledgement by itself never does.
-        // POSIX keeps its existing signal-driven finalizer path.
-        if (this.#gracefulIpcStop) {
-          this.#requestCounter += 1;
-          const outcome = await requestGracefulChildStop(
-            child,
-            `${String(process.pid)}-${String(this.#requestCounter)}`,
-          );
-          if (outcome.status !== "exited") await terminateChild(child, signal);
-        } else {
-          await terminateChild(child, signal);
-        }
-      }
+      if (child !== undefined) await terminateChild(child, signal);
       this.#done = true;
       this.#completion.resolve();
     });
@@ -602,14 +617,7 @@ export class Launcher {
       ...(update === undefined ? {} : { update }),
     };
     const spawnArguments = runtimeSpawnArguments(paths);
-    // Run through the interpreter when one is injected (tests on Windows);
-    // production spawns the native executable directly.
-    const command = this.#runtimeInterpreter ?? spawnArguments.command;
-    const args =
-      this.#runtimeInterpreter === undefined
-        ? spawnArguments.args
-        : [spawnArguments.command, ...spawnArguments.args];
-    const child = NodeChildProcess.spawn(command, args, {
+    const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
       env: { ...process.env, [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });
@@ -655,11 +663,6 @@ export class Launcher {
       await this.#handleUpdateRequest(child, message);
       return;
     }
-    if (message.type === "stopped") {
-      // Owned by the dedicated whole-service stop listener in
-      // requestGracefulChildStop; a replacement handoff ignores it.
-      return;
-    }
     await this.#handlePrepared(child, message.updateId);
   }
 
@@ -695,6 +698,23 @@ export class Launcher {
     }
     if (!(await runtimeExists(this.#baseDir, message.targetVersion))) {
       await reject("The requested target runtime is missing or incomplete.");
+      return;
+    }
+    // A check that cannot run refuses the update too: the alternative is
+    // stopping the server without knowing whether the backup fits.
+    const backupBlocker = await databaseBackupBlocker(
+      this.#baseDir,
+      message.dbPath,
+      this.#backupSpaceProbe,
+    ).catch(
+      (error: unknown) =>
+        `Could not check that the database backup fits before updating: ${error instanceof Error ? error.message : String(error)}. The server was not stopped.`,
+    );
+    // The child may have exited during the check. Its queued exit transition
+    // reports that; answering it or recording a pending update would not.
+    if (!child.process.connected) return;
+    if (backupBlocker !== undefined) {
+      await reject(backupBlocker);
       return;
     }
 
@@ -767,6 +787,10 @@ export class Launcher {
   ): Promise<void> {
     if (this.#child !== child || this.#stopping) return;
     this.#child = null;
+    if (code === STATE_DIR_OWNED_EXIT_CODE) {
+      await this.#idleWhileStateDirOwned();
+      return;
+    }
     if (child.role === "trial") {
       this.#clearTimer();
       const pending = this.#state.update;
@@ -788,6 +812,32 @@ export class Launcher {
       return;
     }
     throw new Error(`Active child exited unexpectedly (${String(code ?? signal ?? "unknown")}).`);
+  }
+
+  /**
+   * Another server owns the T3 home. Exiting would make systemd or launchd
+   * start another refused server, so stay idle until stopped or restarted.
+   * A pending update fails without restoring its backup: the other owner may
+   * have written to the database since.
+   */
+  async #idleWhileStateDirOwned(): Promise<void> {
+    this.#clearTimer();
+    const pending = this.#state.update;
+    if (pending?.status === "pending") {
+      const next: ServiceState = {
+        ...this.#state,
+        activeVersion: pending.fromVersion,
+        update: terminalUpdate({ pending, status: "failed", reason: "state-dir-owned" }),
+      };
+      await writeServiceState(this.#statePath, next);
+      this.#state = next;
+      await discardDatabaseBackup(this.#baseDir, pending.id).catch(() => undefined);
+    }
+    // Signal listeners alone do not keep Node alive.
+    this.#timer = setInterval(() => {}, 2_147_483_647);
+    process.stderr.write(
+      "[service-launcher] Another T3 Code server owns this T3 home. Stop it, then restart this service.\n",
+    );
   }
 
   async #returnToPrevious(
@@ -821,12 +871,5 @@ export async function main(): Promise<void> {
   }
   const statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
   const state = await readServiceState(statePath);
-  // Only a host that passed an instance token gets a control reader; a manual
-  // or development launcher keeps its signal-only path.
-  const instance = process.env[SERVICE_LAUNCHER_INSTANCE_ENV]?.trim();
-  await new Launcher(
-    baseDir,
-    state,
-    instance === undefined || instance === "" ? {} : { control: { instance } },
-  ).run();
+  await new Launcher(baseDir, state).run();
 }

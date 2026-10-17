@@ -25,10 +25,10 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
-import { Command, Flag } from "effect/unstable/cli";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { Command, Flag } from "effect/cli";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -42,14 +42,6 @@ import {
 } from "./build-desktop-artifact.ts";
 import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
-import {
-  BUILD_INFO_FILE_NAME,
-  createBuildInfo,
-  readGitSourceProvenance,
-  resolveBuildSourceShaFromEnv,
-  resolveSourceRepository,
-  serializeBuildInfo,
-} from "./lib/source-provenance.ts";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64"]);
@@ -486,8 +478,8 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   );
   // The unsuffixed host build is only a valid stand-in when it was built for
   // this platform and architecture; otherwise a missing target must fail.
-  const hostPlatform = yield* HostProcessPlatform;
-  const hostKey = `${hostPlatform === "win32" ? "win" : hostPlatform}-${yield* HostProcessArchitecture}`;
+  const hostPlatform = yield* HostProcess.Platform;
+  const hostKey = `${hostPlatform === "win32" ? "win" : hostPlatform}-${yield* HostProcess.Architecture}`;
   const builtExecutable = (yield* fs.exists(targetExecutable))
     ? targetExecutable
     : targetKey === hostKey
@@ -524,24 +516,6 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     arch: input.arch,
     version: input.version,
   });
-
-  // Provenance travels with the archive so an installer, a WSL extraction, or
-  // a human can read the exact repository, full source SHA, version, and
-  // architecture without trusting the file name.
-  const gitSource = yield* readGitSourceProvenance(repoRoot);
-  const source = yield* resolveBuildSourceShaFromEnv(process.env, gitSource.sourceSha);
-  const buildInfo = createBuildInfo({
-    version: input.version,
-    platform: input.platform,
-    arch: input.arch,
-    repository: resolveSourceRepository(process.env),
-    sourceSha: source.sourceSha,
-    workflowRevision: source.workflowRevision,
-  });
-  yield* fs.writeFileString(
-    path.join(contentDir, BUILD_INFO_FILE_NAME),
-    `${yield* serializeBuildInfo(buildInfo)}\n`,
-  );
 
   const executablePath = path.join(contentDir, executableName);
   if (input.platform === "mac") {

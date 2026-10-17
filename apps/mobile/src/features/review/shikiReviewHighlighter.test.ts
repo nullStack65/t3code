@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { ReviewRenderableLineRow } from "./reviewModel";
 import {
@@ -6,10 +6,6 @@ import {
   highlightReviewSelectedLines,
   highlightSourceFile,
 } from "./shikiReviewHighlighter";
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 describe("highlightSourceFile", () => {
   it("preserves one highlighted token row per source line without trailing newlines", async () => {
@@ -28,6 +24,24 @@ describe("highlightSourceFile", () => {
 
     expect(highlighted.map((tokens) => tokens.map((token) => token.content).join(""))).toEqual(
       lines,
+    );
+  });
+
+  it("keeps colors for a block comment that spans highlight batches", async () => {
+    // Long enough that the comment body crosses at least one batch boundary.
+    const body = Array.from({ length: 400 }, (_, index) => `const insideComment${index} = 1;`);
+    const highlighted = await highlightSourceFile({
+      path: "example.ts",
+      contents: ["/*", ...body, "*/", "const after = 2;"].join("\n"),
+      theme: "dark",
+    });
+
+    const commentColors = new Set(
+      highlighted.slice(1, -2).flatMap((line) => line.map((token) => token.color)),
+    );
+    expect(commentColors.size).toBe(1);
+    expect(highlighted.at(-1)?.map((token) => token.color)).not.toEqual(
+      highlighted[1]?.map((token) => token.color),
     );
   });
 
@@ -55,9 +69,6 @@ describe("highlightSourceFile", () => {
     vi.resetModules();
     const highlighter = await import("./shikiReviewHighlighter");
     const source = "const answer: number = 42;";
-    // Cold regex compilation can exhaust Shiki's per-line time budget under
-    // load. Keep elapsed time fixed here to test initialization and alias parity.
-    vi.spyOn(Date, "now").mockReturnValue(0);
 
     const highlighted = await highlighter.highlightSourceFile({
       path: "example.ts",
@@ -71,59 +82,11 @@ describe("highlightSourceFile", () => {
         .map((token) => token.content)
         .join(""),
     ).toBe(source);
-    expect(
-      new Set(
-        highlighted
-          .flat()
-          .map((token) => token.color)
-          .filter(Boolean),
-      ).size,
-    ).toBeGreaterThan(1);
+    expect(highlighted.flat().some((token) => token.color !== null)).toBe(true);
     expect(
       await highlighter.highlightCodeSnippet({ code: source, language: "ts", theme: "dark" }),
     ).toEqual(highlighted);
   });
-
-  it.each(["source", "snippet"] as const)(
-    "preserves text when cold %s highlighting exhausts its per-line budget",
-    async (firstApi) => {
-      vi.resetModules();
-      const highlighter = await import("./shikiReviewHighlighter");
-      const source = "const answer: number = 42;";
-      let clockReads = 0;
-      // Advance past the library's 500 ms budget during tokenization, without
-      // sleeping or making the test depend on the runner's speed.
-      const clock = vi.spyOn(Date, "now").mockImplementation(() => (++clockReads < 6 ? 0 : 600));
-      const highlightSource = () =>
-        highlighter.highlightSourceFile({
-          path: "example.ts",
-          contents: source,
-          theme: "dark",
-        });
-      const highlightSnippet = () =>
-        highlighter.highlightCodeSnippet({
-          code: source,
-          language: "ts",
-          theme: "dark",
-        });
-      let budgeted;
-      try {
-        budgeted = await (firstApi === "source" ? highlightSource() : highlightSnippet());
-      } finally {
-        clock.mockRestore();
-      }
-      const subsequent = await (firstApi === "source" ? highlightSnippet() : highlightSource());
-      expect(clockReads).toBeGreaterThanOrEqual(6);
-      for (const highlighted of [budgeted, subsequent]) {
-        expect(highlighted.map((line) => line.map((token) => token.content).join(""))).toEqual([
-          source,
-        ]);
-      }
-      // Deadline-limited coloring may differ from the subsequent call. The
-      // remainder must still be present rather than disappearing with its style.
-      expect(budgeted.flat().length).toBeLessThan(subsequent.flat().length);
-    },
-  );
 });
 
 describe("highlightReviewSelectedLines", () => {

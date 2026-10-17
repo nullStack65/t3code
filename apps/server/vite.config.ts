@@ -1,10 +1,10 @@
 import "vite-plus/test/config";
 import { defineConfig, mergeConfig } from "vite-plus";
-import * as NodeModule from "node:module";
 
 import baseConfig from "../../vite.config.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 import packageJson from "./package.json" with { type: "json" };
+import { WeightedShardSequencer } from "./src/testUtils/weightedShardSequencer.ts";
 
 // The bundle used to inline only workspace packages, leaving every third-party
 // runtime dep external. External deps must exist on the real filesystem (the WSL
@@ -20,18 +20,6 @@ import {
 } from "../../scripts/lib/cli-external-packages.ts";
 
 export { shouldBundleCliDependency };
-
-// jsonc-parser's package `main` is its UMD build, which leaves relative
-// CommonJS requires in a single-file SEA. Point only this package at its ESM
-// entry so Rolldown bundles the parser's implementation modules.
-const nodeRequire = NodeModule.createRequire(import.meta.url);
-export const jsoncParserPackInputOptions = {
-  resolve: {
-    alias: {
-      "jsonc-parser$": nodeRequire.resolve("jsonc-parser/lib/esm/main.js"),
-    },
-  },
-};
 
 const repoEnv = loadRepoEnv();
 const cliBuildChannel = /^[^-+]+-(?:nightly|preview)\./.test(packageJson.version)
@@ -119,7 +107,6 @@ export default mergeConfig(
         neverBundle: (id: string) => isExternalCliDependency(id),
         onlyBundle: false,
       },
-      inputOptions: jsoncParserPackInputOptions,
       banner: {
         js: "#!/usr/bin/env node\n",
       },
@@ -147,6 +134,8 @@ export default mergeConfig(
       // The server suite exercises sqlite, git, temp worktrees, and orchestration
       // runtimes heavily. Running files in parallel introduces load-sensitive flakes.
       fileParallelism: false,
+      // CI runs the suite as `--shard` runs of equal recorded duration.
+      sequence: { sequencer: WeightedShardSequencer },
       // Appended to the root setup, which mergeConfig concatenates.
       setupFiles: ["./src/testUtils/gitConfig.setup.ts"],
       // Server integration tests exercise sqlite, git, and orchestration together.

@@ -1,17 +1,37 @@
 # Codex
 
-For one account, use the default Codex provider with your normal Codex login.
+Use your ChatGPT plan or an existing Codex CLI login to code in T3 Code.
 
-Codex normally offers every model reported by its app-server. If an instance
-routes through a proxy with a narrower catalog, set **Model catalog** to
-**Custom models only** and add only the model IDs that backend can serve. This
-prevents the generic app-server catalog from advertising models on the wrong
-route; it does not verify account or backend entitlement.
+## Connect with ChatGPT
 
-[Provider setup](./install.md#providers) covers installation, Settings > Providers,
-and custom binaries or environment variables.
+Connect during onboarding or in **Settings → Providers**. For a remote machine,
+select that environment first. T3 Code handles Codex installation; sign in on
+OpenAI and allow sharing of your ChatGPT plan.
+
+Manage shared usage and credits in ChatGPT through **Manage usage** in T3 Code.
+If a request uses a feature that ChatGPT sharing does not support, use another
+provider for that request.
+
+When reconnecting, choose the same account in T3 Code and on OpenAI's sign-in
+page. Disconnecting stops running threads but keeps their history and lets you
+reconnect later.
+
+If remote sign-in cannot return automatically, paste the full URL from the final
+localhost page into the sign-in panel, even if that page could not load.
+
+## Use an existing Codex login
+
+T3 Code can use your installed Codex and its existing login. Run `codex login`
+on the environment's machine to sign in. [Provider setup](./install.md#providers)
+covers installation and custom configuration.
 
 ## Use multiple accounts
+
+Add another ChatGPT account in **Settings → Providers**, then select the account
+from the thread's model picker. Compatible accounts can continue the same thread.
+Connecting accounts through T3 Code leaves your CLI login unchanged.
+
+### Multiple CLI logins
 
 A shared Codex home with a shadow home lets work and personal accounts continue
 the same threads. The accounts share Codex sessions and configuration while keeping

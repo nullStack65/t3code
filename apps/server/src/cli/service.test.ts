@@ -1,13 +1,13 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, expect, it } from "@effect/vitest";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Terminal from "effect/Terminal";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 import { afterEach, vi } from "vite-plus/test";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -23,17 +23,11 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 const status = {
-  schemaVersion: BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION,
   supported: true,
-  manager: "systemd",
   installed: true,
-  enabled: "enabled",
-  running: "running",
   current: true,
-  configuredVersion: "0.0.29",
   unitPath: "/home/me/.config/systemd/user/t3code.service",
   logPath: "/home/me/.t3/userdata/logs/boot-service.log",
-  observedAt: "2026-09-26T00:00:00.000Z",
 } as const;
 
 it("reports the installed service version and host paths", () => {
@@ -101,114 +95,6 @@ it("reports a newer installed service and tells the CLI to catch up to it", () =
   assert.notInclude(output, "npx");
 });
 
-const observation = {
-  manager: "systemd",
-  source: "systemctl --user show t3code.service",
-  observedAt: "2026-09-26T00:00:00.000Z",
-  reachable: true,
-  enabled: "enabled",
-  running: "running",
-  state: "active",
-  subState: "running",
-  processId: 4321,
-  configuredProgramPath: "/home/me/.t3/runtime/versions/0.0.29/t3",
-  configuredVersion: "0.0.29",
-  restartCount: 0,
-  lastResult: "success",
-} satisfies BootService.BootServiceManagerObservation;
-
-it("emits the versioned machine-readable status contract with --json", () => {
-  const parsed = JSON.parse(
-    formatServiceStatus({ ...status, observation }, "0.0.29", { json: true }),
-  ) as Record<string, unknown>;
-
-  expect(parsed.schemaVersion).toBe(BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION);
-  expect(parsed.schemaVersion).toBe(2);
-  expect(parsed.manager).toBe("systemd");
-  expect(parsed.running).toBe("running");
-  expect(parsed.cliVersion).toBe("0.0.29");
-  expect(parsed.unitPath).toBe(status.unitPath);
-  // Configured launch metadata is separate and there is no observed running
-  // server version in this contract.
-  expect(parsed.configuredVersion).toBe("0.0.29");
-  expect("runningVersion" in parsed).toBe(false);
-  const observationJson = parsed.observation as Record<string, unknown>;
-  expect(observationJson.configuredVersion).toBe("0.0.29");
-  expect(observationJson.configuredProgramPath).toBe("/home/me/.t3/runtime/versions/0.0.29/t3");
-  expect("runningVersion" in observationJson).toBe(false);
-});
-
-it("keeps human status output and adds manager observation lines", () => {
-  const output = formatServiceStatus({ ...status, observation }, "0.0.29");
-
-  expect(output).toContain("Status: installed · t3@0.0.29");
-  expect(output).toContain("Manager: systemd · running running");
-  expect(output).toContain("Configured launcher: t3@0.0.29");
-  expect(output).toContain("Manager state: active/running");
-  expect(output).toContain("Enabled: enabled");
-  expect(output).toContain(
-    "Observed: 2026-09-26T00:00:00.000Z (systemctl --user show t3code.service)",
-  );
-  expect(output).not.toContain("Note:");
-  expect(output).not.toContain("t3@0.0.29 (running)");
-});
-
-it("does not report a non-running manager observation as healthy", () => {
-  const output = formatServiceStatus(
-    {
-      ...status,
-      running: "not-loaded",
-      observation: { ...observation, running: "not-loaded", detail: "launch-agent-not-loaded" },
-    },
-    "0.0.29",
-  );
-
-  expect(output).toContain("Manager: systemd · running not loaded");
-  expect(output).toContain("Manager detail: launch-agent-not-loaded");
-  expect(output).toContain("that is a manager observation, not application health");
-});
-
-it("reports a transitioning manager state without calling it stopped or healthy", () => {
-  const output = formatServiceStatus(
-    {
-      ...status,
-      running: "transitioning",
-      observation: {
-        ...observation,
-        running: "transitioning",
-        state: "deactivating",
-        subState: "stop-sigterm",
-      },
-    },
-    "0.0.29",
-  );
-
-  expect(output).toContain("Manager: systemd · running changing state");
-  expect(output).toContain("Manager state: deactivating/stop-sigterm");
-  expect(output).toContain("that is a manager observation, not application health");
-  expect(output).not.toContain("running stopped");
-});
-
-it("shows the configured program path when it carries no exact version", () => {
-  const {
-    configuredVersion: _configuredVersion,
-    configuredProgramPath: _configuredProgramPath,
-    ...observationWithoutBinding
-  } = observation;
-  const output = formatServiceStatus(
-    {
-      ...status,
-      observation: {
-        ...observationWithoutBinding,
-        configuredProgramPath: "/home/me/.t3/runtime/versions/nightly/t3",
-      },
-    },
-    "0.0.29",
-  );
-
-  expect(output).toContain("Configured launcher: /home/me/.t3/runtime/versions/nightly/t3");
-});
-
 const newerServiceStatus = { ...status, current: false, installedVersion: "999.0.0" };
 
 function makeTestService(serviceStatus: BootService.BootServiceStatus) {
@@ -250,7 +136,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NetService.layer))("service commands
         "--base-dir",
         baseDir,
       ]).pipe(
-        Effect.provideService(HostProcessEnvironment, {}),
+        Effect.provideService(HostProcess.Environment, {}),
         Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
       );
 
@@ -275,7 +161,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NetService.layer))("service commands
           "--base-dir",
           baseDir,
         ]).pipe(
-          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.provideService(HostProcess.Environment, {}),
           Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
           Effect.flip,
         );
@@ -304,7 +190,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NetService.layer))("service commands
         baseDir,
         "--allow-downgrade",
       ]).pipe(
-        Effect.provideService(HostProcessEnvironment, {}),
+        Effect.provideService(HostProcess.Environment, {}),
         Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
       );
 

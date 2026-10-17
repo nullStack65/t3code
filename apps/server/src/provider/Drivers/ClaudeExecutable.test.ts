@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 
@@ -17,8 +17,8 @@ function withWindowsResolution(input: {
   const existing = new Set(input.existingFiles ?? []);
   return <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
-      Effect.provideService(HostProcessPlatform, "win32"),
-      Effect.provideService(SpawnExecutableResolution, () => Effect.succeed(input.resolvedCommand)),
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(SpawnExecutableResolution, () => input.resolvedCommand),
       Effect.provideService(ClaudeExecutableFileCheck, (filePath) => existing.has(filePath)),
     );
 }
@@ -28,10 +28,10 @@ describe("resolveClaudeSdkExecutablePath", () => {
     Effect.gen(function* () {
       expect(
         yield* resolveClaudeSdkExecutablePath("claude", {}).pipe(
-          Effect.provideService(HostProcessPlatform, "darwin"),
-          Effect.provideService(SpawnExecutableResolution, () =>
-            Effect.die("must not resolve on non-Windows platforms"),
-          ),
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(SpawnExecutableResolution, () => {
+            throw new Error("must not resolve on non-Windows platforms");
+          }),
         ),
       ).toBe("claude");
     }),

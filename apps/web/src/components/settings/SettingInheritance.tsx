@@ -45,9 +45,11 @@ function formatValue(key: keyof ServerSettings, value: unknown): string {
           ? "Automatic"
           : key === "sourceControlWriterModelSelection"
             ? "Text generation model"
-            : key === "defaultThreadEnvMode" || key === "worktreeSubmodules"
-              ? "Inherit"
-              : "Not set";
+            : key === "reviewGuideModelSelection"
+              ? "Source control writer model"
+              : key === "defaultThreadEnvMode" || key === "worktreeSubmodules"
+                ? "Inherit"
+                : "Not set";
   }
   if (typeof value === "boolean") return value ? "On" : "Off";
   if (typeof value === "number") {
@@ -223,11 +225,7 @@ export function SettingInheritance({
         </TooltipTrigger>
         <TooltipPopup side="top">{overrideSummary}</TooltipPopup>
       </Tooltip>
-      <PopoverPopup
-        align="start"
-        width="md"
-        viewportClassName="p-0 [--viewport-inline-padding:0px]"
-      >
+      <PopoverPopup align="start" width="md" padding="none">
         <div className="divide-y divide-border/60">
           {chains.map(({ target, environment, machine, layers }) => (
             <section

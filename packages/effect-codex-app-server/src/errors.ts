@@ -115,7 +115,6 @@ export type CodexAppServerTransportOperation = typeof CodexAppServerTransportOpe
 
 export const CodexAppServerIdentifierPurpose = Schema.Literals([
   "provider-event",
-  "session-observation",
   "command-approval-request",
   "file-change-approval-request",
   "mcp-elicitation-request",

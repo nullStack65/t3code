@@ -15,63 +15,36 @@
  * @module usageScanCache
  */
 import type { UsageProviderKind } from "@t3tools/contracts";
+import type {
+  TranscriptUsageFormat,
+  UsageRecord,
+  UsageSpeed,
+} from "@t3tools/provider-core/server/usage";
+import * as Schema from "effect/Schema";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type {
-  CodexScanState,
-  DedupeKeyScope,
-  UsageMeasurement,
-  UsageMeasurementCompleteness,
-  UsageObservationScope,
-  UsageRecord,
-} from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
-// v4: records carry native request/message/prompt ids. Without the bump, warm
-// v3 entries would silently report those levels as unsupported until the file
-// next changed. The v4 row later gained validity/completeness and dedupe-key
-// scope fields appended after the first v4 rows; the version deliberately
-// stayed 4 because those fields are additive.
-//
-// Supported-format policy:
-// - v3 documents are still *read*. The scan retains measured records from
-//   transcripts that have since been deleted, and those cannot be re-parsed, so
-//   discarding a v3 cache would destroy 90 days of history. A v3 row decodes
-//   with its native ids and measurement presence explicitly `unavailable`.
-// - A v4 row written by the predecessor (15 fields, no quality metadata)
-//   decodes conservatively: completeness is `partial`, never `complete`, and
-//   the entry is `qualityMetadata: "predecessor"` so an extant file is cold
-//   re-parsed once. No row is discarded for the format change. The marker is
-//   persisted on the file (`lq`) because the encoder rewrites rows to the
-//   current 18-field shape, so provenance cannot be recovered from row length
-//   after a save/restart.
-// - Only v1/v2 (no parse position, different fork semantics) are rejected.
-const USAGE_SCAN_CACHE_VERSION = 4 as const;
-const LEGACY_USAGE_SCAN_CACHE_VERSION = 3 as const;
-
-/** Index of the first appended post-v4 field (completeness code) in a row. */
-const POST_V4_FIELD_INDEX = 15;
+// v4: records carry Claude fast mode, which v3 rows never captured.
+// v5: Codex records carry their service tier. v4 rows store speed the same
+// way, so v4 entries still load; see `decodeScanCache` for v4 stateful entries.
+const USAGE_SCAN_CACHE_VERSION = 5 as const;
+const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
- * Whether a cache entry's rows still carry their native ids and measurement
- * presence. A `v3` entry erased both; the projection must report them as
- * unavailable rather than as a measured zero or an absent id.
+ * Each cache version writes its own file in the state directory. An older
+ * server sharing that directory cannot read a newer cache and would replace
+ * it, dropping saved usage for deleted transcripts. Separate files keep both.
+ * A v5 server reads the legacy (v4) file once, when its own file is missing.
  */
-export type ScanCacheIdentity = "declared" | "unavailable";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v5.json";
+export const LEGACY_SCAN_CACHE_FILE_NAME = "usage-scan-cache.json";
 
-/**
- * Whether a cache entry's rows carry the current numeric quality metadata
- * (validity/completeness and dedupe-key scope, appended after the first v4
- * rows). Native-id availability alone does not prove that: a `15`-field v4 row
- * written before that metadata existed has identity `declared` but no
- * completeness, so reading it as complete would silently promote an unknown
- * measurement. Such an entry is `predecessor`: its retained rows are treated as
- * partial, and an extant file is cold re-parsed once to enrich it.
- */
-export type ScanCacheQualityMetadata = "declared" | "predecessor";
+/** Serialised as the index into this list. */
+const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
 
 export interface CachedFile {
   readonly size: number;
@@ -86,17 +59,6 @@ export interface CachedFile {
    */
   readonly tailRecords: readonly UsageRecord[];
   readonly position: TranscriptParsePosition;
-  /**
-   * `unavailable` for a legacy row whose ids/presence were erased. Callers must
-   * not resume such an entry: a cold re-parse is the only way to enrich it.
-   */
-  readonly identity: ScanCacheIdentity;
-  /**
-   * `predecessor` for an entry whose rows omit the current quality metadata.
-   * Callers must not serve it warm or resume it: the numeric quality is
-   * unasserted, so a cold re-parse is the only way to establish completeness.
-   */
-  readonly qualityMetadata: ScanCacheQualityMetadata;
 }
 
 export type ScanCache = Map<string, CachedFile>;
@@ -117,57 +79,10 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
-  providerRequestId: string | null,
-  providerMessageId: string | null,
-  promptId: string | null,
-  measurementCode: number,
-  scopeCode: number,
-  /** Appended after the first v4 rows; absent means `complete` when observed. */
-  completenessCode: number,
-  /** Appended after the first v4 rows; count of present-but-invalid fields. */
-  invalidTokenFields: number,
-  /** Appended after the first v4 rows; absent means `global`. */
-  dedupeKeyScopeCode: number,
+  speed: number,
+  /** Optional trailing field keeps existing cache rows readable. */
+  rateModelIndex?: number | null,
 ];
-
-// `invalid` is appended last so the existing observed/empty/unavailable codes
-// keep their values and older v4 rows keep decoding.
-const MEASUREMENT_CODES: readonly UsageMeasurement[] = [
-  "observed",
-  "empty",
-  "unavailable",
-  "invalid",
-];
-const SCOPE_CODES: readonly UsageObservationScope[] = ["delta", "snapshot"];
-const COMPLETENESS_CODES: readonly UsageMeasurementCompleteness[] = ["complete", "partial"];
-const DEDUPE_KEY_SCOPE_CODES: readonly DedupeKeyScope[] = ["global", "source-local"];
-
-function encodeMeasurement(measurement: UsageMeasurement | undefined): number {
-  const index = MEASUREMENT_CODES.indexOf(measurement ?? "observed");
-  return index < 0 ? 0 : index;
-}
-
-function encodeScope(scope: UsageObservationScope | undefined): number {
-  const index = SCOPE_CODES.indexOf(scope ?? "delta");
-  return index < 0 ? 0 : index;
-}
-
-function encodeCompleteness(completeness: UsageMeasurementCompleteness | undefined): number {
-  const index = COMPLETENESS_CODES.indexOf(completeness ?? "complete");
-  return index < 0 ? 0 : index;
-}
-
-function encodeDedupeKeyScope(scope: DedupeKeyScope | undefined): number {
-  const index = DEDUPE_KEY_SCOPE_CODES.indexOf(scope ?? "global");
-  return index < 0 ? 0 : index;
-}
-
-function decodeCode<Value extends string>(
-  value: unknown,
-  codes: readonly Value[],
-): Value | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? codes[value] : undefined;
-}
 
 interface SerializedFile {
   readonly s: number;
@@ -180,23 +95,8 @@ interface SerializedFile {
   readonly o: number;
   readonly gl: number;
   readonly gh: number;
-  /** Codex reducer state at `o`; `null` for stateless providers. */
-  readonly cs: CodexScanState | null;
-  /**
-   * `1` when this entry's rows predate native ids / measurement presence. Kept
-   * on the file so an erased-history entry stays `unavailable` across restarts
-   * until an extant file is cold re-parsed. Absent on a fresh entry.
-   */
-  readonly li?: number;
-  /**
-   * `1` when this entry's rows predate the current numeric quality metadata.
-   * Like `li`, it is a file-level provenance marker: the encoder rewrites every
-   * row to the current 18-field shape, so row length alone cannot tell a
-   * predecessor entry apart from a freshly parsed one after a persist. Kept on
-   * the file so a predecessor entry stays `predecessor` across restarts until a
-   * successful full parse replaces it. Absent on a fresh entry.
-   */
-  readonly lq?: number;
+  /** The format's encoded reducer state at `o`; `null` for stateless formats. */
+  readonly cs: unknown;
 }
 
 interface SerializedCache {
@@ -206,26 +106,32 @@ interface SerializedCache {
   readonly files: Readonly<Record<string, SerializedFile>>;
 }
 
-/** Serialises the cache, interning the repeated model and session strings. */
-export function encodeScanCache(cache: ScanCache): SerializedCache {
-  const models: string[] = [];
-  const sessions: string[] = [];
-  const modelIndex = new Map<string, number>();
-  const sessionIndex = new Map<string, number>();
+/** Model and session strings, each stored once and referenced by index. */
+interface InternTables {
+  readonly models: string[];
+  readonly sessions: string[];
+  readonly modelIndex: Map<string, number>;
+  readonly sessionIndex: Map<string, number>;
+}
 
-  const intern = (table: string[], index: Map<string, number>, value: string): number => {
-    const existing = index.get(value);
-    if (existing !== undefined) return existing;
-    const next = table.length;
-    table.push(value);
-    index.set(value, next);
-    return next;
-  };
+function makeInternTables(): InternTables {
+  return { models: [], sessions: [], modelIndex: new Map(), sessionIndex: new Map() };
+}
 
+function intern(table: string[], index: Map<string, number>, value: string): number {
+  const existing = index.get(value);
+  if (existing !== undefined) return existing;
+  const next = table.length;
+  table.push(value);
+  index.set(value, next);
+  return next;
+}
+
+function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile {
   const serializeRecord = (record: UsageRecord): SerializedRecord => [
     record.timestampMs,
-    intern(models, modelIndex, record.model),
-    intern(sessions, sessionIndex, record.sessionId),
+    intern(tables.models, tables.modelIndex, record.model),
+    intern(tables.sessions, tables.sessionIndex, record.sessionId),
     record.totals.uncachedInputTokens,
     record.totals.cachedInputTokens,
     record.totals.cacheCreationTokens,
@@ -233,38 +139,73 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.totals.reasoningTokens,
     record.dedupeKey,
     record.reportedCostUsd,
-    record.providerRequestId ?? null,
-    record.providerMessageId ?? null,
-    record.promptId ?? null,
-    encodeMeasurement(record.measurement),
-    encodeScope(record.scope),
-    encodeCompleteness(record.measurementCompleteness),
-    record.invalidTokenFields ?? 0,
-    encodeDedupeKeyScope(record.dedupeKeyScope),
+    SPEEDS.indexOf(record.speed),
+    record.rateModel === undefined
+      ? null
+      : intern(tables.models, tables.modelIndex, record.rateModel),
   ];
+  return {
+    s: entry.size,
+    m: entry.mtimeMs,
+    p: entry.provider,
+    r: entry.records.map(serializeRecord),
+    t: entry.tailRecords.map(serializeRecord),
+    o: entry.position.resumeOffset,
+    gl: entry.position.guardLength,
+    gh: entry.position.guardHash,
+    cs: entry.position.state,
+  };
+}
 
+/** Serialises the cache, interning the repeated model and session strings. */
+export function encodeScanCache(cache: ScanCache): SerializedCache {
+  const tables = makeInternTables();
   const files: Record<string, SerializedFile> = {};
-  for (const [path, entry] of cache) {
-    files[path] = {
-      s: entry.size,
-      m: entry.mtimeMs,
-      p: entry.provider,
-      r: entry.records.map(serializeRecord),
-      t: entry.tailRecords.map(serializeRecord),
-      o: entry.position.resumeOffset,
-      gl: entry.position.guardLength,
-      gh: entry.position.guardHash,
-      cs: entry.position.codexState,
-      ...(entry.identity === "unavailable" ? { li: 1 } : {}),
-      // Persist the freshness provenance, not just the row shape. The rows are
-      // always rewritten to the current 18-field form, so without this marker a
-      // predecessor entry would decode as `declared` after the first persist and
-      // be served warm forever, skipping the cold re-parse that asserts quality.
-      ...(entry.qualityMetadata === "predecessor" ? { lq: 1 } : {}),
-    };
-  }
+  for (const [path, entry] of cache) files[path] = serializeFile(entry, tables);
+  return {
+    version: USAGE_SCAN_CACHE_VERSION,
+    models: tables.models,
+    sessions: tables.sessions,
+    files,
+  };
+}
 
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
+/**
+ * Returns a function that serialises the cache to JSON text, re-encoding only
+ * the entries that changed since its last call. Call it once per persist.
+ *
+ * Writes the same document as `encodeScanCache`. Most entries never change
+ * between scans, and encoding all of them made each persist cost close to a
+ * second on a large cache. Entries are replaced, never mutated, when their file
+ * changes, so an entry's JSON is memoised by identity. The intern tables only
+ * grow, so a memoised entry's indexes stay valid; a pruned entry can leave an
+ * unused string behind until the next process start.
+ */
+export function makeScanCacheWriter(): (
+  cache: ScanCache,
+  extra: Readonly<Record<string, unknown>>,
+) => string {
+  const tables = makeInternTables();
+  const fragments = new WeakMap<CachedFile, string>();
+  return (cache, extra) => {
+    const files: string[] = [];
+    for (const [path, entry] of cache) {
+      let fragment = fragments.get(entry);
+      if (fragment === undefined) {
+        fragment = JSON.stringify(serializeFile(entry, tables));
+        fragments.set(entry, fragment);
+      }
+      files.push(`${JSON.stringify(path)}:${fragment}`);
+    }
+    // Encoded after the files, which may have added to the intern tables.
+    const head = JSON.stringify({
+      ...extra,
+      version: USAGE_SCAN_CACHE_VERSION,
+      models: tables.models,
+      sessions: tables.sessions,
+    });
+    return `${head.slice(0, -1)},"files":{${files.join(",")}}}`;
+  };
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
@@ -275,22 +216,26 @@ function isRecordArray(value: unknown): value is readonly unknown[] {
  * Rebuilds the cache from a parsed document.
  *
  * Anything malformed yields an empty cache rather than an error: a corrupt
- * cache should cost one cold scan, never a broken page.
+ * cache should cost one cold scan, never a broken page. Entries of a provider
+ * without a transcript format in `formats` are dropped.
  */
-export function decodeScanCache(document: unknown): ScanCache {
+export function decodeScanCache(
+  document: unknown,
+  formats: ReadonlyMap<UsageProviderKind, TranscriptUsageFormat<unknown>>,
+): ScanCache {
   const cache: ScanCache = new Map();
+  const isValidState = makeStateValidators(formats);
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
+  const version = root.version;
   if (
-    root.version !== USAGE_SCAN_CACHE_VERSION &&
-    root.version !== LEGACY_USAGE_SCAN_CACHE_VERSION
+    typeof version !== "number" ||
+    version < SPEED_COMPATIBLE_SINCE_VERSION ||
+    version > USAGE_SCAN_CACHE_VERSION
   ) {
     return cache;
   }
-  // A v3 document has no native ids or measurement presence anywhere; every
-  // entry it holds is erased-history. A v4 entry carries its own marker.
-  const legacyDocument = root.version === LEGACY_USAGE_SCAN_CACHE_VERSION;
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
@@ -308,18 +253,10 @@ export function decodeScanCache(document: unknown): ScanCache {
   const decodeRecords = (
     rows: readonly unknown[],
     provider: UsageProviderKind,
-    legacy: boolean,
-  ): { records: UsageRecord[]; qualityDeclared: boolean } | null => {
+  ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
-    // Every row must carry the appended post-v4 fields for the entry to be
-    // current. A 15-field row was written before completeness existed; the
-    // entry's numeric quality is then unasserted and must not be read as
-    // complete. Empty row lists are vacuously current: there is no measurement
-    // to promote.
-    let qualityDeclared = true;
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 10) return null;
-      if (row.length <= POST_V4_FIELD_INDEX) qualityDeclared = false;
+      if (!isRecordArray(row) || row.length < 11) return null;
       const [
         timestampMs,
         modelIndex,
@@ -331,66 +268,33 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        speedIndex,
+        rateModelIndex,
       ] = row as SerializedRecord;
-      // Appended in v4. Absent on a hand-built or truncated row, in which case
-      // the identity is simply not asserted rather than defaulted to a value.
-      const providerRequestId = row[10];
-      const providerMessageId = row[11];
-      const promptId = row[12];
-      // Appended after v4. A v3 or early-v4 row has no presence information, so
-      // a nonzero total proves a measurement while an all-zero row stays
-      // explicitly `unavailable` rather than being read as a measured zero.
-      const measurementCode = row[13];
-      const scopeCode = row[14];
-      // Appended after the first v4 rows: validity/completeness metadata. Absent
-      // on an older row, whose completeness is then unasserted (`partial`).
-      const completenessCode = row[15];
-      const invalidTokenFieldsRaw = row[16];
-      const dedupeKeyScopeCode = row[17];
+      const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
+      const rateModel = typeof rateModelIndex === "number" ? models[rateModelIndex] : undefined;
       if (
         typeof timestampMs !== "number" ||
         !Number.isFinite(timestampMs) ||
         model === undefined ||
+        (rateModelIndex != null && rateModel === undefined) ||
         !Number.isFinite(uncached) ||
         !Number.isFinite(cached) ||
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
-        !Number.isFinite(reasoning)
+        !Number.isFinite(reasoning) ||
+        speed === undefined
       ) {
         return null;
       }
-
-      const measurement: UsageMeasurement =
-        decodeCode(measurementCode, MEASUREMENT_CODES) ??
-        (uncached + cached + cacheCreation + output > 0 ? "observed" : "unavailable");
-      const scope: UsageObservationScope = decodeCode(scopeCode, SCOPE_CODES) ?? "delta";
-      // A row that omits the completeness code proves nothing about coverage,
-      // whether it is a legacy row (presence erased) or a predecessor v4 row
-      // (metadata predates the field). Default to `partial`, never `complete`:
-      // missing quality metadata must not be silently promoted to a measured
-      // complete observation. The current writer always emits the code, so this
-      // only applies to older rows.
-      const completeness: UsageMeasurementCompleteness | undefined =
-        measurement === "observed"
-          ? (decodeCode(completenessCode, COMPLETENESS_CODES) ?? "partial")
-          : undefined;
-      const invalidTokenFields =
-        typeof invalidTokenFieldsRaw === "number" &&
-        Number.isFinite(invalidTokenFieldsRaw) &&
-        invalidTokenFieldsRaw > 0
-          ? Math.trunc(invalidTokenFieldsRaw)
-          : 0;
-      const dedupeKeyScope: DedupeKeyScope | undefined = decodeCode(
-        dedupeKeyScopeCode,
-        DEDUPE_KEY_SCOPE_CODES,
-      );
 
       records.push({
         provider,
         timestampMs,
         model,
+        ...(rateModel === undefined ? {} : { rateModel }),
         sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
         totals: {
           uncachedInputTokens: uncached,
@@ -400,33 +304,20 @@ export function decodeScanCache(document: unknown): ScanCache {
           reasoningTokens: reasoning,
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
+        speed,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
-        // A v3 row cannot carry native ids; they are unavailable, not absent.
-        ...(legacy
-          ? {}
-          : {
-              ...(typeof providerRequestId === "string" ? { providerRequestId } : {}),
-              ...(typeof providerMessageId === "string" ? { providerMessageId } : {}),
-              ...(typeof promptId === "string" ? { promptId } : {}),
-            }),
-        measurement,
-        ...(completeness === undefined ? {} : { measurementCompleteness: completeness }),
-        ...(invalidTokenFields === 0 ? {} : { invalidTokenFields }),
-        // Legacy rows erased identity; keep that visible so the projection does
-        // not read an absent native id as a missing one.
-        ...(legacy ? { identityAvailable: false } : {}),
-        ...(dedupeKeyScope === undefined ? {} : { dedupeKeyScope }),
-        ...(scope === "delta" ? {} : { scope }),
       });
     }
-    return { records, qualityDeclared };
+    return records;
   };
 
   for (const [path, raw] of Object.entries(root.files)) {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
     if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
-    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "grok") continue;
+    if (entry.p === undefined) continue;
+    const format = formats.get(entry.p);
+    if (format === undefined) continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
     // Position fields feed byte offsets and a Buffer allocation in the reader,
     // so anything outside their real ranges must reject the entry: a bogus
@@ -446,35 +337,34 @@ export function decodeScanCache(document: unknown): ScanCache {
     ) {
       continue;
     }
-    const codexState = decodeCodexState(entry.cs);
-    if (codexState === undefined) continue;
+    // v4 records of stateful formats (Codex) predate service tiers, so they
+    // all priced as standard. Keep them, because the rollout may be gone, but
+    // make a live rollout re-parse whole: no file has size -1, and a zero
+    // position cannot resume.
+    const legacy = format.state !== undefined && version < USAGE_SCAN_CACHE_VERSION;
+    // A corrupt state disqualifies the entry: resuming with it would attach
+    // appended usage to the wrong model or replay fork-copied history.
+    if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
 
-    const provider: UsageProviderKind = entry.p;
-    const legacy = legacyDocument || entry.li === 1;
-    const decodedRecords = decodeRecords(entry.r, provider, legacy);
-    const decodedTail = decodeRecords(entry.t, provider, legacy);
-    if (decodedRecords === null || decodedTail === null) continue;
+    const provider = entry.p;
+    const records = decodeRecords(entry.r, provider);
+    const tailRecords = decodeRecords(entry.t, provider);
+    if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
-      size: entry.s,
+      size: legacy ? -1 : entry.s,
       mtimeMs: entry.m,
       provider,
-      records: decodedRecords.records,
-      tailRecords: decodedTail.records,
-      position: {
-        resumeOffset: entry.o,
-        guardLength: entry.gl,
-        guardHash: entry.gh,
-        codexState,
-      },
-      identity: legacy ? "unavailable" : "declared",
-      // `lq` records provenance the row shape cannot: the encoder always emits
-      // the current 18-field rows, so a persisted predecessor entry would
-      // otherwise decode as `declared` on the next start without any parse.
-      qualityMetadata:
-        entry.lq === 1 || !decodedRecords.qualityDeclared || !decodedTail.qualityDeclared
-          ? "predecessor"
-          : "declared",
+      records,
+      tailRecords,
+      position: legacy
+        ? { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null }
+        : {
+            resumeOffset: entry.o,
+            guardLength: entry.gl,
+            guardHash: entry.gh,
+            state: entry.cs,
+          },
     });
   }
 
@@ -482,33 +372,21 @@ export function decodeScanCache(document: unknown): ScanCache {
 }
 
 /**
- * Validates a persisted Codex reducer state. Returns `undefined` for a corrupt
- * value, which disqualifies the entry: resuming with a bad state would attach
- * appended usage to the wrong model or replay fork-copied history.
+ * Per provider, whether a persisted state is valid: `null`, or one the
+ * format's schema accepts.
  */
-function decodeCodexState(value: unknown): CodexScanState | null | undefined {
-  if (value === null) return null;
-  if (typeof value !== "object") return undefined;
-  const state = value as Partial<CodexScanState>;
-  if (
-    typeof state.model !== "string" ||
-    typeof state.sessionId !== "string" ||
-    (state.lastUsageSignature !== null && typeof state.lastUsageSignature !== "string") ||
-    typeof state.sawSessionMeta !== "boolean" ||
-    typeof state.suppressingForkCopies !== "boolean" ||
-    typeof state.forkCopyAnchorMs !== "number" ||
-    !Number.isFinite(state.forkCopyAnchorMs)
-  ) {
-    return undefined;
-  }
-  return {
-    model: state.model,
-    sessionId: state.sessionId,
-    lastUsageSignature: state.lastUsageSignature ?? null,
-    sawSessionMeta: state.sawSessionMeta,
-    suppressingForkCopies: state.suppressingForkCopies,
-    forkCopyAnchorMs: state.forkCopyAnchorMs,
-  };
+function makeStateValidators(
+  formats: ReadonlyMap<UsageProviderKind, TranscriptUsageFormat<unknown>>,
+): ReadonlyMap<UsageProviderKind, (value: unknown) => boolean> {
+  return new Map(
+    [...formats].map(([provider, format]) => {
+      const isState = format.state === undefined ? undefined : Schema.is(format.state.schema);
+      return [
+        provider,
+        (value: unknown) => value === null || (isState !== undefined && isState(value)),
+      ] as const;
+    }),
+  );
 }
 
 /** Keeps saved usage after transcript cleanup, until the reporting retention expires. */
