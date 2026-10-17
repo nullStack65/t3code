@@ -1,3 +1,4 @@
+import { carryCurrentSkillRequest } from "../provider/CurrentSkillRequest.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -1173,13 +1174,15 @@ export const layer: Layer.Layer<
             .join("\n\n");
           // A note continuation has no turn to resume; its text is the prompt.
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
-          yield* start({
+          const deliveredInput = {
             ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
               text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
             },
-          }).pipe(
+          };
+          carryCurrentSkillRequest(turnInput, deliveredInput);
+          yield* start(deliveredInput).pipe(
             // A pending marker would make the next turn abandon this native
             // session, though the refused prompt never reached it.
             Effect.tapError((error) =>
@@ -1259,6 +1262,19 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
+        skillRequest: {
+          messageId: message.id,
+          text: message.text,
+          activationAllowed:
+            message.createdBy === "user" &&
+            message.creationSource !== "server" &&
+            message.creationSource !== "provider" &&
+            message.scheduledTaskId === undefined &&
+            message.senderThreadId === undefined,
+          conversation: projectionStore
+            .getThreadProjection(input.threadId)
+            .pipe(Effect.map((current) => current.messages)),
+        },
         message: {
           messageId: message.id,
           text: userText,
