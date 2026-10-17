@@ -1328,6 +1328,147 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect.skipIf(Effect.runSync(HostProcess.Platform) === "win32")(
+    "terminates actual macOS probe process groups on timeout and cancellation before cleanup",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const witness = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-probe-witness-" });
+          for (const mode of ["timeout", "cancel"] as const) {
+            const ready = yield* Deferred.make<void, string>();
+            const marker = path.join(witness, `${mode}.json`);
+            let pid = 0;
+            let descendant = 0;
+            let directory = "";
+            let watchdogTriggered = false;
+            let watchdog: ReturnType<typeof setTimeout> | undefined;
+            const fixture = [
+              "const {spawn}=require('node:child_process');",
+              `process.on('SIGTERM',()=>{${mode === "cancel" ? "process.exit(0)" : ""}});`,
+              "const code=\"const fs=require('node:fs');process.on('SIGTERM',()=>fs.writeFileSync(process.argv[1],JSON.stringify({inputPresent:fs.existsSync('probe.cc')})));console.log(process.pid);setInterval(()=>{},1000);setTimeout(()=>process.exit(0),8000)\";",
+              `const child=spawn(process.execPath,['-e',code,${JSON.stringify(marker)}],{stdio:['ignore','pipe','ignore']});`,
+              "child.stdout.pipe(process.stdout);setInterval(()=>{},1000);",
+            ].join("\n");
+            const spawner = Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make((command) =>
+                Effect.gen(function* () {
+                  if (command._tag !== "StandardCommand") return mockProcess(1);
+                  if (!command.args.includes("configure")) return mockProcess(0);
+                  directory = command.options.cwd!;
+                  const child = yield* nativeSpawner.spawn(
+                    ChildProcess.make(process.execPath, ["-e", fixture], command.options),
+                  );
+                  pid = Number(child.pid);
+                  yield* Effect.log("probe fixture spawned", { mode, pid });
+                  return ChildProcessSpawner.makeHandle({
+                    ...child,
+                    stdout: child.stdout.pipe(
+                      Stream.decodeText(),
+                      Stream.splitLines,
+                      Stream.tap((line) =>
+                        Effect.gen(function* () {
+                          descendant = Number(line);
+                          yield* Effect.log("probe descendant ready", { mode, descendant });
+                          assert.isTrue(Number.isInteger(descendant) && descendant > 0);
+                          // @effect-diagnostics-next-line globalTimersInEffect:off - Emergency native watchdog must remain independent of the TestClock under test.
+                          watchdog = setTimeout(() => {
+                            watchdogTriggered = true;
+                            for (const ownedPid of [pid, descendant]) {
+                              try {
+                                process.kill(ownedPid, "SIGKILL");
+                              } catch {
+                                /* already exited */
+                              }
+                            }
+                          }, 4_000);
+                          yield* Deferred.succeed(ready, undefined);
+                        }),
+                      ),
+                      Stream.encodeText,
+                    ),
+                  });
+                }),
+              ),
+            );
+            yield* Effect.gen(function* () {
+              const fiber = yield* preflightMacDesktopBuild("x64").pipe(
+                Effect.provide(
+                  Layer.merge(
+                    spawner,
+                    ConfigProvider.layer(
+                      ConfigProvider.fromEnv({
+                        env: {
+                          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
+                        },
+                      }),
+                    ),
+                  ),
+                ),
+                Effect.onExit((exit) => Deferred.fail(ready, String(exit))),
+                Effect.flip,
+                Effect.forkChild,
+              );
+              yield* Deferred.await(ready);
+              if (mode === "cancel") yield* Fiber.interrupt(fiber);
+              else {
+                yield* TestClock.adjust("60 seconds");
+                const error = yield* Fiber.join(fiber);
+                assert.include(error.message, "Timed out after 60 seconds");
+              }
+              assert.isFalse(
+                watchdogTriggered,
+                "native finalization required the emergency watchdog",
+              );
+              assert.isFalse(yield* fs.exists(directory));
+              assert.equal(yield* fs.readFileString(marker), '{"inputPresent":true}');
+              // POSIX can retain a killed orphan as a zombie. It cannot read files;
+              // this check distinguishes it from a surviving active descendant.
+              for (const ownedPid of [pid, descendant]) {
+                const ps = yield* nativeSpawner.spawn(
+                  ChildProcess.make("ps", ["-o", "stat=", "-p", String(ownedPid)]),
+                );
+                const status = (yield* Stream.runFold(
+                  ps.stdout.pipe(Stream.decodeText()),
+                  () => "",
+                  (s, chunk) => s + chunk,
+                )).trim();
+                yield* ps.exitCode;
+                assert.match(status, /^(Z\S*)?$/u);
+                yield* Effect.log("probe process stopped", { mode, ownedPid, status });
+              }
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  clearTimeout(watchdog);
+                  if (pid > 0) {
+                    try {
+                      process.kill(-pid, "SIGKILL");
+                    } catch {
+                      /* owned group already exited */
+                    }
+                  }
+                  for (const ownedPid of [pid, descendant]) {
+                    if (ownedPid > 0) {
+                      try {
+                        process.kill(ownedPid, "SIGKILL");
+                      } catch {
+                        /* already exited */
+                      }
+                    }
+                  }
+                }),
+              ),
+            );
+          }
+        }),
+      ),
+    { timeout: 15_000 },
+  );
+
   it.effect("reports missing Windows toolchain capabilities before building", () =>
     Effect.scoped(
       Effect.gen(function* () {

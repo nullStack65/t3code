@@ -1948,6 +1948,7 @@ const preflightMacNativeCompile = Effect.fn("preflightMacNativeCompile")(functio
       ChildProcess.make(process.execPath, [nodeGyp, ...args], {
         cwd: directory,
         env,
+        forceKillAfter: "1 second",
       }),
       { label, verbose: false },
     ).pipe(
