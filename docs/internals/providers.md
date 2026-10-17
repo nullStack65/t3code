@@ -87,7 +87,10 @@ Skill inputs. Each request opens fresh provider context and carries prior user-v
 attributed data, rather than replaying hidden provider instructions. Server/agent wakes and quoted
 history cannot become current user activation. Unknown selected generation excludes compatibility
 patches; it does not exclude model-neutral applications. Intent/task-context and capability,
-condition, and native-data positives remain unsupported. Legacy `codex` is outside this policy.
+condition, and native-data positives remain unsupported. The initial supported account read establishes
+startup readiness; later revocation survives fresh thread opening and requires process replacement.
+Server restart continuations carry their current prompt into fresh admission without user activation;
+legacy native resume keeps its promptless behavior. Legacy `codex` is outside this policy.
 
 Unexposed preparation failures clean their candidates. Discovery-exposed failures retain inputs until
 process disposal. Sequential completed roots retire old inputs only after discovery detachment and

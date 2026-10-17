@@ -232,6 +232,9 @@ rl.on("line", (line) => {
   }
   if (method === "thread/start") {
     threadStartCount++;
+    for (const notification of script.notificationsOnThreadStarts?.[threadStartCount] ?? []) {
+      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
     if (script.freshThreads) {
       currentThreadId = `${script.rootThreadId}-fresh-${threadStartCount}`;
       write({

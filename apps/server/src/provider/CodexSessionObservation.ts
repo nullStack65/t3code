@@ -192,6 +192,10 @@ export function makeCodexSessionObservation(input: {
     },
     initialized: () => {
       if (!closed) {
+        // The owning runtime completes its initial no-refresh account read here.
+        // Only that initial readiness event can precede the first context.
+        if (!initialized && providerThreadId === null && invalidated === "account-changed")
+          invalidated = null;
         initialized = true;
         revision++;
       }
@@ -204,7 +208,7 @@ export function makeCodexSessionObservation(input: {
         model === null ? null : Object.freeze({ value: model, provenance: "thread-open-response" });
       acknowledgedTurnId = null;
       pendingTurn = null;
-      invalidated = null;
+      // Opening context does not requalify a revoked process/account route.
       revision++;
       contextGeneration++;
     },

@@ -6906,7 +6906,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             return Effect.gen(function* () {
               yield* startNativeTurn(
                 turnInput,
-                turnInput.restartContinuationOfRunId === undefined
+                // Legacy continuation resumes native history. Governed turns
+                // always start fresh and must receive the current server prompt.
+                governed || turnInput.restartContinuationOfRunId === undefined
                   ? yield* toCodexInput(turnInput)
                   : [],
               );

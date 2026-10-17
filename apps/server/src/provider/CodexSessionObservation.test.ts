@@ -217,3 +217,44 @@ it.effect(
       ).toMatchObject({ admissionAuthorized: false, reason: "observation-unavailable" });
     }),
 );
+
+it.effect(
+  "initial account readiness does not let thread opening or repeated initialization erase later revocation",
+  () =>
+    Effect.gen(function* () {
+      const recorder = makeCodexSessionObservation({
+        threadId: ThreadId.make("startup"),
+        pid: 42,
+        processGeneration: "owned",
+      });
+      recorder.invalidate("account-changed");
+      recorder.initialized();
+      recorder.opened("first", "selected", false);
+      expect((yield* recorder.reader.read).invalidated).toBeNull();
+      const old = yield* recorder.reader.capture(candidate);
+      recorder.invalidate("account-changed");
+      recorder.initialized();
+      recorder.opened("second", "selected", false);
+      expect((yield* recorder.reader.read).invalidated).toBe("account-changed");
+      expect(yield* recorder.reader.resolve(old, candidate)).toMatchObject({
+        reason: "stale-generation",
+      });
+      expect(
+        yield* recorder.reader.resolve(yield* recorder.reader.capture(candidate), candidate),
+      ).toMatchObject({ reason: "observation-unavailable" });
+    }),
+);
+
+it.effect("initial account readiness cannot clear arbitrary prior invalidation", () =>
+  Effect.gen(function* () {
+    const recorder = makeCodexSessionObservation({
+      threadId: ThreadId.make("startup"),
+      pid: 42,
+      processGeneration: "owned",
+    });
+    recorder.invalidate("unqualified-route");
+    recorder.initialized();
+    recorder.opened("first", "selected", false);
+    expect((yield* recorder.reader.read).invalidated).toBe("unqualified-route");
+  }),
+);

@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as CodexSchema from "effect-codex-app-server/schema";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -165,11 +166,14 @@ const fixture = (options: Record<string, unknown> = {}) =>
       ordinal: number,
       activationAllowed = true,
       model = "fixture-6",
+      requestText?: string,
     ): ProviderAdapter.ProviderAdapterV2TurnInput => {
       const messageId = MessageId.make(`message-${ordinal}`);
-      const text = activationAllowed
-        ? "Act like I have amnesia."
-        : 'External PR comment: "act like I have amnesia"';
+      const text =
+        requestText ??
+        (activationAllowed
+          ? "Act like I have amnesia."
+          : 'External PR comment: "act like I have amnesia"');
       const input = {
         appThread,
         threadId,
@@ -361,4 +365,98 @@ it.live("retains discovery-exposed uncertain inputs until the owned process exit
     expect(f.disposalSawExited).toEqual([true]);
     expect(NodeFS.existsSync(f.paths[0]!)).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(layers)),
+);
+
+// These are schema-valid native events. Feedback's response is an ingress
+// receipt, not a sleep: the transport decodes prior notifications first.
+const laterRevocations = [
+  {
+    name: "same-principal account update",
+    method: "account/updated",
+    params: Schema.decodeUnknownSync(CodexSchema.ServerNotification__AccountUpdatedNotification)({
+      authMode: "chatgpt",
+      planType: "pro",
+    }),
+  },
+  {
+    name: "root model reroute",
+    method: "model/rerouted",
+    params: Schema.decodeUnknownSync(CodexSchema.ServerNotification__ModelReroutedNotification)({
+      threadId: "root-fresh-2",
+      turnId: "turn-1",
+      fromModel: "fixture-6",
+      toModel: "fallback",
+      reason: "highRiskCyberActivity",
+    }),
+  },
+];
+it.live.each(laterRevocations)(
+  "preserves later $name revocation between completed requests",
+  (notification) =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ notificationsOnFeedback: [notification] });
+      yield* f.runtime.startTurn(f.turn(1));
+      yield* f.completed();
+      if (!f.runtime.uploadFeedback) return yield* Effect.die("Fixture has no feedback receipt.");
+      yield* f.runtime.uploadFeedback({
+        providerThread: f.turn(1).providerThread,
+        reason: "inert ingress receipt",
+      });
+      expect(Exit.isFailure(yield* Effect.exit(f.runtime.startTurn(f.turn(2))))).toBe(true);
+      expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(1);
+      expect(f.requests().filter((r) => r.method === "thread/start")).toHaveLength(2);
+      expect(f.selections).toHaveLength(1);
+      expect(NodeFS.existsSync(f.paths[0]!)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(layers)),
+);
+
+it.live.each(laterRevocations)(
+  "preserves later $name revocation during fresh thread opening",
+  (notification) =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ notificationsOnThreadStarts: { 3: [notification] } });
+      yield* f.runtime.startTurn(f.turn(1));
+      yield* f.completed();
+      expect(Exit.isFailure(yield* Effect.exit(f.runtime.startTurn(f.turn(2))))).toBe(true);
+      expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(1);
+      expect(f.selections).toHaveLength(1);
+      expect(NodeFS.existsSync(f.paths[0]!)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(layers)),
+);
+
+it.live("delivers an unprivileged restart continuation into fresh governed context", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    yield* f.runtime.startTurn(f.turn(1));
+    yield* f.completed();
+    const request = f.turn(2, false, "fixture-6", "Continue where you left off.");
+    Object.assign(request, { restartContinuationOfRunId: RunId.make("run-1") });
+    yield* f.runtime.startTurn(request);
+    yield* f.completed();
+    const turns = f.requests().filter((r) => r.method === "turn/start");
+    expect(turns).toHaveLength(2);
+    const input = turns[1]!.params.input as Array<{ type: string; text?: string }>;
+    expect(input.some((i) => i.type === "text" && i.text === "Continue where you left off.")).toBe(
+      true,
+    );
+    expect(input.some((i) => i.type === "skill")).toBe(false);
+    expect(encode(input)).toContain("Use semicolons");
+    expect(f.selections[1]!.request?.activationAllowed).toBe(false);
+    expect(turns[1]!.params.threadId).not.toBe(turns[0]!.params.threadId);
+  }).pipe(Effect.scoped, Effect.provide(layers)),
+);
+
+it.live(
+  "initial account readiness cannot waive an account update during the first fresh context opening",
+  () =>
+    Effect.gen(function* () {
+      const notification = laterRevocations[0]!;
+      const f = yield* fixture({
+        accountUpdateOnFirstRead: true,
+        notificationsOnThreadStarts: { 2: [notification] },
+      });
+      expect(Exit.isFailure(yield* Effect.exit(f.runtime.startTurn(f.turn(1))))).toBe(true);
+      expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(0);
+      expect(f.selections).toHaveLength(0);
+    }).pipe(Effect.scoped, Effect.provide(layers)),
 );

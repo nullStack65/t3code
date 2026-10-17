@@ -64,11 +64,20 @@ export const makeCodexGovernedSession = Effect.fn("makeCodexGovernedSession")(fu
   const commands = new Set<string>();
   const consumed = new Set<string>();
   const rootTurns = new Map<string, string | undefined>();
-  const ready = Effect.suspend(() =>
-    active || childReaders || commands.size > 0 || uncertain
-      ? Effect.fail(refuse("Governed native readers or uncertain work require a session restart."))
-      : Effect.void,
-  );
+  const ready = Effect.gen(function* () {
+    const current = yield* observation.reader.read;
+    if (
+      active ||
+      childReaders ||
+      commands.size > 0 ||
+      uncertain ||
+      current.closed ||
+      (current.initialized && current.invalidated !== null)
+    )
+      return yield* refuse(
+        "Governed route revocation, native readers or uncertain work require a session restart.",
+      );
+  });
   const observe = (method: string, payload: unknown) => {
     if (!Predicate.isObject(payload)) return;
     if (method === "account/updated") {
