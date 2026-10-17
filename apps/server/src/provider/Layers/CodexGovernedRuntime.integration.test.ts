@@ -23,6 +23,9 @@ import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
 
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeRequestMethods = Schema.decodeUnknownEffect(
+  Schema.Array(Schema.Struct({ method: Schema.String })),
+);
 const peer = NodePath.join(
   import.meta.dirname,
   `../testFixtures/codexCollabMockPeer.${HostProcessPlatform.defaultValue() === "win32" ? "cmd" : "sh"}`,
@@ -415,5 +418,108 @@ for (const mode of ["completed", "active", "failed", "cancelled", "uncertain"] a
       yield* runtime.close;
       expect(candidates.some((p) => NodeFS.existsSync(p))).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+}
+
+for (const ingress of ["Detach", "Reattach", "FinalAccount"] as const) {
+  it.live(
+    `late collaboration during ${ingress} preserves reader files and refuses submission`,
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-retirement-" });
+        const script = NodePath.join(directory, "script.json");
+        yield* fs.writeFileString(
+          script,
+          encode({
+            rootThreadId: "retirement",
+            freshThreads: true,
+            recordAllRequests: true,
+            notifications: [],
+            [`collabOn${ingress}`]: true,
+          }),
+        );
+        const candidates: string[] = [];
+        let providerPid = 0;
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make("retirement"),
+          binaryPath: peer,
+          cwd: directory,
+          runtimeMode: "approval-required",
+          model: "fixture-6",
+          environment: {
+            PATH: process.env.PATH,
+            SystemRoot: process.env.SystemRoot,
+            ComSpec: process.env.ComSpec,
+            PATHEXT: process.env.PATHEXT,
+            HOME: directory,
+            USERPROFILE: directory,
+            CODEX_HOME: directory,
+            T3_CODEX_COLLAB_SCRIPT: script,
+          },
+          governedSkills: () =>
+            Effect.gen(function* () {
+              const root = yield* fs.makeTempDirectoryScoped({ prefix: "owned-reader-candidate-" });
+              candidates.push(root);
+              yield* fs.writeFileString(NodePath.join(root, "SKILL.md"), "READER_BODY");
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  let stopped = false;
+                  try {
+                    process.kill(providerPid, 0);
+                  } catch (error) {
+                    expect(error).toMatchObject({ code: "ESRCH" });
+                    stopped = true;
+                  }
+                  expect(stopped).toBe(true);
+                  expect(NodeFS.readFileSync(NodePath.join(root, "SKILL.md"), "utf8")).toBe(
+                    "READER_BODY",
+                  );
+                }),
+              );
+              return { discoveryRoot: root, instructions: "current", skills: [] };
+            }).pipe(
+              Effect.mapError((error) => new CodexSkillConsumerError({ reason: error.message })),
+            ),
+        });
+        yield* runtime.start();
+        providerPid = (yield* runtime.nativeObservation!.read).process.pid;
+        const send = (index: number) => {
+          const messageId = MessageId.make(`retirement-${index}`);
+          return runtime.sendTurn({
+            input: "Current request",
+            currentRequest: {
+              messageId,
+              text: "Current request",
+              activationAllowed: true,
+              conversation: Effect.succeed([
+                { id: messageId, role: "user", text: "Current request" },
+              ]),
+            },
+          });
+        };
+        const completed = yield* Stream.runHead(
+          runtime.events.pipe(Stream.filter((e) => e.method === "turn/completed")),
+        ).pipe(Effect.forkScoped);
+        yield* send(0);
+        yield* Fiber.join(completed);
+        const second = yield* send(1).pipe(Effect.exit);
+        expect(NodeFS.readFileSync(NodePath.join(candidates[0]!, "SKILL.md"), "utf8")).toBe(
+          "READER_BODY",
+        );
+        expect(second._tag).toBe("Failure");
+        expect(candidates).toHaveLength(ingress === "Detach" ? 1 : 2);
+        for (const root of candidates)
+          expect(NodeFS.readFileSync(NodePath.join(root, "SKILL.md"), "utf8")).toBe("READER_BODY");
+        expect((yield* send(2).pipe(Effect.exit))._tag).toBe("Failure");
+        const requests = NodeFS.readFileSync(script + ".allRequests", "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => decode(line));
+        const turns = yield* decodeRequestMethods(requests);
+        expect(turns.filter((r) => r.method === "turn/start")).toHaveLength(1);
+        yield* runtime.close;
+        expect(candidates.some((p) => NodeFS.existsSync(p))).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 }

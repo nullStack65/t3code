@@ -24,6 +24,28 @@ let activeTurn;
 // Server->client requests the runtime must answer (approval prompts), keyed
 // by the numeric JSON-RPC id this peer allocated for them.
 const openServerRequests = new Map();
+const writePreviousRootCollaboration = () => {
+  write({
+    method: "item/started",
+    params: {
+      threadId: `${script.rootThreadId}-fresh-${threadStartCount - 1}`,
+      turnId: "previous-turn",
+      startedAtMs: 1,
+      item: {
+        type: "collabAgentToolCall",
+        id: "late-child",
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: `${script.rootThreadId}-fresh-${threadStartCount - 1}`,
+        receiverThreadIds: ["still-reading"],
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: {},
+      },
+    },
+  });
+};
 const rl = NodeReadline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   let message;
@@ -93,14 +115,16 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "account/read") {
+    if (script.collabOnFinalAccount && accountReadCount === 3) writePreviousRootCollaboration();
     write({
       id,
       result: {
-        account: script.accounts?.[Math.min(accountReadCount++, script.accounts.length - 1)] ??
+        account: script.accounts?.[Math.min(accountReadCount, script.accounts.length - 1)] ??
           script.account ?? { type: "apiKey" },
         requiresOpenaiAuth: false,
       },
     });
+    accountReadCount++;
     return;
   }
   if (method === "skills/list" || method === "model/list") {
@@ -108,6 +132,12 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "skills/extraRoots/set") {
+    if (
+      (message.params.extraRoots.length === 0 && script.collabOnDetach) ||
+      (message.params.extraRoots.length > 0 && turnStartCount === 1 && script.collabOnReattach)
+    ) {
+      writePreviousRootCollaboration();
+    }
     for (const notification of script.notificationsOnExtraRoots ?? []) {
       write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
     }

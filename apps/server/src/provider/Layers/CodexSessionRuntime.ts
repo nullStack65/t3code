@@ -1323,6 +1323,16 @@ export const makeCodexSessionRuntime = (
     let retainedCandidates: Scope.Closeable | undefined;
     let uncertainGovernedSubmission = false;
     let governedChildReaders = false;
+    const requireGovernedReaderRetirement = Effect.suspend(() =>
+      uncertainGovernedSubmission || governedChildReaders
+        ? Effect.fail(
+            CodexErrors.CodexAppServerRequestError.internalError(
+              "Governed native readers require a provider restart before continuing.",
+              "turn/start",
+            ),
+          )
+        : Effect.void,
+    );
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
@@ -2592,6 +2602,7 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) => {
         let requestCandidates: Scope.Closeable | undefined;
         let submitted = false;
+        let discoveryExposed = false;
         const operation = Effect.gen(function* () {
           let governed: CodexSkillTurn | undefined;
           let governedRevision: number | undefined;
@@ -2603,10 +2614,7 @@ export const makeCodexSessionRuntime = (
           if (options.governedSkills) {
             const refuse = (message: string) =>
               CodexErrors.CodexAppServerRequestError.internalError(message, "turn/start");
-            if (uncertainGovernedSubmission || governedChildReaders)
-              return yield* refuse(
-                "Governed native readers require a provider restart before continuing.",
-              );
+            yield* requireGovernedReaderRetirement;
             const previous = yield* Ref.get(sessionRef);
             if (previous.activeTurnId)
               return yield* refuse("Governed requests require the previous turn to finish.");
@@ -2654,13 +2662,13 @@ export const makeCodexSessionRuntime = (
               resumeCursor: { threadId: opened.thread.id },
               model: opened.model,
             });
-            // Previous root execution is complete and a fresh native context is open.
-            // Detach old discovery before retiring its files. Child readers above
-            // require process disposal instead of guessing when they stop reading.
+            yield* requireGovernedReaderRetirement;
+            // Detachment itself can deliver collaboration from the previous root.
+            // Keep its files through preparation, and recheck decoded ingress before
+            // retirement rather than treating an earlier check as a reader lease.
             if (retainedCandidates) {
               yield* client.request("skills/extraRoots/set", { extraRoots: [] });
-              yield* Scope.close(retainedCandidates, Exit.void);
-              retainedCandidates = undefined;
+              yield* requireGovernedReaderRetirement;
             }
             requestCandidates = yield* Scope.fork(candidateLifetime);
             const before = yield* observation.reader.read;
@@ -2697,11 +2705,15 @@ export const makeCodexSessionRuntime = (
                 Effect.provideService(Scope.Scope, requestCandidates),
                 Effect.mapError((error) => refuse(error.message)),
               );
+            yield* requireGovernedReaderRetirement;
             if ((yield* observation.reader.read).revision !== before.revision)
               return yield* refuse("Native route changed during Skill resolution.");
+            // A cancelled or failed setter can already have exposed these files.
+            discoveryExposed = true;
             yield* client.request("skills/extraRoots/set", {
               extraRoots: [governed.discoveryRoot],
             });
+            yield* requireGovernedReaderRetirement;
           }
           const providerThreadId = yield* readProviderThreadId;
           if (hasConfiguredMcpServer(options.appServerArgs)) {
@@ -2739,6 +2751,7 @@ export const makeCodexSessionRuntime = (
             const currentAccount = yield* client.request("account/read", { refreshToken: false });
             const currentEmail =
               currentAccount.account?.type === "chatgpt" ? currentAccount.account.email : null;
+            yield* requireGovernedReaderRetirement;
             if (currentEmail !== governedAccountEmail)
               return yield* CodexErrors.CodexAppServerRequestError.internalError(
                 "Account changed during governed Skill resolution.",
@@ -2753,6 +2766,19 @@ export const makeCodexSessionRuntime = (
               "Native route changed before governed turn submission.",
               "turn/start",
             );
+          if (options.governedSkills) {
+            yield* requireGovernedReaderRetirement;
+            if (retainedCandidates) {
+              yield* Scope.close(retainedCandidates, Exit.void);
+              retainedCandidates = undefined;
+            }
+            yield* requireGovernedReaderRetirement;
+            if ((yield* observation.reader.read).revision !== governedRevision)
+              return yield* CodexErrors.CodexAppServerRequestError.internalError(
+                "Native route changed during governed input retirement.",
+                "turn/start",
+              );
+          }
           if (requestCandidates) {
             retainedCandidates = requestCandidates;
             submitted = true;
@@ -2791,10 +2817,10 @@ export const makeCodexSessionRuntime = (
         }).pipe(
           Effect.onExit((exit) => {
             if (!Exit.isFailure(exit) || !requestCandidates) return Effect.void;
-            if (submitted) {
-              // A cancelled/failed RPC can already be executing natively. Preserve
-              // those files and refuse continuation until process disposal proves
-              // there is no reader; at most one submitted request is retained.
+            if (submitted || discoveryExposed) {
+              // A submitted turn or discovery RPC can already have native readers.
+              // Keep both old and discovery-exposed request scopes attached
+              // to candidateLifetime; process disposal must precede their cleanup.
               uncertainGovernedSubmission = true;
               return Effect.void;
             }
