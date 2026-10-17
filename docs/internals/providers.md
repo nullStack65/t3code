@@ -93,83 +93,73 @@ checkpoints but cannot roll back its conversation. The [checkpoint boundary](./o
 therefore rejects revert before touching files. Native permission and question option IDs must
 also survive normalization; a display label is not necessarily a valid reply.
 
-## Governed Skill admission is a separate route
+## Governed Skills use a separate route
 
-The reserved `codex-typed-skills` driver is a **refusal-only** input contract. It
-accepts an offline candidate reference under `providerInstances.<id>.config`:
+`codex-typed-skills` keeps selected-model policy separate from legacy Codex.
+Configure its `launch` with ordinary `codex` settings and a `source` containing an
+absolute canonical checkout `directory`, clean immutable `sourceCommit`, `pythonPath`,
+selected `provider` namespace, `principal: { id, emailSha256 }`, and `generations`
+map from exact selected model IDs to explicitly qualified generation IDs. The
+operator must authorize that exact source and principal mapping. This is server
+configuration, not model-provided input; a hash alone does not authenticate source.
+Existing offline `candidate` references without `launch` still refuse before
+reading files or starting a provider. Older builds reject this driver kind rather
+than silently dropping a policy flag. Never translate it to legacy `codex`.
 
-```json
-{
-  "driver": "codex-typed-skills",
-  "config": {
-    "candidate": {
-      "directory": "/disposable/candidate",
-      "sourceRepository": "nullStack65/closura-agent-config",
-      "sourceCommit": "<40 lowercase hex characters>",
-      "admissionSha256": "<64 lowercase hex characters>"
-    }
-  }
-}
-```
+The [consumer](../../apps/server/src/provider/CodexSkillConsumer.ts) runs the pinned
+canonical `scripts/build_skill_session.py --context/--output` and `--verify` for
+discovery, bootstrap, startup and the current request. It checks the source head/clean tree,
+returned context, admission and content digests, then supplies only positive load
+paths as supported native Skill inputs alongside generated AGENTS instructions.
+Compatibility patches stay outside the candidate's ordinary discovery root.
+Discovery metadata can match a current natural-language request; it does not grant
+permission. Quoted or historical mentions and bound agent callbacks do not select
+request-only Skills. Matching is conservative and source-description based, not a
+universal natural-language classifier.
 
-These fields identify a request; they authenticate neither source nor route. The
-[driver](../../apps/server/src/provider/Drivers/CodexTypedSkillsDriver.ts) refuses
-before reading the candidate, materializing a home or returning any runtime,
-discovery, authentication or text-generation capability. The registry publishes
-an unavailable snapshot with empty models/skills. Its typed failure carries
-`admissionAuthorized: false` and `reason: native-boundary-unqualified`; this is a
-denied request, **not** an observed process/session/turn, signed attestation or a
-receipt suitable for positive route admission. Process identity, principal,
-served model, generation, effort, billing, availability, pin and fallback facts
-are unobserved on this refused route. Candidate, task, owner, attempt, freshness
-and effect claims cannot supply them. No candidate content enters model context.
+The runtime uses its owned PID/stdio/thread observation, current selected model
+acknowledgment, actual executable version and supported `account/read` response.
+A configured email digest maps that account to a policy principal without logging
+account data. A mismatched or unknown account excludes user-scoped apps. Unknown
+selected generation or mismatched model acknowledgment excludes patches while
+model-neutral apps can remain eligible. These facts do not attest the actual
+served model, served effort, billing or fallback, and do not grant tool effects.
+The PR33 observer's portable-admission result remains denied; this consumer does
+not turn its unknown fields into positive PR371 evidence.
 
-A distinct driver kind matters across versions: builds without it retain the
-existing unknown-driver refusal. An optional field added to legacy Codex settings
-could instead be discarded by an older schema. Never translate this driver to
-`codex` as a compatibility fallback. Legacy Codex and other providers remain
-ungoverned by this contract; selecting them is not governed activation.
+Every governed request opens a new provider thread and never resumes old provider
+context, including after source/model changes. It reprojects prior visible user
+and assistant text as attributed conversation data, preserving task corrections
+and reported status. It omits hidden system/developer frames and old Skill inputs.
+Missing current-message identity or oversized visible history refuses rather than
+silently dropping the conversation. Earlier attachments are not replayed. A source
+or observed lifecycle change during resolution refuses; already consumed request
+IDs cannot be retried in that runtime. Accepted T3 history is preserved.
 
-The legacy Codex adapter exposes a server-local `nativeObservation(threadId)`
-reader as an admission prerequisite. The runtime binds its spawned PID and fresh
-process generation to the owned stdio transport, initialization, opened provider
-thread and correlated turn response. Requested model/tier and provider-reported
-session model remain distinct from the unknown actual served model, generation,
-principal, harness build, billing, effort and fallback. It records no home,
-credentials or prompt content and changes no provider configuration.
+Candidates belong to request scopes: failures or cancellation before discovery
+exposure remove their files. Once discovery is exposed, failed or uncertain
+preparation retains inputs until process disposal. Completed sequential-root inputs
+retire at the reader-state check immediately before scope cleanup, after a fresh
+context has detached old discovery and finished preparation. Collaboration decoded
+before that decision preserves reader inputs and requires a provider restart.
+Collaboration first observed after retirement commits prevents an as-yet
+unsubmitted turn and requires restart, but cannot undo already-committed file
+removal or revoke a previously submitted turn; this is not an atomic native reader
+lease. Active and uncertain inputs stay intact until process
+disposal stops readers before removing files. Account updates revoke applicability
+at decoded ingress, and account identity is reread immediately before submission.
+Intent/task-context activation and capability/condition/native-data positives
+remain unsupported; unknown inputs continue to exclude dependent policies.
 
-`capture(candidate)` binds an immutable request reference to the current
-observation; `resolve(capture, candidate)` consumes the original in-memory handle
-once, within five seconds, and refuses candidate or lifecycle drift. Serialized
-copies and handles from another runtime cannot establish provenance. New turns,
-route/model events, session/process closure, compaction and rollback revoke prior
-captures; compaction/rollback never attest that old instructions were erased.
-This is not a portable signed receipt or an exposed model/client RPC. Even current
-known-fact evidence returns `admissionAuthorized: false`: source/assignment
-authority, context containment and exclusive Skill discovery/read/invocation
-remain unqualified. An absent observer on an older runtime stays absent. No
-agent-config positive consumer or installation may infer eligibility from it.
-
-Positive support requires an independently trusted bridge to the canonical typed
-policy/source admission, actual per-process/turn route observation, exclusive
-discovery and every body/read/expansion path, and invalidation of retained context
-on request/model/generation/principal/harness/freshness changes. Offline session
-JSON, hashes, login metadata and the agent-config PR371 consistency predicate do
-not establish those capabilities or grant permissions. The agent-config runtime
-activation refusal must remain until those boundaries are implemented and
-independently qualified; the candidate reference above is not a consumer-enabling
-contract.
-
-Codex 0.162.1's supported `app-server generate-json-schema --out <fresh-directory>`
-exports `skills/list` with `cwds`/`forceReload` and `skills/extraRoots/set` with
-`extraRoots`. The latter is additive. Neither schema offers exclusive discovery
-or complete interception of native Skill expansion and arbitrary tool reads.
-Shadow homes share `skills` and `plugins`; ordinary full-access tools can read
-other source locations. Root enumeration/filtering cannot establish containment.
-The focused registry tests prove refusal and absence of capabilities, including
-reconciliation and old-build refusal. They do not prove positive Amnesia
-discovery/invocation, model-patch generation expiry, semantic request recognition,
-or installed/runtime behavior on Mac, Windows or Linux.
+This route governs the inputs T3 constructs, not arbitrary filesystem reads or all
+provider discovery. Codex 0.162.1's `skills/extraRoots/set` is additive; shared homes,
+plugins, repository instructions and full-access tools remain unmanaged. Keep
+compatibility patches out of those roots. Config CLI receipts remain
+`runtime-admission-candidate`, with installed and behavior-verified false; building
+or verifying a candidate is not installed/model behavior acceptance. Legacy Codex,
+other providers, delegated children and maintenance text generation are outside
+this governed turn path. No live provider configuration or installation is changed
+by adding the source implementation.
 
 ## Attachments and stored history
 

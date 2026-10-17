@@ -54,6 +54,7 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import * as Stream from "effect/Stream";
 
 import { appendUserInputAttachmentPaths } from "../userInputAttachments.ts";
+import { carryCurrentSkillRequest } from "../CurrentSkillRequest.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import type { RouteSelectionMetadata } from "../../usage/routeMetadata.ts";
 import * as ServerConfig from "../../config.ts";
@@ -1937,6 +1938,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ? { input: inputTextWithAttachmentContext }
         : {}),
     };
+    carryCurrentSkillRequest(rawInput, input);
     yield* Effect.annotateCurrentSpan({
       "provider.operation": "send-turn",
       "provider.thread_id": input.threadId,

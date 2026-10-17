@@ -46,6 +46,8 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
+import { currentSkillRequest } from "../CurrentSkillRequest.ts";
+import type { CodexSkillConsumer } from "../CodexSkillConsumer.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 import {
@@ -86,6 +88,8 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const PROVIDER = ProviderDriverKind.make("codex");
 
 export interface CodexAdapterLiveOptions {
+  readonly governedSkills?: CodexSkillConsumer;
+  readonly providerKind?: ProviderDriverKind;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly makeRuntime?: (
@@ -2234,6 +2238,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   codexConfig: CodexSettings,
   options?: CodexAdapterLiveOptions,
 ) {
+  const PROVIDER = options?.providerKind ?? ProviderDriverKind.make("codex");
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
@@ -2272,6 +2277,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
+          ...(options?.governedSkills ? { governedSkills: options.governedSkills } : {}),
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
@@ -2526,6 +2532,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
     const session = yield* requireSession(input.threadId);
+    const skillRequest = currentSkillRequest(input);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -2536,6 +2543,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
+        ...(skillRequest ? { currentRequest: skillRequest } : {}),
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }

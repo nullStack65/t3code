@@ -1,3 +1,12 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Layer from "effect/Layer";
+import { HttpClient } from "effect/unstable/http";
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+import { CodexResetCreditCoordinator } from "../Layers/codexResetCredit.ts";
+import * as ModelManifest from "../ModelManifest.ts";
+import { ProviderEventLoggers, NoOpProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
+import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { expect, it } from "@effect/vitest";
 import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -15,6 +24,21 @@ import {
   CodexTypedSkillsSettings,
 } from "./CodexTypedSkillsDriver.ts";
 
+const unusedServices = Layer.mergeAll(
+  NodeServices.layer,
+  Layer.mock(BackgroundPolicy.BackgroundPolicy)({}),
+  Layer.mock(CodexResetCreditCoordinator)({}),
+  Layer.mock(ModelManifest.ModelManifest)({}),
+  Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+  ServerConfig.layerTest(process.cwd(), { prefix: "t3-typed-driver-refusal-" }).pipe(
+    Layer.provide(NodeServices.layer),
+  ),
+  Layer.mock(ServerSettingsService)({}),
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make(() => Effect.die("Refused route must not make HTTP requests")),
+  ),
+);
 const instanceId = ProviderInstanceId.make("governed-codex");
 const codexId = ProviderInstanceId.make("codex");
 const candidate = {
@@ -77,7 +101,7 @@ it.effect(
         });
         expect(error.detail).not.toContain(candidate.directory);
       }
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.scoped, Effect.provide(unusedServices)),
 );
 
 it.effect(
@@ -125,7 +149,7 @@ it.effect(
       expect(yield* registry.getInstance(instanceId)).toBeUndefined();
       expect(yield* registry.listInstances).toEqual([]);
       expect((yield* registry.listUnavailable)[0]?.skills).toEqual([]);
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.scoped, Effect.provide(unusedServices)),
 );
 
 it.effect("a build without this driver refuses instead of degrading to legacy Codex", () =>
@@ -143,7 +167,7 @@ it.effect("a build without this driver refuses instead of degrading to legacy Co
       skills: [],
       models: [],
     });
-  }).pipe(Effect.scoped),
+  }).pipe(Effect.scoped, Effect.provide(unusedServices)),
 );
 
 it("rejects malformed immutable candidate references at the native config boundary", () => {
