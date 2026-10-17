@@ -52,14 +52,41 @@ export function evaluatePullRequestWatch(
 
   // An empty list keeps the last state: a host can answer with one when its check read fails.
   let failedChecks = headMoved ? [] : watch.failedChecks;
+  let failedCheckRuns = headMoved ? [] : watch.failedCheckRuns;
   let passed = headMoved ? false : watch.passed;
   let passedChecks = headMoved ? [] : watch.passedChecks;
   if (detail.checks.length > 0) {
     const failed = detail.checks.filter(isFailedCheck);
-    const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
+    const runKey = (identity: NonNullable<PullRequestCheck["identity"]>) =>
+      JSON.stringify([identity.id, identity.attempt ?? null]);
+    const toldRuns = new Map((failedCheckRuns ?? []).map((run) => [runKey(run.identity), run]));
+    const knownNames = new Set((failedCheckRuns ?? []).map((run) => run.name));
+    const newlyFailed = failed.filter((check) => {
+      const identity = check.identity;
+      if (identity === undefined) return !failedChecks.includes(check.name);
+      const key = runKey(identity);
+      const withoutAttempt = runKey({ id: identity.id });
+      // Losing an attempt token is incomplete data, not a new attempt. Learning the first
+      // token for an already reported id establishes a baseline once, then retries are distinct.
+      const incomplete = identity.attempt === undefined;
+      const knownId = [...toldRuns.values()].some((run) => run.identity.id === identity.id);
+      const told = toldRuns.has(key) || (incomplete ? knownId : toldRuns.has(withoutAttempt));
+      if (!incomplete || !knownId) {
+        if (!incomplete) toldRuns.delete(withoutAttempt);
+        toldRuns.set(key, { name: check.name, identity });
+      } else {
+        for (const [knownKey, run] of toldRuns) {
+          if (run.identity.id === identity.id) toldRuns.set(knownKey, { ...run, name: check.name });
+        }
+      }
+      // Old names, or a host that previously omitted identity, cannot identify the reported
+      // run. Baseline that name once, without claiming its past run was verified.
+      return !told && !(failedChecks.includes(check.name) && !knownNames.has(check.name));
+    });
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
-    // A check that runs again leaves the list, so a rerun that fails again is reported.
+    // Unidentified checks retain name-based behavior; URLs must not invent run identities.
     failedChecks = failed.map((check) => check.name);
+    failedCheckRuns = [...toldRuns.values()];
 
     const required = detail.checks.filter((check) => check.required === true);
     const gate = required.length > 0 ? required : detail.checks;
@@ -114,6 +141,7 @@ export function evaluatePullRequestWatch(
       startedAt: watch.startedAt,
       headSha,
       failedChecks,
+      ...(failedCheckRuns === undefined ? {} : { failedCheckRuns }),
       passed,
       passedChecks,
       remarksThrough,

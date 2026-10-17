@@ -77,6 +77,8 @@ const RawLatestReviewSchema = Schema.Struct({
 
 const RawCheckSchema = Schema.Struct({
   __typename: Schema.optional(Schema.String),
+  id: Schema.optional(Schema.NullOr(Schema.String)),
+  createdAt: Schema.optional(Schema.NullOr(Schema.String)),
   name: Schema.optional(Schema.NullOr(Schema.String)),
   context: Schema.optional(Schema.NullOr(Schema.String)),
   status: Schema.optional(Schema.NullOr(Schema.String)),
@@ -813,9 +815,9 @@ function checkContextNodesSelection(host: string): string {
     host.toLowerCase() === "github.com" ? " isRequired(pullRequestNumber: $number)" : "";
   return `nodes {
             __typename
-            ... on StatusContext { context state targetUrl createdAt description${required} }
+            ... on StatusContext { id context state targetUrl createdAt description${required} }
             ... on CheckRun {
-              name status conclusion startedAt completedAt detailsUrl${required}
+              id name status conclusion startedAt completedAt detailsUrl${required}
               checkSuite { workflowRun { workflow { name } } }
             }
           }`;
@@ -1613,6 +1615,7 @@ function toCheckEntries(
           status,
           description: trimmed(check.description),
           url: trimmed(check.detailsUrl) ?? trimmed(check.targetUrl),
+          ...checkIdentity(check),
           ...(typeof check.isRequired === "boolean" ? { required: check.isRequired } : {}),
         },
         workflowName: trimmed(check.workflowName),
@@ -1623,6 +1626,26 @@ function toCheckEntries(
       },
     ];
   });
+}
+
+function checkIdentity(
+  check: Schema.Schema.Type<typeof RawCheckSchema>,
+): Pick<PullRequestCheck, "identity"> {
+  const id = trimmed(check.id);
+  if (id === null || (check.__typename !== "CheckRun" && check.__typename !== "StatusContext")) {
+    return {};
+  }
+  // A workflow's current runAttempt also changes for jobs that were NOT retried. Use this
+  // check's own start time to distinguish reuse of a CheckRun, not its workflow's attempt.
+  const attempt = realTimestamp(
+    check.__typename === "CheckRun" ? check.startedAt : check.createdAt,
+  );
+  return {
+    identity: {
+      id: `github:${check.__typename}:${id}`,
+      ...(attempt === null ? {} : { attempt }),
+    },
+  };
 }
 
 /**
