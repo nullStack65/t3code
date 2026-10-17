@@ -781,6 +781,7 @@ function threadDetail(
 
 function threadRun(run: OrchestrationV2Run): OrchestratorMcpThreadRun {
   return {
+    ...(run.workAffiliation === undefined ? {} : { workAffiliation: run.workAffiliation }),
     runId: run.id,
     ordinal: run.ordinal,
     status: run.status,
@@ -2600,6 +2601,8 @@ const make = Effect.gen(function* () {
             ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
             messageId,
             text: input.message,
+            ...(input.workReference === undefined ? {} : { workReference: input.workReference }),
+            ...(input.workSource === undefined ? {} : { workSource: input.workSource }),
             attachments: [],
             mode,
             createdBy: "agent",

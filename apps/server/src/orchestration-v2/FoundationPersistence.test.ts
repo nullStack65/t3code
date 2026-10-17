@@ -3547,3 +3547,70 @@ it.effect("publishes live events in commit order across concurrent writers", () 
     }).pipe(Effect.provide(layerEventSink));
   }).pipe(Effect.provide(layerDatabase)),
 );
+
+it.effect(
+  "preserves declared affiliation through event persistence, lifecycle update and projection rebuild",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:work-persistence");
+      const runId = RunId.make("run:work-persistence");
+      const messageId = MessageId.make("message:work-persistence");
+      const workAffiliation = {
+        reference: { kind: "root_assignment" as const, ref: "t3:root/message:assignment" },
+        establishedBy: { threadId, messageId },
+      };
+      const run: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: messageId,
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "starting",
+        requestedAt: now,
+        startedAt: null,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+        workAffiliation,
+      };
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({ id: "event:work:thread", thread: makeThread(threadId, now), now }),
+          {
+            id: EventId.make("event:work:run"),
+            type: "run.created",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: run,
+          },
+        ],
+      });
+      const persisted = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+      assert.deepEqual(persisted.workAffiliation, workAffiliation);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:work:update"),
+            type: "run.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: { ...persisted, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      const rebuilt = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+      assert.equal(rebuilt.status, "completed");
+      assert.deepEqual(rebuilt.workAffiliation, workAffiliation);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);

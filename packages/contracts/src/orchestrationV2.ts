@@ -540,6 +540,35 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 /** Failure code on the error item a failed workspace preparation leaves. */
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
+/** Caller-declared membership, never proof of temporal allocation or disjoint spend. */
+export const OrchestrationV2WorkReference = Schema.Struct({
+  kind: Schema.Literals(["obligation", "root_assignment"]),
+  ref: Schema.String.check(
+    Schema.isMaxLength(1024),
+    Schema.isPattern(/^[A-Za-z][A-Za-z0-9+.-]*:[A-Za-z0-9._~:/%+#-]+$/),
+  ),
+}).annotate({
+  description:
+    "Existing namespaced obligation or root-assignment reference, without task prose, credentials or URL queries. This records declared membership, not token allocation.",
+});
+export type OrchestrationV2WorkReference = typeof OrchestrationV2WorkReference.Type;
+
+export const OrchestrationV2WorkSource = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+}).annotate({
+  description:
+    "Exact persisted run whose established affiliation this work continues. Missing affiliation stays unknown; conversation lineage alone does not establish membership.",
+});
+export type OrchestrationV2WorkSource = typeof OrchestrationV2WorkSource.Type;
+
+export const OrchestrationV2WorkAffiliation = Schema.Struct({
+  reference: OrchestrationV2WorkReference,
+  establishedBy: Schema.Struct({ threadId: ThreadId, messageId: MessageId }),
+  inheritedFrom: Schema.optional(OrchestrationV2WorkSource),
+});
+export type OrchestrationV2WorkAffiliation = typeof OrchestrationV2WorkAffiliation.Type;
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -548,6 +577,7 @@ export const OrchestrationV2Run = Schema.Struct({
   modelSelection: ModelSelection,
   providerThreadId: Schema.NullOr(ProviderThreadId),
   userMessageId: MessageId,
+  workAffiliation: Schema.optional(OrchestrationV2WorkAffiliation),
   rootNodeId: Schema.NullOr(NodeId),
   activeAttemptId: Schema.NullOr(RunAttemptId),
   status: OrchestrationV2RunStatus,
@@ -2938,6 +2968,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    workReference: Schema.optional(OrchestrationV2WorkReference),
+    workSource: Schema.optional(OrchestrationV2WorkSource),
     notification: Schema.optional(OrchestrationV2Notification),
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
