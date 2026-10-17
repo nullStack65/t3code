@@ -9,6 +9,8 @@ import { MessageId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
 import { makeCodexSessionObservation } from "./CodexSessionObservation.ts";
 import { makeCodexSkillConsumer, selectsCurrentSkill } from "./CodexSkillConsumer.ts";
 
@@ -50,6 +52,7 @@ if(app)files[appPath]='---\nname: durable-app\ndescription: '+JSON.stringify(fix
 decisions.push({id:'durable-app',discoverable:app,load:activeApp,runtime_admitted:app,artifact_kind:'skill',...(app?activeApp?{projected_path:appPath}:{discovery_path:appPath}:{}),reasons:[app?'eligible':'principal-mismatch']});
 const activePatch=patch&&phase==='startup';if(activePatch)files[patchPath]='---\nname: fix\ndescription: Synthetic qualified patch\n---\nPATCH_BODY';
 decisions.push({id:'fix',discoverable:patch,load:activePatch,runtime_admitted:true,artifact_kind:'compatibility-patch',...(activePatch?{projected_path:patchPath}:{}),reasons:[patch?'qualified':'tuple-mismatch']});
+if(fixture.bootstrap){const p='.codex/skills/bootstrap-app/SKILL.md',active=phase==='bootstrap';if(active)files[p]='BOOTSTRAP_BODY';decisions.push({id:'bootstrap-app',discoverable:true,load:active,runtime_admitted:true,artifact_kind:'skill',...(active?{projected_path:p}:{}),reasons:['bootstrap-fixture']});}
 const loaded=decisions.filter(d=>d.load).map(d=>d.projected_path);files['.codex/AGENTS.md']='SOURCE_GENERATED_AGENTS\n'+loaded.join('\n');
 const receipt={schema_version:1,state:fixture.state??'runtime-admission-candidate',context:fixture.stale?{...ctx,model:'old'}:ctx,permissions_granted:false,installed:false,behavior_verified:false,source:{commit:cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty:false},files:Object.fromEntries(Object.entries(files).map(([f,b])=>[f,hash(b)])),decisions,target_contract:{skills:'.codex/skills',instructions:'.codex/AGENTS.md',activation_paths:loaded}};
 fs.mkdirSync(out,{recursive:true});for(const [f,b]of Object.entries(files)){fs.mkdirSync(path.dirname(path.join(out,f)),{recursive:true});fs.writeFileSync(path.join(out,f),b);}if(fixture.tamper)fs.appendFileSync(path.join(out,'.codex/AGENTS.md'),'TAMPER');fs.writeFileSync(path.join(out,'admission.json'),JSON.stringify(receipt));console.log('{}');
@@ -63,6 +66,7 @@ function fixture(
     tamper?: boolean;
     verifyFailure?: boolean;
     repository?: string;
+    bootstrap?: boolean;
   } = {},
 ) {
   return Effect.gen(function* () {
@@ -199,5 +203,21 @@ it.live(
       expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
       git("config", "--unset", "remote.origin.url");
       expect((yield* f.consume(f.facts)).skills.map((s) => s.name)).toEqual(["fix"]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.live(
+  "resolves bootstrap in the fresh request scope and removes candidates when that scope retires",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ bootstrap: true });
+      const lifetime = yield* Scope.fork(yield* Scope.Scope);
+      const selected = yield* f.consume(f.facts).pipe(Effect.provideService(Scope.Scope, lifetime));
+      expect(selected.skills.map((s) => s.name)).toEqual(["bootstrap-app", "fix", "durable-app"]);
+      expect(NodeFS.readFileSync(selected.skills[0]!.path, "utf8")).toBe("BOOTSTRAP_BODY");
+      const root = NodePath.resolve(selected.discoveryRoot, "../../..");
+      expect(NodeFS.existsSync(root)).toBe(true);
+      yield* Scope.close(lifetime, Exit.void);
+      expect(NodeFS.existsSync(root)).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

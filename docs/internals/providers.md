@@ -108,7 +108,7 @@ than silently dropping a policy flag. Never translate it to legacy `codex`.
 
 The [consumer](../../apps/server/src/provider/CodexSkillConsumer.ts) runs the pinned
 canonical `scripts/build_skill_session.py --context/--output` and `--verify` for
-discovery, startup and the current request. It checks the source head/clean tree,
+discovery, bootstrap, startup and the current request. It checks the source head/clean tree,
 returned context, admission and content digests, then supplies only positive load
 paths as supported native Skill inputs alongside generated AGENTS instructions.
 Compatibility patches stay outside the candidate's ordinary discovery root.
@@ -134,7 +134,7 @@ and reported status. It omits hidden system/developer frames and old Skill input
 Missing current-message identity or oversized visible history refuses rather than
 silently dropping the conversation. Earlier attachments are not replayed. A source
 or observed lifecycle change during resolution refuses; already consumed request
-IDs cannot be retried in that runtime. Accepted T3 history is preserved.
+IDs cannot be retried in that runtime. Accepted T3 history is preserved. Candidates belong to request scopes: preparation failure/cancellation removes them; completed inputs retire after a new context detaches old discovery. Active or uncertain submitted inputs stay intact until native readers stop. Uncertain submissions or native collaboration require a provider restart before another governed request; process disposal stops readers before removing their files. Account updates revoke applicability at decoded ingress, and account identity is reread immediately before submission. Intent/task-context activation and capability/condition/native-data positives remain unsupported; unknown inputs continue to exclude dependent policies.
 
 This route governs the inputs T3 constructs, not arbitrary filesystem reads or all
 provider discovery. Codex 0.162.1's `skills/extraRoots/set` is additive; shared homes,

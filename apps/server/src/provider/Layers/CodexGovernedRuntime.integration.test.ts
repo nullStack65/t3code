@@ -11,6 +11,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { CodexSkillConsumerError } from "../CodexSkillConsumer.ts";
 import type { CodexSkillTurnFacts } from "../CodexSkillConsumer.ts";
 import { selectsCurrentSkill } from "../CodexSkillConsumer.ts";
 import {
@@ -214,37 +215,121 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-for (const ingress of ["resolution", "extraRoots"] as const) {
-  it.live(`withholds native turn input after route drift during ${ingress}`, () =>
+for (const change of ["model", "account", "silentAccount"] as const) {
+  for (const ingress of ["resolution", "extraRoots"] as const) {
+    it.live(`withholds native turn input after ${change} drift during ${ingress}`, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-drift-" });
+        const script = NodePath.join(directory, "script.json");
+        const notification =
+          change === "account"
+            ? { method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } }
+            : {
+                method: "model/rerouted",
+                params: {
+                  threadId: "synthetic-drift-fresh-2",
+                  turnId: "no-turn-yet",
+                  fromModel: "fixture-6",
+                  toModel: "fixture-7",
+                  reason: "highRiskCyberActivity",
+                },
+              };
+        yield* fs.writeFileString(
+          script,
+          encode({
+            rootThreadId: "synthetic-drift",
+            freshThreads: true,
+            recordAllRequests: true,
+            notifications: [],
+            accounts: [
+              { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
+              {
+                type: "chatgpt",
+                email: change === "model" ? "fixture@example.invalid" : "other@example.invalid",
+                planType: "pro",
+              },
+            ],
+            notificationsOnFeedback:
+              change !== "silentAccount" && ingress === "resolution" ? [notification] : [],
+            notificationsOnExtraRoots:
+              change !== "silentAccount" && ingress === "extraRoots" ? [notification] : [],
+          }),
+        );
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make("synthetic-drift"),
+          binaryPath: peer,
+          cwd: directory,
+          runtimeMode: "approval-required",
+          model: "fixture-6",
+          environment: {
+            PATH: process.env.PATH,
+            SystemRoot: process.env.SystemRoot,
+            ComSpec: process.env.ComSpec,
+            PATHEXT: process.env.PATHEXT,
+            HOME: directory,
+            USERPROFILE: directory,
+            CODEX_HOME: directory,
+            T3_CODEX_COLLAB_SCRIPT: script,
+          },
+          governedSkills: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+              return { discoveryRoot: directory, instructions: "OLD_PATCH_INPUT", skills: [] };
+            }),
+        });
+        yield* runtime.start();
+        const messageId = MessageId.make("current");
+        const result = yield* runtime
+          .sendTurn({
+            input: "Current request",
+            currentRequest: {
+              messageId,
+              text: "Current request",
+              activationAllowed: true,
+              conversation: Effect.succeed([
+                { id: messageId, role: "user", text: "Current request" },
+              ]),
+            },
+          })
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* Deferred.await(entered);
+        if (ingress === "resolution")
+          yield* runtime.uploadFeedback("synthetic ingress receipt only");
+        yield* Deferred.succeed(release, undefined);
+        expect(yield* Fiber.join(result)).toMatchObject({ _tag: "CodexAppServerRequestError" });
+        const requests = NodeFS.readFileSync(script + ".allRequests", "utf8")
+          .trim()
+          .split("\n");
+        expect(requests.some((line) => line.includes('"method":"turn/start"'))).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+}
+
+for (const mode of ["completed", "active", "failed", "cancelled", "uncertain"] as const) {
+  it.live(`owns candidate files across ${mode} native request lifetime`, () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-drift-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-lifetime-" });
       const script = NodePath.join(directory, "script.json");
-      const notification = {
-        method: "model/rerouted",
-        params: {
-          threadId: "synthetic-drift-fresh-2",
-          turnId: "no-turn-yet",
-          fromModel: "fixture-6",
-          toModel: "fixture-7",
-          reason: "highRiskCyberActivity",
-        },
-      };
       yield* fs.writeFileString(
         script,
         encode({
-          rootThreadId: "synthetic-drift",
+          rootThreadId: "lifetime",
           freshThreads: true,
-          recordAllRequests: true,
           notifications: [],
-          notificationsOnFeedback: ingress === "resolution" ? [notification] : [],
-          notificationsOnExtraRoots: ingress === "extraRoots" ? [notification] : [],
+          holdTurnOpen: mode === "active" || mode === "uncertain",
+          holdTurnStartResponse: mode === "uncertain",
         }),
       );
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
+      const candidates: string[] = [];
+      const prepared = yield* Deferred.make<void>();
       const runtime = yield* makeCodexSessionRuntime({
-        threadId: ThreadId.make("synthetic-drift"),
+        threadId: ThreadId.make("lifetime"),
         binaryPath: peer,
         cwd: directory,
         runtimeMode: "approval-required",
@@ -261,15 +346,28 @@ for (const ingress of ["resolution", "extraRoots"] as const) {
         },
         governedSkills: () =>
           Effect.gen(function* () {
-            yield* Deferred.succeed(entered, undefined);
-            yield* Deferred.await(release);
-            return { discoveryRoot: directory, instructions: "OLD_PATCH_INPUT", skills: [] };
-          }),
+            const root = yield* fs.makeTempDirectoryScoped({ prefix: "owned-candidate-" });
+            candidates.push(root);
+            yield* fs.writeFileString(NodePath.join(root, "SKILL.md"), "ACTIVE_BODY");
+            yield* Deferred.succeed(prepared, undefined);
+            if (mode === "failed")
+              return yield* new CodexSkillConsumerError({ reason: "synthetic-resolution-failure" });
+            if (mode === "cancelled") return yield* Effect.never;
+            return {
+              discoveryRoot: root,
+              instructions: "current",
+              skills: [
+                { type: "skill" as const, name: "fixture", path: NodePath.join(root, "SKILL.md") },
+              ],
+            };
+          }).pipe(
+            Effect.mapError((error) => new CodexSkillConsumerError({ reason: error.message })),
+          ),
       });
       yield* runtime.start();
-      const messageId = MessageId.make("current");
-      const result = yield* runtime
-        .sendTurn({
+      const send = (index: number) => {
+        const messageId = MessageId.make(`current-${index}`);
+        return runtime.sendTurn({
           input: "Current request",
           currentRequest: {
             messageId,
@@ -279,16 +377,43 @@ for (const ingress of ["resolution", "extraRoots"] as const) {
               { id: messageId, role: "user", text: "Current request" },
             ]),
           },
-        })
-        .pipe(Effect.flip, Effect.forkScoped);
-      yield* Deferred.await(entered);
-      if (ingress === "resolution") yield* runtime.uploadFeedback("synthetic ingress receipt only");
-      yield* Deferred.succeed(release, undefined);
-      expect(yield* Fiber.join(result)).toMatchObject({ _tag: "CodexAppServerRequestError" });
-      const requests = NodeFS.readFileSync(script + ".allRequests", "utf8")
-        .trim()
-        .split("\n");
-      expect(requests.some((line) => line.includes('"method":"turn/start"'))).toBe(false);
+        });
+      };
+      if (mode === "completed") {
+        expect(yield* Effect.flip(runtime.compactThread)).toMatchObject({
+          _tag: "CodexAppServerRequestError",
+        });
+        for (let index = 0; index < 4; index++) {
+          const completed = yield* Stream.runHead(
+            runtime.events.pipe(Stream.filter((e) => e.method === "turn/completed")),
+          ).pipe(Effect.forkScoped);
+          yield* send(index);
+          yield* Fiber.join(completed);
+          expect(candidates.filter((p) => NodeFS.existsSync(p))).toEqual([candidates[index]]);
+        }
+      } else if (mode === "active") {
+        yield* send(0);
+        expect(yield* Effect.flip(send(1))).toMatchObject({ _tag: "CodexAppServerRequestError" });
+        expect(NodeFS.readFileSync(NodePath.join(candidates[0]!, "SKILL.md"), "utf8")).toBe(
+          "ACTIVE_BODY",
+        );
+      } else if (mode === "failed") {
+        expect(yield* Effect.flip(send(0))).toMatchObject({ _tag: "CodexAppServerRequestError" });
+        expect(NodeFS.existsSync(candidates[0]!)).toBe(false);
+      } else {
+        const started = yield* Stream.runHead(
+          runtime.events.pipe(Stream.filter((e) => e.method === "turn/started")),
+        ).pipe(Effect.forkScoped);
+        const pending = yield* send(0).pipe(Effect.forkScoped);
+        if (mode === "uncertain") yield* Fiber.join(started);
+        else yield* Deferred.await(prepared);
+        yield* Fiber.interrupt(pending);
+        expect(NodeFS.existsSync(candidates[0]!)).toBe(mode === "uncertain");
+        if (mode === "uncertain")
+          expect(yield* Effect.flip(send(1))).toMatchObject({ _tag: "CodexAppServerRequestError" });
+      }
+      yield* runtime.close;
+      expect(candidates.some((p) => NodeFS.existsSync(p))).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 }

@@ -29,6 +29,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -1315,6 +1316,13 @@ export const makeCodexSessionRuntime = (
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
+    // Register candidate cleanup before spawning the process: scope disposal stops
+    // native readers before closing the older candidate-lifetime child scope.
+    const candidateLifetime = yield* Scope.fork(runtimeScope);
+    const governedRequestLock = yield* Semaphore.make(1);
+    let retainedCandidates: Scope.Closeable | undefined;
+    let uncertainGovernedSubmission = false;
+    let governedChildReaders = false;
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
@@ -2382,7 +2390,16 @@ export const makeCodexSessionRuntime = (
           const notification = makeCodexServerNotification(method, params);
           // Revoke captures at decoded ingress. The event consumer can be held
           // independently; enqueueing must never leave pre-event evidence current.
+          if (
+            options.governedSkills &&
+            (notification.method === "item/started" || notification.method === "item/completed") &&
+            notification.params.item.type === "collabAgentToolCall"
+          )
+            governedChildReaders = true;
           switch (notification.method) {
+            case "account/updated":
+              observation.invalidate("account-changed");
+              break;
             case "turn/started":
             case "turn/completed":
               observation.lifecycle(notification.params.threadId, notification.params.turn.id);
@@ -2563,21 +2580,33 @@ export const makeCodexSessionRuntime = (
       start,
       getSession: Ref.get(sessionRef),
       compactThread: Effect.gen(function* () {
+        if (options.governedSkills)
+          return yield* CodexErrors.CodexAppServerRequestError.internalError(
+            "Governed requests use fresh context; native background compaction is unsupported.",
+            "thread/compact/start",
+          );
         observation.invalidate("compaction-does-not-attest-context-removal");
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/compact/start", { threadId: providerThreadId });
       }),
-      sendTurn: (input) =>
-        Effect.gen(function* () {
+      sendTurn: (input) => {
+        let requestCandidates: Scope.Closeable | undefined;
+        let submitted = false;
+        const operation = Effect.gen(function* () {
           let governed: CodexSkillTurn | undefined;
           let governedRevision: number | undefined;
           let conversationData: string | undefined;
+          let governedAccountEmail: string | null | undefined;
           const selectedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
           if (options.governedSkills) {
             const refuse = (message: string) =>
               CodexErrors.CodexAppServerRequestError.internalError(message, "turn/start");
+            if (uncertainGovernedSubmission || governedChildReaders)
+              return yield* refuse(
+                "Governed native readers require a provider restart before continuing.",
+              );
             const previous = yield* Ref.get(sessionRef);
             if (previous.activeTurnId)
               return yield* refuse("Governed requests require the previous turn to finish.");
@@ -2625,9 +2654,20 @@ export const makeCodexSessionRuntime = (
               resumeCursor: { threadId: opened.thread.id },
               model: opened.model,
             });
+            // Previous root execution is complete and a fresh native context is open.
+            // Detach old discovery before retiring its files. Child readers above
+            // require process disposal instead of guessing when they stop reading.
+            if (retainedCandidates) {
+              yield* client.request("skills/extraRoots/set", { extraRoots: [] });
+              yield* Scope.close(retainedCandidates, Exit.void);
+              retainedCandidates = undefined;
+            }
+            requestCandidates = yield* Scope.fork(candidateLifetime);
             const before = yield* observation.reader.read;
             governedRevision = before.revision;
             const account = yield* client.request("account/read", { refreshToken: false });
+            governedAccountEmail =
+              account.account?.type === "chatgpt" ? account.account.email : null;
             const versionCommand = yield* resolveSpawnCommand(options.binaryPath, ["--version"], {
               env,
               extendEnv,
@@ -2649,11 +2689,14 @@ export const makeCodexSessionRuntime = (
                 observation: before,
                 model: selectedModel && opened.model === selectedModel ? selectedModel : null,
                 harnessVersion: version.trim().replace(/^codex-cli\s+/, ""),
-                accountEmail: account.account?.type === "chatgpt" ? account.account.email : null,
+                accountEmail: governedAccountEmail,
                 cwd: options.cwd,
                 ...(input.currentRequest ? { request: input.currentRequest } : {}),
               })
-              .pipe(Effect.mapError((error) => refuse(error.message)));
+              .pipe(
+                Effect.provideService(Scope.Scope, requestCandidates),
+                Effect.mapError((error) => refuse(error.message)),
+              );
             if ((yield* observation.reader.read).revision !== before.revision)
               return yield* refuse("Native route changed during Skill resolution.");
             yield* client.request("skills/extraRoots/set", {
@@ -2692,6 +2735,16 @@ export const makeCodexSessionRuntime = (
               options.mcpCapabilities,
             ),
           });
+          if (options.governedSkills) {
+            const currentAccount = yield* client.request("account/read", { refreshToken: false });
+            const currentEmail =
+              currentAccount.account?.type === "chatgpt" ? currentAccount.account.email : null;
+            if (currentEmail !== governedAccountEmail)
+              return yield* CodexErrors.CodexAppServerRequestError.internalError(
+                "Account changed during governed Skill resolution.",
+                "turn/start",
+              );
+          }
           if (
             governedRevision !== undefined &&
             (yield* observation.reader.read).revision !== governedRevision
@@ -2700,6 +2753,10 @@ export const makeCodexSessionRuntime = (
               "Native route changed before governed turn submission.",
               "turn/start",
             );
+          if (requestCandidates) {
+            retainedCandidates = requestCandidates;
+            submitted = true;
+          }
           const observationGeneration = observation.beginTurn(normalizedModel, input.serviceTier);
           const rawResponse = yield* client.raw
             .request("turn/start", params)
@@ -2731,7 +2788,21 @@ export const makeCodexSessionRuntime = (
               ? { resumeCursor: { threadId: resumedProviderThreadId } }
               : {}),
           } satisfies ProviderTurnStartResult;
-        }),
+        }).pipe(
+          Effect.onExit((exit) => {
+            if (!Exit.isFailure(exit) || !requestCandidates) return Effect.void;
+            if (submitted) {
+              // A cancelled/failed RPC can already be executing natively. Preserve
+              // those files and refuse continuation until process disposal proves
+              // there is no reader; at most one submitted request is retained.
+              uncertainGovernedSubmission = true;
+              return Effect.void;
+            }
+            return Scope.close(requestCandidates, exit);
+          }),
+        );
+        return options.governedSkills ? governedRequestLock.withPermit(operation) : operation;
+      },
       interruptTurn: (turnId) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;

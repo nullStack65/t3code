@@ -17,6 +17,7 @@ const script = JSON.parse(NodeFS.readFileSync(process.env.T3_CODEX_COLLAB_SCRIPT
 
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
+let accountReadCount = 0;
 let threadStartCount = 0;
 let currentThreadId = script.rootThreadId;
 let activeTurn;
@@ -94,7 +95,11 @@ rl.on("line", (line) => {
   if (method === "account/read") {
     write({
       id,
-      result: { account: script.account ?? { type: "apiKey" }, requiresOpenaiAuth: false },
+      result: {
+        account: script.accounts?.[Math.min(accountReadCount++, script.accounts.length - 1)] ??
+          script.account ?? { type: "apiKey" },
+        requiresOpenaiAuth: false,
+      },
     });
     return;
   }
@@ -188,7 +193,8 @@ rl.on("line", (line) => {
       : fixture.responses.turnStart.turn;
     activeTurn = turn;
     turnStartCount += 1;
-    write({ id, result: { ...fixture.responses.turnStart, turn } });
+    if (!script.holdTurnStartResponse)
+      write({ id, result: { ...fixture.responses.turnStart, turn } });
     const rootThreadId = currentThreadId;
     if (script.onlyFirstTurnStarts !== true || turnStartCount === 1) {
       write({

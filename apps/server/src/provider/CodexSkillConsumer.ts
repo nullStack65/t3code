@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -90,7 +91,7 @@ export interface CodexSkillTurnFacts {
 }
 export type CodexSkillConsumer = (
   facts: CodexSkillTurnFacts,
-) => Effect.Effect<CodexSkillTurn, CodexSkillConsumerError>;
+) => Effect.Effect<CodexSkillTurn, CodexSkillConsumerError, Scope.Scope>;
 
 // Selection is deliberately conservative. The eligible source's discovery
 // description supplies natural-language phrases; quoted/history text is never
@@ -112,11 +113,6 @@ export const makeCodexSkillConsumer = Effect.fn("makeCodexSkillConsumer")(functi
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  // macOS temp paths can pass through /var or /tmp symlinks. The canonical
-  // builder refuses linked output ancestors, so use the owned directory's real path.
-  const root = yield* fs
-    .makeTempDirectoryScoped({ prefix: "t3-governed-skills-" })
-    .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
   const run = (binary: string, args: ReadonlyArray<string>, cwd = source.directory) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -140,7 +136,6 @@ export const makeCodexSkillConsumer = Effect.fn("makeCodexSkillConsumer")(functi
     if (head !== source.sourceCommit || dirty)
       return yield* new CodexSkillConsumerError({ reason: "source-head-or-worktree-changed" });
   });
-  let sequence = 0;
   const consume: CodexSkillConsumer = (facts) =>
     Effect.gen(function* () {
       yield* checkSource;
@@ -188,8 +183,11 @@ export const makeCodexSkillConsumer = Effect.fn("makeCodexSkillConsumer")(functi
           requested_writes: [],
         },
       };
-      const directory = path.join(root, String(++sequence));
-      yield* fs.makeDirectory(directory);
+      // The native request owner supplies the scope. Failed preparations close it
+      // immediately; successful inputs stay alive until their native readers retire.
+      const directory = yield* fs
+        .makeTempDirectoryScoped({ prefix: "t3-governed-skills-" })
+        .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
       const build = Effect.fnUntraced(function* (phase: string, explicit: string[]) {
         const expected = { ...context, activation: { ...context.activation, phase, explicit } };
         const contextPath = path.join(directory, `${phase}.json`);
@@ -263,10 +261,11 @@ export const makeCodexSkillConsumer = Effect.fn("makeCodexSkillConsumer")(functi
             explicit.push(decision.id);
         }
       }
+      const bootstrap = yield* build("bootstrap", []);
       const startup = yield* build("startup", []);
       const request = yield* build("request", explicit);
       const skills: Array<{ type: "skill"; name: string; path: string }> = [];
-      for (const candidate of [startup, request]) {
+      for (const candidate of [bootstrap, startup, request]) {
         for (const decision of candidate.receipt.decisions) {
           if (!decision.load) continue;
           if (
@@ -290,7 +289,7 @@ export const makeCodexSkillConsumer = Effect.fn("makeCodexSkillConsumer")(functi
       }
       yield* checkSource;
       const agents = yield* Effect.forEach(
-        [startup, request],
+        [bootstrap, startup, request],
         Effect.fnUntraced(function* (candidate) {
           const relative = candidate.receipt.target_contract.instructions;
           if (!candidate.receipt.files[relative])
