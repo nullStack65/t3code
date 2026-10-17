@@ -78,6 +78,30 @@ run before the prompt. They reject profiles with such configuration before launc
 instructions and tool denial do not create a native sandbox.
 See [helper constraints](../../apps/server/src/textGeneration/AntigravityTextGeneration.ts).
 
+## Governed Codex inputs
+
+`codex-typed-skills` is an explicit, opt-in driver. Its pinned canonical resolver owns applicability;
+the [consumer](../../apps/server/src/provider/CodexSkillConsumer.ts) verifies its candidate before the
+[V2 adapter](../../apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts) supplies current native
+Skill inputs. Each request opens fresh provider context and carries prior user-visible messages as
+attributed data, rather than replaying hidden provider instructions. Server/agent wakes and quoted
+history cannot become current user activation. Unknown selected generation excludes compatibility
+patches; it does not exclude model-neutral applications. Intent/task-context and capability,
+condition, and native-data positives remain unsupported. The initial supported account read establishes
+startup readiness; later revocation survives fresh thread opening and requires process replacement.
+Server restart continuations carry their current prompt into fresh admission without user activation;
+legacy native resume keeps its promptless behavior. Legacy `codex` is outside this policy.
+
+Unexposed preparation failures clean their candidates. Discovery-exposed failures retain inputs until
+process disposal. Sequential completed roots retire old inputs only after discovery detachment and
+final account/reader checks; already observed child readers require restart. This retirement decision
+is not an atomic future-reader lease: an event arriving after cleanup commits cannot reverse an
+issued unlink. Processes stop before retained inputs are deleted. Resume never replays old governed
+context; native steering, goals, compaction, rollback and fork refuse where fresh admission cannot be
+preserved. Additive discovery roots do not isolate unmanaged home/project Skills or filesystem access.
+Selected model and protocol observations do not attest actual served model, billing, or portable
+source authority. Source execution is separate from installed desktop qualification.
+
 ## Provider updates run only through the owning installer
 
 A package manager runs only when the resolved executable's path proves it owns the install. Homebrew

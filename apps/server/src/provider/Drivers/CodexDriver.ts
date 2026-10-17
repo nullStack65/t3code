@@ -1,3 +1,5 @@
+import { makeCodexSkillConsumer, type CodexSkillSource } from "../CodexSkillConsumer.ts";
+import { TextGenerationError } from "@t3tools/contracts";
 /**
  * CodexDriver — first concrete `ProviderDriver` in the new per-instance model.
  *
@@ -127,263 +129,321 @@ export type CodexDriverEnv =
   | ServerEnvironment.ServerEnvironmentIdentity
   | CodexInstallation.CodexInstallation;
 
-export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Path> = {
-  driverKind: DRIVER_KIND,
-  metadata: {
-    displayName: "Codex",
-    supportsMultipleInstances: true,
-  },
-  configSchema: CodexSettings,
-  defaultConfig: (): CodexSettings => decodeCodexSettings({}),
-  usage: codexUsageReader,
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
-    Effect.gen(function* () {
-      if (config.setupMode === "managed")
-        return yield* makeManagedCodexProvider({
+export const makeCodexDriver = (
+  source?: CodexSkillSource,
+): ProviderDriver<CodexSettings, CodexDriverEnv, Path.Path> => {
+  const DRIVER_KIND = ProviderDriverKind.make(source ? "codex-typed-skills" : "codex");
+  return {
+    driverKind: DRIVER_KIND,
+    metadata: {
+      displayName: "Codex",
+      supportsMultipleInstances: true,
+    },
+    configSchema: CodexSettings,
+    defaultConfig: (): CodexSettings => decodeCodexSettings({}),
+    usage: codexUsageReader,
+    create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+      Effect.gen(function* () {
+        if (source && config.setupMode === "managed")
+          return yield* new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail:
+              "Governed launch requires an explicit existing Codex home; managed auth setup is outside coverage.",
+          });
+        if (config.setupMode === "managed")
+          return yield* makeManagedCodexProvider({
+            instanceId,
+            displayName,
+            accentColor,
+            environment,
+            enabled,
+            config,
+          });
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const httpClient = yield* HttpClient.HttpClient;
+        const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+        const modelCatalog = yield* ModelCatalog.ModelCatalog;
+        const currentCatalog = modelCatalog.current(ProviderDriverKind.make("codex"));
+        const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+        const homeLayout = yield* resolveCodexHomeLayout(config);
+        const continuationIdentity = codexContinuationIdentity(homeLayout);
+        const stampIdentity = withInstanceIdentity({
           instanceId,
+          driverKind: DRIVER_KIND,
           displayName,
           accentColor,
-          environment,
-          enabled,
-          config,
+          continuationGroupKey: continuationIdentity.continuationKey,
         });
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      const httpClient = yield* HttpClient.HttpClient;
-      const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-      const modelCatalog = yield* ModelCatalog.ModelCatalog;
-      const currentCatalog = modelCatalog.current(DRIVER_KIND);
-      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
-      const homeLayout = yield* resolveCodexHomeLayout(config);
-      const continuationIdentity = codexContinuationIdentity(homeLayout);
-      const stampIdentity = withInstanceIdentity({
-        instanceId,
-        driverKind: DRIVER_KIND,
-        displayName,
-        accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
-      });
-      yield* materializeCodexShadowHome(homeLayout).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: cause.message,
-              cause,
-            }),
-        ),
-      );
-      const effectiveConfig = {
-        ...config,
-        enabled,
-        binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
-        homePath: homeLayout.effectiveHomePath ?? "",
-      } satisfies CodexSettings;
-      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-        resolveProviderMaintenanceCapabilitiesEffect(
-          makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
+        yield* materializeCodexShadowHome(homeLayout).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+        const effectiveConfig = {
+          ...config,
+          enabled,
+          binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
+          homePath: homeLayout.effectiveHomePath ?? "",
+        } satisfies CodexSettings;
+        const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
+          resolveProviderMaintenanceCapabilitiesEffect(
+            makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
+            {
+              binaryPath: effectiveConfig.binaryPath,
+              env: processEnv,
+            },
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, pathService),
+          ),
+        );
+
+        const governedSkills = source ? yield* makeCodexSkillConsumer(source) : undefined;
+        const orchestrationAdapter = yield* createCodexAdapterV2(
           {
-            binaryPath: effectiveConfig.binaryPath,
-            env: processEnv,
+            instanceId,
+            displayName,
+            accentColor,
+            environment,
+            enabled,
+            config,
+          },
+          {
+            onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+            ...(governedSkills ? { governedSkills } : {}),
           },
         ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: "Failed to build Codex orchestration adapter.",
+                cause,
+              }),
+          ),
+        );
+
+        // Build a managed snapshot whose settings never change — mutations come
+        // in as instance rebuilds from the registry rather than in-place
+        // updates. Pre-provide `ChildProcessSpawner` so the check fits
+        // `makeManagedServerProvider.checkProvider`'s `R = never`.
+        // Kick the TTL-gated manifest refresh in the background and classify
+        // with the in-memory manifest, so a slow or hung fetch never delays the
+        // provider check. A refresh that lands mid-probe applies on the next one.
+        const checkProvider = modelCatalog.refreshInBackground.pipe(
+          Effect.andThen(
+            Effect.zipWith(
+              checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
+              currentCatalog,
+              (draft, catalog) => stampIdentity(applyCodexModelCatalog(draft, catalog)),
+              { concurrent: true },
+            ),
+          ),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, pathService),
-        ),
-      );
-
-      const orchestrationAdapter = yield* createCodexAdapterV2(
-        {
-          instanceId,
-          displayName,
-          accentColor,
-          environment,
-          enabled,
-          config,
-        },
-        { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: "Failed to build Codex orchestration adapter.",
-              cause,
-            }),
-        ),
-      );
-
-      // Build a managed snapshot whose settings never change — mutations come
-      // in as instance rebuilds from the registry rather than in-place
-      // updates. Pre-provide `ChildProcessSpawner` so the check fits
-      // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      // Kick the TTL-gated manifest refresh in the background and classify
-      // with the in-memory manifest, so a slow or hung fetch never delays the
-      // provider check. A refresh that lands mid-probe applies on the next one.
-      const checkProvider = modelCatalog.refreshInBackground.pipe(
-        Effect.andThen(
-          Effect.zipWith(
-            checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
-            currentCatalog,
-            (draft, catalog) => stampIdentity(applyCodexModelCatalog(draft, catalog)),
-            { concurrent: true },
-          ),
-        ),
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.provideService(Path.Path, pathService),
-      );
-      const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<CodexSettings>>({
-        resolveMaintenance,
-        getSettings: snapshotSettings.getSettings,
-        streamSettings: snapshotSettings.streamSettings,
-        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
-        initialSnapshot: (settings) =>
-          Effect.zipWith(
-            makePendingCodexProvider(settings.provider),
-            currentCatalog,
-            (draft, catalog) => stampIdentity(applyCodexModelCatalog(draft, catalog)),
-          ),
-        checkProvider,
-        enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
-          resolveMaintenance().pipe(
-            Effect.flatMap((maintenanceCapabilities) =>
-              enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
-                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-              }),
+        );
+        const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
+        const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<CodexSettings>>({
+          resolveMaintenance,
+          getSettings: snapshotSettings.getSettings,
+          streamSettings: snapshotSettings.streamSettings,
+          haveSettingsChanged: haveProviderSnapshotSettingsChanged,
+          initialSnapshot: (settings) =>
+            Effect.zipWith(
+              makePendingCodexProvider(settings.provider),
+              currentCatalog,
+              (draft, catalog) => stampIdentity(applyCodexModelCatalog(draft, catalog)),
             ),
-            Effect.provideService(HttpClient.HttpClient, httpClient),
-            Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
-            Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
-          ),
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: `Failed to build Codex snapshot: ${cause.message ?? String(cause)}`,
-              cause,
-            }),
-        ),
-      );
-      const textGeneration = yield* makeCodexTextGeneration(
-        effectiveConfig,
-        processEnv,
-        snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
-      );
-      const snapshotForCwd = (cwd: string) =>
-        !effectiveConfig.enabled
-          ? snapshot.getSnapshot
-          : Effect.all([
-              snapshot.getSnapshot,
-              probeCodexSkillsForCwd({
-                binaryPath: effectiveConfig.binaryPath,
-                homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
-                cwd,
-                environment: processEnv,
-              }).pipe(
-                Effect.scoped,
-                Effect.timeout("20 seconds"),
-                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          checkProvider,
+          enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
+            resolveMaintenance().pipe(
+              Effect.flatMap((maintenanceCapabilities) =>
+                enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
+                  enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+                }),
               ),
-            ]).pipe(
-              Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
+              Effect.provideService(HttpClient.HttpClient, httpClient),
+              Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+              Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
+            ),
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: `Failed to build Codex snapshot: ${cause.message ?? String(cause)}`,
+                cause,
+              }),
+          ),
+        );
+        const textGeneration = yield* makeCodexTextGeneration(
+          effectiveConfig,
+          processEnv,
+          snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
+        );
+        const snapshotForCwd = (cwd: string) =>
+          governedSkills
+            ? snapshot.getSnapshot.pipe(Effect.map((value) => ({ ...value, skills: [] })))
+            : !effectiveConfig.enabled
+              ? snapshot.getSnapshot
+              : Effect.all([
+                  snapshot.getSnapshot,
+                  probeCodexSkillsForCwd({
+                    binaryPath: effectiveConfig.binaryPath,
+                    homePath: effectiveConfig.homePath,
+                    launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                    cwd,
+                    environment: processEnv,
+                  }).pipe(
+                    Effect.scoped,
+                    Effect.timeout("20 seconds"),
+                    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                  ),
+                ]).pipe(
+                  Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderDriverError({
+                        driver: DRIVER_KIND,
+                        instanceId,
+                        detail: `Failed to probe Codex skills for '${cwd}'`,
+                        cause,
+                      }),
+                  ),
+                );
+
+        // Redemption spends something on the user's account. It serialises on
+        // the account (instances sharing a Codex home share the credit), keeps
+        // one idempotency key until Codex reports an outcome, and is bounded so
+        // a hung app-server cannot hold the account lock.
+        // Keyed on the directory holding auth.json: an auth-overlay instance has
+        // its own account under `effectiveHomePath`, while plain instances share
+        // the common home. The continuation key would conflate the two.
+        const accountKey = homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath;
+        const consumeResetCredit: NonNullable<ProviderInstance["consumeResetCredit"]> = () =>
+          resetCreditCoordinator
+            .redeem(accountKey, (idempotencyKey) =>
+              Effect.gen(function* () {
+                const { client } = yield* withCodexAppServerClient({
+                  binaryPath: effectiveConfig.binaryPath,
+                  homePath: effectiveConfig.homePath,
+                  launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                  // Account-level request; any directory serves, same as the status probe.
+                  cwd: process.cwd(),
+                  environment: processEnv,
+                });
+                const response = yield* client.request("account/rateLimitResetCredit/consume", {
+                  idempotencyKey,
+                });
+                return response.outcome;
+              }).pipe(Effect.scoped, Effect.timeout("20 seconds")),
+            )
+            .pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
               Effect.mapError(
                 (cause) =>
                   new ProviderDriverError({
                     driver: DRIVER_KIND,
                     instanceId,
-                    detail: `Failed to probe Codex skills for '${cwd}'`,
+                    detail: "Codex could not redeem the reset credit.",
                     cause,
                   }),
               ),
+              // The windows just changed; re-probe so the snapshot says so. A
+              // failed probe republishes the pre-redemption limits rather than
+              // marking them failed, so "confirmed" means `checkedAt` moved
+              // past what was published before the redemption started. Only a
+              // reset claims the limits changed, so only a reset reports an
+              // unconfirmed refresh.
+              Effect.tap((outcome) =>
+                Effect.gen(function* () {
+                  const before = (yield* snapshot.getSnapshot).usageLimits?.checkedAt;
+                  const refreshed = yield* snapshot.refresh;
+                  const after = refreshed.usageLimits?.checkedAt;
+                  if (
+                    outcome === "reset" &&
+                    (after === undefined ||
+                      after === before ||
+                      refreshed.usageLimits?.unavailable?.reason === "probeFailed")
+                  ) {
+                    return yield* new ProviderDriverError({
+                      driver: DRIVER_KIND,
+                      instanceId,
+                      detail:
+                        "The reset was applied, but Codex could not confirm the new limits. Refresh to check.",
+                    });
+                  }
+                }),
+              ),
             );
 
-      // Redemption spends something on the user's account. It serialises on
-      // the account (instances sharing a Codex home share the credit), keeps
-      // one idempotency key until Codex reports an outcome, and is bounded so
-      // a hung app-server cannot hold the account lock.
-      // Keyed on the directory holding auth.json: an auth-overlay instance has
-      // its own account under `effectiveHomePath`, while plain instances share
-      // the common home. The continuation key would conflate the two.
-      const accountKey = homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath;
-      const consumeResetCredit: NonNullable<ProviderInstance["consumeResetCredit"]> = () =>
-        resetCreditCoordinator
-          .redeem(accountKey, (idempotencyKey) =>
-            Effect.gen(function* () {
-              const { client } = yield* withCodexAppServerClient({
-                binaryPath: effectiveConfig.binaryPath,
-                homePath: effectiveConfig.homePath,
-                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
-                // Account-level request; any directory serves, same as the status probe.
-                cwd: process.cwd(),
-                environment: processEnv,
-              });
-              const response = yield* client.request("account/rateLimitResetCredit/consume", {
-                idempotencyKey,
-              });
-              return response.outcome;
-            }).pipe(Effect.scoped, Effect.timeout("20 seconds")),
-          )
-          .pipe(
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-            Effect.mapError(
-              (cause) =>
-                new ProviderDriverError({
-                  driver: DRIVER_KIND,
-                  instanceId,
-                  detail: "Codex could not redeem the reset credit.",
-                  cause,
-                }),
-            ),
-            // The windows just changed; re-probe so the snapshot says so. A
-            // failed probe republishes the pre-redemption limits rather than
-            // marking them failed, so "confirmed" means `checkedAt` moved
-            // past what was published before the redemption started. Only a
-            // reset claims the limits changed, so only a reset reports an
-            // unconfirmed refresh.
-            Effect.tap((outcome) =>
-              Effect.gen(function* () {
-                const before = (yield* snapshot.getSnapshot).usageLimits?.checkedAt;
-                const refreshed = yield* snapshot.refresh;
-                const after = refreshed.usageLimits?.checkedAt;
-                if (
-                  outcome === "reset" &&
-                  (after === undefined ||
-                    after === before ||
-                    refreshed.usageLimits?.unavailable?.reason === "probeFailed")
-                ) {
-                  return yield* new ProviderDriverError({
-                    driver: DRIVER_KIND,
-                    instanceId,
-                    detail:
-                      "The reset was applied, but Codex could not confirm the new limits. Refresh to check.",
-                  });
-                }
-              }),
-            ),
-          );
-
-      return {
-        instanceId,
-        driverKind: DRIVER_KIND,
-        continuationIdentity,
-        displayName,
-        accentColor,
-        enabled,
-        snapshot,
-        snapshotForCwd,
-        consumeResetCredit,
-        orchestrationAdapter,
-        textGeneration,
-      } satisfies ProviderInstance;
-    }),
+        return {
+          instanceId,
+          driverKind: DRIVER_KIND,
+          continuationIdentity,
+          displayName,
+          accentColor,
+          enabled,
+          snapshot,
+          snapshotForCwd,
+          consumeResetCredit,
+          orchestrationAdapter,
+          textGeneration: source
+            ? {
+                generateCommitMessage: () =>
+                  Effect.fail(
+                    new TextGenerationError({
+                      operation: "governed-codex-exec",
+                      detail: "Governed codex exec is unsupported; use an admitted provider turn.",
+                    }),
+                  ),
+                generatePrContent: () =>
+                  Effect.fail(
+                    new TextGenerationError({
+                      operation: "governed-codex-exec",
+                      detail: "Governed codex exec is unsupported; use an admitted provider turn.",
+                    }),
+                  ),
+                generateBranchName: () =>
+                  Effect.fail(
+                    new TextGenerationError({
+                      operation: "governed-codex-exec",
+                      detail: "Governed codex exec is unsupported; use an admitted provider turn.",
+                    }),
+                  ),
+                generateThreadTitle: () =>
+                  Effect.fail(
+                    new TextGenerationError({
+                      operation: "governed-codex-exec",
+                      detail: "Governed codex exec is unsupported; use an admitted provider turn.",
+                    }),
+                  ),
+                generateReviewGuide: () =>
+                  Effect.fail(
+                    new TextGenerationError({
+                      operation: "governed-codex-exec",
+                      detail: "Governed codex exec is unsupported; use an admitted provider turn.",
+                    }),
+                  ),
+              }
+            : textGeneration,
+        } satisfies ProviderInstance;
+      }),
+  };
 };
+
+export const CodexDriver = makeCodexDriver();
