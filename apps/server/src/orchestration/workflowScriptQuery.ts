@@ -14,8 +14,8 @@
  * never trusted beyond these checks.
  */
 import * as NodeFSP from "node:fs/promises";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { effectiveHomeDirectory } from "@t3tools/shared/isolationRoot";
 
 import { OrchestrationGetWorkflowScriptError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -23,7 +23,7 @@ import * as Effect from "effect/Effect";
 const SCRIPT_BYTE_CAP = 256 * 1024;
 
 function scriptsRoot(): string {
-  return NodePath.join(NodeOS.homedir(), ".claude", "projects");
+  return NodePath.join(effectiveHomeDirectory(process.env, []), ".claude", "projects");
 }
 
 export const readWorkflowScript = Effect.fn("orchestration.readWorkflowScript")(function* (input: {

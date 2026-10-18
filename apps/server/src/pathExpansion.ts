@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { effectiveHomeDirectory } from "@t3tools/shared/isolationRoot";
 
 import type * as Path from "effect/Path";
 
@@ -17,10 +17,15 @@ import type * as Path from "effect/Path";
  * expansion.
  */
 export function expandHomePath(value: string): string {
+  return expandHomePathFrom(value, effectiveHomeDirectory(process.env, []));
+}
+
+/** Pure expansion form for callers that already hold an explicitly selected home directory. */
+export function expandHomePathFrom(value: string, homeDirectory: string): string {
   if (!value) return value;
-  if (value === "~") return NodeOS.homedir();
+  if (value === "~") return homeDirectory;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return NodePath.join(NodeOS.homedir(), value.slice(2));
+    return NodePath.join(homeDirectory, value.slice(2));
   }
   return value;
 }
@@ -32,11 +37,17 @@ export function expandHomePath(value: string): string {
  * separator handling.
  */
 export function expandHomePathWith(value: string, path: Path.Path): string {
-  if (value === "~") {
-    return NodeOS.homedir();
-  }
+  return expandHomePathFromWith(value, effectiveHomeDirectory(process.env, []), path);
+}
+
+export function expandHomePathFromWith(
+  value: string,
+  homeDirectory: string,
+  path: Path.Path,
+): string {
+  if (value === "~") return homeDirectory;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return path.join(NodeOS.homedir(), value.slice(2));
+    return path.join(homeDirectory, value.slice(2));
   }
   return value;
 }

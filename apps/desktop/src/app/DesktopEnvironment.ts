@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type { IsolationProfilePaths } from "@t3tools/shared/isolationRoot";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -28,6 +29,7 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  readonly isolationProfile?: IsolationProfilePaths;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -43,6 +45,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly appPath: string;
     readonly resourcesPath: string;
     readonly homeDirectory: string;
+    readonly isolationProfile: IsolationProfilePaths | undefined;
+    readonly userDataDirectory: string;
     readonly appDataDirectory: string;
     readonly baseDir: string;
     readonly stateDir: string;
@@ -154,20 +158,24 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const path = yield* Path.Path;
   const config = yield* DesktopConfig.DesktopConfig;
   const homeDirectory = input.homeDirectory;
+  const isolationProfile = input.isolationProfile;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
   const appDataDirectory =
-    input.platform === "win32"
+    isolationProfile?.appDataDirectory ??
+    (input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
           path.join(homeDirectory, "AppData", "Roaming"),
         )
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
-        : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
+        : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config")));
+  const effectiveT3Home =
+    isolationProfile === undefined ? config.t3Home : Option.some(isolationProfile.t3Home);
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home: effectiveT3Home,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -184,7 +192,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     baseDir,
     isDevelopment,
     joinPath: path.join,
-    t3Home: config.t3Home,
+    t3Home: effectiveT3Home,
   });
   const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
   const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
@@ -205,6 +213,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appPath: input.appPath,
     resourcesPath,
     homeDirectory,
+    isolationProfile,
+    userDataDirectory:
+      isolationProfile?.userDataDirectory ?? path.join(appDataDirectory, userDataDirName),
     appDataDirectory,
     baseDir,
     stateDir,
@@ -228,11 +239,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
     devRemoteT3ServerEntryPath: config.devRemoteT3ServerEntryPath,
     configuredBackendPort: config.configuredBackendPort,
     commitHashOverride: config.commitHashOverride,
-    otlpTracesUrl: config.otlpTracesUrl,
-    otlpMetricsUrl: config.otlpMetricsUrl,
-    otlpLogsUrl: config.otlpLogsUrl,
+    otlpTracesUrl: isolationProfile === undefined ? config.otlpTracesUrl : Option.none(),
+    otlpMetricsUrl: isolationProfile === undefined ? config.otlpMetricsUrl : Option.none(),
+    otlpLogsUrl: isolationProfile === undefined ? config.otlpLogsUrl : Option.none(),
     otlpExportIntervalMs: config.otlpExportIntervalMs,
-    otlpHeaders: config.otlpHeaders,
+    otlpHeaders: isolationProfile === undefined ? config.otlpHeaders : Option.none(),
     otlpProtocol: config.otlpProtocol,
     branding,
     displayName,
