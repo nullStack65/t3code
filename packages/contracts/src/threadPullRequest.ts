@@ -11,6 +11,7 @@ import {
 import {
   PullRequestActor,
   PullRequestCheckIdentity,
+  PullRequestCheckStatus,
   PullRequestChecksState,
   PullRequestMergeability,
   PullRequestReviewDecision,
@@ -116,6 +117,20 @@ export const ThreadPullRequestWatch = Schema.Struct({
       Schema.Struct({
         name: TrimmedNonEmptyString,
         identity: PullRequestCheckIdentity,
+      }),
+    ),
+  ),
+  /**
+   * Terminal results seen on this head, retained across reconnects and rollup replacements.
+   * Absent until the first nonempty check read baselines existing results. A name without
+   * identity only baselines incomplete host data; it never identifies a new run.
+   */
+  terminalCheckRuns: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        name: TrimmedNonEmptyString,
+        identity: Schema.optional(PullRequestCheckIdentity),
+        status: PullRequestCheckStatus,
       }),
     ),
   ),
