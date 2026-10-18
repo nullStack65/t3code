@@ -247,6 +247,7 @@ describe("host context compatibility", () => {
             modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
             runtimeMode: "full-access",
             interactionMode: "default",
+            executionScope: "coding",
             workspaceMode: "local",
             branch: null,
             worktreePath: null,

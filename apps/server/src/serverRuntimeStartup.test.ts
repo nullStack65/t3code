@@ -256,7 +256,7 @@ it.effect.each([
     machineMode: "full-access",
     projectMode: "auto-accept-edits",
   },
-] as const)("auto-bootstrap model and permissions precedence: %j", (options) =>
+] as const)("does not create an unassigned startup thread before user intent: %j", (options) =>
   Effect.gen(function* () {
     const { existing, machineModel, projectModel, machineMode, projectMode } = options;
     const machineSelection = machineModel
@@ -348,23 +348,13 @@ it.effect.each([
     );
 
     assert.equal(typeof targets.bootstrapProjectId, "string");
-    assert.equal(typeof targets.bootstrapThreadId, "string");
+    assert.equal(targets.bootstrapThreadId, undefined);
     assert.equal(targets.bootstrapProjectCreated, !existing);
-    assert.equal(targets.bootstrapThreadCreated, true);
+    assert.equal(targets.bootstrapThreadCreated, undefined);
     const commands = yield* Ref.get(dispatchCalls);
     assert.deepStrictEqual(
       commands.map((command) => command.type),
-      existing ? ["thread.create"] : ["project.create", "thread.create"],
-    );
-    if (!existing) assert.equal("defaultModelSelection" in commands[0]!, false);
-    assert.equal(commands.at(-1)?.runtimeMode, projectMode ?? machineMode);
-    assert.deepStrictEqual(
-      commands.at(-1)?.modelSelection,
-      projectSelection ??
-        machineSelection ?? {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: DEFAULT_MODEL,
-        },
+      existing ? [] : ["project.create"],
     );
   }),
 );

@@ -15,6 +15,7 @@ import {
 import {
   ApprovalRequestId,
   CommandId,
+  EnvironmentId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
@@ -69,6 +70,7 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
@@ -262,6 +264,10 @@ describe("ProviderRuntimeIngestion", () => {
   > | null = null;
   let scope: Scope.Closeable | null = null;
   const tempDirs: string[] = [];
+  const serverEnvironmentIdentityTestLayer = Layer.succeed(
+    ServerEnvironment.ServerEnvironmentIdentity,
+    { getEnvironmentId: Effect.succeed(EnvironmentId.make("provider-runtime-ingestion-test")) },
+  );
 
   function makeTempDir(prefix: string): string {
     const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
@@ -305,6 +311,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(serverEnvironmentIdentityTestLayer),
       Layer.provide(SqlitePersistenceMemory),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -350,6 +357,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
+      Layer.provideMerge(serverEnvironmentIdentityTestLayer),
       Layer.provideMerge(
         Layer.effect(
           CheckpointStore.CheckpointStore,
@@ -395,6 +403,7 @@ describe("ProviderRuntimeIngestion", () => {
       );
 
     const createdAt = "2026-01-01T00:00:00.000Z";
+    // Ingestion tests seed a pre-existing thread and exercise provider callbacks, not launch.
     await dispatch({
       type: "project.create",
       commandId: CommandId.make("cmd-provider-project-create"),
@@ -421,6 +430,7 @@ describe("ProviderRuntimeIngestion", () => {
       runtimeMode: "approval-required",
       branch: null,
       worktreePath: null,
+      historyImport: true,
       createdAt,
     });
     await dispatch({
@@ -2511,6 +2521,7 @@ describe("ProviderRuntimeIngestion", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2546,6 +2557,7 @@ describe("ProviderRuntimeIngestion", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2724,6 +2736,7 @@ describe("ProviderRuntimeIngestion", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         }),
         harness.engine.dispatch({
@@ -2962,6 +2975,7 @@ describe("ProviderRuntimeIngestion", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );
@@ -2997,6 +3011,7 @@ describe("ProviderRuntimeIngestion", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt,
       }),
     );

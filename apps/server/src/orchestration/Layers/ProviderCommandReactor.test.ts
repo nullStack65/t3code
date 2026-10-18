@@ -76,6 +76,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerActivation } from "../../serverActivation.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
 
@@ -83,6 +84,10 @@ const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+const serverEnvironmentIdentityTestLayer = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  { getEnvironmentId: Effect.succeed(EnvironmentId.make("provider-command-reactor-test")) },
+);
 
 const assistantQuoteText = "Retain the reconnect backoff.";
 const assistantCitation = {
@@ -170,6 +175,7 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  // Reactor scenarios reuse a synthetic historical thread instead of provisioning Git worktrees.
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly initialTitle?: string;
@@ -422,6 +428,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
+      Layer.provideMerge(serverEnvironmentIdentityTestLayer),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(ThreadBackgroundLiveness.layer),
@@ -510,6 +517,7 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest(input?.serverSettingsOverrides ?? {})),
+      Layer.provideMerge(serverEnvironmentIdentityTestLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
@@ -544,6 +552,7 @@ describe("ProviderCommandReactor", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt: now,
       }),
     );
@@ -577,6 +586,7 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt: now,
         }),
       );

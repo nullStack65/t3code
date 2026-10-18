@@ -503,6 +503,7 @@ import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -3803,18 +3804,23 @@ export default function ChatView(props: ChatViewProps) {
   // Keep a hidden, off-flow strip mounted for existing threads so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
-  const mountComposerContextStrip = shouldShowComposerContextStrip({
-    hasActiveProject: activeProject !== null,
-    isGitRepo,
-    showEnvironmentIndicator: showComposerEnvironmentIndicator,
-    hostsRestingComposerControls: routeKind === "server",
-  });
-  const showComposerContextStrip = shouldShowComposerContextStrip({
-    hasActiveProject: activeProject !== null,
-    isGitRepo,
-    showEnvironmentIndicator: showComposerEnvironmentIndicator,
-    hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
-  });
+  const draftScopeSelectorVisible = isLocalDraftThread && activeProject !== null;
+  const mountComposerContextStrip =
+    draftScopeSelectorVisible ||
+    shouldShowComposerContextStrip({
+      hasActiveProject: activeProject !== null,
+      isGitRepo,
+      showEnvironmentIndicator: showComposerEnvironmentIndicator,
+      hostsRestingComposerControls: routeKind === "server",
+    });
+  const showComposerContextStrip =
+    draftScopeSelectorVisible ||
+    shouldShowComposerContextStrip({
+      hasActiveProject: activeProject !== null,
+      isGitRepo,
+      showEnvironmentIndicator: showComposerEnvironmentIndicator,
+      hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
+    });
   const terminalShortcutLabelOptions = useMemo(
     () => ({
       context: {
@@ -5888,10 +5894,12 @@ export default function ChatView(props: ChatViewProps) {
       ? (pendingServerThreadStartFromOriginByThreadId[activeThread?.id ?? ""] ??
         activeProjectSettings.settings.newWorktreesStartFromOrigin)
       : false;
-  const sendEnvMode = resolveSendEnvMode({
-    requestedEnvMode: envMode,
-    isGitRepo,
-  });
+  const firstLaunchScope = draftThread?.executionScope ?? "coding";
+  const sendEnvMode = isLocalDraftThread
+    ? firstLaunchScope === "coding"
+      ? "worktree"
+      : "local"
+    : resolveSendEnvMode({ requestedEnvMode: envMode, isGitRepo });
   const localCheckoutBranchMismatch = useMemo(
     () =>
       isServerThread
@@ -7724,7 +7732,10 @@ export default function ChatView(props: ChatViewProps) {
     const shouldCreateWorktree =
       isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
     if (shouldCreateWorktree && !activeThreadBranch) {
-      setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
+      setThreadError(
+        threadIdForSend,
+        "Coding needs a Git repository and a committed base branch. Select a repository project or choose Coordinator for noncoding work.",
+      );
       return;
     }
 
@@ -8066,6 +8077,7 @@ export default function ChatView(props: ChatViewProps) {
                   bootstrap: {
                     createThread: {
                       projectId: activeProject.id,
+                      executionScope: "coding",
                       title,
                       modelSelection: target.selection,
                       runtimeMode,
@@ -8403,6 +8415,7 @@ export default function ChatView(props: ChatViewProps) {
                 ? {
                     createThread: {
                       projectId: activeProject.id,
+                      executionScope: firstLaunchScope,
                       title,
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
@@ -10240,12 +10253,52 @@ export default function ChatView(props: ChatViewProps) {
                         >
                           {mountComposerContextStrip && (
                             <div className="pointer-events-auto">
+                              {isLocalDraftThread && (
+                                <Select
+                                  value={firstLaunchScope}
+                                  onValueChange={(scope) => {
+                                    if (scope !== "coding" && scope !== "coordinator") return;
+                                    setDraftThreadContext(composerDraftTarget, {
+                                      executionScope: scope,
+                                      envMode: scope === "coding" ? "worktree" : "local",
+                                    });
+                                    if (scope !== "coding") setMultipleModelSelections(null);
+                                  }}
+                                >
+                                  <SelectTrigger
+                                    variant="ghost"
+                                    size="compact"
+                                    aria-label="First launch execution scope"
+                                  >
+                                    <SelectValue>
+                                      {(scope: string) =>
+                                        scope === "coding"
+                                          ? "Coding · isolated worktree"
+                                          : "Coordinator"
+                                      }
+                                    </SelectValue>
+                                  </SelectTrigger>
+                                  <SelectPopup align="start" alignItemWithTrigger={false}>
+                                    <SelectItem value="coding">
+                                      Coding · isolated worktree
+                                    </SelectItem>
+                                    <SelectItem value="coordinator">Coordinator</SelectItem>
+                                  </SelectPopup>
+                                </Select>
+                              )}
                               <BranchToolbar
-                                forceNewWorktree={multipleModelSelections !== null}
+                                forceNewWorktree={
+                                  multipleModelSelections !== null ||
+                                  (isLocalDraftThread && firstLaunchScope === "coding")
+                                }
+                                draftScopeLocked={isLocalDraftThread}
                                 ref={branchToolbarRef}
                                 environmentId={activeThread.environmentId}
                                 threadId={activeThread.id}
-                                showGitControls={isGitRepo}
+                                showGitControls={
+                                  isGitRepo &&
+                                  (!isLocalDraftThread || firstLaunchScope === "coding")
+                                }
                                 {...(routeKind === "draft" && draftId ? { draftId } : {})}
                                 onEnvModeChange={onEnvModeChange}
                                 startFromOrigin={startFromOrigin}

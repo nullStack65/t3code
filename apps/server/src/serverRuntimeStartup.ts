@@ -1,14 +1,10 @@
 import {
   CommandId,
   EventId,
-  DEFAULT_MODEL,
-  DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_SERVER_SETTINGS,
   type ServerSettings as ServerSettingsValue,
-  type ModelSelection,
   type OrchestrationProjectShell,
   ProjectId,
-  ProviderInstanceId,
   ThreadId,
   TurnId,
   WORKTREE_SETUP_ACTIVITY_KIND,
@@ -177,11 +173,6 @@ const recordStartupHeartbeat = Effect.gen(function* () {
   });
 });
 
-const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
-  instanceId: ProviderInstanceId.make("codex"),
-  model: DEFAULT_MODEL,
-});
-
 export const resolveWelcomeBase = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const segments = serverConfig.cwd.split(/[/\\]/).filter(Boolean);
@@ -207,21 +198,16 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
   let bootstrapThreadCreated = false;
 
   if (serverConfig.autoBootstrapProjectFromCwd) {
-    const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
-    const defaultModelSelection =
-      settings.defaultModelSelection ?? getAutoBootstrapThreadModelSelection();
     yield* Effect.gen(function* () {
       const existingProject = yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
         serverConfig.cwd,
       );
       let nextProjectId: ProjectId;
-      let nextThreadModelSelection: ModelSelection;
 
       if (Option.isNone(existingProject)) {
         const createdAt = DateTime.formatIso(yield* DateTime.now);
         nextProjectId = ProjectId.make(yield* randomUUID);
         const bootstrapProjectTitle = path.basename(serverConfig.cwd) || "project";
-        nextThreadModelSelection = defaultModelSelection;
         yield* orchestrationEngine.dispatch({
           type: "project.create",
           commandId: CommandId.make(yield* randomUUID),
@@ -235,34 +221,18 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
       } else {
         nextProjectId = existingProject.value.id;
         bootstrapProjectId = nextProjectId;
-        nextThreadModelSelection =
-          resolveProjectSettings(settings, nextProjectId, existingProject.value).settings
-            .defaultModelSelection ?? defaultModelSelection;
       }
 
       yield* Effect.gen(function* () {
         const existingThreadId =
           yield* projectionReadModelQuery.getFirstActiveThreadIdByProjectId(nextProjectId);
         if (Option.isNone(existingThreadId)) {
-          const createdAt = DateTime.formatIso(yield* DateTime.now);
-          const createdThreadId = ThreadId.make(yield* randomUUID);
-          yield* orchestrationEngine.dispatch({
-            type: "thread.create",
-            commandId: CommandId.make(yield* randomUUID),
-            threadId: createdThreadId,
-            projectId: nextProjectId,
-            title: "New thread",
-            modelSelection: nextThreadModelSelection,
-            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            runtimeMode: resolveProjectSettings(settings, nextProjectId).settings
-              .defaultRuntimeMode,
-            branch: null,
-            worktreePath: null,
-            createdAt,
-          });
-          bootstrapThreadId = createdThreadId;
-          bootstrapThreadCreated = true;
-        } else {
+          // Leave the first thread as a local draft. The client knows whether
+          // Coding can allocate a destination worktree and can select the
+          // explicit Coordinator exception for a non-Git destination.
+          return;
+        }
+        if (Option.isSome(existingThreadId)) {
           bootstrapThreadId = existingThreadId.value;
         }
       }).pipe(

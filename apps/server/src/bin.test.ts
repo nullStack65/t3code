@@ -9,6 +9,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  EnvironmentId,
   EnvironmentOrchestrationHttpApi,
   ProviderInstanceId,
   ThreadId,
@@ -55,6 +56,10 @@ import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 import packageJson from "../package.json" with { type: "json" };
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const serverEnvironmentIdentityTestLayer = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  { getEnvironmentId: Effect.succeed(EnvironmentId.make("bin-test")) },
+);
 const DisconnectedLauncherChildLayer = Layer.mergeAll(
   Layer.succeed(HostProcessEnvironment, {
     ...process.env,
@@ -129,6 +134,7 @@ const makeProjectPersistenceLayer = (config: ServerConfig.ServerConfig["Service"
   Layer.mergeAll(
     OrchestrationLayerLive.pipe(
       Layer.provideMerge(RepositoryIdentityResolver.layer),
+      Layer.provide(serverEnvironmentIdentityTestLayer),
       Layer.provideMerge(SqlitePersistenceLayerLive),
     ),
     WorkspacePaths.layer,
@@ -164,6 +170,7 @@ const makeProjectLookupFixture = Effect.fn("makeProjectLookupFixture")(function*
     const config = yield* makeCliTestServerConfig(baseDir);
     yield* Effect.gen(function* () {
       const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      // The CLI removal fixture needs an existing aggregate, not a launched coding thread.
       yield* engine.dispatch({
         type: "thread.create",
         commandId: CommandId.make("cmd-project-lookup-thread"),
@@ -175,6 +182,7 @@ const makeProjectLookupFixture = Effect.fn("makeProjectLookupFixture")(function*
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        historyImport: true,
         createdAt: DateTime.formatIso(yield* DateTime.now),
       });
     }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
@@ -397,6 +405,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
         }),
       ),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(serverEnvironmentIdentityTestLayer),
       Layer.provide(ServerConfig.layer(config)),
     );
 
@@ -783,6 +792,8 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          // The removal command only needs a historical child thread in this fixture.
+          historyImport: true,
           createdAt: DateTime.formatIso(yield* DateTime.now),
         });
       }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
