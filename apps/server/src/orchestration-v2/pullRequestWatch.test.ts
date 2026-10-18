@@ -65,6 +65,137 @@ const remark = (
 
 const noRemarks: ReadonlyArray<PullRequestComment> = [];
 
+describe("terminal completion news", () => {
+  const job = (
+    id: string,
+    status: PullRequestCheck["status"] = "success",
+    attempt: string | null = "1",
+  ): PullRequestCheck => ({
+    ...check("build", status),
+    identity: { id, ...(attempt === null ? {} : { attempt }) },
+  });
+  const snapshot = (...jobs: ReadonlyArray<PullRequestCheck>): Detail =>
+    detail({
+      checks: [
+        { ...check("required", "success"), required: true },
+        ...jobs,
+        check("advisory", "pending"),
+      ],
+    });
+  const baseline = () =>
+    evaluatePullRequestWatch(watch(), snapshot(job("run-1", "pending")), noRemarks).next;
+  const completed = (report: ReturnType<typeof evaluatePullRequestWatch>) =>
+    report.changes.filter((change) => change.kind === "checks-completed");
+
+  it.each(["run-1", "run-2"])("reports late success with optional work pending: %s", (id) => {
+    const result = evaluatePullRequestWatch(baseline(), snapshot(job(id)), noRemarks);
+    assert.deepEqual(result.changes, [{ kind: "checks-completed", completed: [job(id)] }]);
+    assert.deepEqual(
+      evaluatePullRequestWatch(result.next, snapshot(job(id)), noRemarks).changes,
+      [],
+    );
+    const message = pullRequestWatchMessage({
+      number: 12,
+      url: "https://github.com/o/r/pull/12",
+      baseBranch: "main",
+      headSha: result.next.headSha,
+      report: result,
+    });
+    assert.include(message.text, "build (success)");
+    assert.notInclude(message.text, "All ");
+    assert.equal(message.notification.outcome, "updated");
+  });
+
+  it("coalesces native results, retains run/attempt/status history across persistence and reconnect", () => {
+    const both = snapshot(job("run-1"), { ...job("other"), name: "test" });
+    const first = evaluatePullRequestWatch(baseline(), both, noRemarks);
+    assert.equal(completed(first).length, 1);
+    assert.equal(completed(first)[0]?.completed.length, 2);
+    const saved = decodeWatch(JSON.parse(JSON.stringify(first.next)));
+    assert.deepEqual(saved, first.next);
+    const empty = evaluatePullRequestWatch(saved, detail({ checks: [] }), null);
+    assert.deepEqual(empty.next.terminalCheckRuns, saved.terminalCheckRuns);
+    assert.deepEqual(evaluatePullRequestWatch(empty.next, both, noRemarks).changes, []);
+    const retry = evaluatePullRequestWatch(
+      saved,
+      snapshot(job("run-1", "success", "2")),
+      noRemarks,
+    );
+    assert.equal(completed(retry).length, 1);
+    assert.deepEqual(evaluatePullRequestWatch(retry.next, both, noRemarks).changes, []);
+    const renamed = snapshot({ ...job("run-1", "success", "2"), name: "renamed" });
+    assert.deepEqual(evaluatePullRequestWatch(retry.next, renamed, noRemarks).changes, []);
+  });
+
+  it("keeps failure/cancelled identity semantics and reports recovery as completion news once", () => {
+    let state = baseline();
+    for (const status of ["failure", "cancelled", "action-required"] as const) {
+      const result = evaluatePullRequestWatch(state, snapshot(job("run-1", status)), noRemarks);
+      assert.equal(result.changes.length, status === "failure" ? 1 : 0);
+      assert.equal(completed(result).length, 0);
+      state = result.next;
+    }
+    const recovery = evaluatePullRequestWatch(state, snapshot(job("run-1")), noRemarks);
+    assert.equal(completed(recovery).length, 1);
+    const pending = evaluatePullRequestWatch(
+      recovery.next,
+      snapshot(job("run-1", "pending")),
+      noRemarks,
+    );
+    assert.deepEqual(
+      evaluatePullRequestWatch(pending.next, snapshot(job("run-1")), noRemarks).changes,
+      [],
+    );
+  });
+
+  it("baselines initial/legacy terminals after an empty fetch and resets for a different head/watch", () => {
+    const legacy = watch({ headSha: "aaaaaaaaaa", passed: true, passedChecks: ["required"] });
+    const empty = evaluatePullRequestWatch(legacy, detail({ checks: [] }), null);
+    assert.isUndefined(empty.next.terminalCheckRuns);
+    const current = snapshot(job("run-1"));
+    const hydrated = evaluatePullRequestWatch(empty.next, current, noRemarks);
+    assert.deepEqual(hydrated.changes, []);
+    assert.isDefined(hydrated.next.terminalCheckRuns);
+    assert.equal(completed(evaluatePullRequestWatch(watch(), current, noRemarks)).length, 0);
+    assert.equal(
+      completed(
+        evaluatePullRequestWatch(hydrated.next, { ...current, headSha: "new-head" }, noRemarks),
+      ).length,
+      0,
+    );
+    assert.equal(
+      completed(evaluatePullRequestWatch(hydrated.next, snapshot(job("run-2")), noRemarks)).length,
+      1,
+    );
+  });
+
+  it("baselines incomplete identities without fabricating runs or replaying learned attempt tokens", () => {
+    const unknown = { ...check("build", "success"), url: "https://ci.example/not-an-id" };
+    const first = evaluatePullRequestWatch(baseline(), snapshot(unknown), noRemarks);
+    assert.deepEqual(first.changes, []);
+    const learned = evaluatePullRequestWatch(
+      first.next,
+      snapshot(job("run-1", "success", null)),
+      noRemarks,
+    );
+    assert.deepEqual(learned.changes, []);
+    const attempt = evaluatePullRequestWatch(learned.next, snapshot(job("run-1")), noRemarks);
+    assert.deepEqual(attempt.changes, []);
+    const lost = evaluatePullRequestWatch(
+      attempt.next,
+      snapshot(job("run-1", "success", null)),
+      noRemarks,
+    );
+    assert.deepEqual(lost.changes, []);
+    assert.equal(
+      completed(
+        evaluatePullRequestWatch(lost.next, snapshot(job("run-1", "success", "2")), noRemarks),
+      ).length,
+      1,
+    );
+  });
+});
+
 describe("evaluatePullRequestWatch", () => {
   const run = (id: string, attempt = "1"): PullRequestCheck => ({
     ...check("Dev CI", "failure"),
