@@ -1158,6 +1158,10 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   ]),
   createdAt: Schema.DateTimeUtc,
   resolvedAt: Schema.NullOr(Schema.DateTimeUtc),
+  /** Server control that recorded this terminal snapshot, not adapter acknowledgement or responder identity. */
+  terminalCause: Schema.optional(
+    Schema.Literals(["response_recorded", "input_dismissed", "thread_settled"]),
+  ),
   decision: Schema.optional(ProviderApprovalDecision),
   answers: Schema.optional(ProviderUserInputAnswers),
 });

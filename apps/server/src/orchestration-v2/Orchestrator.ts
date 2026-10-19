@@ -42,6 +42,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
+  type OrchestrationV2RuntimeRequest,
   type OrchestrationV2WorkAffiliation,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
@@ -2699,6 +2700,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
           events,
           effects,
+          "thread_settled",
         );
       }
       for (const run of automaticQueuedRuns) {
@@ -7449,6 +7451,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "runtime-request.respond" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    terminalCause: NonNullable<
+      OrchestrationV2RuntimeRequest["terminalCause"]
+    > = "response_recorded",
   ) =>
     Effect.gen(function* () {
       const context = yield* projectionStore
@@ -7496,6 +7501,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...runtimeRequest,
         status: "resolved" as const,
         resolvedAt: now,
+        terminalCause,
         ...(command.decision === undefined ? {} : { decision: command.decision }),
         ...(command.answers === undefined ? {} : { answers: command.answers }),
       };
@@ -7709,6 +7715,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
         events,
         effects,
+        "input_dismissed",
       );
     });
 

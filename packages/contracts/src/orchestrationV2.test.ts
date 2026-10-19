@@ -18,6 +18,7 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
@@ -33,6 +34,8 @@ import {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2RuntimeRequest,
+  OrchestrationV2RuntimeRequestJson,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2SubscribeThreadInput,
   OrchestrationV2Subagent,
@@ -1567,4 +1570,39 @@ describe("latestProviderTurnForAttempt", () => {
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
   });
+});
+
+it("roundtrips bounded request terminal provenance while legacy payloads remain unknown", () => {
+  const request = {
+    id: RuntimeRequestId.make("request:terminal-cause"),
+    nodeId: NodeId.make("node:terminal-cause"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "user_input" as const,
+    status: "resolved" as const,
+    responseCapability: { type: "message" as const },
+    createdAt: now,
+    resolvedAt: now,
+  };
+  const encode = Schema.encodeSync(OrchestrationV2RuntimeRequestJson);
+  const decode = Schema.decodeUnknownSync(OrchestrationV2RuntimeRequestJson);
+  expect(decode(encode(request))).not.toHaveProperty("terminalCause");
+  const { terminalCause: _newField, ...legacyFields } = OrchestrationV2RuntimeRequest.fields;
+  const decodeLegacy = Schema.decodeUnknownSync(Schema.Struct(legacyFields));
+  for (const terminalCause of ["response_recorded", "input_dismissed", "thread_settled"] as const) {
+    const annotated = { ...request, terminalCause };
+    expect(decode(encode(annotated))).toEqual(annotated);
+    expect(decodeLegacy(annotated)).toEqual(request);
+  }
+  for (const terminalCause of [null, "human_answered", "PRIVATE_BODY", {}, true]) {
+    expect(() => decode({ ...encode(request), terminalCause })).toThrow();
+  }
+  const command = decodeOrchestrationV2Command({
+    type: "runtime-request.respond",
+    commandId: CommandId.make("command:terminal-cause"),
+    threadId: ThreadId.make("thread:terminal-cause"),
+    requestId: request.id,
+    terminalCause: "thread_settled",
+  });
+  expect(command).not.toHaveProperty("terminalCause");
 });
