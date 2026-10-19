@@ -1494,6 +1494,17 @@ const OrchestrationV2SecretRequestFields = {
   secretStatus: OrchestrationV2SecretRequestStatus,
 } as const;
 
+// Native command lifecycle endpoints are separate from UI/receipt timestamps.
+// A missing endpoint is unknown; even a reversed pair is retained as evidence.
+const NativeCommandLifecycleTimestamp = Schema.Int.check(
+  Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }),
+);
+const NativeCommandLifecycle = Schema.Struct({
+  source: Schema.Literal("codex_item_lifecycle"),
+  startedAtMs: Schema.optional(NativeCommandLifecycleTimestamp),
+  completedAtMs: Schema.optional(NativeCommandLifecycleTimestamp),
+});
+
 export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1562,6 +1573,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("command_execution"),
+    nativeLifecycle: Schema.optional(NativeCommandLifecycle),
     input: Schema.String,
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
@@ -2346,6 +2358,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("command_execution"),
+    nativeLifecycle: Schema.optional(NativeCommandLifecycle),
     input: Schema.String,
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */

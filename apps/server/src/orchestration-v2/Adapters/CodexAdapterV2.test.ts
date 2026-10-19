@@ -3408,6 +3408,143 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect(
+    "preserves native command endpoints independently of receipt time and late starts",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = "native-command-lifecycle";
+          const nativeThreadId = `native-${scenario}-thread`;
+          const nativeTurnId = `native-${scenario}-turn`;
+          const lifecycle: CodexReplay.CodexAppServerReplayEntry[] = [];
+          const emit = (id: string, phase: "started" | "completed", timestamp: number) => {
+            lifecycle.push({
+              type: "emit_inbound",
+              label: `${phase}-${id}-${lifecycle.length}`,
+              frame: {
+                method: `item/${phase}`,
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  ...(phase === "started"
+                    ? { startedAtMs: timestamp }
+                    : { completedAtMs: timestamp }),
+                  item: {
+                    type: "commandExecution",
+                    id,
+                    command: "pwd",
+                    cwd: "/workspace",
+                    processId: "42",
+                    source: "unifiedExecStartup",
+                    status: phase === "started" ? "inProgress" : "completed",
+                    commandActions: [{ type: "unknown", command: "pwd" }],
+                    aggregatedOutput: null,
+                    exitCode: phase === "started" ? null : 0,
+                    durationMs: null,
+                  },
+                },
+              },
+            });
+          };
+          emit("revised", "started", 0);
+          emit("revised", "started", 2);
+          emit("revised", "started", 8640000000000001); // invalid revision cannot erase valid evidence
+          emit("revised", "completed", 10);
+          emit("revised", "completed", 10);
+          emit("revised", "completed", 12);
+          emit("revised", "completed", 8640000000000001);
+          emit("revised", "started", 3); // cannot regress terminal state
+          emit("end-only", "completed", 20);
+          emit("end-only", "started", 5);
+          emit("invalid", "started", 8640000000000001);
+          emit("invalid", "completed", 8640000000000001);
+          emit("fractional", "started", 1.5); // protocol rejects this notification
+          emit("fractional", "completed", 30);
+          emit("reversed", "started", 50);
+          emit("reversed", "completed", 40);
+          for (const id of ["equal-a", "equal-b"]) {
+            emit(id, "started", 0);
+            emit(id, "completed", 0);
+          }
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario,
+              entries: [
+                ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Commands." }),
+                ...lifecycle,
+                {
+                  type: "emit_inbound",
+                  label: "turn/completed",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                    },
+                  },
+                },
+              ],
+            }),
+          );
+          const input = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("native-command-lifecycle"),
+            text: "Commands.",
+          });
+          yield* harness.runtime.startTurn(input);
+          yield* harness.firstTerminal;
+          const items = harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "command_execution"
+              ? [event.turnItem]
+              : [],
+          );
+          const snapshots = (id: string) =>
+            items.filter((item) => item.nativeItemRef?.nativeId === id);
+          const latest = (id: string) => snapshots(id).at(-1)!;
+          assert.deepEqual(latest("revised").nativeLifecycle, {
+            source: "codex_item_lifecycle",
+            startedAtMs: 2,
+            completedAtMs: 12,
+          });
+          assert.equal(latest("revised").startedAt?.epochMilliseconds, 0);
+          assert.notEqual(latest("revised").completedAt?.epochMilliseconds, 12);
+          assert.equal(new Set(snapshots("revised").map((item) => item.ordinal)).size, 1);
+          assert.equal(latest("revised").status, "completed");
+          assert.deepEqual(latest("end-only").nativeLifecycle, {
+            source: "codex_item_lifecycle",
+            completedAtMs: 20,
+          });
+          assert.lengthOf(snapshots("end-only"), 1);
+          assert.notProperty(latest("invalid"), "nativeLifecycle");
+          assert.deepEqual(latest("fractional").nativeLifecycle, {
+            source: "codex_item_lifecycle",
+            completedAtMs: 30,
+          });
+          assert.deepEqual(latest("reversed").nativeLifecycle, {
+            source: "codex_item_lifecycle",
+            startedAtMs: 50,
+            completedAtMs: 40,
+          });
+          for (const id of ["equal-a", "equal-b"]) {
+            assert.deepEqual(latest(id).nativeLifecycle, {
+              source: "codex_item_lifecycle",
+              startedAtMs: 0,
+              completedAtMs: 0,
+            });
+            assert.equal(latest(id).runId, input.runId);
+            assert.isNotNull(latest(id).providerTurnId);
+          }
+          assert.notEqual(latest("equal-a").id, latest("equal-b").id);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect("stamps Codex items with their own start time, not the turn's", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -4465,6 +4602,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             () => lateCommandUpdateIndex() > terminalIndex,
             "post-settle command projection",
           );
+          const captured = harness.events[lateCommandUpdateIndex()];
+          assert.equal(captured?.type, "turn_item.updated");
+          if (
+            captured?.type === "turn_item.updated" &&
+            captured.turnItem.type === "command_execution"
+          ) {
+            assert.equal(captured.turnItem.nativeLifecycle?.completedAtMs, 1782622465500);
+            assert.isDefined(captured.turnItem.nativeLifecycle?.startedAtMs);
+            assert.equal(captured.turnItem.runId, RunId.make("run-attempt-codex-bg-wake"));
+            assert.equal(
+              captured.turnItem.providerTurnId,
+              harness.terminalEvents()[0]?.providerTurnId,
+            );
+          }
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
         }).pipe(
@@ -4716,6 +4867,14 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* worker.drain();
           const projection = yield* orchestrator.getThreadProjection(threadId);
           const run = projection.runs.at(-1)!;
+          const capturedCommand = projection.turnItems.find(
+            (item) => item.type === "command_execution",
+          );
+          assert.equal(capturedCommand?.type, "command_execution");
+          if (capturedCommand?.type === "command_execution") {
+            assert.isDefined(capturedCommand.nativeLifecycle?.startedAtMs);
+            assert.notProperty(capturedCommand.nativeLifecycle!, "completedAtMs");
+          }
           assert.equal(run.status, "completed");
           assert.equal(
             (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks?.length,
@@ -5283,6 +5442,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.isAtLeast(commandUpdates.length, 2, "start + interrupt terminalization");
         assert.equal(commandUpdates[commandUpdates.length - 1]?.turnItem.status, "interrupted");
+        const interrupted = commandUpdates.at(-1)?.turnItem;
+        assert.equal(interrupted?.type, "command_execution");
+        if (interrupted?.type === "command_execution") {
+          assert.isDefined(interrupted.nativeLifecycle?.startedAtMs);
+          assert.notProperty(interrupted.nativeLifecycle!, "completedAtMs");
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -6695,6 +6860,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             event.turnItem.status === "failed",
         );
         assert.isAtLeast(failedCommandIndex, 0);
+        const failed = harness.events[failedCommandIndex];
+        if (failed?.type === "turn_item.updated" && failed.turnItem.type === "command_execution") {
+          assert.isDefined(failed.turnItem.nativeLifecycle?.startedAtMs);
+          assert.notProperty(failed.turnItem.nativeLifecycle!, "completedAtMs");
+        }
         assert.isAbove(
           terminalIndex,
           failedCommandIndex,
