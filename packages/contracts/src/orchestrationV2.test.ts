@@ -178,6 +178,51 @@ describe("orchestration V2 contracts", () => {
     }
   });
 
+  it("roundtrips native command endpoints without inventing old or missing measurements", () => {
+    const base = {
+      id: "native-command",
+      type: "command_execution",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      input: "example",
+      startedAt: null,
+      completedAt: null,
+      updatedAt: now,
+    };
+    expect(decodeOrchestrationV2TurnItem(base)).not.toHaveProperty("nativeLifecycle");
+    for (const nativeLifecycle of [
+      { source: "codex_item_lifecycle", startedAtMs: 0, completedAtMs: 0 },
+      { source: "codex_item_lifecycle", completedAtMs: 10 },
+      { source: "codex_item_lifecycle", startedAtMs: 20, completedAtMs: 10 },
+      {
+        source: "codex_item_lifecycle",
+        startedAtMs: -8640000000000000,
+        completedAtMs: 8640000000000000,
+      },
+    ]) {
+      const runtime = decodeOrchestrationV2TurnItem({ ...base, nativeLifecycle });
+      expect(decodeOrchestrationV2TurnItemJson(encodeOrchestrationV2TurnItemJson(runtime))).toEqual(
+        runtime,
+      );
+      expect(runtime).toMatchObject({ nativeLifecycle });
+    }
+    for (const nativeLifecycle of [
+      { source: "inference", startedAtMs: 0 },
+      ...[null, Infinity, NaN, 1.5, 8640000000000001, -8640000000000001, "1"].map(
+        (startedAtMs) => ({ source: "codex_item_lifecycle", startedAtMs }),
+      ),
+    ])
+      expect(() => decodeOrchestrationV2TurnItem({ ...base, nativeLifecycle })).toThrow();
+  });
+
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),

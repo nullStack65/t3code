@@ -351,6 +351,91 @@ it.effect("keeps other database work runnable while discovering compaction candi
 );
 
 it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
+  it.effect(
+    "retains native command evidence through corrected snapshots and projection rebuild",
+    () =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* EventStore.EventStoreV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const now = yield* DateTime.now;
+        const thread = makeThread(ThreadId.make("thread:native-command-evidence"), now);
+        const item: OrchestrationV2TurnItem = {
+          id: TurnItemId.make("native-command-evidence"),
+          type: "command_execution",
+          threadId: thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "running",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          input: "example",
+          nativeLifecycle: { source: "codex_item_lifecycle", startedAtMs: 0 },
+        };
+        yield* sink.write({
+          events: [
+            threadCreatedEvent({ id: "native-command-thread", thread, now }),
+            {
+              id: EventId.make("native-command-start"),
+              type: "turn-item.updated",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: item,
+            },
+          ],
+        });
+        for (const end of [10, 12]) {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`native-command-end-${end}`),
+                type: "turn-item.updated",
+                threadId: thread.id,
+                occurredAt: now,
+                payload: {
+                  ...item,
+                  status: "completed",
+                  completedAt: now,
+                  nativeLifecycle: { ...item.nativeLifecycle!, completedAtMs: end },
+                },
+              },
+            ],
+          });
+        }
+        const assertLatest = Effect.gen(function* () {
+          const latest = (yield* projections.getThreadProjection(thread.id)).turnItems[0]!;
+          assert.equal(latest.type, "command_execution");
+          if (latest.type !== "command_execution") return;
+          assert.deepEqual(latest.nativeLifecycle, {
+            source: "codex_item_lifecycle",
+            startedAtMs: 0,
+            completedAtMs: 12,
+          });
+          assert.equal(latest.completedAt?.epochMilliseconds, now.epochMilliseconds);
+        });
+        yield* assertLatest;
+        const history = yield* store.read({ threadId: thread.id }).pipe(Stream.runCollect);
+        assert.deepEqual(
+          history.flatMap(({ event }) =>
+            event.type === "turn-item.updated" && event.payload.type === "command_execution"
+              ? [event.payload.nativeLifecycle?.completedAtMs ?? null]
+              : [],
+          ),
+          [null, 10, 12],
+        );
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        yield* assertLatest;
+      }),
+  );
+
   it.effect("projects oversized tool bodies before both replay and live RPC retention", () =>
     Effect.scoped(
       Effect.gen(function* () {
