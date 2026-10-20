@@ -628,8 +628,38 @@ export function orchestrationV2RunWorkStartedAt(
   return run.workStartedAt ?? run.startedAt ?? run.requestedAt;
 }
 
+// Sampled around the typed Codex client call, not wire send or model execution.
+// Absence after a crash is unknown; this is recorded only after local call exit.
+export const OrchestrationV2CodexTurnStartCall = Schema.Struct({
+  source: Schema.Literal("codex_turn_start_client_call"),
+  localOperationId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  nativeThreadId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  providerSessionId: ProviderSessionId,
+  userMessageId: MessageId,
+  requestedModel: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  invokedAtMs: Schema.Int.check(
+    Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }),
+  ),
+  exitedAtMs: Schema.Int.check(
+    Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }),
+  ),
+  exitKind: Schema.Literals(["decoded_response", "request_error", "local_interruption"]),
+  nativeTurnId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1024))),
+});
+export type OrchestrationV2CodexTurnStartCall = typeof OrchestrationV2CodexTurnStartCall.Type;
+
+const OrchestrationV2RunAttemptClientCallObserved = Schema.Struct({
+  attemptId: RunAttemptId,
+  runId: RunId,
+  rootNodeId: NodeId,
+  providerThreadId: ProviderThreadId,
+  providerInstanceId: ProviderInstanceId,
+  observation: OrchestrationV2CodexTurnStartCall,
+});
+
 export const OrchestrationV2RunAttempt = Schema.Struct({
   id: RunAttemptId,
+  codexTurnStartCall: Schema.optional(OrchestrationV2CodexTurnStartCall),
   // Provider-thread rows can be reused after recovery; retain the native input destination.
   nativeThreadId: Schema.optional(Schema.String),
   runId: RunId,
@@ -1833,6 +1863,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("run-attempt.client-call-observed"),
+    payload: OrchestrationV2RunAttemptClientCallObserved,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("run-attempt.created"),
     payload: OrchestrationV2RunAttempt,
   }),
@@ -2656,6 +2691,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("run-attempt.client-call-observed"),
+    payload: OrchestrationV2RunAttemptClientCallObserved,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,

@@ -248,9 +248,34 @@ export function applyOrchestrationV2ProjectionEvent(
             : run,
         ),
       };
+    case "run-attempt.client-call-observed":
+      return {
+        ...base,
+        attempts: base.attempts.map((attempt) =>
+          attempt.id === event.payload.attemptId &&
+          attempt.runId === event.payload.runId &&
+          attempt.rootNodeId === event.payload.rootNodeId &&
+          attempt.providerThreadId === event.payload.providerThreadId &&
+          attempt.providerInstanceId === event.payload.providerInstanceId
+            ? {
+                ...attempt,
+                codexTurnStartCall: { ...attempt.codexTurnStartCall, ...event.payload.observation },
+              }
+            : attempt,
+        ),
+      };
     case "run-attempt.created":
     case "run-attempt.updated": {
-      const next = { ...base, attempts: upsertEntity(base.attempts, event.payload) };
+      const recorded = base.attempts.find(
+        (attempt) => attempt.id === event.payload.id,
+      )?.codexTurnStartCall;
+      const next = {
+        ...base,
+        attempts: upsertEntity(base.attempts, {
+          ...event.payload,
+          ...(recorded === undefined ? {} : { codexTurnStartCall: recorded }),
+        }),
+      };
       return { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
     }
     case "node.updated":
