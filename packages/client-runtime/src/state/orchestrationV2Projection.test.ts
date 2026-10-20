@@ -8,6 +8,9 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
+  RunAttemptId,
+  type OrchestrationV2RunAttempt,
   NodeId,
   ProviderThreadId,
   ProviderTurnId,
@@ -106,6 +109,72 @@ const emptyProjection = {
 } as OrchestrationV2ThreadProjection;
 
 describe("applyOrchestrationV2ProjectionEvent", () => {
+  it("keeps client-call patches on their historical attempt across stale snapshots", () => {
+    const attempt: OrchestrationV2RunAttempt = {
+      id: RunAttemptId.make("call-attempt"),
+      runId,
+      attemptOrdinal: 1,
+      rootNodeId: NodeId.make("call-root"),
+      providerInstanceId: run.providerInstanceId,
+      providerThreadId: ProviderThreadId.make("call-provider"),
+      providerTurnId: null,
+      reason: "initial",
+      status: "completed",
+      startedAt: now,
+      completedAt: now,
+    };
+    const observation = {
+      source: "codex_turn_start_client_call" as const,
+      localOperationId: `${attempt.id}:codex-turn-start`,
+      nativeThreadId: "native-call",
+      providerSessionId: ProviderSessionId.make("call-session"),
+      userMessageId: run.userMessageId,
+      invokedAtMs: 0,
+      exitedAtMs: 10,
+      exitKind: "decoded_response" as const,
+    };
+    const event: OrchestrationV2DomainEvent = {
+      id: "call-patch" as OrchestrationV2DomainEvent["id"],
+      type: "run-attempt.client-call-observed",
+      threadId,
+      occurredAt: now,
+      payload: {
+        attemptId: attempt.id,
+        runId,
+        rootNodeId: attempt.rootNodeId,
+        providerThreadId: attempt.providerThreadId,
+        providerInstanceId: attempt.providerInstanceId,
+        observation,
+      },
+    };
+    let projection = applyOrchestrationV2ProjectionEvent(
+      { ...emptyProjection, attempts: [attempt] },
+      event,
+    )!;
+    projection = applyOrchestrationV2ProjectionEvent(projection, {
+      ...event,
+      payload: { ...event.payload, observation: { ...observation, exitedAtMs: 12 } },
+    })!;
+    projection = applyOrchestrationV2ProjectionEvent(projection, {
+      ...event,
+      type: "run-attempt.updated",
+      payload: { ...attempt, codexTurnStartCall: observation },
+    })!;
+    expect(projection.attempts[0]?.codexTurnStartCall?.exitedAtMs).toBe(12);
+    expect(projection.attempts[0]?.status).toBe("completed");
+    for (const invalid of [
+      { ...event, threadId: ThreadId.make("foreign") },
+      { ...event, payload: { ...event.payload, rootNodeId: NodeId.make("foreign") } },
+      {
+        ...event,
+        payload: { ...event.payload, providerInstanceId: ProviderInstanceId.make("foreign") },
+      },
+    ])
+      expect(applyOrchestrationV2ProjectionEvent(projection, invalid)?.attempts).toEqual(
+        projection.attempts,
+      );
+  });
+
   it("applies a compact PR sync without replacing other links or thread metadata", () => {
     const link = (number: number): ThreadPullRequestLink => ({
       host: "github.com",

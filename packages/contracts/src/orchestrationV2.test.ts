@@ -18,12 +18,14 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2CodexTurnStartCall,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -33,6 +35,8 @@ import {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2RuntimeRequest,
+  OrchestrationV2RuntimeRequestJson,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2SubscribeThreadInput,
   OrchestrationV2Subagent,
@@ -173,6 +177,51 @@ describe("orchestration V2 contracts", () => {
       expect(runtime).not.toHaveProperty("output");
       expect(json).not.toHaveProperty("output");
     }
+  });
+
+  it("roundtrips native command endpoints without inventing old or missing measurements", () => {
+    const base = {
+      id: "native-command",
+      type: "command_execution",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      input: "example",
+      startedAt: null,
+      completedAt: null,
+      updatedAt: now,
+    };
+    expect(decodeOrchestrationV2TurnItem(base)).not.toHaveProperty("nativeLifecycle");
+    for (const nativeLifecycle of [
+      { source: "codex_item_lifecycle", startedAtMs: 0, completedAtMs: 0 },
+      { source: "codex_item_lifecycle", completedAtMs: 10 },
+      { source: "codex_item_lifecycle", startedAtMs: 20, completedAtMs: 10 },
+      {
+        source: "codex_item_lifecycle",
+        startedAtMs: -8640000000000000,
+        completedAtMs: 8640000000000000,
+      },
+    ]) {
+      const runtime = decodeOrchestrationV2TurnItem({ ...base, nativeLifecycle });
+      expect(decodeOrchestrationV2TurnItemJson(encodeOrchestrationV2TurnItemJson(runtime))).toEqual(
+        runtime,
+      );
+      expect(runtime).toMatchObject({ nativeLifecycle });
+    }
+    for (const nativeLifecycle of [
+      { source: "inference", startedAtMs: 0 },
+      ...[null, Infinity, NaN, 1.5, 8640000000000001, -8640000000000001, "1"].map(
+        (startedAtMs) => ({ source: "codex_item_lifecycle", startedAtMs }),
+      ),
+    ])
+      expect(() => decodeOrchestrationV2TurnItem({ ...base, nativeLifecycle })).toThrow();
   });
 
   it("decodes thread event types from a newer server as skippable items", () => {
@@ -1567,4 +1616,59 @@ describe("latestProviderTurnForAttempt", () => {
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
   });
+});
+
+it("roundtrips bounded request terminal provenance while legacy payloads remain unknown", () => {
+  const request = {
+    id: RuntimeRequestId.make("request:terminal-cause"),
+    nodeId: NodeId.make("node:terminal-cause"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "user_input" as const,
+    status: "resolved" as const,
+    responseCapability: { type: "message" as const },
+    createdAt: now,
+    resolvedAt: now,
+  };
+  const encode = Schema.encodeSync(OrchestrationV2RuntimeRequestJson);
+  const decode = Schema.decodeUnknownSync(OrchestrationV2RuntimeRequestJson);
+  expect(decode(encode(request))).not.toHaveProperty("terminalCause");
+  const { terminalCause: _newField, ...legacyFields } = OrchestrationV2RuntimeRequest.fields;
+  const decodeLegacy = Schema.decodeUnknownSync(Schema.Struct(legacyFields));
+  for (const terminalCause of ["response_recorded", "input_dismissed", "thread_settled"] as const) {
+    const annotated = { ...request, terminalCause };
+    expect(decode(encode(annotated))).toEqual(annotated);
+    expect(decodeLegacy(annotated)).toEqual(request);
+  }
+  for (const terminalCause of [null, "human_answered", "PRIVATE_BODY", {}, true]) {
+    expect(() => decode({ ...encode(request), terminalCause })).toThrow();
+  }
+  const command = decodeOrchestrationV2Command({
+    type: "runtime-request.respond",
+    commandId: CommandId.make("command:terminal-cause"),
+    threadId: ThreadId.make("thread:terminal-cause"),
+    requestId: request.id,
+    terminalCause: "thread_settled",
+  });
+  expect(command).not.toHaveProperty("terminalCause");
+});
+
+it("bounds client-call facts without inventing elapsed from reversed clocks", () => {
+  const call = {
+    source: "codex_turn_start_client_call",
+    localOperationId: "attempt:call",
+    nativeThreadId: "native",
+    providerSessionId: "session",
+    userMessageId: "message",
+    invokedAtMs: 10,
+    exitedAtMs: 0,
+    exitKind: "request_error",
+  };
+  const decode = Schema.decodeUnknownSync(OrchestrationV2CodexTurnStartCall);
+  expect(decode(call).exitedAtMs).toBe(0);
+  expect(decode({ ...call, invokedAtMs: 0 }).invokedAtMs).toBe(0);
+  for (const bad of [true, 1.5, "0", null, 8640000000000001])
+    expect(() => decode({ ...call, invokedAtMs: bad })).toThrow();
+  expect(() => decode({ ...call, nativeThreadId: "x".repeat(1025) })).toThrow();
+  expect(() => decode({ ...call, requestedModel: "x".repeat(257) })).toThrow();
 });
