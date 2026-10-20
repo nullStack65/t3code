@@ -2551,6 +2551,117 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect(
+    "bounds and joins a stalled timing sink without extending measured client elapsed",
+    () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const calls: Array<OrchestrationV2CodexTurnStartCall> = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "client-call-sink-stalled",
+            entries: codexReplayPreamble({
+              nativeThreadId: "bounded-thread",
+              nativeTurnId: "bounded-turn",
+              prompt: "prompt",
+            }),
+          }),
+        );
+        const running = yield* harness.runtime
+          .startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              text: "prompt",
+              attemptId: RunAttemptId.make("attempt:bounded-1"),
+              now: yield* DateTime.now,
+            }),
+            recordCodexTurnStartCall: (call) =>
+              Effect.gen(function* () {
+                calls.push(call);
+                yield* Deferred.succeed(entered, undefined);
+                return yield* Effect.never.pipe(
+                  Effect.ensuring(Deferred.succeed(stopped, undefined)),
+                );
+              }),
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(running);
+        assert.isTrue(yield* Deferred.isDone(stopped));
+        assert.lengthOf(calls, 1);
+        assert.equal(calls[0]!.exitKind, "decoded_response");
+        assert.equal(calls[0]!.exitedAtMs - calls[0]!.invokedAtMs, 0);
+        assert.equal(calls[0]!.nativeTurnId, "bounded-turn");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect("joins stalled telemetry on request interruption and preserves the original exit", () =>
+    Effect.gen(function* () {
+      const requested = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      const stopped = yield* Deferred.make<void>();
+      const calls: Array<OrchestrationV2CodexTurnStartCall> = [];
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "client-call-interrupted-sink-stalled",
+          entries: codexReplayPreamble({
+            nativeThreadId: "interrupted-thread",
+            nativeTurnId: "unused",
+            prompt: "prompt",
+          }),
+        }),
+        undefined,
+        (method) =>
+          method === "turn/start"
+            ? Deferred.succeed(requested, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.void,
+      );
+      const running = yield* harness.runtime
+        .startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            text: "prompt",
+            attemptId: RunAttemptId.make("attempt:bounded-2"),
+            now: yield* DateTime.now,
+          }),
+          recordCodexTurnStartCall: (call) =>
+            Effect.gen(function* () {
+              calls.push(call);
+              yield* Deferred.succeed(entered, undefined);
+              return yield* Effect.never.pipe(
+                Effect.ensuring(Deferred.succeed(stopped, undefined)),
+              );
+            }),
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(requested);
+      const interrupted = yield* Fiber.interrupt(running).pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust("1 second");
+      yield* Fiber.join(interrupted);
+      assert.isTrue(yield* Deferred.isDone(stopped));
+      assert.isTrue((yield* Fiber.await(running))._tag === "Failure");
+      assert.lengthOf(calls, 1);
+      assert.equal(calls[0]!.exitKind, "local_interruption");
+      assert.isUndefined(calls[0]!.nativeTurnId);
+      assert.equal(calls[0]!.exitedAtMs - calls[0]!.invokedAtMs, 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect("waits for native start before interrupting an acknowledged queued turn", () =>
     Effect.gen(function* () {
       const nativeThreadId = "early-stop-thread";
