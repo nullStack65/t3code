@@ -1415,6 +1415,47 @@ export const layer: Layer.Layer<
             text: entry.text,
           }));
           const turnInput = {
+            recordCodexTurnStartCall: (
+              observation: NonNullable<OrchestrationV2RunAttempt["codexTurnStartCall"]>,
+            ) =>
+              Effect.gen(function* () {
+                if (
+                  input.session.driver !== "codex" ||
+                  input.providerThread.driver !== "codex" ||
+                  input.session.instanceId !== input.providerThread.providerInstanceId ||
+                  observation.providerSessionId !== input.providerSessionId ||
+                  observation.userMessageId !== input.message.messageId ||
+                  observation.localOperationId !== `${input.attemptId}:codex-turn-start`
+                )
+                  return;
+                const occurredAt = yield* DateTime.now;
+                yield* eventSink.writeWithEffects({
+                  effects: [],
+                  events: [
+                    {
+                      id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                      type: "run-attempt.client-call-observed",
+                      threadId: input.run.threadId,
+                      runId: input.run.id,
+                      nodeId: input.rootNode.id,
+                      providerInstanceId: input.providerThread.providerInstanceId,
+                      occurredAt,
+                      payload: {
+                        attemptId: input.attemptId,
+                        runId: input.run.id,
+                        rootNodeId: input.rootNode.id,
+                        providerThreadId: input.providerThread.id,
+                        providerInstanceId: input.providerThread.providerInstanceId,
+                        observation,
+                      },
+                    },
+                  ],
+                });
+              }).pipe(
+                Effect.catchCause(() =>
+                  Effect.logWarning("Provider client-call observation could not be persisted."),
+                ),
+              ),
             appThread: input.appThread,
             threadId: input.run.threadId,
             runId: input.run.id,

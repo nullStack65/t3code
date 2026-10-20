@@ -13,6 +13,8 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
+  type OrchestrationV2RunAttempt,
+  type OrchestrationV2CodexTurnStartCall,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   ProjectId,
@@ -351,6 +353,190 @@ it.effect("keeps other database work runnable while discovering compaction candi
 );
 
 it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
+  it.effect(
+    "preserves historical client-call evidence through late response, stale snapshots and rebuild",
+    () =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const now = yield* DateTime.now;
+        const thread = makeThread(ThreadId.make("thread:client-call-evidence"), now);
+        const runId = RunId.make("run:client-call-evidence");
+        const attempt: OrchestrationV2RunAttempt = {
+          id: RunAttemptId.make("attempt:client-call-evidence"),
+          runId,
+          attemptOrdinal: 1,
+          rootNodeId: NodeId.make("root:client-call-evidence"),
+          providerInstanceId,
+          providerThreadId: ProviderThreadId.make("provider:client-call-evidence"),
+          providerTurnId: null,
+          reason: "initial",
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        };
+        const newer = {
+          ...attempt,
+          id: RunAttemptId.make("attempt:client-call-newer"),
+          attemptOrdinal: 2,
+          rootNodeId: NodeId.make("root:client-call-newer"),
+          status: "running" as const,
+          completedAt: null,
+        };
+        const run: OrchestrationV2Run = {
+          id: runId,
+          threadId: thread.id,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: attempt.providerThreadId,
+          userMessageId: MessageId.make("message:client-call"),
+          rootNodeId: newer.rootNodeId,
+          activeAttemptId: newer.id,
+          status: "running",
+          queuePosition: null,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        };
+        yield* sink.write({
+          events: [
+            threadCreatedEvent({ id: "client-call-thread", thread, now }),
+            {
+              id: EventId.make("client-call-run"),
+              type: "run.created",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: run,
+            },
+            ...[attempt, newer].map((payload) => ({
+              id: EventId.make(`client-call-${payload.id}`),
+              type: "run-attempt.created" as const,
+              threadId: thread.id,
+              occurredAt: now,
+              payload,
+            })),
+          ],
+        });
+        let replay = yield* projections.getThreadProjection(thread.id);
+        const call: OrchestrationV2CodexTurnStartCall = {
+          source: "codex_turn_start_client_call",
+          localOperationId: `${attempt.id}:codex-turn-start`,
+          nativeThreadId: "native-client-thread",
+          providerSessionId: ProviderSessionId.make("client-session"),
+          userMessageId: run.userMessageId,
+          requestedModel: "requested-alias",
+          invokedAtMs: 0,
+          exitedAtMs: 10,
+          exitKind: "decoded_response",
+          nativeTurnId: "native-client-turn",
+        };
+        const patch = (id: string, observation = call): OrchestrationV2DomainEvent => ({
+          id: EventId.make(id),
+          type: "run-attempt.client-call-observed",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: {
+            attemptId: attempt.id,
+            runId,
+            rootNodeId: attempt.rootNodeId,
+            providerThreadId: attempt.providerThreadId,
+            providerInstanceId,
+            observation,
+          },
+        });
+        const {
+          nativeTurnId: _nativeTurnId,
+          requestedModel: _requestedModel,
+          ...partialCall
+        } = call;
+        for (const event of [
+          patch("client-call-first"),
+          patch("client-call-duplicate"),
+          patch("client-call-correction", { ...partialCall, exitedAtMs: 12 }),
+          {
+            id: EventId.make("client-call-stale-snapshot"),
+            type: "run-attempt.updated" as const,
+            threadId: thread.id,
+            occurredAt: now,
+            payload: { ...attempt, codexTurnStartCall: call },
+          },
+          {
+            id: EventId.make("client-call-legacy-snapshot"),
+            type: "run-attempt.updated" as const,
+            threadId: thread.id,
+            occurredAt: now,
+            payload: attempt,
+          },
+        ]) {
+          replay = ProjectionStore.applyToProjection(replay, event);
+          yield* sink.write({ events: [event] });
+        }
+        const original = patch("client-call-invalid");
+        if (original.type !== "run-attempt.client-call-observed") return;
+        for (const [n, changes] of [
+          { runId: RunId.make("foreign") },
+          { rootNodeId: NodeId.make("foreign") },
+          { providerThreadId: ProviderThreadId.make("foreign") },
+          { providerInstanceId: ProviderInstanceId.make("foreign") },
+          { attemptId: RunAttemptId.make("missing") },
+        ].entries()) {
+          const event = {
+            ...original,
+            id: EventId.make(`client-call-foreign-${n}`),
+            payload: { ...original.payload, ...changes, observation: { ...call, exitedAtMs: 999 } },
+          };
+          yield* sink.write({ events: [event] });
+          replay = ProjectionStore.applyToProjection(replay, event);
+        }
+        const check = Effect.gen(function* () {
+          const projection = yield* projections.getThreadProjection(thread.id);
+          const old = projection.attempts.find((a) => a.id === attempt.id)!;
+          assert.deepEqual(old.codexTurnStartCall, { ...call, exitedAtMs: 12 });
+          assert.equal(old.status, "completed");
+          assert.equal(old.completedAt?.epochMilliseconds, now.epochMilliseconds);
+          assert.equal(projection.attempts.find((a) => a.id === newer.id)?.status, "running");
+          assert.isUndefined(
+            projection.attempts.find((a) => a.id === newer.id)?.codexTurnStartCall,
+          );
+          assert.equal(projection.runs[0]?.activeAttemptId, newer.id);
+          assert.deepEqual(
+            replay.attempts.find((a) => a.id === attempt.id)?.codexTurnStartCall,
+            old.codexTurnStartCall,
+          );
+        });
+        yield* check;
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        yield* check;
+        // A committed running attempt without the post-call fact cannot prove
+        // whether a client call happened before process loss. Recovery keeps it unknown.
+        const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+          Effect.provide(ServerSettings.layerTest()),
+          Effect.provideService(
+            EffectWorker.OrchestrationEffectWorkerV2,
+            EffectWorker.OrchestrationEffectWorkerV2.of({
+              awaitWork: Effect.void,
+              runRecoveryOnce: Effect.succeed(false),
+              runOnce: Effect.succeed(false),
+              nextClaimableAt: Effect.succeed(Option.none()),
+              drain: () => Effect.succeed(0),
+            }),
+          ),
+        );
+        yield* recovery.recover;
+        const recovered = yield* projections.getThreadProjection(thread.id);
+        assert.equal(recovered.runs[0]?.status, "cancelled");
+        assert.isUndefined(recovered.attempts.find((a) => a.id === newer.id)?.codexTurnStartCall);
+        assert.deepEqual(recovered.attempts.find((a) => a.id === attempt.id)?.codexTurnStartCall, {
+          ...call,
+          exitedAtMs: 12,
+        });
+      }).pipe(Effect.provide(Layer.fresh(layerTest))),
+  );
+
   it.effect(
     "retains native command evidence through corrected snapshots and projection rebuild",
     () =>

@@ -15,6 +15,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2CodexTurnStartCall,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2TurnItem,
@@ -2303,6 +2304,245 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(error._tag, "ProviderAdapterProtocolError");
       const cause = error._tag === "ProviderAdapterProtocolError" ? error.cause : undefined;
       assert.equal((cause as { _tag?: string } | undefined)?._tag, "CodexAppServerRequestError");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("records typed turn-start client elapsed separately from native execution", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const calls: Array<OrchestrationV2CodexTurnStartCall> = [];
+      const transcript = makeCodexReplayTranscript({
+        scenario: "client-call-timing",
+        entries: codexReplayPreamble({
+          nativeThreadId: "client-thread",
+          nativeTurnId: "client-turn",
+          prompt: "PRIVATE-prompt",
+        }),
+      });
+      const harness = yield* makeCodexReplayHarness(transcript, undefined, (method) =>
+        method === "turn/start"
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          : Effect.void,
+      );
+      const input = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        text: "PRIVATE-prompt",
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("attempt:client-call-test"),
+      });
+      const running = yield* harness.runtime
+        .startTurn({
+          ...input,
+          recordCodexTurnStartCall: (call) =>
+            Effect.sync(() => {
+              calls.push(call);
+            }),
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      assert.lengthOf(calls, 0);
+      yield* TestClock.adjust("7 millis");
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(running);
+      assert.lengthOf(calls, 1);
+      const call = calls[0]!;
+      assert.equal(call.exitedAtMs - call.invokedAtMs, 7);
+      assert.equal(call.exitKind, "decoded_response");
+      assert.equal(call.nativeTurnId, "client-turn");
+      assert.equal(call.userMessageId, input.message.messageId);
+      assert.equal(call.localOperationId, `${input.attemptId}:codex-turn-start`);
+      assert.notInclude(JSON.stringify(call), "PRIVATE-prompt");
+      assert.lengthOf(harness.terminalEvents(), 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("records the old client call after native completion precedes response", () =>
+    Effect.gen(function* () {
+      const calls: Array<OrchestrationV2CodexTurnStartCall> = [];
+      const nativeThreadId = "client-complete-first";
+      const nativeTurnId = "client-complete-turn";
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "prompt" });
+      const response = preamble[preamble.length - 2]!;
+      if (response.type !== "emit_inbound") return yield* Effect.die("Expected response fixture.");
+      const started = preamble[preamble.length - 1]!;
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "client-native-completes-first",
+          entries: [
+            ...preamble.slice(0, -2),
+            started,
+            {
+              type: "emit_inbound",
+              label: "completed-before-response",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+            { ...response, afterMs: 1000 },
+          ],
+        }),
+      );
+      const running = yield* harness.runtime
+        .startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt:complete-first"),
+            text: "prompt",
+          }),
+          recordCodexTurnStartCall: (call) =>
+            Effect.sync(() => {
+              calls.push(call);
+            }),
+        })
+        .pipe(Effect.forkScoped);
+      yield* harness.firstTerminal;
+      assert.lengthOf(calls, 0);
+      yield* TestClock.adjust("1 second");
+      yield* Fiber.join(running);
+      assert.lengthOf(calls, 1);
+      assert.equal(calls[0]!.nativeTurnId, nativeTurnId);
+      assert.equal(calls[0]!.exitKind, "decoded_response");
+      assert.equal(calls[0]!.exitedAtMs - calls[0]!.invokedAtMs, 1000);
+      assert.lengthOf(harness.terminalEvents(), 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("records local request error without inventing native acceptance", () =>
+    Effect.gen(function* () {
+      const calls: Array<OrchestrationV2CodexTurnStartCall> = [];
+      const preamble = codexReplayPreamble({
+        nativeThreadId: "client-error",
+        nativeTurnId: "unused",
+        prompt: "prompt",
+      });
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "client-call-error",
+          entries: [
+            ...preamble.slice(0, -2),
+            {
+              type: "emit_inbound",
+              label: "rejected",
+              frame: { id: 3, error: { code: -32600, message: "PRIVATE-error" } },
+            },
+          ],
+        }),
+      );
+      const result = yield* harness.runtime
+        .startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            text: "prompt",
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt:client-call-test"),
+          }),
+          recordCodexTurnStartCall: (call) =>
+            Effect.sync(() => {
+              calls.push(call);
+            }),
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(result._tag === "Failure");
+      assert.lengthOf(calls, 1);
+      assert.equal(calls[0]!.exitKind, "request_error");
+      assert.isUndefined(calls[0]!.nativeTurnId);
+      assert.notInclude(JSON.stringify(calls), "PRIVATE-error");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("records interrupted client wait and isolates timing sink defects", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const calls: Array<OrchestrationV2CodexTurnStartCall> = [];
+      const preamble = codexReplayPreamble({
+        nativeThreadId: "client-interrupt",
+        nativeTurnId: "unused",
+        prompt: "prompt",
+      });
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({ scenario: "client-call-interrupted", entries: preamble }),
+        undefined,
+        (method) =>
+          method === "turn/start"
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.void,
+      );
+      const running = yield* harness.runtime
+        .startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            text: "prompt",
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt:client-call-test"),
+          }),
+          recordCodexTurnStartCall: (call) =>
+            Effect.sync(() => {
+              calls.push(call);
+            }),
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(running);
+      assert.lengthOf(calls, 1);
+      assert.equal(calls[0]!.exitKind, "local_interruption");
+      assert.isUndefined(calls[0]!.nativeTurnId);
+      let starts = 0;
+      const healthy = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "client-call-sink-defect",
+          entries: codexReplayPreamble({
+            nativeThreadId: "client-healthy",
+            nativeTurnId: "client-good",
+            prompt: "prompt",
+          }),
+        }),
+        undefined,
+        (method) =>
+          Effect.sync(() => {
+            if (method === "turn/start") starts += 1;
+          }),
+      );
+      yield* healthy.runtime.startTurn({
+        ...makeCodexTestTurnInput({
+          threadId: healthy.threadId,
+          providerThread: healthy.providerThread,
+          text: "prompt",
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt:client-call-test"),
+        }),
+        recordCodexTurnStartCall: () => Effect.die("PRIVATE-sink-error"),
+      });
+      assert.equal(starts, 1);
     }).pipe(
       Effect.scoped,
       Effect.provide(
