@@ -6505,8 +6505,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                         : {}),
                     }),
                   ).pipe(
-                    // A telemetry write cannot indefinitely hold the governed request lock.
-                    // Join cancellation of the sink rather than leaving a detached writer.
+                    // Request cancellation after one second, then join the sink so no writer
+                    // escapes. Uninterruptible transaction cleanup can extend this grace period.
                     Effect.interruptible,
                     Effect.timeoutOption("1 second"),
                     Effect.flatMap((persisted) =>
