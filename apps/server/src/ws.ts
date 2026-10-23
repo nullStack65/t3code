@@ -1,3 +1,4 @@
+import { qualifyThreadWorktree } from "./project/ThreadWorktree.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -1088,7 +1089,62 @@ const makeWsRpcLayer = (
                 "A destination-bound callback cannot use thread bootstrap. No setup or message was ingested; submit it to the existing destination thread after correcting its route.",
             });
           }
-          const bootstrap = command.bootstrap;
+          let bootstrap = command.bootstrap;
+          if (bootstrap?.createThread) {
+            const create = bootstrap.createThread;
+            const scope = create.executionScope ?? "coding";
+            const project = yield* projectionSnapshotQuery
+              .getProjectShellById(create.projectId)
+              .pipe(
+                Effect.map(Option.getOrNull),
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Cannot resolve destination project"),
+                ),
+              );
+            if (!project)
+              return yield* new OrchestrationDispatchCommandError({
+                message: "Destination project is missing.",
+              });
+            if (scope === "coding") {
+              if (
+                bootstrap.prepareWorktree &&
+                bootstrap.prepareWorktree.projectCwd !== project.workspaceRoot
+              ) {
+                return yield* new OrchestrationDispatchCommandError({
+                  message:
+                    "Worktree allocation must use the destination project's local repository path.",
+                });
+              }
+              if (create.worktreePath === null) {
+                bootstrap = {
+                  ...bootstrap,
+                  createThread: { ...create, executionScope: scope },
+                  prepareWorktree: {
+                    ...(bootstrap.prepareWorktree ?? {
+                      projectCwd: project.workspaceRoot,
+                      baseBranch: create.branch ?? "HEAD",
+                      branch: `t3/thread-${command.threadId}`,
+                    }),
+                    requireWorktree: true,
+                  },
+                };
+              } else {
+                yield* qualifyThreadWorktree({
+                  threadId: command.threadId,
+                  projectCwd: project.workspaceRoot,
+                  worktreePath: create.worktreePath,
+                  branch: create.branch,
+                }).pipe(
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Worktree attach refused"),
+                  ),
+                );
+                bootstrap = { ...bootstrap, createThread: { ...create, executionScope: scope } };
+              }
+            } else {
+              bootstrap = { ...bootstrap, createThread: { ...create, executionScope: scope } };
+            }
+          }
           const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
           let createdThread = false;
           let targetProjectId = bootstrap?.createThread?.projectId;
@@ -1441,6 +1497,7 @@ const makeWsRpcLayer = (
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
+                executionScope: bootstrap.createThread.executionScope ?? "coding",
                 createdAt: bootstrap.createThread.createdAt,
               });
               // The successful create is a fence in the engine command queue:
@@ -1594,6 +1651,18 @@ const makeWsRpcLayer = (
                 }),
               }));
               targetWorktreePath = worktree.worktree.path;
+              const bootstrapScope = bootstrap?.createThread?.executionScope;
+              if (bootstrapScope === "coding") {
+                yield* qualifyThreadWorktree(
+                  {
+                    threadId,
+                    projectCwd: prepareWorktree.projectCwd,
+                    branch: worktree.worktree.refName,
+                    worktreePath: targetWorktreePath,
+                  },
+                  { claimCreatedWorktree: true },
+                );
+              }
               yield* dispatchFromClient({
                 type: "thread.meta.update",
                 commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
@@ -1783,13 +1852,83 @@ const makeWsRpcLayer = (
           return yield* runBootstrap;
         });
 
+      const prepareDirectThreadCreate = Effect.fnUntraced(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.create" }>,
+      ) {
+        // History import preserves the provider's recorded cwd, and is not a new coding launch.
+        const existing = yield* projectionSnapshotQuery.getThreadShellById(command.threadId);
+        // Replay reaches the existing command receipt without allocating again.
+        if (Option.isSome(existing) || command.historyImport === true) return command;
+        const executionScope = command.executionScope ?? "coding";
+        if (executionScope !== "coding") {
+          if (executionScope === "coordinator" && command.worktreePath === null) {
+            const cwd = yield* Effect.gen(function* () {
+              const fs = yield* FileSystem.FileSystem;
+              const path = yield* Path.Path;
+              const cwd = path.join(config.stateDir, "coordination-workspaces", command.threadId);
+              yield* fs.makeDirectory(cwd, { recursive: true });
+              return cwd;
+            }).pipe(Effect.provide(normalizerContext));
+            return { ...command, executionScope, worktreePath: cwd };
+          }
+          return { ...command, executionScope };
+        }
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(command.projectId)
+          .pipe(Effect.map(Option.getOrNull));
+        if (!project)
+          return yield* new OrchestrationDispatchCommandError({
+            message: "Destination project is missing.",
+          });
+        let branch = command.branch;
+        let worktreePath = command.worktreePath;
+        if (worktreePath === null) {
+          const refName = branch ?? "HEAD";
+          if (
+            !(yield* gitWorkflow.isRepository(project.workspaceRoot)) ||
+            !(yield* gitWorkflow.hasCommit({ cwd: project.workspaceRoot, refName }))
+          ) {
+            return yield* new OrchestrationDispatchCommandError({
+              message:
+                "Coding requires a Git repository with a committed base. Select a repository project, or explicitly select coordinator/read-only work.",
+            });
+          }
+          const worktree = yield* gitWorkflow.createWorktree({
+            cwd: project.workspaceRoot,
+            refName,
+            newRefName: `t3/thread-${command.threadId}`,
+            baseRefName: refName,
+            path: null,
+          });
+          branch = worktree.worktree.refName;
+          worktreePath = worktree.worktree.path;
+          yield* qualifyThreadWorktree(
+            { threadId: command.threadId, projectCwd: project.workspaceRoot, branch, worktreePath },
+            { claimCreatedWorktree: true },
+          );
+        } else {
+          yield* qualifyThreadWorktree({
+            threadId: command.threadId,
+            projectCwd: project.workspaceRoot,
+            branch,
+            worktreePath,
+          });
+        }
+        return { ...command, executionScope, branch, worktreePath };
+      });
+
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
             ? dispatchBootstrapTurnStart(normalizedCommand)
-            : dispatchFromClient(normalizedCommand).pipe(
+            : (normalizedCommand.type === "thread.create"
+                ? prepareDirectThreadCreate(normalizedCommand).pipe(
+                    Effect.flatMap(dispatchFromClient),
+                  )
+                : dispatchFromClient(normalizedCommand)
+              ).pipe(
                 Effect.tap(({ sequence }) =>
                   // Returning from thread.create is the handoff point at which
                   // clients may start resources for the new incarnation. Use

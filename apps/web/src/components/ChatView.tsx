@@ -498,6 +498,7 @@ import { readPreparedConnection } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button } from "./ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -5841,10 +5842,10 @@ export default function ChatView(props: ChatViewProps) {
       ? (pendingServerThreadStartFromOriginByThreadId[activeThread?.id ?? ""] ??
         activeProjectSettings.settings.newWorktreesStartFromOrigin)
       : false;
-  const sendEnvMode = resolveSendEnvMode({
-    requestedEnvMode: envMode,
-    isGitRepo,
-  });
+  const firstLaunchScope = draftThread?.executionScope ?? "coding";
+  const sendEnvMode = isLocalDraftThread
+    ? firstLaunchScope === "coding" ? "worktree" : "local"
+    : resolveSendEnvMode({ requestedEnvMode: envMode, isGitRepo });
   const localCheckoutBranchMismatch = useMemo(
     () =>
       isServerThread
@@ -7677,7 +7678,7 @@ export default function ChatView(props: ChatViewProps) {
     const shouldCreateWorktree =
       isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
     if (shouldCreateWorktree && !activeThreadBranch) {
-      setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
+      setThreadError(threadIdForSend, "Coding needs a Git repository and a committed base branch. Select a repository project, or choose Coordinator / Read-only for noncoding work.");
       return;
     }
 
@@ -8019,12 +8020,14 @@ export default function ChatView(props: ChatViewProps) {
                   bootstrap: {
                     createThread: {
                       projectId: activeProject.id,
+                      executionScope: firstLaunchScope,
                       title,
                       modelSelection: target.selection,
                       runtimeMode,
                       interactionMode: target.interactionMode,
                       branch: activeThreadBranch,
                       worktreePath: null,
+                      executionScope: "coding",
                       createdAt: messageCreatedAt,
                     },
                     prepareWorktree: {
@@ -10189,6 +10192,23 @@ export default function ChatView(props: ChatViewProps) {
                         >
                           {mountComposerContextStrip && (
                             <div className="pointer-events-auto">
+                              {isLocalDraftThread && (
+                                <Select value={firstLaunchScope} onValueChange={(scope) => {
+                                  if (scope !== "coding" && scope !== "coordinator" && scope !== "readonly") return;
+                                  setDraftThreadContext(composerDraftTarget, { executionScope: scope,
+                                    envMode: scope === "coding" ? "worktree" : "local" });
+                                  if (scope !== "coding") setMultipleModelSelections(null);
+                                }}>
+                                  <SelectTrigger variant="ghost" size="compact" aria-label="First launch execution scope">
+                                    <SelectValue>{(scope: string) => scope === "coding" ? "Coding · isolated worktree" : scope === "coordinator" ? "Coordinator" : "Read-only"}</SelectValue>
+                                  </SelectTrigger>
+                                  <SelectPopup align="start" alignItemWithTrigger={false}>
+                                    <SelectItem value="coding">Coding · isolated worktree</SelectItem>
+                                    <SelectItem value="coordinator">Coordinator</SelectItem>
+                                    <SelectItem value="readonly">Read-only</SelectItem>
+                                  </SelectPopup>
+                                </Select>
+                              )}
                               <BranchToolbar
                                 forceNewWorktree={multipleModelSelections !== null}
                                 ref={branchToolbarRef}

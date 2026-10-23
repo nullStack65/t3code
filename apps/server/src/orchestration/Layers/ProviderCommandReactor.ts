@@ -1,3 +1,4 @@
+import { qualifyThreadWorktree } from "../../project/ThreadWorktree.ts";
 import { withWorkspaceLease } from "../../workspace/workspaceLease.ts";
 import {
   type ChatAttachment,
@@ -719,6 +720,32 @@ const make = Effect.gen(function* () {
       thread,
       projects: project ? [project] : [],
     });
+    // Recheck immediately before starting/resuming the provider; admission and execution
+    // are asynchronous, so a removed/rebound checkout cannot use a shared cwd fallback.
+    if (thread.executionScope === "coding") {
+      if (!project)
+        return yield* new ProviderAdapterRequestError({
+          provider: preferredProvider,
+          method: "thread.turn.start",
+          detail: "Coding project is missing.",
+        });
+      yield* qualifyThreadWorktree({
+        threadId,
+        projectCwd: project.workspaceRoot,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: preferredProvider,
+              method: "thread.turn.start",
+              detail:
+                cause instanceof Error ? cause.message : "Coding worktree qualification failed.",
+            }),
+        ),
+      );
+    }
     const refreshWorkspaceSnapshot = effectiveCwd
       ? providerRegistry
           .refreshWorkspaceSnapshot({ instanceId: desiredInstanceId, cwd: effectiveCwd })

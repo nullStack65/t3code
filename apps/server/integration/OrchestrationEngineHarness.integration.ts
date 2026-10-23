@@ -355,12 +355,12 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),
-          refreshLocalStatus: () =>
+          refreshLocalStatus: (cwd) =>
             Effect.succeed({
               isRepo: true,
               hasPrimaryRemote: false,
               isDefaultRef: true,
-              refName: "main",
+              refName: runGit(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).trim(),
               hasWorkingTreeChanges: false,
               workingTree: { files: [], insertions: 0, deletions: 0 },
             }),
