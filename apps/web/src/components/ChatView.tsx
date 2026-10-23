@@ -237,6 +237,7 @@ import {
   ChevronDownIcon,
   DownloadIcon,
   GitBranchIcon,
+  HourglassIcon,
   Minimize2Icon,
   PaperclipIcon,
   WifiOffIcon,
@@ -478,6 +479,8 @@ import {
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
+import { resolveSessionSilence } from "../sessionSilence";
+import { formatElapsedDurationLabel } from "../timestampFormat";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -6268,6 +6271,48 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
   }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  // A running turn that has gone quiet with no known tool, explicit wait, or
+  // background work. This is a warning only: it never interrupts, retries, or
+  // settles the turn, and it clears as soon as any provider activity lands.
+  const sessionSilenceNowMs = Date.parse(`${nowMinute}:00.000Z`);
+  const sessionSilenceState = useMemo(
+    () =>
+      resolveSessionSilence({
+        nowMs: sessionSilenceNowMs,
+        connectionPhase: activeEnvironmentConnectionPhase,
+        session: activeThread?.session ?? null,
+        latestTurn: activeLatestTurn,
+        activities: activeThread?.activities ?? [],
+        messages: activeThread?.messages ?? [],
+        hasPendingApprovals: pendingApprovals.length > 0,
+        hasPendingUserInput: pendingUserInputs.length > 0,
+        backgroundLiveness: activeThreadShell?.backgroundLiveness ?? null,
+      }),
+    [
+      activeEnvironmentConnectionPhase,
+      activeLatestTurn,
+      activeThread,
+      activeThreadShell?.backgroundLiveness,
+      pendingApprovals.length,
+      pendingUserInputs.length,
+      sessionSilenceNowMs,
+    ],
+  );
+  const sessionSilenceBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (sessionSilenceState.kind !== "silent" || activeThread === null) {
+      return null;
+    }
+    return {
+      id: `session-silence:${activeThread.id}`,
+      variant: "warning",
+      icon: <HourglassIcon />,
+      title: `No activity for ${formatElapsedDurationLabel(
+        sessionSilenceState.since,
+        sessionSilenceNowMs,
+      )}`,
+      description: "The agent may still be working. T3 will not interrupt it.",
+    };
+  }, [activeThread, sessionSilenceNowMs, sessionSilenceState]);
   const backgroundLivenessBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (activeBackgroundLiveness === null || !activeThread) {
       return null;
@@ -6491,6 +6536,8 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const sessionSilenceItems =
+      sessionSilenceBannerItem === null ? [] : [sessionSilenceBannerItem];
     const resumeCompactionItems =
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -6505,6 +6552,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...systemComposerBannerItems,
         ...backgroundLivenessItems,
+        ...sessionSilenceItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
@@ -6516,6 +6564,7 @@ export default function ChatView(props: ChatViewProps) {
       ...projectCloneItems,
       ...systemComposerBannerItems,
       ...backgroundLivenessItems,
+      ...sessionSilenceItems,
       ...resumeCompactionItems,
       ...wokeThreadItems,
       {
@@ -6568,6 +6617,7 @@ export default function ChatView(props: ChatViewProps) {
     parkedThreadBannerItem,
     projectCloneBannerItem,
     resumeCompactionBannerItem,
+    sessionSilenceBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
     usageLimitsBanner,
