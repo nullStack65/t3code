@@ -695,6 +695,8 @@ export const make = Effect.gen(function* () {
           ({
             authenticated: true,
             auth: descriptor,
+            sessionId: session.sessionId,
+            subject: session.subject,
             scopes: session.scopes,
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),

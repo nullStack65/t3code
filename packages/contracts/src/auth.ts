@@ -348,6 +348,10 @@ export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentia
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,
   auth: ServerAuthDescriptor,
+  // Present only after the server accepts a credential. sessionId is an
+  // opaque server-side session identity; subject remains principal metadata.
+  sessionId: Schema.optionalKey(AuthSessionId),
+  subject: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
