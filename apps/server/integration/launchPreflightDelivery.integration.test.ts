@@ -531,7 +531,7 @@ it.live("A3: a missing configured executable fails before model work", () =>
 
 interface CapturedLaunch {
   consumer?: LaunchPreflight.LaunchPreflightConsumer | undefined;
-  gitEnvironment?: NodeJS.ProcessEnv | undefined;
+  providerGitEnvironment?: NodeJS.ProcessEnv | undefined;
 }
 
 const captureConsumerLayer = (options: {
@@ -566,7 +566,7 @@ const captureConsumerLayer = (options: {
     reportLaunchPreflightWarning: () => Effect.succeed(true),
     launchPreflightRunner: (_root, runnerOptions) => {
       options.captured.consumer = runnerOptions?.consumer;
-      options.captured.gitEnvironment = runnerOptions?.gitEnvironment;
+      options.captured.providerGitEnvironment = runnerOptions?.providerGitEnvironment;
       return Effect.succeed(findingResult([]));
     },
   }).pipe(Layer.provide(NodeServices.layer), Layer.provideMerge(shared));
@@ -638,7 +638,7 @@ it.live(
         },
       });
       assert.deepStrictEqual(local.consumer, { driver: "opencode", snapshotsEnabled: true });
-      assert.strictEqual(local.gitEnvironment?.ENVCHK_SENTINEL, sentinel);
+      assert.strictEqual(local.providerGitEnvironment?.ENVCHK_SENTINEL, sentinel);
 
       // 2. Effective `snapshot:false` in the selected instance's environment
       //    suppresses the provider-specific requirement.
