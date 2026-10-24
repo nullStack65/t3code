@@ -6,29 +6,22 @@ name: Mobile EAS Production
 # fingerprint (platform-specific deps + pnpm version) and errors. On this Linux
 # runner, with corepack pinning pnpm 10.24 in eas.json, local == build.
 #
-# Every merge to main that touches the mobile app reconciles, per platform:
-#   1. Store builds: if the latest production build's version differs from
-#      app.config.ts, cut a new build and submit it (TestFlight + Play internal
-#      track). Bumping `version` is therefore all it takes to
-#      start the next release train — the first build of a version enters
-#      external-TestFlight beta review immediately, and later builds of the
-#      same version auto-approve until that version is released. After App
-#      Store approval, Apple closes the release train and `version` must be
-#      bumped before another iOS build can be submitted. Releasing to the App
-#      Store stays a manual App Store Connect step.
-#   2. OTA: publish a production-channel update for each platform where at
-#      least one finished production build matches the current native
-#      fingerprint. Old-version binaries with a matching fingerprint receive
-#      it too. When native drift means no binary could install the update,
-#      it is skipped and flagged in the job summary instead of published
-#      into the void.
-# workflow_dispatch remains as a manual override for both modes (e.g. to
-# retry an errored build or force an OTA).
-# Manual v2-preview builds keep the production app identity and disable OTA.
-# Select the v2 branch when dispatching a preview build.
+# Production builds/OTA require an owner dispatch with exact reviewed source and
+# workflow commits. Commit and review version changes before dispatch; inline
+# version overrides are refused because they would change the approved source.
+# The source must be current main; preview builds from other branches are not
+# admitted by this production workflow.
 on:
   workflow_dispatch:
     inputs:
+      reviewed_source_sha:
+        description: "Exact reviewed commit to build or publish"
+        required: true
+        type: string
+      reviewed_workflow_sha:
+        description: "Exact reviewed current main workflow commit"
+        required: true
+        type: string
       mode:
         description: "build (+ auto-submit to TestFlight) or update (OTA)"
         required: true
@@ -62,23 +55,8 @@ on:
         description: "OTA update message (mode=update only)"
         required: false
         type: string
-  push:
-    branches: [main]
-    paths:
-      - apps/mobile/**
-      - packages/client-runtime/**
-      - packages/contracts/**
-      - packages/shared/**
-      - assets/**
-      - scripts/**
-      - patches/**
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/workflows/mobile-eas-production.yml
 
-# Serialize runs so OTAs publish in merge order. GitHub keeps at most one
-# queued run per group, so a burst of merges collapses into one run of the
-# newest commit — intermediate commits don't need their own OTA.
+# Serialize explicit production requests. No source push publishes an update.
 concurrency:
   group: mobile-eas-production
   cancel-in-progress: false
@@ -86,6 +64,17 @@ concurrency:
 jobs:
   production:
     name: EAS ${{ inputs.profile || 'production' }} ${{ github.event_name == 'push' && 'auto' || inputs.mode }}
+    # Admit only an owner request before allocating a runner.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'nullStack65/t3code' &&
+      github.repository_owner_id == '112618179' &&
+      github.event.repository.default_branch == 'main' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'nullStack65' &&
+      github.actor_id == '112618179' &&
+      github.triggering_actor == 'nullStack65' &&
+      github.run_attempt == '1'
     runs-on: ["self-hosted", "Linux", "X64", "ubuntu-24.04"]
     permissions:
       contents: read
@@ -93,6 +82,25 @@ jobs:
       APP_VARIANT: production
       NODE_OPTIONS: --max-old-space-size=8192
     steps:
+      - name: Checkout reviewed admission code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts
+
+      - name: Admit exact manual production source
+        uses: actions/github-script@v8
+        env:
+          REVIEWED_SOURCE_SHA: ${{ inputs.reviewed_source_sha }}
+          REVIEWED_WORKFLOW_SHA: ${{ inputs.reviewed_workflow_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        with:
+          script: |
+            const { admitManualRelease, assertReviewedReleaseSource } = require('./.github/scripts/admit-manual-release.cjs');
+            const source = await admitManualRelease({ github, context, env: process.env });
+            assertReviewedReleaseSource(context.sha, source);
+
       - name: Reject preview OTA updates
         if: github.event_name == 'workflow_dispatch' && inputs.profile == 'v2-preview' && inputs.mode == 'update'
         run: |
