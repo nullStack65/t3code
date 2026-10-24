@@ -44,7 +44,8 @@ import {
   scRunningState,
   scServiceDoesNotExist,
   WINDOWS_BOOT_SERVICE_NAME,
-  windowsRegistrationMatchesOurBinding,
+  windowsRegistrationOwnedByUs,
+  windowsRuntimeFromImagePath,
   windowsServiceHelperPath,
   windowsServiceProgram,
   windowsServiceSteps,
@@ -225,6 +226,29 @@ export interface BootServiceStep {
  * next step races a still-loaded service.
  */
 const STOP_STEP_TIMEOUT = Duration.seconds(120);
+
+/**
+ * `sc.exe stop`/`start`/`delete` return once the request is accepted, which is
+ * not SCM state completion: a stop can stay `STOP_PENDING`, a delete can stay
+ * marked-for-deletion. SCM transitions are instead observed by bounded polling
+ * of authoritative `sc.exe queryex` state; a timeout or failed query is never
+ * promoted to a successful transition.
+ */
+const WINDOWS_TRANSITION_POLL_MS = 200;
+const WINDOWS_TRANSITION_TIMEOUT_MS = 30_000;
+
+/**
+ * A real-time delay for the bounded SCM transition poll. It deliberately does
+ * not use the Effect `Clock`, so the wait also advances under a test clock where
+ * an `Effect.sleep` would never elapse. It only spaces out authoritative state
+ * probes; it is never itself treated as evidence that a transition completed.
+ */
+const realDelay = (ms: number): Effect.Effect<void> =>
+  Effect.callback<void, never>((resume) => {
+    // @effect-diagnostics-next-line globalTimers:off
+    const timer = setTimeout(() => resume(Effect.void), ms);
+    return Effect.sync(() => clearTimeout(timer));
+  });
 
 /**
  * Platform service-manager integration as data: paths, a pure renderer, and
@@ -436,14 +460,12 @@ function selectBootServiceManager(input: {
       environmentPath: input.environmentPath,
     });
   }
-  // Windows is only selectable once the explicit account, home, helper and
-  // runtime are all known. Missing prerequisites leave the manager undefined so
-  // install/status refuse rather than defaulting to LocalSystem.
-  if (
-    input.platform === "win32" &&
-    input.windows !== undefined &&
-    isQualifiedWindowsAccount(input.windows.account)
-  ) {
+  // Windows is selectable for read-only observation whenever the home, helper
+  // and runtime are known, even without an install account: status must be able
+  // to observe an installed service the caller has no credentials to mutate.
+  // Mutation still refuses a missing/unqualified account in
+  // `requireWindowsBinding`, so the adapter never defaults to LocalSystem.
+  if (input.platform === "win32" && input.windows !== undefined) {
     return windowsManager(input.windows);
   }
   return undefined;
@@ -871,6 +893,8 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   readonly logsDir: string;
   readonly cliVersion: string;
   readonly host?: BootServiceHost;
+  /** Test seam: override the bounded SCM transition wait. Production uses 30s. */
+  readonly windowsTransitionTimeoutMs?: number;
 }) {
   const hostExecPath = yield* HostProcessExecutablePath;
   const platform = yield* HostProcessPlatform;
@@ -1376,10 +1400,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (result.value.timedOut) {
       return unknownObservation({ manager: "scm", source, observedAt, detail: "manager-timeout" });
     }
-    if (
-      result.value.code !== 0 &&
-      scServiceDoesNotExist(result.value.code, result.value.stdout, result.value.stderr)
-    ) {
+    if (result.value.code !== 0 && scServiceDoesNotExist(result.value.code)) {
       return {
         manager: "scm",
         source,
@@ -1425,12 +1446,17 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     const runtimeFromImage =
       qc?.binaryPathName === undefined
         ? undefined
-        : /--runtime\s+"?([^"\s]+)"?/.exec(qc.binaryPathName)?.[1];
+        : windowsRuntimeFromImagePath(qc.binaryPathName);
     const bound =
       runtimeFromImage === undefined
         ? undefined
         : bindBootServiceProgramPath(runtimeFromImage, input.baseDir, path);
-    const running = scRunningState(parsed.state);
+    const running =
+      parsed.state !== undefined && scRunningState(parsed.state) === "running"
+        ? parsed.processId === undefined
+          ? "unknown"
+          : "running"
+        : scRunningState(parsed.state);
     return {
       manager: "scm",
       source,
@@ -1499,6 +1525,87 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       return { kind: "registered" as const, qc };
     });
 
+  type WindowsServiceProbe =
+    | { readonly kind: "absent" }
+    | { readonly kind: "unreachable" }
+    | { readonly kind: "observed"; readonly state?: string; readonly processId?: number };
+
+  /** One bounded, read-only `sc.exe queryex`; absent only on the numeric 1060. */
+  const probeWindowsServiceState = (binding: WindowsBootServiceBinding) =>
+    Effect.gen(function* () {
+      const result = yield* probeManager("sc.exe", ["queryex", binding.serviceName]);
+      if (Option.isNone(result) || result.value.timedOut) {
+        return { kind: "unreachable" } satisfies WindowsServiceProbe;
+      }
+      if (result.value.code !== 0) {
+        return (scServiceDoesNotExist(result.value.code)
+          ? { kind: "absent" }
+          : { kind: "unreachable" }) satisfies WindowsServiceProbe;
+      }
+      const parsed = parseScQuery(result.value.stdout);
+      if (parsed === undefined) return { kind: "unreachable" } satisfies WindowsServiceProbe;
+      return {
+        kind: "observed",
+        ...(parsed.state === undefined ? {} : { state: parsed.state }),
+        ...(parsed.processId === undefined ? {} : { processId: parsed.processId }),
+      } satisfies WindowsServiceProbe;
+    });
+
+  const windowsStopped = (probe: WindowsServiceProbe) =>
+    probe.kind === "absent" ||
+    (probe.kind === "observed" && scRunningState(probe.state) === "stopped");
+  const windowsRunning = (probe: WindowsServiceProbe) =>
+    probe.kind === "observed" &&
+    scRunningState(probe.state) === "running" &&
+    probe.processId !== undefined;
+  const windowsAbsent = (probe: WindowsServiceProbe) => probe.kind === "absent";
+
+  /**
+   * Polls SCM state until `accept` holds or the bound expires. An unreachable
+   * or malformed query ends the wait immediately: it is unknown, and never
+   * evidence that a requested transition completed. The final probe is
+   * returned so the caller reports the truthful outcome.
+   */
+  const waitForWindowsServiceState = (
+    binding: WindowsBootServiceBinding,
+    accept: (probe: WindowsServiceProbe) => boolean,
+  ) =>
+    Effect.gen(function* () {
+      const deadline = Date.now() + (input.windowsTransitionTimeoutMs ?? WINDOWS_TRANSITION_TIMEOUT_MS);
+      for (;;) {
+        const probe = yield* probeWindowsServiceState(binding);
+        if (accept(probe) || probe.kind === "unreachable" || Date.now() >= deadline) return probe;
+        yield* realDelay(WINDOWS_TRANSITION_POLL_MS);
+      }
+    });
+
+  const windowsTransitionStep = (label: string, probe: WindowsServiceProbe) =>
+    new BootServiceCommandError({
+      step: `waiting for the SCM service to ${label} (observed ${probe.kind}${
+        probe.kind === "observed" ? `:${probe.state ?? "unknown"}` : ""
+      })`,
+    });
+
+  const checkWindowsInstallPreconditions = (options?: { readonly allowDowngrade?: boolean }) =>
+    Effect.gen(function* () {
+      const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
+      if (Option.isNone(previousStateText)) return;
+      if (serviceStateHasPendingUpdate(previousStateText.value)) {
+        return yield* new BootServiceUpdatePendingError();
+      }
+      const installedVersion = serviceStateActiveVersion(previousStateText.value);
+      if (
+        installedVersion !== undefined &&
+        options?.allowDowngrade !== true &&
+        compareExactServiceVersions(input.cliVersion, installedVersion) < 0
+      ) {
+        return yield* new BootServiceDowngradeRefusedError({
+          installedVersion,
+          targetVersion: input.cliVersion,
+        });
+      }
+    });
+
   const installWindows = Effect.fn("cloud.boot_service.install_windows")(function* (options?: {
     readonly allowDowngrade?: boolean;
     readonly start?: boolean;
@@ -1513,38 +1620,30 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       return yield* new BootServicePrerequisiteError({ problem: "windows-service-unreachable" });
     }
     const registered = inspection.kind === "registered";
-    if (
-      inspection.kind === "registered" &&
-      !windowsRegistrationMatchesOurBinding(inspection.qc, binding)
-    ) {
+    if (registered && !windowsRegistrationOwnedByUs(inspection.qc, binding)) {
       // A foreign or changed binding is refused before anything is stopped or
-      // rewritten; the adapter never adopts another install's registration.
+      // rewritten; the adapter never adopts another install's registration. An
+      // owned older runtime is *not* foreign and is upgraded below.
       return yield* new BootServicePrerequisiteError({
         problem: "windows-service-foreign-registration",
       });
     }
     const start = options?.start !== false;
-    if (registered && start) yield* runSteps([steps.stop]);
 
-    if (registered) {
-      const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
-      if (Option.isSome(previousStateText)) {
-        if (serviceStateHasPendingUpdate(previousStateText.value)) {
-          return yield* new BootServiceUpdatePendingError();
-        }
-        const installedVersion = serviceStateActiveVersion(previousStateText.value);
-        if (
-          installedVersion !== undefined &&
-          options?.allowDowngrade !== true &&
-          compareExactServiceVersions(input.cliVersion, installedVersion) < 0
-        ) {
-          return yield* new BootServiceDowngradeRefusedError({
-            installedVersion,
-            targetVersion: input.cliVersion,
-          });
-        }
-      }
+    // Fail on an in-flight update or an obvious downgrade before disrupting a
+    // running service.
+    if (registered) yield* checkWindowsInstallPreconditions(options);
+
+    if (registered && start) {
+      yield* runSteps([steps.stop]);
+      const stopped = yield* waitForWindowsServiceState(binding, windowsStopped);
+      if (!windowsStopped(stopped)) return yield* windowsTransitionStep("stop", stopped);
+      // The launcher may have finished a remote update while the service
+      // drained; revalidate its mutable state after the confirmed stop and
+      // before touching the registration or launcher-owned state.
+      yield* checkWindowsInstallPreconditions(options);
     }
+
     if (!start && registered) {
       yield* fs.writeFileString(restartPendingPath, `${input.cliVersion}\n`, { mode: 0o600 });
     }
@@ -1566,12 +1665,15 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         return yield* new BootServiceUpdatePendingError();
       }
     }
+
+    // Registration and activation are distinct: even with start=false the
+    // registration is created or reconfigured so a later start runs this
+    // version. Only the start step is gated on activation.
+    yield* runSteps([registered ? steps.reconfigure : steps.register]);
     if (start) {
-      // `reconfigure` is idempotent; `register` only runs when absent. Start is
-      // last, so no administrative write follows a successful start.
-      yield* runSteps(
-        registered ? [steps.reconfigure, steps.start] : [steps.register, steps.start],
-      );
+      yield* runSteps([steps.start]);
+      const running = yield* waitForWindowsServiceState(binding, windowsRunning);
+      if (!windowsRunning(running)) return yield* windowsTransitionStep("start", running);
       yield* fs.remove(restartPendingPath, { force: true });
     }
     return {
@@ -1594,6 +1696,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // A permissions failure must not leave a partial install or stop a working server.
     if (manager.kind === "systemd") {
       yield* requireSystemdPrerequisites.pipe(Effect.tapError(logFailure));
+    }
+    // An unqualified or missing Windows account fails before any runtime
+    // download or service mutation.
+    if (manager.kind === "scm") {
+      yield* requireWindowsBinding;
     }
 
     // Prepare every immutable artifact before stopping the installed unit.
@@ -1749,18 +1856,21 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (manager.kind === "scm") {
       const binding = yield* requireWindowsBinding;
       const inspection = yield* inspectWindowsRegistration(binding);
-      if (
-        inspection.kind !== "registered" ||
-        !windowsRegistrationMatchesOurBinding(inspection.qc, binding)
-      ) {
+      if (inspection.kind !== "registered" || !windowsRegistrationOwnedByUs(inspection.qc, binding)) {
         // Absent, unreachable or another home's registration: leave it alone.
         return false;
       }
       const steps = windowsServiceSteps(binding);
       yield* runSteps([steps.stop]);
-      yield* runSteps([steps.start]).pipe(
-        Effect.tapError(() => runSteps([steps.start]).pipe(Effect.ignore)),
-      );
+      const stopped = yield* waitForWindowsServiceState(binding, windowsStopped);
+      if (!windowsStopped(stopped)) return yield* windowsTransitionStep("stop", stopped);
+      yield* runSteps([steps.start]);
+      const running = yield* waitForWindowsServiceState(binding, windowsRunning);
+      if (!windowsRunning(running)) {
+        // Truthful partial outcome: the stop was confirmed but the start did
+        // not reach RUNNING. Do not speculate with a second start.
+        return yield* windowsTransitionStep("start", running);
+      }
       yield* fs.remove(restartPendingPath, { force: true });
       return true;
     }
@@ -1793,17 +1903,26 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (manager.kind === "scm") {
       const binding = yield* requireWindowsBinding;
       const inspection = yield* inspectWindowsRegistration(binding);
-      if (
-        inspection.kind !== "registered" ||
-        !windowsRegistrationMatchesOurBinding(inspection.qc, binding)
-      ) {
+      if (inspection.kind !== "registered" || !windowsRegistrationOwnedByUs(inspection.qc, binding)) {
         // Never delete a foreign or unreachable registration, and never touch
         // the home or userdata; only the exact owned registration is removed.
         return false;
       }
       const steps = windowsServiceSteps(binding);
-      yield* runSteps([steps.stop]).pipe(Effect.ignore);
+      yield* runSteps([steps.stop]);
+      const stopped = yield* waitForWindowsServiceState(binding, windowsStopped);
+      if (!windowsStopped(stopped)) {
+        // A failed or unknown stop must not be hidden by deleting anyway, and
+        // uninstall must not claim success over it.
+        return yield* windowsTransitionStep("stop before deletion", stopped);
+      }
       yield* runSteps([steps.delete]);
+      const deleted = yield* waitForWindowsServiceState(binding, windowsAbsent);
+      if (!windowsAbsent(deleted)) {
+        // `DeleteService` only marks the service for deletion; a still-present
+        // registration is a truthful failure, not a successful uninstall.
+        return yield* windowsTransitionStep("deletion to complete", deleted);
+      }
       return true;
     }
     if (
@@ -1837,11 +1956,11 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       } satisfies BootServiceStatus;
     }
     if (detectedManager.kind === "scm") {
-      const binding = yield* requireWindowsBinding.pipe(
-        Effect.catchTag("BootServicePrerequisiteError", () =>
-          Effect.succeed(undefined as WindowsBootServiceBinding | undefined),
-        ),
-      );
+      // Read-only observation needs no install credentials: the SCM is queried
+      // by fixed service name. A missing install account must not make an
+      // installed service unobservable or the platform look unsupported; it only
+      // blocks mutation, which still enforces `requireWindowsBinding`.
+      const binding = windowsBinding;
       if (binding === undefined) {
         return {
           schemaVersion: BOOT_SERVICE_STATUS_SCHEMA_VERSION,
@@ -1892,7 +2011,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       const state = Option.isSome(stateText) ? parseServiceState(stateText.value) : undefined;
       const bound =
         inspection.kind === "registered" &&
-        windowsRegistrationMatchesOurBinding(inspection.qc, binding);
+        windowsRegistrationOwnedByUs(inspection.qc, binding);
       const problems: BootServiceProblem[] = [];
       if (queryFailed) problems.push("windows-service-unreachable");
       else if (!bound) problems.push("windows-service-foreign-registration");
@@ -1916,6 +2035,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         current:
           problems.length === 0 &&
           bound &&
+          observation.configuredVersion === input.cliVersion &&
           runtimeEntryExists &&
           Option.isSome(runtimeSentinel) &&
           runtimeSentinel.value.trim() === input.cliVersion &&

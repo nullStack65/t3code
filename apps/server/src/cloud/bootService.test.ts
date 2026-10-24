@@ -808,11 +808,21 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect("fails closed on Windows", () =>
+  it.effect("observes Windows without credentials but fails closed on mutation", () =>
     Effect.gen(function* () {
       const { service } = yield* makeHarness("win32");
-      expect((yield* service.status).supported).toBe(false);
-      expect((yield* service.install().pipe(Effect.flip))._tag).toBe("BootServiceUnsupportedError");
+      // The platform is not unsupported merely because install-account input is
+      // absent; the SCM is still observed by fixed name.
+      expect(yield* service.status).toMatchObject({
+        supported: true,
+        manager: "scm",
+        installed: false,
+      });
+      const error = yield* service.install().pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "BootServicePrerequisiteError",
+        problem: "service-account-missing",
+      });
     }),
   );
 
@@ -1294,14 +1304,14 @@ it.layer(NodeServices.layer)("boot service status observations", (it) => {
 
       expect(status).toMatchObject({
         schemaVersion: BootService.BOOT_SERVICE_STATUS_SCHEMA_VERSION,
-        supported: false,
-        manager: "unsupported",
+        supported: true,
+        manager: "scm",
         installed: false,
         running: "unknown",
         enabled: "unknown",
         current: false,
       });
-      expect(status.observation).toBeUndefined();
+      expect(status.observation).toMatchObject({ reachable: true, running: "unknown" });
     }),
   );
 
