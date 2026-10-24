@@ -40,6 +40,7 @@ on:
         required: true
         type: string
       runner:
+        description: "JSON self-hosted labels including OS, native architecture and image qualification"
         required: true
         type: string
       platform:
@@ -104,7 +105,11 @@ permissions:
 jobs:
   build:
     name: Build ${{ inputs.label }}
-    runs-on: ${{ inputs.runner }}
+    runs-on:
+      - self-hosted
+      - ${{ fromJSON(inputs.runner)[1] }}
+      - ${{ fromJSON(inputs.runner)[2] }}
+      - ${{ fromJSON(inputs.runner)[3] }}
     timeout-minutes: 30
     env:
       T3CODE_CLERK_PUBLISHABLE_KEY: ${{ inputs.clerk_publishable_key }}

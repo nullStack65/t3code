@@ -30,7 +30,7 @@ jobs:
       github.actor_id == '112618179' &&
       github.triggering_actor == 'nullStack65' &&
       github.run_attempt == '1'
-    runs-on: ubuntu-24.04
+    runs-on: ["self-hosted", "Linux", "X64", "ubuntu-24.04"]
     timeout-minutes: 5
     outputs:
       source_sha: ${{ steps.validate.outputs.source_sha }}
@@ -79,7 +79,7 @@ jobs:
       contents: read
       id-token: none
       statuses: write
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ["self-hosted", "Linux", "X64", "ubuntu-24.04"]
     timeout-minutes: 15
     environment:
       name: production
