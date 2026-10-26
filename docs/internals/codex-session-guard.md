@@ -1,10 +1,11 @@
 # Codex session guard
 
 `codexSessionGuard` (server settings) is a host-level, opt-in requirement that
-T3's Codex processes run behind the Closura fenced provider launcher. On an
-enrolled host, `enforce` turns an unguarded launch into a refusal instead of a
-silent fallback. `disabled` is the default and never inspects the filesystem, so
-hosts that never opt in keep the existing spawn path.
+T3's driver-backed Codex processes run behind the Closura fenced provider
+launcher. On an enrolled host, `enforce` turns an unguarded launch into a
+refusal instead of a silent fallback. `disabled` is the default and never
+inspects the filesystem, so hosts that never opt in keep the existing spawn
+path.
 
 ## The contract it binds to
 
@@ -25,38 +26,71 @@ T3 also cannot substitute its own holder: it is the parent of the launcher, so a
 T3 crash would drop T3's lock while the provider may still be running, which is
 the case the fence exists to prevent.
 
-Spawning through the launcher anyway would therefore manufacture a lifetime
-guarantee nobody can check. `enforce` validates every configured reference and
-then refuses with a stable blocker code, before any process exists and before
-the shadow home is written. The refusal is honest about what is missing rather
-than pretending a wrapper is a qualification.
+Spawning through the launcher anyway would manufacture a lifetime guarantee
+nobody can check. `enforce` validates the configured references and then refuses
+with a stable blocker code, before any process exists and before the shadow home
+is written.
 
-## Where the gate applies
+## What the gate covers
 
-One admission point: `CodexDriver.create`, immediately after the home layout is
-resolved and before `materializeCodexShadowHome`. It is host-wide rather than
-per-instance so a managed host cannot be partly enrolled by leaving one
-instance unguarded.
+The gate is `CodexDriver.create`. Every Codex process T3 builds for a provider
+instance starts from that instance: the session app-server and its version
+probe, status/Skills/reset-credit probes, `codex exec` text generation, and
+maintenance/update resolution. `CodexTypedSkillsDriver` constructs through the
+same factory, so it is covered too.
 
-Every T3-owned Codex process is constructed from that instance, so one check
-covers all of them:
+Not covered, and not claimed: a user's terminal PTY (`terminal/Manager`),
+`t3 triage`, and any Codex process started outside T3. This is not a
+host-universal guarantee.
 
-- the session app-server and its version probe (`CodexSessionRuntime`)
-- status, Skills and reset-credit probes (`CodexProvider.withCodexAppServerClient`)
-- `codex exec` text generation (`CodexTextGeneration`)
-- maintenance and update resolution (`CodexDriver`, `providerMaintenance`)
+T3 also does not read the delivery journal, receipts, device health or setup
+ownership. Partial-journal and unhealthy-state refusal belong to the reviewed
+launcher and reconciler. T3's refusal is unconditional and independent of that
+state, so it neither duplicates nor replaces those checks.
 
-Out of scope, and never counted as covered: the user's terminal PTY
-(`terminal/Manager`) and `t3 triage`, which run Codex for the developer rather
-than as a T3 provider session, and any Codex process started outside T3.
+## Live settings changes
 
-## What a refusal checks
+The policy is host-wide, but the registry reconciles per instance, and a Codex
+instance's config envelope does not contain it. `ProviderInstanceRegistryHydration`
+therefore derives a construction identity for every Codex-built instance
+(`codex`, `codex-typed-skills`) and passes it to
+`ProviderInstanceRegistryMutator.reconcile`. Reconcile replaces an instance when
+its envelope **or** its identity changes.
 
-- Every reference is present, absolute, NUL-free and canonical (`realpath`
-  unchanged), so two spellings of one target cannot look like two integrations.
-- `launcher` is the reviewed `launch_provider.py` and `sourceRoot` is the
-  checkout that contains it at the reviewed path — the binding the launcher
-  itself re-checks before starting a provider.
+Consequences, in the order reconcile performs them:
+
+1. The previous instance scope closes first, retiring its adapter, snapshot
+   refresters, text-generation closures and maintenance resolution.
+2. The replacement is then built. Under `enforce` it fails the gate, so the
+   instance appears as unavailable with the refusal detail; probes never start.
+3. Only after both steps does the registry publish, so no consumer observes
+   "enforced" while the old readers are still live.
+
+Disabling the guard rebuilds a live instance again. Instances of other drivers
+keep their exact live objects, and settings changes outside the guard policy do
+not rebuild Codex — both are covered by the reconcile-identity regression.
+
+Residual limit, stated rather than papered over: an operation that already
+resolved the old instance before reconcile closed its scope can still complete.
+Codex sessions own a detached session scope, so a session start already past
+that lookup can finish spawning after enrollment. Closing that interleaving needs
+admission at the spawn boundary, which belongs with the launcher change. Lookups
+after publication resolve to unavailable and fail instead of spawning.
+
+## What a refusal checks, and what it does not prove
+
+Validation exists because enrollment must name one reviewed integration with
+explicit absolute references, and because a typo should become an actionable
+refusal instead of a later surprise. It is **not authentication and not
+qualification**: matching paths, a matching device document or a present fence
+inode say nothing about the source tree's contents, and none of it can qualify a
+provider chain.
+
+- Every reference is absolute, NUL-free and canonical (`realpath` unchanged), so
+  two spellings of one target cannot look like two integrations.
+- `launcher` must equal `path.join(sourceRoot, "company", "agent-environment",
+"config-delivery", "launch_provider.py")` — the reviewed path inside that
+  checkout, not merely a same-depth file with the same basename.
 - `deviceFile` is a small JSON document whose `state_root` is the configured
   `stateRoot`, so a stale or crossed device file cannot enroll another fence.
 - The fence is a real, singly-linked inode; a symlinked or hardlinked lock would
@@ -79,8 +113,10 @@ credential or file content is echoed.
    `--source-root`, `--device`, `--state-root`, `--`, provider executable and
    `app-server` args), passes the merged provider environment through unchanged,
    and keeps the launcher as the direct child so cancellation still forwards to
-   the provider's process group. It must also stop injecting `CODEX_HOME`, which
-   the guard refuses.
+   the provider's process group. That change also needs narrowly qualified
+   exact-root support upstream for the provider root T3 would use. Clearing or
+   stripping a user's configured home override is not acceptable and is not a
+   substitute for that qualification.
 
 Until both land, `enforce` is a refusal. Do not add a switch that claims the
 lifetime guarantee.
@@ -90,5 +126,6 @@ lifetime guarantee.
 Configuration lives in server settings (`codexSessionGuard`), not the provider
 settings form. An instance that refuses becomes unavailable with the refusal
 detail, so an enrolled host with Codex enabled shows why Codex is not starting.
-Reverting to `disabled` restores the legacy path on the next instance rebuild;
-the guard keeps no state and writes nothing.
+Flipping the policy takes effect on the live registry: enabling retires running
+Codex instances and leaves them unavailable; disabling rebuilds them. The guard
+keeps no state and writes nothing.

@@ -71,6 +71,8 @@ interface LiveEntry {
   readonly instance: ProviderInstance;
   readonly scope: Scope.Closeable;
   readonly entry: ProviderInstanceConfig;
+  /** Construction identity the entry was built under; see `reconcile`. */
+  readonly identity: string;
 }
 
 /**
@@ -120,6 +122,7 @@ const buildEntry = <R>(input: {
   readonly instanceId: ProviderInstanceId;
   readonly rawInstanceId: string;
   readonly entry: ProviderInstanceConfig;
+  readonly identity: string;
 }): Effect.Effect<
   | { readonly kind: "live"; readonly live: LiveEntry }
   | { readonly kind: "unavailable"; readonly snapshot: ServerProvider },
@@ -127,7 +130,7 @@ const buildEntry = <R>(input: {
   R
 > =>
   Effect.gen(function* () {
-    const { driversById, parentScope, instanceId, rawInstanceId, entry } = input;
+    const { driversById, parentScope, instanceId, rawInstanceId, entry, identity } = input;
     const driver = driversById.get(entry.driver);
     if (!driver) {
       return {
@@ -208,6 +211,7 @@ const buildEntry = <R>(input: {
         instance: createResult.success,
         scope: childScope,
         entry,
+        identity,
       },
     };
   });
@@ -220,10 +224,17 @@ const makeReconcile = <R>(input: {
   readonly state: RegistryState;
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
   readonly parentScope: Scope.Scope;
-}): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
+}): ((
+  configMap: ProviderInstanceConfigMap,
+  identity?: ReadonlyMap<ProviderInstanceId, string>,
+) => Effect.Effect<void, never, R>) => {
   const { state, driversById, parentScope } = input;
-  return (configMap: ProviderInstanceConfigMap) =>
+  return (
+    configMap: ProviderInstanceConfigMap,
+    identity?: ReadonlyMap<ProviderInstanceId, string>,
+  ) =>
     Effect.gen(function* () {
+      const identityFor = (instanceId: ProviderInstanceId) => identity?.get(instanceId) ?? "";
       const previousEntries = yield* Ref.get(state.entries);
       const previousUnavailable = yield* Ref.get(state.unavailable);
       const nextRaw = Object.entries(configMap);
@@ -242,7 +253,10 @@ const makeReconcile = <R>(input: {
           continue;
         }
         const nextEntry = configMap[instanceId];
-        if (nextEntry !== undefined && !entryEqual(live.entry, nextEntry)) {
+        if (
+          nextEntry !== undefined &&
+          (!entryEqual(live.entry, nextEntry) || live.identity !== identityFor(instanceId))
+        ) {
           replacedIds.add(instanceId);
         }
       }
@@ -278,6 +292,7 @@ const makeReconcile = <R>(input: {
           instanceId,
           rawInstanceId,
           entry,
+          identity: identityFor(instanceId),
         });
         if (result.kind === "live") {
           builtEntries.set(instanceId, result.live);
@@ -338,6 +353,8 @@ const makeReconcile = <R>(input: {
 export const makeProviderInstanceRegistry = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
+  /** Construction identity per instance id; see `ProviderInstanceRegistryMutator`. */
+  readonly identity?: ReadonlyMap<ProviderInstanceId, string>;
 }): Effect.Effect<
   {
     readonly registry: ProviderInstanceRegistryShape;
@@ -370,12 +387,12 @@ export const makeProviderInstanceRegistry = <R>(input: {
 
     const state: RegistryState = { entries, unavailable, changes };
     const reconcileWithR = makeReconcile({ state, driversById, parentScope });
-    const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
-      reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
+    const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap, identity) =>
+      reconcileWithR(configMap, identity).pipe(Effect.provideContext(driverContext));
 
     // Hydrate the initial configMap synchronously so callers can read
     // `listInstances` immediately after this effect completes.
-    yield* reconcile(input.configMap);
+    yield* reconcile(input.configMap, input.identity);
 
     const registry: ProviderInstanceRegistryShape = {
       getInstance: (id) => Ref.get(entries).pipe(Effect.map((map) => map.get(id)?.instance)),
@@ -419,6 +436,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
 export const ProviderInstanceRegistryMutableLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
+  readonly identity?: ReadonlyMap<ProviderInstanceId, string>;
 }): Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R> =>
   Layer.effectContext(
     makeProviderInstanceRegistry(input).pipe(

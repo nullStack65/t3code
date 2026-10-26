@@ -1,4 +1,4 @@
-import type { CodexSessionGuardSettings } from "@t3tools/contracts";
+import { ProviderDriverKind, type CodexSessionGuardSettings } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -57,6 +57,30 @@ export class CodexSessionGuardRefused extends Schema.TaggedError<CodexSessionGua
 export type CodexSessionGuardAdmission =
   | { readonly status: "disabled" }
   | { readonly status: "refused"; readonly refused: CodexSessionGuardRefused };
+
+/** Driver kinds that build through `makeCodexDriver`, where the gate lives. */
+export const CODEX_SESSION_GUARD_DRIVER_KINDS: ReadonlySet<ProviderDriverKind> = new Set([
+  ProviderDriverKind.make("codex"),
+  ProviderDriverKind.make("codex-typed-skills"),
+]);
+
+/**
+ * Identity for the host guard policy, used only to decide when a settings
+ * change must rebuild Codex instances. Length-prefixed so different reference
+ * sets cannot collide. It is identity, not authentication: it says nothing
+ * about the source tree's contents and qualifies nothing.
+ */
+export const codexSessionGuardPolicyKey = (settings: CodexSessionGuardSettings): string =>
+  [
+    settings.mode,
+    settings.interpreter,
+    settings.launcher,
+    settings.sourceRoot,
+    settings.deviceFile,
+    settings.stateRoot,
+  ]
+    .map((value) => `${value.length}:${value}`)
+    .join("|");
 
 /** Provider roots the reviewed guard refuses to run with an override for. */
 const PROVIDER_ROOT_OVERRIDES = ["CODEX_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR"] as const;
@@ -150,20 +174,19 @@ const validateReferences = Effect.fnUntraced(function* (
   }
 
   yield* canonicalEntry("launcher", settings.launcher, "File");
-  if (path.basename(settings.launcher) !== "launch_provider.py") {
-    return yield* invalidSettings("launcher", "must be the reviewed launch_provider.py entrypoint");
-  }
-
   yield* canonicalEntry("sourceRoot", settings.sourceRoot, "Directory");
-  // The reviewed entrypoint refuses when its checkout root is not the running
-  // library root; mirror that binding so a mismatched pair fails before any
-  // process exists. The reviewed path is
-  // `<root>/company/agent-environment/config-delivery/launch_provider.py`.
-  const expectedSourceRoot = path.dirname(
-    path.dirname(path.dirname(path.dirname(settings.launcher))),
+  // Bind the pair the same way the reviewed entrypoint does: the launcher must
+  // be exactly this checkout's reviewed path. Depth and basename alone would
+  // accept a same-shaped path under a different directory tree.
+  const expectedLauncher = path.join(
+    settings.sourceRoot,
+    "company",
+    "agent-environment",
+    "config-delivery",
+    "launch_provider.py",
   );
-  if (expectedSourceRoot !== settings.sourceRoot) {
-    return yield* invalidSettings("sourceRoot", "does not contain launcher at its reviewed path");
+  if (expectedLauncher !== settings.launcher) {
+    return yield* invalidSettings("launcher", "is not the reviewed path inside sourceRoot");
   }
 
   const deviceInfo = yield* canonicalEntry("deviceFile", settings.deviceFile, "File");

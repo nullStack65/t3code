@@ -86,6 +86,26 @@ it.layer(NodeServices.layer)("CodexSessionGuard", (it) => {
     }),
   );
 
+  it.effect("pins the exact reviewed launcher path, not just its depth and basename", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeCodexGuardFixture();
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const lookalike = path.join(
+        fixture.sourceRoot,
+        "company",
+        "agent-environment",
+        "other-delivery",
+        "launch_provider.py",
+      );
+      yield* fs.makeDirectory(path.dirname(lookalike), { recursive: true });
+      yield* fs.writeFileString(lookalike, "# looks reviewed\n");
+      const refused = expectRefused(yield* admit({ ...fixture.settings, launcher: lookalike }));
+      expect(refused.reason).toBe("invalid-settings");
+      expect(refused.detail).toContain("launcher");
+    }),
+  );
+
   it.effect("refuses a source root that does not contain the launcher", () =>
     Effect.gen(function* () {
       const fixture = yield* makeCodexGuardFixture();
