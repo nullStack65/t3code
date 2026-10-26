@@ -26,6 +26,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfig from "./config.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
+import { admitCodexSession, codexSessionGuardRefusalPolicy } from "./provider/CodexSessionGuard.ts";
 import * as ServerSettingsModule from "./serverSettings.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
 
@@ -1699,6 +1700,90 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         assert.isDefined(exit);
         assert.isFalse(yield* reader.isRunning);
         assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+  it.effect("keeps an explicit Codex guard policy when an unrelated field fails to decode", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        // Valid JSON, valid guard, one unrelated field of the wrong type.
+        const document =
+          '{"codexSessionGuard":{"mode":"enforce","stateRoot":"/reviewed/state"},"sharedSessionRoot":42}\n';
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, document);
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        const settings = yield* serverSettings.getSettings;
+        assert.equal(settings.codexSessionGuard.mode, "enforce");
+        assert.equal(settings.codexSessionGuard.stateRoot, "/reviewed/state");
+        // The rejected document stays on disk for the operator to repair.
+        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), document);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("refuses Codex when the declared guard block cannot be decoded", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const document = '{"codexSessionGuard":{"mode":"enforce","stateRoot":42}}\n';
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, document);
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        const settings = yield* serverSettings.getSettings;
+        assert.deepEqual(settings.codexSessionGuard, codexSessionGuardRefusalPolicy);
+        // Admission is what actually keeps a provider from starting.
+        const admission = yield* admitCodexSession({
+          settings: settings.codexSessionGuard,
+          homePath: "",
+          environment: {},
+          platform: "darwin",
+        });
+        assert.equal(admission.status, "refused");
+        assert.equal(
+          admission.status === "refused" ? admission.refused.reason : "",
+          "invalid-settings",
+        );
+        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), document);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("keeps the disabled default when a rejected document declares no guard policy", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, '{"sharedSessionRoot":42}\n');
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  live("keeps the latched policy when settings.json becomes unreadable", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.start;
+        const changes = yield* serverSettings.subscribeChanges;
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+
+        const malformed = '{"codexSessionGuard":{"mode":"enforce"';
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, malformed);
+        const emitted = Option.getOrUndefined(
+          yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds")),
+        );
+        assert.isDefined(emitted);
+        assert.equal(emitted.codexSessionGuard.mode, "disabled");
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+        // Unparseable JSON is never rewritten; it stays for the operator.
+        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), malformed);
       }),
     ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
   );

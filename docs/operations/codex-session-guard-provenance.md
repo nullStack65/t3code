@@ -40,6 +40,7 @@ for name in (
     "review-request-changes",
     "coordinator-instruction-round3",
     "parent-brief-round3",
+    "coordinator-continuation-round4",
 ):
     body = re.search(
         "<!-- BEGIN:" + re.escape(name) + " -->.*?```text\n(.*?)\n```",
@@ -53,15 +54,16 @@ PY
 The digests pin the text as recorded here. They do not authenticate the original
 transport, and they are not evidence of who approved anything.
 
-| Block                          | SHA-256                                                            |
-| ------------------------------ | ------------------------------------------------------------------ |
-| execution-handoff              | `3a901f96de74ad60cab13f2805e5729dfc003ddfe6bed0a3027ed6a111d2a589` |
-| original-assignment            | `b2eb034413fd84caeda306b0656b447a38ce8ade26dbc8719801d20242ead38a` |
-| coordinator-correction         | `3b8a51ebd856d74fd732219eeb2a7eb09d7637662ac2922f229aabdda24c8c3b` |
-| repair-brief                   | `d96f6dabbb682b6ebfb4d0e7e233d29bab499c8458314b259b99239ac22bf19d` |
-| review-request-changes         | `19e4225bdbf06f66d06fb416a4ebc5ed3f9a1688267bb7ca6a2da9d5a3c4242f` |
-| coordinator-instruction-round3 | `b2b2e6542bf166e84836d6eedc31df4c636def1198bac2f5af1480ff737c8dfe` |
-| parent-brief-round3            | `8ea266e4606bd1a2af6de2eae454d796e2e8da56fe65baa365148d6bb6a41f72` |
+| Block                           | SHA-256                                                            |
+| ------------------------------- | ------------------------------------------------------------------ |
+| execution-handoff               | `3a901f96de74ad60cab13f2805e5729dfc003ddfe6bed0a3027ed6a111d2a589` |
+| original-assignment             | `b2eb034413fd84caeda306b0656b447a38ce8ade26dbc8719801d20242ead38a` |
+| coordinator-correction          | `3b8a51ebd856d74fd732219eeb2a7eb09d7637662ac2922f229aabdda24c8c3b` |
+| repair-brief                    | `d96f6dabbb682b6ebfb4d0e7e233d29bab499c8458314b259b99239ac22bf19d` |
+| review-request-changes          | `19e4225bdbf06f66d06fb416a4ebc5ed3f9a1688267bb7ca6a2da9d5a3c4242f` |
+| coordinator-instruction-round3  | `b2b2e6542bf166e84836d6eedc31df4c636def1198bac2f5af1480ff737c8dfe` |
+| parent-brief-round3             | `8ea266e4606bd1a2af6de2eae454d796e2e8da56fe65baa365148d6bb6a41f72` |
+| coordinator-continuation-round4 | `6ee7171a5283f172c0d4679c6d1ef7c8fda923e16dac4ac3f27986a194b63149` |
 
 ## Execution handoff
 
@@ -222,6 +224,31 @@ Inspect .repos/effect-smol/LLMS.md before Effect changes. Focused regression sho
 ```
 
 <!-- END:parent-brief-round3 -->
+
+## Startup-decode correction round
+
+The parent rejected the previous review's characterization of the boot fallback
+as fail-safe: a whole-document decode failure discarded a valid explicit
+`codexSessionGuard.mode = enforce` and latched disabled, which is fail-open for
+an opted-in host. The coordinator continuation is reproduced verbatim; the
+quoted `END` delimiter was the parent's execution delimiter, not part of the
+text.
+
+Agent-authored outcome, not approval: the loader now reads the guard block
+independently when the whole document is rejected (valid block honored, invalid
+block becomes the fail-closed refusal policy, absent block keeps the disabled
+default, non-JSON stays unverified), and the pending-file preservation caveat is
+documented.
+
+<!-- BEGIN:coordinator-continuation-round4 -->
+
+```text
+Continuation from explicit current user: 'Status? Move work forward. Get this merged and green and deployed and healthy and monitored and such'. Cloudflare central config-fleet staging release0bfc is deployed at 100%, source stack merged #1191 etc, PR1354 parser correction merged a1f2e2ac. First actual Mac device NOT enrolled; your existing T3 source candidate bc8773b2 (held locally) is still required to qualify safe startup policy. This is NOT a new implementation owner.
+
+Resume existing CFG-T3-BIND-1 sole source lane WITHOUT duplicate Go workers. Confirm serialized Go slot return with MAGPIE-1:LEAD mcp:b8a01b14-287c-4bd3-9b5e-e1f52173dbb9 and SETAUD. If slot available and original qualified included-only OpenCode Go source route still admitted, ask SAME prior writer to repair *only* validated remaining bug: full settings decode failure at startup discards valid explicit enforce and latches disabled; preserve fail-closed; add no-model regression + docs pending-file caveat. Single independent proportional review on corrected head, normal PR47 nonforce update, no live install. If capacity/route unavailable do not use subscription/purchase/fallback, report exact blocker and return slot. Preserve source boot/quiescence caveat; never claim full Codex lifetime guard with detached sessions. No R720/VM103 or unqualified CI; t3code Actions intentionally disabled, don't enable policy. Deliver exact source PR delta/result to issue1189; no repeat settled old review.
+```
+
+<!-- END:coordinator-continuation-round4 -->
 
 ## Sanitization
 

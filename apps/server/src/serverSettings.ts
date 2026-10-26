@@ -14,7 +14,7 @@ import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_MODEL_BY_PROVIDER,
-  type CodexSessionGuardSettings,
+  CodexSessionGuardSettings,
   DEFAULT_SERVER_SETTINGS,
   ModelSelection,
   ProjectScript,
@@ -57,6 +57,7 @@ import {
   deriveLegacyProjectOverrides,
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
+import { codexSessionGuardRefusalPolicy } from "./provider/CodexSessionGuard.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 
 export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/serverSettings";
@@ -493,6 +494,38 @@ function foldLegacyProjectSettings(
   };
 }
 
+const decodeSettingsDocument = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+const decodeSessionGuard = Schema.decodeUnknownOption(CodexSessionGuardSettings);
+
+type RecoveredSessionGuard =
+  | { readonly kind: "absent" }
+  | { readonly kind: "valid"; readonly guard: CodexSessionGuardSettings }
+  | { readonly kind: "invalid" }
+  | { readonly kind: "unreadable" };
+
+/**
+ * Recover the Codex session guard from a settings document the whole-document
+ * decoder rejected. An unrelated invalid field must not silently discard an
+ * explicit policy: a guard block that decodes on its own is used as written, a
+ * present-but-undecodable block refuses Codex instead of disabling it, and only
+ * a document with no guard block at all keeps the disabled default.
+ *
+ * The unreadable case (not JSON) yields no evidence either way; it keeps the
+ * default and the host is not claimed guarded. See
+ * `docs/internals/codex-session-guard.md`.
+ */
+const recoverSessionGuard = (raw: string): RecoveredSessionGuard => {
+  const document = decodeSettingsDocument(raw);
+  if (Option.isNone(document)) return { kind: "unreadable" };
+  const value = document.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { kind: "unreadable" };
+  }
+  if (!("codexSessionGuard" in value)) return { kind: "absent" };
+  const guard = decodeSessionGuard(value.codexSessionGuard);
+  return Option.isSome(guard) ? { kind: "valid", guard: guard.value } : { kind: "invalid" };
+};
+
 const make = Effect.gen(function* () {
   const { settingsPath } = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
@@ -604,12 +637,14 @@ const make = Effect.gen(function* () {
   const loadSettingsFromDisk = Effect.gen(function* () {
     let settings = DEFAULT_SERVER_SETTINGS;
     let persisted: typeof PersistedOptionalProviderSettings.Type = {};
+    let rawSettings: string | undefined;
     // A file that failed to decode must stay on disk for the user to repair;
     // the fold below only writes when it started from the file's real contents.
     let settingsFileTrusted = true;
 
     if (yield* readConfigExists) {
       const raw = yield* readRawConfig;
+      rawSettings = raw;
       const decoded = decodeServerSettingsJsonExit(raw);
       const persistedSettings = decodePersistedOptionalProviderSettingsJsonExit(raw);
       if (persistedSettings._tag === "Success") {
@@ -627,6 +662,26 @@ const make = Effect.gen(function* () {
         }
       } else {
         settings = decoded.value;
+      }
+    }
+
+    // A rejected whole document still carries the guard block the host wrote.
+    // Read it independently so a typo in an unrelated field cannot turn an
+    // explicit `enforce` into a silently unguarded launch.
+    if (!settingsFileTrusted && rawSettings !== undefined) {
+      const recovered = recoverSessionGuard(rawSettings);
+      if (recovered.kind === "valid") {
+        settings = { ...settings, codexSessionGuard: recovered.guard };
+        yield* Effect.logWarning(
+          "settings.json did not decode; keeping the Codex session guard policy it declares",
+          { path: settingsPath },
+        );
+      } else if (recovered.kind === "invalid") {
+        settings = { ...settings, codexSessionGuard: codexSessionGuardRefusalPolicy };
+        yield* Effect.logError(
+          "settings.json declares an undecodable Codex session guard; refusing Codex launches",
+          { path: settingsPath },
+        );
       }
     }
 

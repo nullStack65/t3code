@@ -68,7 +68,10 @@ So the settings service treats the guard as boot-latched:
   effective value.
 - A later file edit keeps the effective policy and logs that a restart is
   required. The edited value stays on disk as pending, and saving unrelated
-  settings preserves it instead of reverting or adopting it.
+  settings preserves it instead of reverting or adopting it. That preservation
+  only covers a value the running server has loaded: an edit the watcher never
+  observed (or a file it could not read yet) is not remembered, so a later save
+  can overwrite it. The effective policy is unchanged either way.
 - An API patch that would change the policy fails with `restart-required`
   before secret handling, the file write or a change emission, so a client can
   never observe "enforce accepted" while processes started under the previous
@@ -80,9 +83,30 @@ no Codex instance is constructed at all, so there is no session to leak. Both
 directions require a restart, which is also the point where an operator has to
 stop the server (quiescent) rather than have T3 interrupt live sessions.
 
-The server cannot prove that non-T3 Codex processes, or processes left behind by
-an earlier run, are quiescent. That remains an explicit operator and upstream
-qualification prerequisite; a restart is not evidence of it.
+### A rejected settings document still carries its guard
+
+The whole-document decoder is strict, so one wrong type in an unrelated field
+rejects the document and the rest of the settings fall back to defaults. That
+fallback must not also discard an explicit guard policy:
+
+- If the document is valid JSON and its `codexSessionGuard` block decodes on its
+  own, that block is used as written, and the file is still left untouched for
+  the operator to repair.
+- If the block is present but cannot be decoded, the effective policy becomes the
+  fail-closed refusal policy: Codex construction is refused because no reference
+  can validate. This is deliberately not "someone probably meant disabled".
+- If the document declares no guard block, the disabled default stands: absence
+  of opt-in is unchanged legacy behavior.
+- If the file is not JSON at all, it provides no evidence either way. T3 keeps
+  the disabled default and does not claim the host is guarded; enrollment has to
+  be verified again after the file is repaired and the server restarted.
+
+None of this is a qualification. It bounds what the running server can know from
+a settings file it was asked to read.
+
+The server also cannot prove that non-T3 Codex processes, or processes left
+behind by an earlier run, are quiescent. That remains an explicit operator and
+upstream qualification prerequisite; a restart is not evidence of it.
 
 ## What a refusal checks, and what it does not prove
 
