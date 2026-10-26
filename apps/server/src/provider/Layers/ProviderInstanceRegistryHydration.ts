@@ -45,7 +45,6 @@ import {
   defaultInstanceIdForDriver,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
-  ProviderInstanceId,
   ServerSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -55,14 +54,7 @@ import * as Stream from "effect/Stream";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
-import {
-  ProviderInstanceRegistryMutator,
-  type ProviderInstanceRegistryMutatorShape,
-} from "../Services/ProviderInstanceRegistryMutator.ts";
-import {
-  CODEX_SESSION_GUARD_DRIVER_KINDS,
-  codexSessionGuardPolicyKey,
-} from "../CodexSessionGuard.ts";
+import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
 
 /**
@@ -112,43 +104,6 @@ export const deriveProviderInstanceConfigMap = (
 };
 
 /**
- * Construction identity per instance id for host policy that gates how an
- * instance is built without being part of its config envelope. Today that is
- * only the Codex session guard: its mode and references decide whether a
- * Codex instance may start at all, so a change must rebuild those instances —
- * otherwise a live instance keeps serving sessions, probes and text generation
- * from closures built before the policy changed.
- *
- * Every other instance keeps the empty identity the registry assumes.
- */
-export const deriveProviderInstanceIdentity = (
-  settings: ServerSettings,
-): ReadonlyMap<ProviderInstanceId, string> => {
-  const identity = codexSessionGuardPolicyKey(settings.codexSessionGuard);
-  const identities = new Map<ProviderInstanceId, string>();
-  for (const [rawInstanceId, entry] of Object.entries(deriveProviderInstanceConfigMap(settings))) {
-    if (CODEX_SESSION_GUARD_DRIVER_KINDS.has(entry.driver)) {
-      identities.set(ProviderInstanceId.make(rawInstanceId), identity);
-    }
-  }
-  return identities;
-};
-
-/**
- * Apply one settings snapshot to the registry: the provider envelopes plus the
- * construction identities above, so policy-only changes rebuild the affected
- * instances instead of leaving their previous closures live.
- */
-export const reconcileProviderInstanceSettings = (
-  mutator: ProviderInstanceRegistryMutatorShape,
-  settings: ServerSettings,
-): Effect.Effect<void> =>
-  mutator.reconcile(
-    deriveProviderInstanceConfigMap(settings),
-    deriveProviderInstanceIdentity(settings),
-  );
-
-/**
  * Layer that consumes `ProviderInstanceRegistryMutator` and forks a
  * settings-watcher fiber. The fiber's lifetime is tied to the enclosing
  * layer scope (process lifetime in production), so it is interrupted on
@@ -166,11 +121,13 @@ const SettingsWatcherLive = Layer.effectDiscard(
     const settingsChanges = yield* serverSettings.subscribeChanges;
     yield* settingsChanges.pipe(
       Stream.runForEach((next) =>
-        reconcileProviderInstanceSettings(mutator, next).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
+        mutator
+          .reconcile(deriveProviderInstanceConfigMap(next))
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
+            ),
           ),
-        ),
       ),
       Effect.forkScoped,
     );
@@ -207,13 +164,10 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
       initialSettings === undefined
         ? ({} as ProviderInstanceConfigMap)
         : deriveProviderInstanceConfigMap(initialSettings);
-    const initialIdentity =
-      initialSettings === undefined ? undefined : deriveProviderInstanceIdentity(initialSettings);
 
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
       drivers: BUILT_IN_DRIVERS,
       configMap: initialConfigMap,
-      ...(initialIdentity === undefined ? {} : { identity: initialIdentity }),
     });
 
     return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));

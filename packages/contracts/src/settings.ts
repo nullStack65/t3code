@@ -1418,6 +1418,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "write-secret",
   "write-file",
   "prepare-directory",
+  "restart-required",
 ]);
 export type ServerSettingsOperation = typeof ServerSettingsOperation.Type;
 
@@ -1432,6 +1433,9 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
   },
 ) {
   override get message(): string {
+    if (this.operation === "restart-required") {
+      return `This setting can only change when the server starts: ${this.settingsPath}.`;
+    }
     const provider =
       this.providerInstanceId === undefined ? "" : ` for provider ${this.providerInstanceId}`;
     const variable =

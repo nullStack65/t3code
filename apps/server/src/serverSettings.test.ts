@@ -11,7 +11,7 @@ import {
   ServerSettingsPatch,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { assert, it } from "@effect/vitest";
+import { assert, it, live } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
@@ -21,6 +21,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfig from "./config.ts";
@@ -1597,5 +1598,108 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       // The user's file is still there to repair; nothing was written over it.
       assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), broken);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+  // Live time: the settings watcher debounces on the real clock.
+  live("keeps the Codex session guard policy fixed until the server restarts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.start;
+        const changes = yield* serverSettings.subscribeChanges;
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+
+        // An operator enrolling a running host edits the file directly.
+        yield* fileSystem.writeFileString(
+          serverConfig.settingsPath,
+          '{"codexSessionGuard":{"mode":"enforce"}}\n',
+        );
+        const emitted = Option.getOrUndefined(
+          yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds")),
+        );
+        assert.isDefined(emitted);
+        assert.equal(emitted.codexSessionGuard.mode, "disabled");
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+        // The file keeps the pending value; the next start is what applies it.
+        assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
+
+        yield* serverSettings.updateSettings({ sidebarAutoSettleOnMerge: false });
+        assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+
+  it.effect("refuses a hot Codex session guard patch before writing or emitting", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const changes = yield* serverSettings.subscribeChanges;
+        yield* serverSettings.getSettings;
+
+        const failure = yield* Effect.flip(
+          serverSettings.updateSettings({ codexSessionGuard: { mode: "enforce" } }),
+        );
+        assert.strictEqual(failure._tag, "ServerSettingsError");
+        assert.strictEqual(failure.operation, "restart-required");
+        assert.isFalse(yield* fileSystem.exists(serverConfig.settingsPath));
+
+        // The first snapshot a client sees is the next accepted change, so the
+        // refused patch never looked accepted.
+        yield* serverSettings.updateSettings({ generateThreadTitles: false });
+        const first = Option.getOrUndefined(yield* changes.pipe(Stream.runHead));
+        assert.isDefined(first);
+        assert.isFalse(first.generateThreadTitles);
+        assert.equal(first.codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("applies the Codex session guard policy the server starts with", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.writeFileString(
+          serverConfig.settingsPath,
+          '{"codexSessionGuard":{"mode":"enforce","stateRoot":"/reviewed/state"}}\n',
+        );
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        const settings = yield* serverSettings.getSettings;
+        assert.equal(settings.codexSessionGuard.mode, "enforce");
+        assert.equal(settings.codexSessionGuard.stateRoot, "/reviewed/state");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+
+  live("refuses a hot guard change while an owned inert process is still running", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.getSettings;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        // Stand-in for an active reader: a plain local process with no model
+        // and no provider involvement, owned and stopped by this test.
+        const reader = yield* spawner.spawn(ChildProcess.make("/bin/sh", ["-c", "sleep 30"]));
+
+        const failure = yield* Effect.flip(
+          serverSettings.updateSettings({ codexSessionGuard: { mode: "enforce" } }),
+        );
+        assert.strictEqual(failure.operation, "restart-required");
+        assert.isTrue(yield* reader.isRunning);
+
+        yield* reader.kill();
+        // A signal-terminated process reports its exit as a platform failure,
+        // so only the fact that it ended matters here.
+        const exit = yield* Effect.exit(reader.exitCode).pipe(Effect.timeout("5 seconds"));
+        assert.isDefined(exit);
+        assert.isFalse(yield* reader.isRunning);
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
   );
 });

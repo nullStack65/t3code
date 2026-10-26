@@ -38,6 +38,8 @@ for name in (
     "coordinator-correction",
     "repair-brief",
     "review-request-changes",
+    "coordinator-instruction-round3",
+    "parent-brief-round3",
 ):
     body = re.search(
         "<!-- BEGIN:" + re.escape(name) + " -->.*?```text\n(.*?)\n```",
@@ -51,13 +53,15 @@ PY
 The digests pin the text as recorded here. They do not authenticate the original
 transport, and they are not evidence of who approved anything.
 
-| Block                  | SHA-256                                                            |
-| ---------------------- | ------------------------------------------------------------------ |
-| execution-handoff      | `3a901f96de74ad60cab13f2805e5729dfc003ddfe6bed0a3027ed6a111d2a589` |
-| original-assignment    | `b2eb034413fd84caeda306b0656b447a38ce8ade26dbc8719801d20242ead38a` |
-| coordinator-correction | `3b8a51ebd856d74fd732219eeb2a7eb09d7637662ac2922f229aabdda24c8c3b` |
-| repair-brief           | `d96f6dabbb682b6ebfb4d0e7e233d29bab499c8458314b259b99239ac22bf19d` |
-| review-request-changes | `19e4225bdbf06f66d06fb416a4ebc5ed3f9a1688267bb7ca6a2da9d5a3c4242f` |
+| Block                          | SHA-256                                                            |
+| ------------------------------ | ------------------------------------------------------------------ |
+| execution-handoff              | `3a901f96de74ad60cab13f2805e5729dfc003ddfe6bed0a3027ed6a111d2a589` |
+| original-assignment            | `b2eb034413fd84caeda306b0656b447a38ce8ade26dbc8719801d20242ead38a` |
+| coordinator-correction         | `3b8a51ebd856d74fd732219eeb2a7eb09d7637662ac2922f229aabdda24c8c3b` |
+| repair-brief                   | `d96f6dabbb682b6ebfb4d0e7e233d29bab499c8458314b259b99239ac22bf19d` |
+| review-request-changes         | `19e4225bdbf06f66d06fb416a4ebc5ed3f9a1688267bb7ca6a2da9d5a3c4242f` |
+| coordinator-instruction-round3 | `b2b2e6542bf166e84836d6eedc31df4c636def1198bac2f5af1480ff737c8dfe` |
+| parent-brief-round3            | `8ea266e4606bd1a2af6de2eae454d796e2e8da56fe65baa365148d6bb6a41f72` |
 
 ## Execution handoff
 
@@ -184,6 +188,40 @@ and publishes only afterwards, the launcher check pins the exact reviewed path
 inside `sourceRoot`, and the internals page now scopes the guarantee to
 driver-backed processes with the remaining in-flight limitation stated. The
 independent review of this repair is a separate round owned by the parent.
+
+## Enrollment-contract round (startup latch)
+
+The next bounded source round replaced the hot-transition repair from
+`e25859e396` after source evidence showed a detached Codex session cannot be
+retired by closing a registry entry. The coordinator instruction is reproduced
+verbatim; the parent's operative brief for this round follows it.
+
+Agent-authored outcome, not approval: the guard policy is now boot-latched in
+the settings service, hot API patches fail with `restart-required` before
+secrets, file writes or emission, a file edit is kept pending on disk and only
+read at the next start, and the per-instance reconcile identity added in `e258`
+was removed because it could not make a running session safe.
+
+<!-- BEGIN:coordinator-instruction-round3 -->
+
+```text
+Latest literal user request: "Status? Move work forward. Get this merged and green and deployed and healthy and monitored and such". I read your completed #47 e25859e3 source-only checkpoint and exact limitations. Do not wait idle for CI settings if necessary source work toward actual first-device qualification can proceed locally. Continue the SAME ownership lane with the next bounded SOURCE-ONLY repair: determine and implement the smallest safe lifetime/admission contract for (a) no new/in-flight spawn crossing an enforcement transition and (b) existing detached sessions not silently escaping the configuration fence. Keep guard disabled by default, preserve explicit CODEX_HOME incompatibility until a reviewed supported binding exists; do not strip env or pretend construction refusal is full fencing. Prefer an explicit quiescent-start/enrollment prerequisite if architecture cannot safely guard already-active sessions; don't kill/interrupt live user sessions or install anything. Implement only when source evidence supports a bounded repair and validate real local process lifecycle/fixtures without model inference. Use existing canonical admitted coding/reviewer workflow and current owner; no duplicate competing writer, no new paid route or native-subscription fallback if local instructions prohibit it. Existing reviews/test receipts remain preserved; review only actual changed scope once. Preserve exact user prompt in any changed PR. Repo Actions intentionally disabled: no policy/settings/grants change, no R720/VM103/ARC dispatch, no merge bypass and no claim CI green. Local check equivalence may be recorded honestly but isn't remote CI. Distinguish a technical prerequisite in another source owner from policy/access blockers; coordinate only specific missing contract with CFG-LIVE owner if needed. Return actual next source result or precise bounded architecture requirement if implementation isn't viable; not another unchanged #47 status recap. OPS owns deployment separately. This instruction authorizes source work toward the existing goal, not live installation/enrollment or a broad T3 redesign.
+```
+
+<!-- END:coordinator-instruction-round3 -->
+
+<!-- BEGIN:parent-brief-round3 -->
+
+```text
+Prior context: source PR47 c888 guard always refused construction, r1 GLM found hot-mode bypass. e258 adds guard-policy identity to registry replacements; r2 GLM PASS_WITH_LIMITATIONS only construction boundary. Both full reviews public PR47#6406733666 and #6406734228, no acceptance of live enrollment. Real Codex session scopes detached in CodexAdapter.ts Scope.make transfer. Thus active process survives registry close; start past lookup can spawn after enforce; registry tests with fake finalizer don't prove actual reader teardown. These are exact supported technical gaps, not billing/access blocks. Source cannot activate upstream guard anyway (CODEX_HOME refusal/descriptor qualification).
+
+New task: determine smallest safe admission/lifetime contract closing unsafe hot-transition claim. Prefer an explicitly startup/quiescent-enrollment-only policy if active-session safe transition cannot be implemented narrowly; NO kills/interruption of live users, broad adapter redesign or fake health boolean. A startup policy may be immutable per server lifetime, reject hot policy changes before writes/secrets/emit, and consistently handle external file reload/cache/read paths so callers never observe 'enforce accepted' while stale sessions are allowed. You must trace actual startup/cache/settings/watcher lifecycle and all instance reconstruction callers; do not mechanically implement this suggestion without evidence. If safe startup latch/readback requires broader redesign, return exact bounded architecture requirement with no invented quiescence proof. Rejecting hot API patch alone is NOT sufficient if file watcher/cache/driver reads change effective policy. Never confuse settings file value with effective runtime enforcement. Startup enforced mode still refuses all provider construction; startup disabled does not become safely enrolled by changing files. Existing external/native process quiescence cannot be proven by ordinary restart; retain explicit operator/upstream qualification prerequisite, no fake installed safety.
+Alternative smallest source-supported per-spawn admission and lifetime leases may be viable if existing owner can serialize with settings; weigh realistically, no framework expansion. Need no in-flight spawn crossing an EFFECTIVE enforce transition, existing detached sessions never silently labeled guarded. Could safe refuse transition until quiescence instead of forced stopping. Parent does not prescribe implementation architecture.
+
+Inspect .repos/effect-smol/LLMS.md before Effect changes. Focused regression should exercise actual settings update/reload vs pending/in-flight synthetic subprocess and active reader, observing spawn/no-spawn/refusal and normal cleanup/restart. Use owned PIDs and event/receipt waits, no sleeps/pattern kills, no real userdata copied. If cannot qualify actual lifecycle use exact test/coverage limitation; do not mirror code mocks and call lifetime proven. Proportionate targeted test/typecheck/lint/fmt only, no repo-wide checks or repeat baseline alias reruns. Update exact docs/ledger only affected scope, maintain prior findings/history. Do not post/edit PR: parent owns publication plus ONE fresh independent GLM review of actual delta before push. Return exact committed head, changed scope, meaningful commands/results, current blockers and upstream contract need. No duplicate writer, restart or provider route changes.
+```
+
+<!-- END:parent-brief-round3 -->
 
 ## Sanitization
 

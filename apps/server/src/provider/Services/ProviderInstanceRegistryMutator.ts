@@ -9,17 +9,13 @@
  * `ServerSettingsService.streamChanges` and applies diffs — imports this
  * tag.
  *
- * The mutator exposes a single entry point, `reconcile(configMap, identity)`,
- * which:
+ * The mutator exposes a single entry point, `reconcile(configMap)`, which:
  *
  *   1. Diffs the incoming map against the live one keyed by instance id.
  *   2. Closes the per-instance `Scope` of every removed or replaced entry
  *      (tearing down adapter processes, refresh fibres, temp files) BEFORE
  *      creating the replacement — `reconcile` guarantees "at most one live
- *      instance per id" at all times. An entry is replaced when its envelope
- *      changes or its `identity` string changes; the identity covers host
- *      policy that changes how a driver builds the instance without appearing
- *      in the driver's config blob.
+ *      instance per id" at all times.
  *   3. Opens a fresh child `Scope` for every added or replaced entry, runs
  *      the driver's `create`, and stores the resulting `ProviderInstance`
  *      plus its scope.
@@ -32,7 +28,7 @@
  *
  * @module provider/Services/ProviderInstanceRegistryMutator
  */
-import type { ProviderInstanceConfigMap, ProviderInstanceId } from "@t3tools/contracts";
+import type { ProviderInstanceConfigMap } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
@@ -47,16 +43,7 @@ export interface ProviderInstanceRegistryMutatorShape {
    * `makeProviderInstanceRegistry`. This keeps settings-watcher loops from
    * erroring out on a single bad entry.
    */
-  readonly reconcile: (
-    configMap: ProviderInstanceConfigMap,
-    /**
-     * Construction identity per instance id, for policy that gates how a
-     * driver builds its instance but is not part of `config`. A changed
-     * identity replaces that instance, retiring its previous readers before
-     * the replacement is published. Omitted ids keep the empty identity.
-     */
-    identity?: ReadonlyMap<ProviderInstanceId, string>,
-  ) => Effect.Effect<void>;
+  readonly reconcile: (configMap: ProviderInstanceConfigMap) => Effect.Effect<void>;
 }
 
 export class ProviderInstanceRegistryMutator extends Context.Service<

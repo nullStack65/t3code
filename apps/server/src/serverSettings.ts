@@ -14,6 +14,7 @@ import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_MODEL_BY_PROVIDER,
+  type CodexSessionGuardSettings,
   DEFAULT_SERVER_SETTINGS,
   ModelSelection,
   ProjectScript,
@@ -509,6 +510,51 @@ const make = Effect.gen(function* () {
   const emitChange = (settings: ServerSettings) =>
     PubSub.publish(changesPubSub, settings).pipe(Effect.asVoid);
 
+  // The Codex session guard policy is fixed for this server's lifetime.
+  // Enrolling a host has to be a deliberate restart: T3 cannot prove that a
+  // Codex process already running, or one that is mid-spawn, is covered by the
+  // fence, so a hot edit must never look like it took effect. The settings
+  // snapshot this service serves IS the effective configuration; a file value
+  // that has not been loaded by a restart stays pending on disk.
+  // See docs/internals/codex-session-guard.md.
+  const effectiveSessionGuardRef = yield* Ref.make<CodexSessionGuardSettings | undefined>(
+    undefined,
+  );
+  const configuredSessionGuardRef = yield* Ref.make<CodexSessionGuardSettings | undefined>(
+    undefined,
+  );
+
+  const latchSessionGuardPolicy = (settings: ServerSettings): Effect.Effect<ServerSettings> =>
+    Effect.gen(function* () {
+      const effective = yield* Ref.get(effectiveSessionGuardRef);
+      yield* Ref.set(configuredSessionGuardRef, settings.codexSessionGuard);
+      if (effective === undefined) {
+        yield* Ref.set(effectiveSessionGuardRef, settings.codexSessionGuard);
+        return settings;
+      }
+      if (Equal.equals(effective, settings.codexSessionGuard)) {
+        return settings;
+      }
+      yield* Effect.logWarning(
+        "Codex session guard changes take effect only after a restart; keeping the policy loaded at startup",
+        { settingsPath },
+      );
+      return { ...settings, codexSessionGuard: effective };
+    });
+
+  /**
+   * Persist the policy the file already asks for, so saving unrelated settings
+   * neither reverts a pending enrollment nor drops it silently.
+   */
+  const settingsForDisk = (settings: ServerSettings): Effect.Effect<ServerSettings> =>
+    Effect.gen(function* () {
+      const configured = yield* Ref.get(configuredSessionGuardRef);
+      if (configured === undefined || Equal.equals(configured, settings.codexSessionGuard)) {
+        return settings;
+      }
+      return { ...settings, codexSessionGuard: configured };
+    });
+
   const readConfigExists = fs.exists(settingsPath).pipe(
     Effect.mapError(
       (cause) =>
@@ -642,7 +688,7 @@ const make = Effect.gen(function* () {
     if (folded !== loaded) {
       yield* writeSettingsAtomically(folded);
     }
-    return folded;
+    return yield* latchSessionGuardPolicy(folded);
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({
@@ -947,8 +993,23 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
         const updated = applyServerSettingsPatch(current, patch);
+        const effectiveGuard = yield* Ref.get(effectiveSessionGuardRef);
+        if (
+          effectiveGuard !== undefined &&
+          !Equal.equals(updated.codexSessionGuard, effectiveGuard)
+        ) {
+          // Refuse before secrets, file writes or a change emission: accepting
+          // a hot change would advertise a policy that processes started under
+          // the previous one are not held to.
+          return yield* new ServerSettingsError({
+            settingsPath,
+            operation: "restart-required",
+            cause: new Error("the Codex session guard can only change when the server starts"),
+          });
+        }
         const persisted = yield* persistProviderEnvironmentSecrets(current, updated);
         const next = yield* normalizeServerSettings(persisted.settings);
+        const diskSettings = yield* settingsForDisk(next);
         const materialized = yield* Effect.uninterruptibleMask(() =>
           Effect.gen(function* () {
             const rollbackSecretChanges = yield* applyProviderEnvironmentSecretChanges(
@@ -961,7 +1022,7 @@ const make = Effect.gen(function* () {
               yield* rollbackSecretChanges;
               return yield* Effect.failCause(materializedExit.cause);
             }
-            const writeExit = yield* Effect.exit(writeSettingsAtomically(next));
+            const writeExit = yield* Effect.exit(writeSettingsAtomically(diskSettings));
             if (Exit.isFailure(writeExit)) {
               yield* rollbackSecretChanges;
               return yield* Effect.failCause(writeExit.cause);

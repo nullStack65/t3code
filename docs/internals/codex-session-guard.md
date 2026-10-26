@@ -41,41 +41,48 @@ same factory, so it is covered too.
 
 Not covered, and not claimed: a user's terminal PTY (`terminal/Manager`),
 `t3 triage`, and any Codex process started outside T3. This is not a
-host-universal guarantee.
+host-universal guarantee, and it says nothing about processes from an earlier
+server run.
 
 T3 also does not read the delivery journal, receipts, device health or setup
 ownership. Partial-journal and unhealthy-state refusal belong to the reviewed
 launcher and reconciler. T3's refusal is unconditional and independent of that
 state, so it neither duplicates nor replaces those checks.
 
-## Live settings changes
+## Enrollment is fixed at server startup
 
-The policy is host-wide, but the registry reconciles per instance, and a Codex
-instance's config envelope does not contain it. `ProviderInstanceRegistryHydration`
-therefore derives a construction identity for every Codex-built instance
-(`codex`, `codex-typed-skills`) and passes it to
-`ProviderInstanceRegistryMutator.reconcile`. Reconcile replaces an instance when
-its envelope **or** its identity changes.
+The effective policy is the value the server loads when it starts. It never
+changes while that server runs, because T3 cannot make a runtime transition
+safe: a Codex session owns a detached scope (`Scope.make` plus transfer in
+`CodexAdapter.startSession`), so closing a registry entry does not stop it, and
+a start already past its instance lookup can still reach the spawn boundary
+after the policy flips. Per-instance reconciliation identity was tried and
+removed: it rebuilt construction readers but could neither stop a running
+session nor close that interleaving, and it left callers able to observe a
+policy the live processes were not held to.
 
-Consequences, in the order reconcile performs them:
+So the settings service treats the guard as boot-latched:
 
-1. The previous instance scope closes first, retiring its adapter, snapshot
-   refresters, text-generation closures and maintenance resolution.
-2. The replacement is then built. Under `enforce` it fails the gate, so the
-   instance appears as unavailable with the refusal detail; probes never start.
-3. Only after both steps does the registry publish, so no consumer observes
-   "enforced" while the old readers are still live.
+- The first load of the settings file fixes the effective policy for the
+  process; reads, `streamChanges` and `subscribeChanges` only ever carry that
+  effective value.
+- A later file edit keeps the effective policy and logs that a restart is
+  required. The edited value stays on disk as pending, and saving unrelated
+  settings preserves it instead of reverting or adopting it.
+- An API patch that would change the policy fails with `restart-required`
+  before secret handling, the file write or a change emission, so a client can
+  never observe "enforce accepted" while processes started under the previous
+  policy keep running.
 
-Disabling the guard rebuilds a live instance again. Instances of other drivers
-keep their exact live objects, and settings changes outside the guard policy do
-not rebuild Codex — both are covered by the reconcile-identity regression.
+Consequences: with the policy disabled at startup nothing claims to be guarded,
+and no later file or API edit can claim it. With the policy enforced at startup
+no Codex instance is constructed at all, so there is no session to leak. Both
+directions require a restart, which is also the point where an operator has to
+stop the server (quiescent) rather than have T3 interrupt live sessions.
 
-Residual limit, stated rather than papered over: an operation that already
-resolved the old instance before reconcile closed its scope can still complete.
-Codex sessions own a detached session scope, so a session start already past
-that lookup can finish spawning after enrollment. Closing that interleaving needs
-admission at the spawn boundary, which belongs with the launcher change. Lookups
-after publication resolve to unavailable and fail instead of spawning.
+The server cannot prove that non-T3 Codex processes, or processes left behind by
+an earlier run, are quiescent. That remains an explicit operator and upstream
+qualification prerequisite; a restart is not evidence of it.
 
 ## What a refusal checks, and what it does not prove
 
@@ -126,6 +133,9 @@ lifetime guarantee.
 Configuration lives in server settings (`codexSessionGuard`), not the provider
 settings form. An instance that refuses becomes unavailable with the refusal
 detail, so an enrolled host with Codex enabled shows why Codex is not starting.
-Flipping the policy takes effect on the live registry: enabling retires running
-Codex instances and leaves them unavailable; disabling rebuilds them. The guard
-keeps no state and writes nothing.
+
+To change the policy: stop the server, edit the file (or set it through any
+tool while stopped), then start it again. A patch while the server is running is
+rejected with `restart-required`, and a file edit is kept pending on disk and
+only read at the next start. The guard keeps no state of its own and writes
+nothing.

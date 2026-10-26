@@ -1,4 +1,4 @@
-import { ProviderDriverKind, type CodexSessionGuardSettings } from "@t3tools/contracts";
+import type { CodexSessionGuardSettings } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -57,30 +57,6 @@ export class CodexSessionGuardRefused extends Schema.TaggedError<CodexSessionGua
 export type CodexSessionGuardAdmission =
   | { readonly status: "disabled" }
   | { readonly status: "refused"; readonly refused: CodexSessionGuardRefused };
-
-/** Driver kinds that build through `makeCodexDriver`, where the gate lives. */
-export const CODEX_SESSION_GUARD_DRIVER_KINDS: ReadonlySet<ProviderDriverKind> = new Set([
-  ProviderDriverKind.make("codex"),
-  ProviderDriverKind.make("codex-typed-skills"),
-]);
-
-/**
- * Identity for the host guard policy, used only to decide when a settings
- * change must rebuild Codex instances. Length-prefixed so different reference
- * sets cannot collide. It is identity, not authentication: it says nothing
- * about the source tree's contents and qualifies nothing.
- */
-export const codexSessionGuardPolicyKey = (settings: CodexSessionGuardSettings): string =>
-  [
-    settings.mode,
-    settings.interpreter,
-    settings.launcher,
-    settings.sourceRoot,
-    settings.deviceFile,
-    settings.stateRoot,
-  ]
-    .map((value) => `${value.length}:${value}`)
-    .join("|");
 
 /** Provider roots the reviewed guard refuses to run with an override for. */
 const PROVIDER_ROOT_OVERRIDES = ["CODEX_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR"] as const;
