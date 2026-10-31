@@ -185,6 +185,7 @@ const makeTildeProviderFixtures = Effect.fn(
       "  process.exit(0);",
       "}",
       "const lines = NodeReadline.createInterface({ input: process.stdin });",
+      'lines.on("close", () => process.exit(0));',
       'lines.on("line", (line) => {',
       "  const message = JSON.parse(line);",
       '  if (message.type !== "control_request" || message.request?.subtype !== "initialize") return;',
