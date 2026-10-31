@@ -22,6 +22,8 @@
  * binaries. That keeps the assertions focused on registry routing
  * behaviour rather than the runtime details of each provider.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off - bounded synthetic subprocess regression.
+import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -40,6 +42,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
@@ -59,6 +62,10 @@ import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+
+const json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeSync(json);
+const decodeJson = Schema.decodeUnknownSync(json);
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -175,36 +182,7 @@ const makeTildeProviderFixtures = Effect.fn(
   );
   yield* fileSystem.chmod(codexPath, 0o755);
 
-  yield* fileSystem.writeFileString(
-    claudePath,
-    [
-      "#!/usr/bin/env node",
-      'import * as NodeReadline from "node:readline";',
-      'if (process.argv.includes("--version")) {',
-      '  process.stdout.write("claude 2.1.219\\n");',
-      "  process.exit(0);",
-      "}",
-      "const lines = NodeReadline.createInterface({ input: process.stdin });",
-      'lines.on("line", (line) => {',
-      "  const message = JSON.parse(line);",
-      '  if (message.type !== "control_request" || message.request?.subtype !== "initialize") return;',
-      "  process.stdout.write(JSON.stringify({",
-      '    type: "control_response",',
-      "    response: {",
-      '      subtype: "success",',
-      "      request_id: message.request_id,",
-      "      response: {",
-      "        commands: [], agents: [], models: [],",
-      '        output_style: "default", available_output_styles: ["default"],',
-      '        account: { email: "test@example.com", subscriptionType: "pro", tokenSource: "oauth" },',
-      "      },",
-      "    },",
-      '  }) + "\\n");',
-      "});",
-      "setInterval(() => {}, 1_000);",
-      "",
-    ].join("\n"),
-  );
+  yield* fileSystem.copyFile(path.join(codexFixtureDir, "claudeTildeMock.mjs"), claudePath);
   yield* fileSystem.chmod(claudePath, 0o755);
   yield* fileSystem.makeDirectory(claudeHomePath);
 
@@ -337,6 +315,41 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       const snapshot = yield* instance!.snapshot.getSnapshot;
       expect(snapshot.enabled).toBe(false);
     }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("exits the synthetic Claude fixture after stdin EOF", () =>
+    Effect.gen(function* () {
+      if (yield* isHostWindows) return;
+
+      const fixtures = yield* makeTildeProviderFixtures();
+      // The larger response also catches forced-exit truncation of queued stdout.
+      for (const requestId of ["stdin-eof-regression", "x".repeat(128 * 1024)]) {
+        // EOF follows initialize. The timeout is only a failure watchdog;
+        // spawnSync terminates its own child if the keepalive leaks.
+        const result = NodeChildProcess.spawnSync(
+          process.execPath,
+          [expandHomePath(fixtures.claudeBinaryPath)],
+          {
+            input: `${encodeJson({
+              type: "control_request",
+              request_id: requestId,
+              request: { subtype: "initialize" },
+            })}\n`,
+            encoding: "utf8",
+            timeout: 2_000,
+          },
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.signal).toBeNull();
+        expect(result.stderr).toBe("");
+        expect(decodeJson(result.stdout)).toMatchObject({
+          type: "control_response",
+          response: { subtype: "success", request_id: requestId },
+        });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.live("runs Codex and Claude readiness probes from configured tilde paths", () =>
