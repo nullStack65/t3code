@@ -22,6 +22,8 @@
  * binaries. That keeps the assertions focused on registry routing
  * behaviour rather than the runtime details of each provider.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off - bounded synthetic subprocess regression.
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -175,37 +177,7 @@ const makeTildeProviderFixtures = Effect.fn(
   );
   yield* fileSystem.chmod(codexPath, 0o755);
 
-  yield* fileSystem.writeFileString(
-    claudePath,
-    [
-      "#!/usr/bin/env node",
-      'import * as NodeReadline from "node:readline";',
-      'if (process.argv.includes("--version")) {',
-      '  process.stdout.write("claude 2.1.219\\n");',
-      "  process.exit(0);",
-      "}",
-      "const lines = NodeReadline.createInterface({ input: process.stdin });",
-      'lines.on("close", () => process.exit(0));',
-      'lines.on("line", (line) => {',
-      "  const message = JSON.parse(line);",
-      '  if (message.type !== "control_request" || message.request?.subtype !== "initialize") return;',
-      "  process.stdout.write(JSON.stringify({",
-      '    type: "control_response",',
-      "    response: {",
-      '      subtype: "success",',
-      "      request_id: message.request_id,",
-      "      response: {",
-      "        commands: [], agents: [], models: [],",
-      '        output_style: "default", available_output_styles: ["default"],',
-      '        account: { email: "test@example.com", subscriptionType: "pro", tokenSource: "oauth" },',
-      "      },",
-      "    },",
-      '  }) + "\\n");',
-      "});",
-      "setInterval(() => {}, 1_000);",
-      "",
-    ].join("\n"),
-  );
+  yield* fileSystem.copyFile(path.join(codexFixtureDir, "claudeTildeMock.mjs"), claudePath);
   yield* fileSystem.chmod(claudePath, 0o755);
   yield* fileSystem.makeDirectory(claudeHomePath);
 
@@ -338,6 +310,34 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       const snapshot = yield* instance!.snapshot.getSnapshot;
       expect(snapshot.enabled).toBe(false);
     }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("exits the synthetic Claude fixture after stdin EOF", () =>
+    Effect.gen(function* () {
+      if (yield* isHostWindows) return;
+
+      const fixtures = yield* makeTildeProviderFixtures();
+      // EOF is delivered after the initialize request. The timeout is a failure
+      // watchdog: spawnSync terminates its own child if the old interval leaks.
+      const result = spawnSync(process.execPath, [expandHomePath(fixtures.claudeBinaryPath)], {
+        input: `${JSON.stringify({
+          type: "control_request",
+          request_id: "stdin-eof-regression",
+          request: { subtype: "initialize" },
+        })}\n`,
+        encoding: "utf8",
+        timeout: 2_000,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.signal).toBeNull();
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        type: "control_response",
+        response: { subtype: "success", request_id: "stdin-eof-regression" },
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.live("runs Codex and Claude readiness probes from configured tilde paths", () =>
