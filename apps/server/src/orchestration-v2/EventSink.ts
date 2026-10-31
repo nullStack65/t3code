@@ -41,6 +41,26 @@ export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>
   {
     eventCount: Schema.Number,
     commandId: Schema.optional(CommandId),
+    category: Schema.optional(Schema.Literal("identity_conflict")),
+    entityKind: Schema.optional(Schema.Literals(["node", "turn_item"])),
+    conflictField: Schema.optional(
+      Schema.Literals([
+        "threadId",
+        "runId",
+        "providerThreadId",
+        "providerTurnId",
+        "nativeDriver",
+        "nativeId",
+        "nativeStrength",
+        "providerInstanceId",
+        "parentNodeId",
+        "rootNodeId",
+        "kind",
+        "nodeId",
+        "parentItemId",
+        "type",
+      ]),
+    ),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -48,6 +68,8 @@ export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>
     return `Failed to write ${this.eventCount} orchestration V2 event(s).`;
   }
 }
+
+const isEventSinkWriteError = Schema.is(EventSinkWriteError);
 
 export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamError>()(
   "EventSinkStreamError",
@@ -329,6 +351,170 @@ const layerBase: Layer.Layer<
       );
     };
 
+    // This protects prospective structural ownership only. Latest rows cannot
+    // attest the original native provider context or repair accepted history.
+    const preflightOwnership = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      commandId?: CommandId,
+    ) {
+      type Owner = {
+        threadId: string;
+        runId: string | null;
+        providerThreadId: string | null;
+        providerTurnId: string | null;
+        nativeDriver: string | null;
+        nativeId: string | null;
+        nativeStrength: string | null;
+      };
+      type NodeOwner = Owner & { parentNodeId: string | null; rootNodeId: string; kind: string };
+      type ItemOwner = Owner & { nodeId: string | null; parentItemId: string | null; type: string };
+      const nodePrefix = "node:provider:codex:native-item:";
+      const itemPrefix = "turn-item:provider:codex:native-item:";
+      const groups = new Map<
+        string,
+        {
+          nodes: NodeOwner[];
+          items: ItemOwner[];
+          instances: Set<string>;
+          envelopeConflict?: "node" | "turn_item";
+        }
+      >();
+      const commonFields = [
+        "threadId",
+        "runId",
+        "providerThreadId",
+        "providerTurnId",
+        "nativeDriver",
+        "nativeId",
+        "nativeStrength",
+      ] as const;
+      const conflict = (
+        entityKind: "node" | "turn_item",
+        conflictField: NonNullable<EventSinkWriteError["conflictField"]>,
+      ) =>
+        new EventSinkWriteError({
+          eventCount: events.length,
+          ...(commandId === undefined ? {} : { commandId }),
+          category: "identity_conflict",
+          entityKind,
+          conflictField,
+        });
+      const getGroup = Effect.fnUntraced(function* (suffix: string) {
+        const cached = groups.get(suffix);
+        if (cached !== undefined) return cached;
+        // Global primary-key reads: a thread-scoped lookup would miss foreign owners.
+        // Extract only ownership scalars, never tool arguments/output or full JSON.
+        const nodes = yield* sql<NodeOwner>`
+          SELECT thread_id AS threadId, run_id AS runId, parent_node_id AS parentNodeId,
+            root_node_id AS rootNodeId, kind, provider_thread_id AS providerThreadId,
+            provider_turn_id AS providerTurnId,
+            json_extract(payload_json, '$.nativeItemRef.driver') AS nativeDriver,
+            json_extract(payload_json, '$.nativeItemRef.nativeId') AS nativeId,
+            json_extract(payload_json, '$.nativeItemRef.strength') AS nativeStrength
+          FROM orchestration_v2_projection_nodes WHERE node_id = ${nodePrefix + suffix} LIMIT 1
+        `;
+        const items = yield* sql<ItemOwner>`
+          SELECT thread_id AS threadId, run_id AS runId, node_id AS nodeId,
+            parent_item_id AS parentItemId, type, provider_thread_id AS providerThreadId,
+            provider_turn_id AS providerTurnId,
+            json_extract(payload_json, '$.nativeItemRef.driver') AS nativeDriver,
+            json_extract(payload_json, '$.nativeItemRef.nativeId') AS nativeId,
+            json_extract(payload_json, '$.nativeItemRef.strength') AS nativeStrength
+          FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${itemPrefix + suffix} LIMIT 1
+        `;
+        const group: {
+          nodes: NodeOwner[];
+          items: ItemOwner[];
+          instances: Set<string>;
+          envelopeConflict?: "node" | "turn_item";
+        } = {
+          nodes: Array.from(nodes),
+          items: Array.from(items),
+          instances: new Set(),
+        };
+        groups.set(suffix, group);
+        return group;
+      });
+      for (const event of events) {
+        if (event.type !== "node.updated" && event.type !== "turn-item.updated") continue;
+        const payload = event.payload;
+        const prefix = event.type === "node.updated" ? nodePrefix : itemPrefix;
+        if (!payload.id.startsWith(prefix)) continue;
+        const group = yield* getGroup(payload.id.slice(prefix.length));
+        const owner = {
+          threadId: payload.threadId,
+          runId: payload.runId,
+          providerThreadId: payload.providerThreadId ?? null,
+          providerTurnId: payload.providerTurnId ?? null,
+          nativeDriver: payload.nativeItemRef?.driver ?? null,
+          nativeId: payload.nativeItemRef?.nativeId ?? null,
+          nativeStrength: payload.nativeItemRef?.strength ?? null,
+        };
+        if (event.type === "node.updated") {
+          group.nodes.push({
+            ...owner,
+            parentNodeId: event.payload.parentNodeId,
+            rootNodeId: event.payload.rootNodeId,
+            kind: event.payload.kind,
+          });
+        } else {
+          group.items.push({
+            ...owner,
+            nodeId: event.payload.nodeId,
+            parentItemId: event.payload.parentItemId,
+            type: event.payload.type,
+          });
+        }
+        // Retain the envelope as another prospective constraint, not as proof of
+        // an original provider instance (which these rows do not preserve).
+        if (event.threadId !== payload.threadId)
+          group.envelopeConflict = event.type === "node.updated" ? "node" : "turn_item";
+        if (event.providerInstanceId !== undefined) group.instances.add(event.providerInstanceId);
+      }
+      for (const [suffix, group] of groups) {
+        const protectedKey =
+          group.nodes.some((n) => n.kind === "tool_call") ||
+          group.items.some((i) => i.type === "command_execution" || i.type === "dynamic_tool");
+        if (!protectedKey) continue;
+        if (group.envelopeConflict !== undefined)
+          return yield* conflict(group.envelopeConflict, "threadId");
+        // Compare attested headers within this call only; latest projections do
+        // not retain original provider-instance ownership across calls.
+        if (group.instances.size > 1) return yield* conflict("node", "providerInstanceId");
+        const node = group.nodes[0];
+        for (const candidate of group.nodes) {
+          for (const field of [...commonFields, "parentNodeId", "rootNodeId", "kind"] as const) {
+            if (node !== undefined && candidate[field] !== node[field])
+              return yield* conflict("node", field);
+          }
+        }
+        const item = group.items[0];
+        for (const candidate of group.items) {
+          for (const field of [...commonFields, "nodeId", "parentItemId", "type"] as const) {
+            if (item !== undefined && candidate[field] !== item[field])
+              return yield* conflict("turn_item", field);
+          }
+        }
+        if (node !== undefined && item !== undefined) {
+          for (const field of commonFields) {
+            if (node[field] !== item[field]) return yield* conflict("turn_item", field);
+          }
+          if (item.nodeId !== nodePrefix + suffix) return yield* conflict("turn_item", "nodeId");
+          if (node.kind !== "tool_call") return yield* conflict("node", "kind");
+          if (item.type !== "command_execution" && item.type !== "dynamic_tool")
+            return yield* conflict("turn_item", "type");
+        }
+      }
+    });
+
+    const prepareEvents = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      commandId?: CommandId,
+    ) {
+      yield* preflightOwnership(events, commandId);
+      return yield* normalizeEvents(events);
+    });
+
     const applyStoredEvents = (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) =>
       Effect.gen(function* () {
         yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
@@ -370,10 +556,11 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
-          const normalized = yield* normalizeEvents(
+          const normalized = yield* prepareEvents(
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(input.events)
               : input.events,
+            input.commandId,
           );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -428,10 +615,11 @@ const layerBase: Layer.Layer<
               };
             }
 
-            const normalized = yield* normalizeEvents(
+            const normalized = yield* prepareEvents(
               input.guardPendingUserInputCancellations === true
                 ? yield* guardUserInputCancellations(input.events)
                 : input.events,
+              input.commandId,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -493,10 +681,11 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(
+          const normalized = yield* prepareEvents(
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(input.events)
               : input.events,
+            input.commandId,
           );
           const storedEvents = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -543,7 +732,7 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
-          const normalized = yield* normalizeEvents(input.events);
+          const normalized = yield* prepareEvents(input.events, input.commandId);
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,
             events: normalized,
@@ -762,57 +951,62 @@ const layerBase: Layer.Layer<
     return EventSinkV2.of({
       write: (input) =>
         writeEffect({ ...input, effects: [] }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            isEventSinkWriteError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
           ),
         ),
       writeWithEffects: (input) =>
         writeEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            isEventSinkWriteError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
           ),
         ),
       writeIfRunCurrent: (input) =>
         writeIfRunCurrentEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            isEventSinkWriteError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
           ),
         ),
       writeIfProviderThreadOwner: (input) =>
         writeIfProviderThreadOwnerEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            isEventSinkWriteError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
           ),
         ),
       commitCommand: (input) =>
         commitCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                commandId: input.commandId,
-                eventCount: input.events.length,
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            isEventSinkWriteError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  commandId: input.commandId,
+                  eventCount: input.events.length,
+                  cause,
+                }),
           ),
         ),
       commitRejectedCommand: (input) =>
