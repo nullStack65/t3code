@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -1600,36 +1601,44 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), broken);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
-  // Live time: the settings watcher debounces on the real clock.
+  // The controlled watch stream buffers events until the watcher consumes them.
+  // Live time is still needed for the watcher’s debounce.
   live("keeps the Codex session guard policy fixed until the server restarts", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const serverConfig = yield* ServerConfig.ServerConfig;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-        yield* serverSettings.start;
-        const changes = yield* serverSettings.subscribeChanges;
-        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+      const watchedFs = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        watch: () => Stream.fromQueue(events),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const serverConfig = yield* ServerConfig.ServerConfig;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+          yield* serverSettings.start;
+          const changes = yield* serverSettings.subscribeChanges;
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
 
-        // An operator enrolling a running host edits the file directly.
-        yield* fileSystem.writeFileString(
-          serverConfig.settingsPath,
-          '{"codexSessionGuard":{"mode":"enforce"}}\n',
-        );
-        const emitted = Option.getOrUndefined(
-          yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds")),
-        );
-        assert.isDefined(emitted);
-        assert.equal(emitted.codexSessionGuard.mode, "disabled");
-        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
-        // The file keeps the pending value; the next start is what applies it.
-        assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
+          // An operator enrolling a running host edits the file directly.
+          yield* fileSystem.writeFileString(
+            serverConfig.settingsPath,
+            '{"codexSessionGuard":{"mode":"enforce"}}\n',
+          );
+          yield* Queue.offer(events, { _tag: "Update", path: serverConfig.settingsPath });
+          const emitted = Option.getOrUndefined(yield* Stream.runHead(changes));
+          assert.isDefined(emitted);
+          assert.equal(emitted.codexSessionGuard.mode, "disabled");
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+          // The file keeps the pending value; the next start is what applies it.
+          assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
 
-        yield* serverSettings.updateSettings({ sidebarAutoSettleOnMerge: false });
-        assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
-        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
-      }),
-    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+          yield* serverSettings.updateSettings({ sidebarAutoSettleOnMerge: false });
+          assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+        }),
+      ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(watchedFs))));
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("refuses a hot Codex session guard patch before writing or emitting", () =>
@@ -1765,26 +1774,33 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   live("keeps the latched policy when settings.json becomes unreadable", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const serverConfig = yield* ServerConfig.ServerConfig;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-        yield* serverSettings.start;
-        const changes = yield* serverSettings.subscribeChanges;
-        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+      const watchedFs = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        watch: () => Stream.fromQueue(events),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const serverConfig = yield* ServerConfig.ServerConfig;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+          yield* serverSettings.start;
+          const changes = yield* serverSettings.subscribeChanges;
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
 
-        const malformed = '{"codexSessionGuard":{"mode":"enforce"';
-        yield* fileSystem.writeFileString(serverConfig.settingsPath, malformed);
-        const emitted = Option.getOrUndefined(
-          yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds")),
-        );
-        assert.isDefined(emitted);
-        assert.equal(emitted.codexSessionGuard.mode, "disabled");
-        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
-        // Unparseable JSON is never rewritten; it stays for the operator.
-        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), malformed);
-      }),
-    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+          const malformed = '{"codexSessionGuard":{"mode":"enforce"';
+          yield* fileSystem.writeFileString(serverConfig.settingsPath, malformed);
+          yield* Queue.offer(events, { _tag: "Update", path: serverConfig.settingsPath });
+          const emitted = Option.getOrUndefined(yield* Stream.runHead(changes));
+          assert.isDefined(emitted);
+          assert.equal(emitted.codexSessionGuard.mode, "disabled");
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+          // Unparseable JSON is never rewritten; it stays for the operator.
+          assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), malformed);
+        }),
+      ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(watchedFs))));
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
