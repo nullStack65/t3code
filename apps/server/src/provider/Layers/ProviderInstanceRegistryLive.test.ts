@@ -23,7 +23,7 @@
  * behaviour rather than the runtime details of each provider.
  */
 // @effect-diagnostics-next-line nodeBuiltinImport:off - bounded synthetic subprocess regression.
-import { spawnSync } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -42,6 +42,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
@@ -61,6 +62,10 @@ import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+
+const json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeSync(json);
+const decodeJson = Schema.decodeUnknownSync(json);
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -317,26 +322,33 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       if (yield* isHostWindows) return;
 
       const fixtures = yield* makeTildeProviderFixtures();
-      // EOF is delivered after the initialize request. The timeout is a failure
-      // watchdog: spawnSync terminates its own child if the old interval leaks.
-      const result = spawnSync(process.execPath, [expandHomePath(fixtures.claudeBinaryPath)], {
-        input: `${JSON.stringify({
-          type: "control_request",
-          request_id: "stdin-eof-regression",
-          request: { subtype: "initialize" },
-        })}\n`,
-        encoding: "utf8",
-        timeout: 2_000,
-      });
+      // The larger response also catches forced-exit truncation of queued stdout.
+      for (const requestId of ["stdin-eof-regression", "x".repeat(128 * 1024)]) {
+        // EOF follows initialize. The timeout is only a failure watchdog;
+        // spawnSync terminates its own child if the keepalive leaks.
+        const result = NodeChildProcess.spawnSync(
+          process.execPath,
+          [expandHomePath(fixtures.claudeBinaryPath)],
+          {
+            input: `${encodeJson({
+              type: "control_request",
+              request_id: requestId,
+              request: { subtype: "initialize" },
+            })}\n`,
+            encoding: "utf8",
+            timeout: 2_000,
+          },
+        );
 
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
-      expect(result.signal).toBeNull();
-      expect(result.stderr).toBe("");
-      expect(JSON.parse(result.stdout)).toMatchObject({
-        type: "control_response",
-        response: { subtype: "success", request_id: "stdin-eof-regression" },
-      });
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.signal).toBeNull();
+        expect(result.stderr).toBe("");
+        expect(decodeJson(result.stdout)).toMatchObject({
+          type: "control_response",
+          response: { subtype: "success", request_id: requestId },
+        });
+      }
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
