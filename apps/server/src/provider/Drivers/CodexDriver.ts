@@ -72,6 +72,7 @@ import {
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
 import { makeCodexSkillConsumer, type CodexSkillSource } from "../CodexSkillConsumer.ts";
+import { admitCodexSession } from "../CodexSessionGuard.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -141,6 +142,35 @@ export const makeCodexDriver = (
         const modelManifest = yield* ModelManifest.ModelManifest;
         const processEnv = mergeProviderInstanceEnvironment(environment);
         const homeLayout = yield* resolveCodexHomeLayout(config);
+        // An enrolled host must refuse unguarded Codex before any process or
+        // filesystem side effect (the shadow home below is a write). Every
+        // T3-owned Codex process — session app-servers, version/status/skills
+        // probes, text generation, maintenance and reset-credit redemption —
+        // is built from this instance, so this is the one admission point.
+        const hostSettings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: "Could not read server settings for the Codex session guard.",
+                cause,
+              }),
+          ),
+        );
+        const sessionGuard = yield* admitCodexSession({
+          settings: hostSettings.codexSessionGuard,
+          homePath: homeLayout.effectiveHomePath ?? "",
+          environment: processEnv,
+        });
+        if (sessionGuard.status === "refused") {
+          return yield* new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: sessionGuard.refused.message,
+            cause: sessionGuard.refused,
+          });
+        }
         const continuationIdentity = governedSkills
           ? {
               driverKind: DRIVER_KIND,
