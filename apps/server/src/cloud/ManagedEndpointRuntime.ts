@@ -371,4 +371,11 @@ export const make = Effect.gen(function* () {
   return runtime;
 });
 
+export const layerDisabled = Layer.succeed(
+  CloudManagedEndpointRuntime,
+  CloudManagedEndpointRuntime.of({
+    applyConfig: () => Effect.succeed({ status: "disabled" }),
+  }),
+);
+
 export const layer = Layer.effect(CloudManagedEndpointRuntime, make);

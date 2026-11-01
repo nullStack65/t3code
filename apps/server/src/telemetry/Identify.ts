@@ -1,4 +1,4 @@
-import * as NodeOS from "node:os";
+import { effectiveHomeDirectory } from "@t3tools/shared/isolationRoot";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
@@ -299,5 +299,5 @@ export const getTelemetryIdentifierForHome = Effect.fn("getTelemetryIdentifierFo
 );
 
 export const getTelemetryIdentifier = Effect.suspend(() =>
-  getTelemetryIdentifierForHome(NodeOS.homedir()),
+  getTelemetryIdentifierForHome(effectiveHomeDirectory(process.env, [])),
 );
