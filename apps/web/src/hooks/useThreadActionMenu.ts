@@ -8,10 +8,11 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 
-import { resolveSnoozePresets, snoozeWakeDescription } from "../components/Sidebar.snooze";
+import { resolveSnoozePresets } from "../components/Sidebar.snooze";
 import {
   buildThreadActionMenuItems,
   type ThreadActionMenuId,
@@ -28,6 +29,7 @@ import {
   useProjects,
 } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
+import { serverEnvironment } from "../state/server";
 import { readLocalApi } from "../localApi";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -71,6 +73,12 @@ export function useThreadActionMenu(input: {
   const router = useRouter();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const serverConfig = useAtomValue(
+    serverEnvironment.configValueAtom(threadRef?.environmentId ?? null),
+  );
+  // The server refuses title regeneration when this is off, so hide the
+  // action instead of offering one that silently does nothing.
+  const generateThreadTitles = serverConfig?.settings?.generateThreadTitles ?? true;
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const logicalProjectKeyByPhysicalKey = useMemo(
     () =>
@@ -134,12 +142,17 @@ export function useThreadActionMenu(input: {
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
           pinning: readEnvironmentSupportsPinning(threadRef.environmentId),
-          titleRegeneration: readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
+          titleRegeneration:
+            generateThreadTitles &&
+            readEnvironmentSupportsTitleRegeneration(threadRef.environmentId),
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
         const items = buildThreadActionMenuItems({
           branch: thread.branch ?? null,
+          // The chat header has no project-scoped thread list behind the
+          // menu, so the "Filter by project" affordance is sidebar-only.
+          projectFilter: null,
           isPinned: thread.pinnedAt != null,
           isSettled: supports.settlement && thread.settledOverride === "settled",
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
@@ -159,29 +172,9 @@ export function useThreadActionMenu(input: {
               : snoozePresets.find((candidate) => `snooze:${candidate.id}` === action);
           if (!preset) return;
           const result = await snoozeThread(threadRef, preset.snoozedUntil);
-          if (result._tag === "Failure") {
-            if (!isAtomCommandInterrupted(result)) {
-              failureToast("Failed to snooze thread", squashAtomCommandFailure(result));
-            }
-            return;
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            failureToast("Failed to snooze thread", squashAtomCommandFailure(result));
           }
-          toastManager.add(
-            stackedThreadToast({
-              type: "success",
-              title: `Snoozed until ${snoozeWakeDescription(preset.snoozedUntil, new Date(), timestampFormat)}`,
-              timeout: 5_000,
-              actionProps: {
-                children: "Undo",
-                onClick: () => {
-                  void unsnoozeThread(threadRef).then((undone) => {
-                    if (undone._tag === "Failure" && !isAtomCommandInterrupted(undone)) {
-                      failureToast("Failed to wake thread", squashAtomCommandFailure(undone));
-                    }
-                  });
-                },
-              },
-            }),
-          );
           return;
         }
         const reportFailure = async (
@@ -341,6 +334,7 @@ export function useThreadActionMenu(input: {
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
+      generateThreadTitles,
       handleNewThread,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,

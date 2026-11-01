@@ -348,6 +348,15 @@ export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentia
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,
   auth: ServerAuthDescriptor,
+  /**
+   * Stable, non-secret principal selected when the session was issued. This
+   * lets non-settling consumers pin the authenticated provider identity
+   * without receiving or deriving a credential. It is omitted when the
+   * request is unauthenticated and is independent of token expiry/rotation.
+   * Key identifiers for managed launch are intentionally a separate future
+   * contract and must not be inferred from this field.
+   */
+  subject: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),

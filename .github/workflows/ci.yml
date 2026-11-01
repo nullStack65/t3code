@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -52,6 +52,9 @@ jobs:
       - name: Check
         run: vp check
 
+      - name: Check className overrides on components/ui do not grow
+        run: vp run lint:restyle-ceiling
+
       - name: Typecheck
         run: vpr typecheck
 
@@ -59,7 +62,7 @@ jobs:
 
       - name: Install browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          sudo sed -i 's|http://|https://|g' /etc/apt/t3-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Build desktop pipeline
@@ -75,7 +78,7 @@ jobs:
   # limit stays at the default 4 so peak load per runner is unchanged.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -100,7 +103,7 @@ jobs:
 
       - name: Install browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          sudo sed -i 's|http://|https://|g' /etc/apt/t3-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Test preview artifact validation
@@ -118,7 +121,7 @@ jobs:
   # isolation that flag buys is preserved exactly.
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -185,7 +188,7 @@ jobs:
   # for checks that take under 3s, on the critical path of every PR.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -203,7 +206,7 @@ jobs:
 
       - name: Check Rust formatting
         run: |
-          for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
+          for crate in resource-monitor kde-snap-shot hyprland-snap-shot windows-service-host; do
             cargo fmt --manifest-path "native/$crate/Cargo.toml" -- --check
           done
 
@@ -213,13 +216,21 @@ jobs:
             cargo test --locked --manifest-path "native/$crate/Cargo.toml"
           done
 
+      - name: Check portable Windows service host
+        run: cargo test --locked --features test-child --manifest-path native/windows-service-host/Cargo.toml
+
+      - name: Check Windows service host target
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          cargo check --locked --target x86_64-pc-windows-gnu --manifest-path native/windows-service-host/Cargo.toml
+
   # The static analysis below needs a macOS runner, which bills ~6.7x a Linux
   # minute, so gate it on the native sources it actually lints instead of paying
   # for it on every push. Detection is API-only (no checkout) and fails open: if
   # the diff cannot be resolved, the lint runs.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -297,7 +308,7 @@ jobs:
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
     # output empty, and that must run the lint rather than silently skip it.
     if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-14
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -325,7 +336,7 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

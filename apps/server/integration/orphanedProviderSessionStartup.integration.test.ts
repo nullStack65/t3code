@@ -21,6 +21,8 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { HttpServer } from "effect/unstable/http";
+import * as NetAddress from "effect/unstable/net/NetAddress";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as EnvironmentAuth from "../src/auth/EnvironmentAuth.ts";
 import * as ServiceLauncherClient from "../src/cloud/serviceLauncherClient.ts";
@@ -44,6 +46,7 @@ import * as ServerRuntimeStartup from "../src/serverRuntimeStartup.ts";
 import * as ServerSettings from "../src/serverSettings.ts";
 import * as AnalyticsService from "../src/telemetry/AnalyticsService.ts";
 import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 
 const providerInstanceId = ProviderInstanceId.make("codex");
 const projectId = ProjectId.make("project-startup-orphan");
@@ -104,12 +107,22 @@ const startupDependencies = Layer.mergeAll(
   Layer.succeed(
     HttpServer.HttpServer,
     HttpServer.HttpServer.of({
-      address: { _tag: "TcpAddress", hostname: "127.0.0.1", port: 3773 },
+      address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 3773),
       serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
     }),
   ),
   AnalyticsService.layerTest,
   Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+  Layer.mock(VcsProcess.VcsProcess)({
+    run: () =>
+      Effect.succeed({
+        exitCode: ChildProcessSpawner.ExitCode(0),
+        stdout: "git version 2.55.0\n",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+  }),
   Layer.succeed(ProviderService.ProviderService, {
     startSession: () => Effect.die("unused"),
     sendTurn: () => Effect.die("unused"),

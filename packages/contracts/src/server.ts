@@ -24,6 +24,7 @@ import {
 import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderHostInstanceIdentity, ProviderKeyIdentifier } from "./providerIdentity.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -63,6 +64,8 @@ export const ServerProviderAuth = Schema.Struct({
   type: Schema.optional(TrimmedNonEmptyString),
   label: Schema.optional(TrimmedNonEmptyString),
   email: Schema.optional(TrimmedNonEmptyString),
+  /** Present only when the provider supplies a real stable public key ID. */
+  keyIds: Schema.optional(Schema.Array(ProviderKeyIdentifier)),
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
@@ -214,6 +217,8 @@ export const ServerProvider = Schema.Struct({
   version: Schema.NullOr(TrimmedNonEmptyString),
   status: ServerProviderState,
   auth: ServerProviderAuth,
+  /** Optional additive envelope; older clients omit and continue to decode. */
+  providerHostInstance: Schema.optional(ProviderHostInstanceIdentity),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   // Optional for back-compat: every legacy producer omits this field and
@@ -261,6 +266,10 @@ export const ServerObservability = Schema.Struct({
   otlpTracesEnabled: Schema.Boolean,
   otlpMetricsUrl: Schema.optional(TrimmedNonEmptyString),
   otlpMetricsEnabled: Schema.Boolean,
+  otlpLogsUrl: Schema.optional(TrimmedNonEmptyString),
+  // Absent on servers from before the log signal shipped, so a newer client
+  // reads those as having no log export rather than rejecting the whole config.
+  otlpLogsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type ServerObservability = typeof ServerObservability.Type;
 
@@ -579,6 +588,8 @@ export const ServerConfig = Schema.Struct({
    * fields to servers that don't advertise this.
    */
   threadSnapshotPagination: Schema.optionalKey(Schema.Boolean),
+  /** Whether thread reads accept the reasoningMessages opt-in. */
+  reasoningMessages: Schema.optionalKey(Schema.Boolean),
   /**
    * Palettes published by this environment's machine. Never sent in a config
    * snapshot: the theme stream emits the current set before any change, so a
@@ -598,14 +609,19 @@ export type ServerConfig = typeof ServerConfig.Type;
 
 /**
  * The machine an environment should be drawn as: the user's pick, else what
- * the server detected, else a generic server. A null config (not connected
- * yet, or an older server) resolves to the same generic so rows never
- * flicker between glyphs.
+ * the server detected, else a generic server. Settings only exist once
+ * connected; a descriptor alone (relay discovery, before any connection)
+ * still yields the detected kind. A null config (nothing known yet, or an
+ * older server) resolves to the same generic so rows never flicker between
+ * glyphs.
  */
 export function resolveEnvironmentMachineKind(
-  config: Pick<ServerConfig, "environment" | "settings"> | null,
+  config: {
+    readonly environment: Pick<ExecutionEnvironmentDescriptor, "platform">;
+    readonly settings?: Pick<ServerSettings, "environmentIcon">;
+  } | null,
 ): EnvironmentMachineKind {
-  return config?.settings.environmentIcon ?? config?.environment.platform.machine ?? "server";
+  return config?.settings?.environmentIcon ?? config?.environment.platform.machine ?? "server";
 }
 
 const ServerUpsertKeybindingReplaceTarget = Schema.Struct({

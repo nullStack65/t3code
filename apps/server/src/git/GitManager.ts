@@ -2,6 +2,7 @@ import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
+import * as ByteSize from "effect/ByteSize";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -41,6 +42,7 @@ import {
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   detectSourceControlProviderFromGitRemoteUrl,
+  parseRepositoryNameWithOwnerFromRemoteUrl,
   mergeGitStatusParts,
   normalizeGitRemoteUrl,
   resolveAutoFeatureBranchName,
@@ -277,28 +279,7 @@ function resolvePullRequestWorktreeLocalBranchName(
   return `t3code/pr-${pullRequest.number}/${suffix}`;
 }
 
-export function parseRepositoryNameWithOwnerFromRemoteUrl(
-  url: string | null,
-  providerKind?: ChangeRequest["provider"],
-): string | null {
-  const trimmed = url?.trim() ?? "";
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  const match =
-    /^(?:[^@/\s]+@[^:/\s]+:|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
-      trimmed,
-    );
-  const repositoryNameWithOwner = match?.[1]?.trim() ?? "";
-  // Forgejo HTTP paths can include an installation mount; its API always names owner/repo.
-  if (providerKind === "forgejo" && /^https?:\/\//iu.test(trimmed)) {
-    return repositoryNameWithOwner.length > 0
-      ? repositoryNameWithOwner.split("/").slice(-2).join("/")
-      : null;
-  }
-  return repositoryNameWithOwner.length > 0 ? repositoryNameWithOwner : null;
-}
+export { parseRepositoryNameWithOwnerFromRemoteUrl } from "@t3tools/shared/git";
 
 function parseRepositoryOwnerLogin(nameWithOwner: string | null): string | null {
   const trimmed = nameWithOwner?.trim() ?? "";
@@ -707,7 +688,7 @@ export const make = Effect.gen(function* () {
         return "";
       }
       const info = yield* fileSystem.stat(instructionPath);
-      if (info.type !== "File" || info.size > FileSystem.Size(20_000)) {
+      if (info.type !== "File" || info.size > ByteSize.bytes(20_000)) {
         return "";
       }
       return (yield* fileSystem.readFileString(instructionPath)).trim();
@@ -2542,11 +2523,20 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const worktree = yield* gitCore.createWorktree({
-        cwd: input.cwd,
-        refName: localPullRequestBranch,
-        path: null,
-      });
+      const worktree = yield* gitCore.createWorktree(
+        {
+          cwd: input.cwd,
+          refName: localPullRequestBranch,
+          path: null,
+        },
+        {
+          // Best effort: a settings read failure falls back to the checkout's t3.json.
+          submodules: yield* projectSettingsFor(input).pipe(
+            Effect.map((settings) => settings.worktreeSubmodules),
+            Effect.orElseSucceed(() => null),
+          ),
+        },
+      );
       yield* ensureExistingWorktreeUpstream(worktree.worktree.path);
       yield* maybeRunSetupScript(worktree.worktree.path);
 

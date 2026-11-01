@@ -8,6 +8,7 @@ import {
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
+  OrchestrationCheckpointStatus,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
   OrchestrationThreadSearchSource,
@@ -37,6 +38,7 @@ import {
 } from "@t3tools/contracts";
 import { legacyLinkedPullRequestOf } from "@t3tools/shared/threadPullRequests";
 import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -52,9 +54,9 @@ import {
   toPersistenceSqlError,
   type ProjectionRepositoryError,
 } from "../../persistence/Errors.ts";
-import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
+import { ThreadPostStartActivityService } from "../ThreadPostStartActivity.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -151,11 +153,16 @@ const ProjectionThreadRuntimeContextDbRowSchema = Schema.Struct({
   title: Schema.String,
   session: Schema.NullOr(ProjectionThreadSessionDbRowSchema),
 });
-const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
-  Struct.assign({
-    files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
-  }),
-);
+const ProjectionCheckpointDbRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  checkpointTurnCount: NonNegativeInt,
+  checkpointRef: CheckpointRef,
+  status: OrchestrationCheckpointStatus,
+  files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
+  assistantMessageId: Schema.NullOr(MessageId),
+  completedAt: IsoDateTime,
+});
 const ProjectionLatestTurnDbRowSchema = Schema.Struct({
   threadId: ProjectionThread.fields.threadId,
   turnId: TurnId,
@@ -488,9 +495,17 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
+  const threadPostStartActivity = yield* ThreadPostStartActivityService;
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
+  // Live observation is stamped with the server clock at mapping time so the
+  // client can measure provider ages against the server's clock rather than
+  // assuming its own agrees.
+  const readPostStartActivity = (threadId: string, observedAt: string) => {
+    const state = threadPostStartActivity.getThreadPostStartActivity(threadId);
+    return state === null ? null : { ...state, observedAt };
+  };
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
     "ProjectionSnapshotQuery.resolveRepositoryIdentitiesForProjects",
   )(function* (
@@ -636,6 +651,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ORDER BY project_id ASC, created_at ASC, thread_id ASC
       `,
   });
+
+  const listDeletedWorktreeRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: Schema.Struct({
+      id: ThreadId,
+      projectId: ProjectId,
+      branch: Schema.String,
+      worktreePath: Schema.String,
+      workspaceRoot: Schema.String,
+      deletedAt: IsoDateTime,
+    }),
+    execute: () => sql`
+      SELECT t.thread_id AS "id", t.project_id AS "projectId", t.branch,
+        t.worktree_path AS "worktreePath", p.workspace_root AS "workspaceRoot",
+        t.deleted_at AS "deletedAt"
+      FROM projection_threads t
+      JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.deleted_at IS NOT NULL AND t.worktree_path IS NOT NULL AND t.branch IS NOT NULL
+      ORDER BY t.deleted_at DESC, t.thread_id ASC
+    `,
+  });
+  const getDeletedWorktreeThreads: ProjectionSnapshotQueryShape["getDeletedWorktreeThreads"] = () =>
+    listDeletedWorktreeRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getDeletedWorktreeThreads:query",
+          "ProjectionSnapshotQuery.getDeletedWorktreeThreads:decodeRows",
+        ),
+      ),
+    );
 
   const listArchivedThreadRows = SqlSchema.findAll({
     Request: Schema.Void,
@@ -1056,6 +1101,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND threads.archived_at IS NULL
             AND projects.deleted_at IS NULL
             AND messages.is_streaming = 0
+            -- Only these two roles are searchable, and the CASE above depends
+            -- on it: reasoning is deliberately excluded so a thinking trace
+            -- cannot surface in the command palette, and widening this filter
+            -- would label it 'assistant' rather than adding a source.
             AND (
               messages.role = 'user'
               OR (
@@ -2664,6 +2713,7 @@ pending_approval_requests AS (
                 sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
               );
               const pullRequestsByThread = groupPullRequestRowsByThread(pullRequestRows);
+              const postStartObservedAt = DateTime.formatIso(yield* DateTime.now);
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -2714,6 +2764,7 @@ pending_approval_requests AS (
                           row.threadId,
                         ),
                         planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
+                        postStartActivity: readPostStartActivity(row.threadId, postStartObservedAt),
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
                 ),
@@ -2829,6 +2880,7 @@ pending_approval_requests AS (
               const sessionByThread = new Map(
                 sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
               );
+              const postStartObservedAt = DateTime.formatIso(yield* DateTime.now);
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -2877,6 +2929,7 @@ pending_approval_requests AS (
                     row.threadId,
                   ),
                   planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
+                  postStartActivity: readPostStartActivity(row.threadId, postStartObservedAt),
                 })),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               };
@@ -3192,6 +3245,8 @@ pending_approval_requests AS (
         return Option.none<OrchestrationThreadShell>();
       }
 
+      const postStartObservedAt = DateTime.formatIso(yield* DateTime.now);
+
       return Option.some({
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
@@ -3233,6 +3288,7 @@ pending_approval_requests AS (
           threadRow.value.threadId,
         ),
         planProgress: threadPlanProgress.getThreadPlanProgress(threadRow.value.threadId),
+        postStartActivity: readPostStartActivity(threadRow.value.threadId, postStartObservedAt),
       } satisfies OrchestrationThreadShell);
     });
 
@@ -3730,6 +3786,7 @@ pending_approval_requests AS (
     getSnapshot,
     getShellSnapshot,
     getArchivedShellSnapshot,
+    getDeletedWorktreeThreads,
     searchThreads,
     getSnapshotSequence,
     getCounts,

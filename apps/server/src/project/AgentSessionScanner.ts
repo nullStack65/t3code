@@ -14,6 +14,7 @@
  * @module project/AgentSessionScanner
  */
 import * as NodeOS from "node:os";
+import { effectiveHomeDirectory, isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 
 import {
   AgentSessionScanError,
@@ -631,7 +632,7 @@ export const make = Effect.gen(function* () {
   // must case fold.
   const foldWorktreeCase = (yield* HostProcessPlatform) === "win32";
   const hostEnvironment = yield* HostProcessEnvironment;
-  const homeDir = NodeOS.homedir();
+  const homeDir = effectiveHomeDirectory(process.env, []);
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.
   const excludedProjectRoots = new Set(
     [homeDir, NodeOS.tmpdir(), "/tmp", "/private/tmp"].map((directory) =>
@@ -910,6 +911,7 @@ export const make = Effect.gen(function* () {
    * environment, then `~/.claude`.
    */
   const resolveClaudeConfigDir = (homePath: string, environmentHome?: string): string => {
+    if (isIsolationProfileActive()) return path.join(homeDir, ".claude");
     const configured = homePath.trim();
     if (configured.length > 0) {
       return path.resolve(expandHomePath(configured));
@@ -918,7 +920,7 @@ export const make = Effect.gen(function* () {
     if (fromEnvironment.length > 0) {
       return path.resolve(expandHomePath(fromEnvironment));
     }
-    return path.join(NodeOS.homedir(), ".claude");
+    return path.join(homeDir, ".claude");
   };
 
   const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
@@ -1199,6 +1201,10 @@ export const make = Effect.gen(function* () {
   let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
+    if (isIsolationProfileActive()) {
+      cachedCandidates = [];
+      return { candidates: [], scannedAt: DateTime.formatIso(yield* DateTime.now) };
+    }
     const { candidates: raw, truncated } = yield* collectCandidates();
     cachedCandidates = raw;
 
@@ -1487,7 +1493,10 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+  ) =>
+    isIsolationProfileActive()
+      ? Stream.empty
+      : Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

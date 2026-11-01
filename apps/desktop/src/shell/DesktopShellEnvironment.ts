@@ -122,30 +122,6 @@ const linuxRuntimeDirCandidates = (
   return candidates.filter((candidate) => candidate.length > 0);
 };
 
-function resolveDefaultLinuxDbusSessionBusPath(input: {
-  readonly env: NodeJS.ProcessEnv;
-  readonly uid: number | undefined;
-  readonly exists?: (path: string) => boolean;
-}): string | null {
-  for (const runtimeDir of linuxRuntimeDirCandidates(input.env, input.uid)) {
-    const busPath = `${runtimeDir}/bus`;
-    if (input.exists === undefined || input.exists(busPath)) {
-      return busPath;
-    }
-  }
-
-  return null;
-}
-
-export function resolveDefaultLinuxDbusSessionBusAddress(input: {
-  readonly env: NodeJS.ProcessEnv;
-  readonly exists: (path: string) => boolean;
-  readonly uid: number | undefined;
-}): string | null {
-  const busPath = resolveDefaultLinuxDbusSessionBusPath(input);
-  return busPath !== null && input.exists(busPath) ? `unix:path=${busPath}` : null;
-}
-
 const pathComparisonKey = (entry: string, platform: NodeJS.Platform) => {
   const normalized = entry.trim().replace(/^"+|"+$/g, "");
   return platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -539,15 +515,17 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const installIntoProcess: DesktopShellEnvironment["Service"]["installIntoProcess"] =
-    installShellEnvironment({
-      env: process.env,
-      platform: environment.platform,
-      userShell: Option.none(),
-    }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      Effect.withSpan("desktop.shellEnvironment.installIntoProcess"),
-    );
+    environment.isolationProfile !== undefined
+      ? Effect.void
+      : installShellEnvironment({
+          env: process.env,
+          platform: environment.platform,
+          userShell: Option.none(),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.withSpan("desktop.shellEnvironment.installIntoProcess"),
+        );
 
   return DesktopShellEnvironment.of({ installIntoProcess });
 });

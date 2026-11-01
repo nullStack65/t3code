@@ -1,69 +1,50 @@
 # Running T3 Code in the background
 
-On Linux and macOS, T3 Code can run as a service for your user so you do not need
-to keep a terminal open.
+On Linux, macOS, and Windows, T3 Code can run as a service for your user so you
+do not need to keep a terminal open.
 
 ## Manage the service
 
-Run these commands on the machine that will host T3 Code:
+Install the `t3` CLI first ([Install T3 Code](./install.md#command-line)), then
+run these commands on the machine that will host T3 Code:
 
-| Task                            | Command                           |
-| ------------------------------- | --------------------------------- |
-| Install and start               | `npx t3@latest service install`   |
-| Inspect status and log location | `npx t3@latest service status`    |
-| Update or repair                | `npx t3@latest service update`    |
-| Stop and remove from startup    | `npx t3@latest service uninstall` |
+| Task                            | Command                |
+| ------------------------------- | ---------------------- |
+| Install and start               | `t3 service install`   |
+| Inspect status and log location | `t3 service status`    |
+| Move to a newer release         | `t3 update`            |
+| Restart                         | `t3 service restart`   |
+| Stop and remove from startup    | `t3 service uninstall` |
+
+`t3 service status` also reports what the service manager itself observes — whether the
+job is registered, enabled, and running — separately from whether T3 is set up correctly.
+A manager-reported version is the launch program the service is configured to run, not proof
+of the server process that is actually running, so status never presents it as one.
+Pass `--json` for a stable, machine-readable version of the same status.
 
 Uninstalling the service leaves your projects, threads, and settings intact.
+Running `t3 service install` again repairs a service that `t3 service status`
+reports as broken.
 
-Install and update use the version of the CLI you invoke. For nightly, use
-`npx t3@nightly service update`; replace `nightly` with an exact version to pin
-one. An older CLI refuses to replace a newer service unless you explicitly add
-`--allow-downgrade`.
-
-Updating restarts the server. Finish active work first, and wait for any remote
-update already in progress. To match a remote client's version, follow
+`t3 update` downloads the newest release on your channel and switches `t3`
+and the service to it. Restarting interrupts running agent turns, terminals,
+and remote clients, so it asks first; answer no and the service keeps running
+the old version until you run `t3 service restart`. Pass `--yes` from a
+script. A server you started by hand is left running; stop and start it again
+to pick up the new version. Wait for any remote update already in progress
+before updating; to match a remote client's version, follow
 [Updating T3 Code](./updating.md).
 
-Self-contained builds install as a download from the T3 Code GitHub release
-instead of through npm, so the machine running the service does not need
-Node.js or npm once the CLI is on it. To get the CLI onto a machine without
-Node, run the install script:
+Pass an exact version (`t3 update 0.0.42`) to pin one, `--channel nightly` to
+switch trains, or `--allow-downgrade` to move backwards. `preview` is a
+maintainers' test train: its builds can be broken and are never offered as
+updates, so the installer and `t3 update` ask for confirmation before
+installing one.
 
-```sh
-curl -fsSL https://t3.codes/install.sh | sh
-```
-
-On Windows, run `irm https://t3.codes/install.ps1 | iex` in PowerShell instead.
-
-It places `t3` in `~/.local/bin` and reuses the same download when you later
-run `t3 service install`. It follows the stable train by default; set
-`T3CODE_CHANNEL=nightly` for nightlies, `T3CODE_VERSION` to pin an exact
-version, or `T3CODE_RELEASE_BASE_URL` to download from a mirror.
-
-`preview` is a third train that maintainers cut from unreleased branches to
-exercise the release pipeline. Those builds can be broken, receive no fixes,
-and are never offered as updates; the installer and `t3 update` only take you
-there when you ask for the channel explicitly, and warn you when they do.
-
-Once a self-contained `t3` is installed, `t3 update` moves the machine to a
-newer one without npm: it downloads the newest release on the channel the
-running `t3` came from, verifies it, and points the `t3` launcher at it. When
-a background service is installed for the same T3 home it asks before
-restarting it, since a restart interrupts running agent turns, terminals, and
-remote clients; answer no and the service keeps the old version until you run
-`t3 service update`. From a script there is no prompt, so pass `--yes` to
-restart the service. A server you started by hand is never touched; the
-command tells you it is still on the old version so you can restart it
-yourself. Pass an exact version (`t3 update 0.0.41-preview.20260912.1595`) to
-pin one, `--channel` to follow a different release train (moving onto preview from stable or nightly asks for confirmation), or
-`--allow-downgrade` to move backwards.
-
-`t3 uninstall` reverses the install script: it shows what it found (the
-background service, the `t3` launcher, every downloaded version under
-`~/.t3/runtime`), asks once, and removes them. Your projects, threads, and
-settings under `~/.t3/userdata` are kept; delete that directory yourself if
-you want them gone too. Pass `--yes` from a script.
+`t3 uninstall` removes the background service, the `t3` launcher, and the
+downloaded versions after showing you the list and asking once. Your projects,
+threads, and settings under `~/.t3/userdata` are kept. Pass `--yes` from a
+script.
 
 ## Platform support
 
@@ -76,7 +57,13 @@ Mac logged in and awake for unattended remote access. Installing over SSH while
 nobody is logged in at the Mac's screen can fail at the final start step; the
 service is still installed and will start at the next login.
 
-Windows background services are not supported.
+The Windows service integration is a candidate and is not available to users
+until a packaged release includes `t3-windows-service-host.exe` beside the
+pinned runtime and the release has been qualified against the Service Control
+Manager. The host runs the pinned launcher under a job object. Setup requires
+an explicit, qualified service account (`DOMAIN\user` or `user@domain`) in
+`T3_SERVICE_ACCOUNT`; T3 never installs the workload as LocalSystem. A copy
+without the helper refuses setup instead of installing a partial service.
 
 T3 Connect can offer service installation during setup, but the two are managed
 separately. Signing out of T3 Connect does not stop or uninstall the service.
@@ -85,7 +72,10 @@ separately. Signing out of T3 Connect does not stop or uninstall the service.
 
 Start with `t3 service status` on the host. It prints the log path and, on Linux,
 checks whether the installed service is running, enabled, and allowed to survive
-logout.
+logout. On macOS it asks `launchctl` for the same running/enabled state; on
+Windows it asks the Service Control Manager. What it
+reports is what the service manager sees — a running job does not by itself prove
+the server is answering, so also check the log if remote clients cannot connect.
 
 If it stops when your SSH session closes, check for `linger-disabled`. An
 administrator can enable lingering with:
@@ -111,10 +101,14 @@ that session open.
 | `user-manager-unavailable`              | Run `systemctl --user status` in a login session for the service user; check your distribution's systemd user-session support. |
 | `service-disabled` or `service-stopped` | Read the log and `systemctl --user status t3code.service`, then use the repair command printed by T3 Code.                     |
 | `restart-pending`                       | A newer version is installed but the service still runs the previous one. Run `t3 service restart`.                            |
+| `service-account-missing`               | Windows: set `T3_SERVICE_ACCOUNT` to a dedicated, qualified account before installing; T3 never uses LocalSystem.              |
+| `service-helper-missing`                | Windows: this copy has no `t3-windows-service-host.exe` beside the pinned runtime. Use a packaged release that ships it.       |
+| `windows-service-unreachable`           | The SCM did not answer a bounded query, so registration state is unknown. Retry once `sc.exe query T3Code` responds.           |
+| `windows-service-foreign-registration`  | A `T3Code` service is bound to another home, helper or account. T3 leaves it alone; remove it deliberately if that is stale.   |
 
 On macOS, check **System Settings → General → Login Items** if the service no
 longer starts at login. If agent work cannot access Desktop, Documents, or
-Downloads, it may need Full Disk Access for the Node executable listed in
+Downloads, it may need Full Disk Access for the `t3` executable listed in
 `ProgramArguments` in
 `~/Library/LaunchAgents/com.t3tools.t3code.service.plist`.
 

@@ -23,6 +23,7 @@ const PersistedServerObservabilitySettingsDocument = Schema.Struct({
   observability: Schema.Struct({
     otlpTracesUrl: Schema.String,
     otlpMetricsUrl: Schema.String,
+    otlpLogsUrl: Schema.String,
   }),
 });
 
@@ -60,6 +61,12 @@ function makeEnvironmentLayer(
     readonly resourcesPath?: string;
     readonly appVersion?: string;
     readonly processArch?: NodeJS.Architecture;
+    readonly isolationProfile?: NonNullable<
+      DesktopEnvironment.MakeDesktopEnvironmentInput["isolationProfile"]
+    >;
+    readonly otlpTracesUrl?: string;
+    readonly otlpMetricsUrl?: string;
+    readonly otlpLogsUrl?: string;
   },
 ) {
   return DesktopEnvironment.layer({
@@ -72,6 +79,9 @@ function makeEnvironmentLayer(
     isPackaged: options?.isPackaged ?? true,
     resourcesPath: options?.resourcesPath ?? "/missing/resources",
     runningUnderArm64Translation: false,
+    ...(options?.isolationProfile === undefined
+      ? {}
+      : { isolationProfile: options.isolationProfile }),
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -82,6 +92,9 @@ function makeEnvironmentLayer(
           T3CODE_MODE: "desktop",
           T3CODE_DESKTOP_LAN_HOST: "192.168.1.50",
           VITE_DEV_SERVER_URL: options?.devServerUrl,
+          T3CODE_OTLP_TRACES_URL: options?.otlpTracesUrl,
+          T3CODE_OTLP_METRICS_URL: options?.otlpMetricsUrl,
+          T3CODE_OTLP_LOGS_URL: options?.otlpLogsUrl,
         }),
       ),
     ),
@@ -105,6 +118,7 @@ const withHarness = <A, E, R>(
     | FileSystem.FileSystem
     | DesktopBackendConfiguration.DesktopBackendConfiguration
   >,
+  environmentOptions?: Parameters<typeof makeEnvironmentLayer>[1],
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -119,7 +133,7 @@ const withHarness = <A, E, R>(
           Layer.provideMerge(DesktopAppSettings.layerTest()),
           Layer.provideMerge(DesktopWslEnvironment.layerTest()),
           Layer.provideMerge(DesktopWslServerTree.layerTest()),
-          Layer.provideMerge(makeEnvironmentLayer(baseDir)),
+          Layer.provideMerge(makeEnvironmentLayer(baseDir, environmentOptions)),
         ),
       ),
     );
@@ -247,6 +261,74 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(second.bootstrap.desktopBootstrapToken, first.bootstrap.desktopBootstrapToken);
       }),
     ),
+  );
+
+  it.effect(
+    "pins a profile backend home and strips network telemetry despite hostile inherited settings",
+    () =>
+      withHarness(
+        Effect.gen(function* () {
+          const environment = yield* DesktopEnvironment.DesktopEnvironment;
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          const inheritedNames = [
+            "HOME",
+            "CODEX_HOME",
+            "T3CODE_HOME",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "T3CODE_OTLP_HEADERS",
+          ] as const;
+          const previous = Object.fromEntries(
+            inheritedNames.map((name) => [name, process.env[name]]),
+          );
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              for (const name of inheritedNames) restoreEnv(name, previous[name]);
+            }),
+          );
+          process.env.HOME = "/Users/account";
+          process.env.CODEX_HOME = "/Users/account/.codex";
+          process.env.T3CODE_HOME = "/Users/account/.t3";
+          process.env.OPENAI_API_KEY = "account-openai-token";
+          process.env.ANTHROPIC_API_KEY = "account-claude-token";
+          process.env.T3CODE_OTLP_HEADERS = "authorization=account-token";
+          const config = yield* configuration.resolvePrimary;
+          const restartedConfig = yield* configuration.resolvePrimary;
+
+          assert.equal(config.extendEnv, false);
+          assert.equal(config.env.T3CODE_ISOLATION_ROOT, environment.isolationProfile?.root);
+          assert.equal(config.env.T3CODE_HOME, environment.baseDir);
+          assert.isUndefined(config.env.HOME);
+          assert.isUndefined(config.env.CODEX_HOME);
+          assert.isUndefined(config.env.OPENAI_API_KEY);
+          assert.isUndefined(config.env.ANTHROPIC_API_KEY);
+          assert.isUndefined(config.env.T3CODE_OTLP_HEADERS);
+          assert.equal(config.bootstrap.t3Home, environment.baseDir);
+          assert.equal(config.bootstrap.host, "127.0.0.1");
+          assert.equal(config.bootstrap.tailscaleServeEnabled, false);
+          assert.isUndefined(config.bootstrap.otlpTracesUrl);
+          assert.isUndefined(config.bootstrap.otlpMetricsUrl);
+          assert.isUndefined(config.bootstrap.otlpLogsUrl);
+          assert.equal(restartedConfig.env.T3CODE_ISOLATION_ROOT, config.env.T3CODE_ISOLATION_ROOT);
+          assert.equal(restartedConfig.env.T3CODE_HOME, config.env.T3CODE_HOME);
+          assert.equal(restartedConfig.bootstrap.t3Home, config.bootstrap.t3Home);
+          assert.equal(restartedConfig.bootstrap.host, "127.0.0.1");
+          assert.equal(restartedConfig.bootstrap.tailscaleServeEnabled, false);
+          assert.isUndefined(restartedConfig.bootstrap.otlpTracesUrl);
+          assert.isUndefined(restartedConfig.bootstrap.otlpMetricsUrl);
+          assert.isUndefined(restartedConfig.bootstrap.otlpLogsUrl);
+        }),
+        {
+          isolationProfile: {
+            root: "/tmp/t3-profile",
+            homeDirectory: "/tmp/t3-profile",
+            appDataDirectory: "/tmp/t3-profile/Library/Application Support",
+            userDataDirectory: "/tmp/t3-profile/userData",
+            sessionDataDirectory: "/tmp/t3-profile/sessionData",
+            t3Home: "/tmp/t3-profile/.t3",
+          },
+        },
+      ),
   );
 
   it.effect("resolvePrimary starts from server.asar without materializing the WSL tree", () =>
@@ -730,6 +812,7 @@ describe("DesktopBackendConfiguration", () => {
             observability: {
               otlpTracesUrl: " http://127.0.0.1:4318/v1/traces ",
               otlpMetricsUrl: " http://127.0.0.1:4318/v1/metrics ",
+              otlpLogsUrl: " http://127.0.0.1:4318/v1/logs ",
             },
           }),
         );
@@ -737,6 +820,7 @@ describe("DesktopBackendConfiguration", () => {
         const config = yield* configuration.resolvePrimary;
         assert.equal(config.bootstrap.otlpTracesUrl, "http://127.0.0.1:4318/v1/traces");
         assert.equal(config.bootstrap.otlpMetricsUrl, "http://127.0.0.1:4318/v1/metrics");
+        assert.equal(config.bootstrap.otlpLogsUrl, "http://127.0.0.1:4318/v1/logs");
       }),
     ),
   );
@@ -749,8 +833,101 @@ describe("DesktopBackendConfiguration", () => {
 
         assert.isUndefined(config.bootstrap.otlpTracesUrl);
         assert.isUndefined(config.bootstrap.otlpMetricsUrl);
+        assert.isUndefined(config.bootstrap.otlpLogsUrl);
       }),
     ),
+  );
+
+  it.effect("resolveWsl carries environment-configured observability endpoints", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-backend-config-test-",
+      });
+
+      yield* Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const config = yield* configuration.resolveWsl({ port: 5050, distro: null });
+
+        // No settings.json exists here: the endpoints come from the desktop
+        // process's env, which a WSL child cannot inherit, so the bootstrap
+        // has to carry them or log export stays off inside the distro.
+        assert.equal(config.bootstrap.otlpTracesUrl, "http://127.0.0.1:4318/v1/traces");
+        assert.equal(config.bootstrap.otlpMetricsUrl, "http://127.0.0.1:4318/v1/metrics");
+        assert.equal(config.bootstrap.otlpLogsUrl, "http://127.0.0.1:4318/v1/logs");
+        assert.notInclude(config.env.WSLENV ?? "", "T3CODE_OTLP_LOGS_URL");
+      }).pipe(
+        Effect.provide(
+          DesktopBackendConfiguration.layer.pipe(
+            Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(DesktopWslServerTree.layerTest()),
+            Layer.provideMerge(
+              DesktopWslEnvironment.layerTest({
+                isAvailable: true,
+                windowsToWslPath: () => Option.some("/mnt/c/repo/apps/server/src/index.ts"),
+                getDistroIp: () => Option.some("172.27.0.99"),
+              }),
+            ),
+            Layer.provideMerge(
+              makeEnvironmentLayer(baseDir, {
+                platform: "win32",
+                otlpTracesUrl: " http://127.0.0.1:4318/v1/traces ",
+                otlpMetricsUrl: " http://127.0.0.1:4318/v1/metrics ",
+                otlpLogsUrl: " http://127.0.0.1:4318/v1/logs ",
+              }),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("environment observability endpoints win over the persisted settings file", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-backend-config-test-",
+      });
+
+      yield* Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+
+        yield* fileSystem.makeDirectory(environment.path.dirname(environment.serverSettingsPath), {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(
+          environment.serverSettingsPath,
+          yield* encodePersistedServerObservabilitySettingsDocument({
+            observability: {
+              otlpTracesUrl: "http://persisted:4318/v1/traces",
+              otlpMetricsUrl: "http://persisted:4318/v1/metrics",
+              otlpLogsUrl: "http://persisted:4318/v1/logs",
+            },
+          }),
+        );
+
+        const config = yield* configuration.resolvePrimary;
+        assert.equal(config.bootstrap.otlpLogsUrl, "http://env:4318/v1/logs");
+        // Only the logs endpoint is set in env, so the other two still come
+        // from the settings file rather than being dropped together.
+        assert.equal(config.bootstrap.otlpTracesUrl, "http://persisted:4318/v1/traces");
+        assert.equal(config.bootstrap.otlpMetricsUrl, "http://persisted:4318/v1/metrics");
+      }).pipe(
+        Effect.provide(
+          DesktopBackendConfiguration.layer.pipe(
+            Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(DesktopWslServerTree.layerTest()),
+            Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+            Layer.provideMerge(
+              makeEnvironmentLayer(baseDir, { otlpLogsUrl: "http://env:4318/v1/logs" }),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("logs structured context when persisted observability settings cannot be read", () =>
@@ -799,6 +976,7 @@ describe("DesktopBackendConfiguration", () => {
 
       assert.isUndefined(config.bootstrap.otlpTracesUrl);
       assert.isUndefined(config.bootstrap.otlpMetricsUrl);
+      assert.isUndefined(config.bootstrap.otlpLogsUrl);
 
       const error = messages
         .flatMap((message) => (Array.isArray(message) ? message : [message]))

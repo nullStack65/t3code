@@ -11,7 +11,7 @@ import {
   ServerSettingsPatch,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { assert, it } from "@effect/vitest";
+import { assert, it, live } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
@@ -19,12 +19,15 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfig from "./config.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
+import { admitCodexSession, codexSessionGuardRefusalPolicy } from "./provider/CodexSessionGuard.ts";
 import * as ServerSettingsModule from "./serverSettings.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
 
@@ -229,6 +232,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "/Users/julius/.codex",
         shadowHomePath: "",
+        modelCatalogMode: "app-server",
         launchArgs: "",
         resumeFailurePolicy: "fallback-to-new-thread",
         customModels: [],
@@ -939,6 +943,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "",
         shadowHomePath: "",
+        modelCatalogMode: "app-server",
         launchArgs: "",
         resumeFailurePolicy: "fallback-to-new-thread",
         customModels: [],
@@ -971,6 +976,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         observability: {
           otlpTracesUrl: "  http://localhost:4318/v1/traces  ",
           otlpMetricsUrl: "  http://localhost:4318/v1/metrics  ",
+          otlpLogsUrl: "  http://localhost:4318/v1/logs  ",
         },
       });
 
@@ -978,6 +984,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.observability, {
         otlpTracesUrl: "http://localhost:4318/v1/traces",
         otlpMetricsUrl: "http://localhost:4318/v1/metrics",
+        otlpLogsUrl: "http://localhost:4318/v1/logs",
       });
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
@@ -1186,6 +1193,34 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     );
   }
 
+  for (const sensitiveLast of [true, false]) {
+    it.effect(`preserves duplicate secret operation order (sensitive last: ${sensitiveLast})`, () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_duplicate");
+        const secret = { name: "API_TOKEN", value: "secret-last", sensitive: true };
+        const plain = { name: "API_TOKEN", value: "plain-last", sensitive: false };
+        const next = yield* service.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              environment: sensitiveLast ? [plain, secret] : [secret, plain],
+              config: {},
+            },
+          },
+        });
+        assert.equal(
+          next.providerInstances[instanceId]?.environment?.at(-1)?.value,
+          sensitiveLast ? "secret-last" : "plain-last",
+        );
+        assert.equal(
+          next.providerInstances[instanceId]?.environment?.find((v) => v.sensitive)?.value,
+          sensitiveLast ? "secret-last" : "",
+        );
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+    );
+  }
+
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
@@ -1284,6 +1319,181 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.include(persisted, '"valueRedacted": true');
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
+
+  it.effect("rolls back provider secret changes when the settings file commit fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      let failRename = false;
+      let settingsPathToFail: string | undefined;
+      const writeFailure = PlatformError.systemError({
+        _tag: "PermissionDenied",
+        module: "FileSystem",
+        method: "rename",
+        description: "Forced settings write failure.",
+      });
+      const failingFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        rename: (fromPath, toPath) =>
+          failRename && toPath === settingsPathToFail
+            ? Effect.fail(writeFailure)
+            : fileSystem.rename(fromPath, toPath),
+      });
+      const instanceId = ProviderInstanceId.make("codex_write_failure");
+      const settingsLayer = makeServerSettingsLayer().pipe(
+        Layer.provideMerge(Layer.succeed(FileSystem.FileSystem, failingFileSystem)),
+      );
+
+      yield* Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        settingsPathToFail = (yield* ServerConfig.ServerConfig).settingsPath;
+        yield* serverSettings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              environment: [{ name: "OPENROUTER_API_KEY", value: "sk-kept", sensitive: true }],
+              config: {},
+            },
+          },
+        });
+
+        failRename = true;
+        const failedUpdate = yield* serverSettings
+          .updateSettings({
+            providerInstances: {
+              [instanceId]: {
+                driver: ProviderDriverKind.make("codex"),
+                environment: [{ name: "OPENROUTER_API_KEY", value: "sk-new", sensitive: true }],
+                config: {},
+              },
+            },
+          })
+          .pipe(Effect.result);
+        assert.equal(failedUpdate._tag, "Failure");
+        assert.equal(
+          (yield* serverSettings.getSettings).providerInstances[instanceId]?.environment?.[0]
+            ?.value,
+          "sk-kept",
+        );
+
+        const failed = yield* serverSettings
+          .updateSettings({ providerInstances: {} })
+          .pipe(Effect.result);
+        assert.equal(failed._tag, "Failure");
+        assert.equal(
+          (yield* serverSettings.getSettings).providerInstances[instanceId]?.environment?.[0]
+            ?.value,
+          "sk-kept",
+        );
+      }).pipe(Effect.provide(settingsLayer));
+    }),
+  );
+
+  for (const failure of ["response materialization", "partially committed write"] as const) {
+    it.effect(`rolls back provider secret changes after ${failure} fails`, () => {
+      const textDecoder = new TextDecoder();
+      const secrets = new Map<string, Uint8Array>();
+      let rejectNewSecret = false;
+      const secretStoreLayer = Layer.succeed(
+        ServerSecretStore.ServerSecretStore,
+        ServerSecretStore.ServerSecretStore.of({
+          get: (name) =>
+            Effect.suspend(() => {
+              const value = secrets.get(name);
+              if (
+                failure === "response materialization" &&
+                rejectNewSecret &&
+                value !== undefined &&
+                textDecoder.decode(value) === "sk-new"
+              ) {
+                return Effect.fail(
+                  new ServerSecretStore.SecretStoreReadError({
+                    resource: `secret ${name}`,
+                    cause: "Forced response materialization failure.",
+                  }),
+                );
+              }
+              return Effect.succeed(
+                value === undefined ? Option.none() : Option.some(Uint8Array.from(value)),
+              );
+            }),
+          set: (name, value) =>
+            Effect.suspend(() => {
+              secrets.set(name, Uint8Array.from(value));
+              return failure === "partially committed write" &&
+                rejectNewSecret &&
+                textDecoder.decode(value) === "sk-new"
+                ? Effect.fail(
+                    new ServerSecretStore.SecretStorePersistError({
+                      resource: `secret ${name}`,
+                      cause: "chmod failed after rename",
+                    }),
+                  )
+                : Effect.void;
+            }),
+          create: (name, value) =>
+            Effect.sync(() => {
+              secrets.set(name, Uint8Array.from(value));
+            }),
+          getOrCreateRandom: (name, bytes) =>
+            Effect.sync(() => {
+              const value = secrets.get(name) ?? new Uint8Array(bytes);
+              secrets.set(name, value);
+              return Uint8Array.from(value);
+            }),
+          remove: (name) =>
+            Effect.sync(() => {
+              secrets.delete(name);
+            }),
+        }),
+      );
+      const settingsLayer = ServerSettingsModule.layer.pipe(
+        Layer.provideMerge(Layer.fresh(SqlitePersistenceMemory)),
+        Layer.provide(secretStoreLayer),
+        Layer.provideMerge(
+          Layer.fresh(
+            ServerConfig.layerTest(process.cwd(), {
+              prefix: "t3code-server-settings-materialization-failure-test-",
+            }),
+          ),
+        ),
+      );
+      const instanceId = ProviderInstanceId.make("codex_materialization_failure");
+
+      return Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              environment: [{ name: "OPENROUTER_API_KEY", value: "sk-kept", sensitive: true }],
+              config: {},
+            },
+          },
+        });
+
+        rejectNewSecret = true;
+        const failedUpdate = yield* serverSettings
+          .updateSettings({
+            providerInstances: {
+              [instanceId]: {
+                driver: ProviderDriverKind.make("codex"),
+                environment: [{ name: "OPENROUTER_API_KEY", value: "sk-new", sensitive: true }],
+                config: {},
+              },
+            },
+          })
+          .pipe(Effect.result);
+
+        assert.equal(failedUpdate._tag, "Failure");
+        rejectNewSecret = false;
+        assert.equal(
+          (yield* serverSettings.getSettings).providerInstances[instanceId]?.environment?.[0]
+            ?.value,
+          "sk-kept",
+        );
+      }).pipe(Effect.provide(settingsLayer));
+    });
+  }
 
   it.effect("folds legacy project overrides into projectSettingsOverrides once", () =>
     Effect.gen(function* () {
@@ -1392,5 +1602,207 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       // The user's file is still there to repair; nothing was written over it.
       assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), broken);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+  // The controlled watch stream buffers events until the watcher consumes them.
+  // Live time is still needed for the watcher’s debounce.
+  live("keeps the Codex session guard policy fixed until the server restarts", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+      const watchedFs = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        watch: () => Stream.fromQueue(events),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const serverConfig = yield* ServerConfig.ServerConfig;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+          yield* serverSettings.start;
+          const changes = yield* serverSettings.subscribeChanges;
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+
+          // An operator enrolling a running host edits the file directly.
+          yield* fileSystem.writeFileString(
+            serverConfig.settingsPath,
+            '{"codexSessionGuard":{"mode":"enforce"}}\n',
+          );
+          yield* Queue.offer(events, { _tag: "Update", path: serverConfig.settingsPath });
+          const emitted = Option.getOrUndefined(yield* Stream.runHead(changes));
+          assert.isDefined(emitted);
+          assert.equal(emitted.codexSessionGuard.mode, "disabled");
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+          // The file keeps the pending value; the next start is what applies it.
+          assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
+
+          yield* serverSettings.updateSettings({ sidebarAutoSettleOnMerge: false });
+          assert.match(yield* fileSystem.readFileString(serverConfig.settingsPath), /"enforce"/);
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+        }),
+      ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(watchedFs))));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses a hot Codex session guard patch before writing or emitting", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const changes = yield* serverSettings.subscribeChanges;
+        yield* serverSettings.getSettings;
+
+        const failure = yield* Effect.flip(
+          serverSettings.updateSettings({ codexSessionGuard: { mode: "enforce" } }),
+        );
+        assert.strictEqual(failure._tag, "ServerSettingsError");
+        assert.strictEqual(failure.operation, "restart-required");
+        assert.isFalse(yield* fileSystem.exists(serverConfig.settingsPath));
+
+        // The first snapshot a client sees is the next accepted change, so the
+        // refused patch never looked accepted.
+        yield* serverSettings.updateSettings({ generateThreadTitles: false });
+        const first = Option.getOrUndefined(yield* changes.pipe(Stream.runHead));
+        assert.isDefined(first);
+        assert.isFalse(first.generateThreadTitles);
+        assert.equal(first.codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("applies the Codex session guard policy the server starts with", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.writeFileString(
+          serverConfig.settingsPath,
+          '{"codexSessionGuard":{"mode":"enforce","stateRoot":"/reviewed/state"}}\n',
+        );
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        const settings = yield* serverSettings.getSettings;
+        assert.equal(settings.codexSessionGuard.mode, "enforce");
+        assert.equal(settings.codexSessionGuard.stateRoot, "/reviewed/state");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+
+  live("refuses a hot guard change while an owned inert process is still running", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* serverSettings.getSettings;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        // Stand-in for an active reader: a plain local process with no model
+        // and no provider involvement, owned and stopped by this test.
+        const reader = yield* spawner.spawn(ChildProcess.make("/bin/sh", ["-c", "sleep 30"]));
+
+        const failure = yield* Effect.flip(
+          serverSettings.updateSettings({ codexSessionGuard: { mode: "enforce" } }),
+        );
+        assert.strictEqual(failure.operation, "restart-required");
+        assert.isTrue(yield* reader.isRunning);
+
+        yield* reader.kill();
+        // A signal-terminated process reports its exit as a platform failure,
+        // so only the fact that it ended matters here.
+        const exit = yield* Effect.exit(reader.exitCode).pipe(Effect.timeout("5 seconds"));
+        assert.isDefined(exit);
+        assert.isFalse(yield* reader.isRunning);
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+  it.effect("keeps an explicit Codex guard policy when an unrelated field fails to decode", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        // Valid JSON, valid guard, one unrelated field of the wrong type.
+        const document =
+          '{"codexSessionGuard":{"mode":"enforce","stateRoot":"/reviewed/state"},"sharedSessionRoot":42}\n';
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, document);
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        const settings = yield* serverSettings.getSettings;
+        assert.equal(settings.codexSessionGuard.mode, "enforce");
+        assert.equal(settings.codexSessionGuard.stateRoot, "/reviewed/state");
+        // The rejected document stays on disk for the operator to repair.
+        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), document);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("refuses Codex when the declared guard block cannot be decoded", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const document = '{"codexSessionGuard":{"mode":"enforce","stateRoot":42}}\n';
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, document);
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        const settings = yield* serverSettings.getSettings;
+        assert.deepEqual(settings.codexSessionGuard, codexSessionGuardRefusalPolicy);
+        // Admission is what actually keeps a provider from starting.
+        const admission = yield* admitCodexSession({
+          settings: settings.codexSessionGuard,
+          homePath: "",
+          environment: {},
+          platform: "darwin",
+        });
+        assert.equal(admission.status, "refused");
+        assert.equal(
+          admission.status === "refused" ? admission.refused.reason : "",
+          "invalid-settings",
+        );
+        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), document);
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("keeps the disabled default when a rejected document declares no guard policy", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, '{"sharedSessionRoot":42}\n');
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+        assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  live("keeps the latched policy when settings.json becomes unreadable", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+      const watchedFs = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        watch: () => Stream.fromQueue(events),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const serverConfig = yield* ServerConfig.ServerConfig;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+          yield* serverSettings.start;
+          const changes = yield* serverSettings.subscribeChanges;
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+
+          const malformed = '{"codexSessionGuard":{"mode":"enforce"';
+          yield* fileSystem.writeFileString(serverConfig.settingsPath, malformed);
+          yield* Queue.offer(events, { _tag: "Update", path: serverConfig.settingsPath });
+          const emitted = Option.getOrUndefined(yield* Stream.runHead(changes));
+          assert.isDefined(emitted);
+          assert.equal(emitted.codexSessionGuard.mode, "disabled");
+          assert.equal((yield* serverSettings.getSettings).codexSessionGuard.mode, "disabled");
+          // Unparseable JSON is never rewritten; it stays for the operator.
+          assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), malformed);
+        }),
+      ).pipe(Effect.provide(makeServerSettingsLayer().pipe(Layer.provideMerge(watchedFs))));
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

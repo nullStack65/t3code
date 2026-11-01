@@ -58,13 +58,13 @@ export class ElectronApp extends Context.Service<
       name: Parameters<Electron.App["setPath"]>[0],
       path: string,
     ) => Effect.Effect<void>;
+    readonly requestSingleInstanceLock: Effect.Effect<boolean>;
     readonly setName: (name: string) => Effect.Effect<void>;
     readonly setAboutPanelOptions: (
       options: Electron.AboutPanelOptionsOptions,
     ) => Effect.Effect<void>;
     readonly setAppUserModelId: (id: string) => Effect.Effect<void>;
     readonly getAppMetrics: Effect.Effect<ReadonlyArray<Electron.ProcessMetric>>;
-    readonly isDefaultProtocolClient: (protocol: string) => Effect.Effect<boolean>;
     readonly setAsDefaultProtocolClient: (
       protocol: string,
       path?: string,
@@ -153,6 +153,7 @@ export const make = ElectronApp.of({
     Effect.sync(() => {
       Electron.app.setPath(name, path);
     }),
+  requestSingleInstanceLock: Effect.sync(() => Electron.app.requestSingleInstanceLock()),
   setName: (name) =>
     Effect.sync(() => {
       Electron.app.setName(name);
@@ -166,8 +167,6 @@ export const make = ElectronApp.of({
       Electron.app.setAppUserModelId(id);
     }),
   getAppMetrics: Effect.sync(() => Electron.app.getAppMetrics()),
-  isDefaultProtocolClient: (protocol) =>
-    Effect.sync(() => Electron.app.isDefaultProtocolClient(protocol)),
   setAsDefaultProtocolClient: (protocol, path, args) =>
     Effect.sync(() => {
       if (path === undefined) {

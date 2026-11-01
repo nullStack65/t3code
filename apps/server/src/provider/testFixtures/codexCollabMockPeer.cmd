@@ -1,8 +1,9 @@
 @echo off
-rem Wrapper so CodexSessionRuntime can spawn the mock peer on Windows: the
-rem runtime always passes "app-server" as the first argument; drop it and
-rem run the .mjs peer with node. "shift /1" leaves %0 alone so %~dp0 still
-rem names this file's directory.
+rem Synthetic Codex protocol peer, including its no-model version probe.
+if "%1"=="--version" (
+  echo codex-cli 0.162.1
+  exit /b 0
+)
 shift /1
 node "%~dp0codexCollabMockPeer.mjs" %1 %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %ERRORLEVEL%

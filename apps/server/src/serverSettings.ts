@@ -14,6 +14,7 @@ import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_MODEL_BY_PROVIDER,
+  CodexSessionGuardSettings,
   DEFAULT_SERVER_SETTINGS,
   ModelSelection,
   ProjectScript,
@@ -56,6 +57,7 @@ import {
   deriveLegacyProjectOverrides,
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
+import { codexSessionGuardRefusalPolicy } from "./provider/CodexSessionGuard.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 
 export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/serverSettings";
@@ -492,6 +494,38 @@ function foldLegacyProjectSettings(
   };
 }
 
+const decodeSettingsDocument = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+const decodeSessionGuard = Schema.decodeUnknownOption(CodexSessionGuardSettings);
+
+type RecoveredSessionGuard =
+  | { readonly kind: "absent" }
+  | { readonly kind: "valid"; readonly guard: CodexSessionGuardSettings }
+  | { readonly kind: "invalid" }
+  | { readonly kind: "unreadable" };
+
+/**
+ * Recover the Codex session guard from a settings document the whole-document
+ * decoder rejected. An unrelated invalid field must not silently discard an
+ * explicit policy: a guard block that decodes on its own is used as written, a
+ * present-but-undecodable block refuses Codex instead of disabling it, and only
+ * a document with no guard block at all keeps the disabled default.
+ *
+ * The unreadable case (not JSON) yields no evidence either way; it keeps the
+ * default and the host is not claimed guarded. See
+ * `docs/internals/codex-session-guard.md`.
+ */
+const recoverSessionGuard = (raw: string): RecoveredSessionGuard => {
+  const document = decodeSettingsDocument(raw);
+  if (Option.isNone(document)) return { kind: "unreadable" };
+  const value = document.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { kind: "unreadable" };
+  }
+  if (!("codexSessionGuard" in value)) return { kind: "absent" };
+  const guard = decodeSessionGuard(value.codexSessionGuard);
+  return Option.isSome(guard) ? { kind: "valid", guard: guard.value } : { kind: "invalid" };
+};
+
 const make = Effect.gen(function* () {
   const { settingsPath } = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
@@ -508,6 +542,51 @@ const make = Effect.gen(function* () {
 
   const emitChange = (settings: ServerSettings) =>
     PubSub.publish(changesPubSub, settings).pipe(Effect.asVoid);
+
+  // The Codex session guard policy is fixed for this server's lifetime.
+  // Enrolling a host has to be a deliberate restart: T3 cannot prove that a
+  // Codex process already running, or one that is mid-spawn, is covered by the
+  // fence, so a hot edit must never look like it took effect. The settings
+  // snapshot this service serves IS the effective configuration; a file value
+  // that has not been loaded by a restart stays pending on disk.
+  // See docs/internals/codex-session-guard.md.
+  const effectiveSessionGuardRef = yield* Ref.make<CodexSessionGuardSettings | undefined>(
+    undefined,
+  );
+  const configuredSessionGuardRef = yield* Ref.make<CodexSessionGuardSettings | undefined>(
+    undefined,
+  );
+
+  const latchSessionGuardPolicy = (settings: ServerSettings): Effect.Effect<ServerSettings> =>
+    Effect.gen(function* () {
+      const effective = yield* Ref.get(effectiveSessionGuardRef);
+      yield* Ref.set(configuredSessionGuardRef, settings.codexSessionGuard);
+      if (effective === undefined) {
+        yield* Ref.set(effectiveSessionGuardRef, settings.codexSessionGuard);
+        return settings;
+      }
+      if (Equal.equals(effective, settings.codexSessionGuard)) {
+        return settings;
+      }
+      yield* Effect.logWarning(
+        "Codex session guard changes take effect only after a restart; keeping the policy loaded at startup",
+        { settingsPath },
+      );
+      return { ...settings, codexSessionGuard: effective };
+    });
+
+  /**
+   * Persist the policy the file already asks for, so saving unrelated settings
+   * neither reverts a pending enrollment nor drops it silently.
+   */
+  const settingsForDisk = (settings: ServerSettings): Effect.Effect<ServerSettings> =>
+    Effect.gen(function* () {
+      const configured = yield* Ref.get(configuredSessionGuardRef);
+      if (configured === undefined || Equal.equals(configured, settings.codexSessionGuard)) {
+        return settings;
+      }
+      return { ...settings, codexSessionGuard: configured };
+    });
 
   const readConfigExists = fs.exists(settingsPath).pipe(
     Effect.mapError(
@@ -558,12 +637,14 @@ const make = Effect.gen(function* () {
   const loadSettingsFromDisk = Effect.gen(function* () {
     let settings = DEFAULT_SERVER_SETTINGS;
     let persisted: typeof PersistedOptionalProviderSettings.Type = {};
+    let rawSettings: string | undefined;
     // A file that failed to decode must stay on disk for the user to repair;
     // the fold below only writes when it started from the file's real contents.
     let settingsFileTrusted = true;
 
     if (yield* readConfigExists) {
       const raw = yield* readRawConfig;
+      rawSettings = raw;
       const decoded = decodeServerSettingsJsonExit(raw);
       const persistedSettings = decodePersistedOptionalProviderSettingsJsonExit(raw);
       if (persistedSettings._tag === "Success") {
@@ -581,6 +662,26 @@ const make = Effect.gen(function* () {
         }
       } else {
         settings = decoded.value;
+      }
+    }
+
+    // A rejected whole document still carries the guard block the host wrote.
+    // Read it independently so a typo in an unrelated field cannot turn an
+    // explicit `enforce` into a silently unguarded launch.
+    if (!settingsFileTrusted && rawSettings !== undefined) {
+      const recovered = recoverSessionGuard(rawSettings);
+      if (recovered.kind === "valid") {
+        settings = { ...settings, codexSessionGuard: recovered.guard };
+        yield* Effect.logWarning(
+          "settings.json did not decode; keeping the Codex session guard policy it declares",
+          { path: settingsPath },
+        );
+      } else if (recovered.kind === "invalid") {
+        settings = { ...settings, codexSessionGuard: codexSessionGuardRefusalPolicy };
+        yield* Effect.logError(
+          "settings.json declares an undecodable Codex session guard; refusing Codex launches",
+          { path: settingsPath },
+        );
       }
     }
 
@@ -642,7 +743,7 @@ const make = Effect.gen(function* () {
     if (folded !== loaded) {
       yield* writeSettingsAtomically(folded);
     }
-    return folded;
+    return yield* latchSessionGuardPolicy(folded);
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({
@@ -733,14 +834,21 @@ const make = Effect.gen(function* () {
       Stream.map(resolveTextGenerationProvider),
     );
 
-  const persistProviderEnvironmentSecrets = (
-    current: ServerSettings,
-    next: ServerSettings,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-    Effect.gen(function* () {
+  type SecretChange = {
+    readonly secretName: string;
+    readonly providerInstanceId?: string;
+    readonly environmentVariable?: string;
+  } & (
+    | { readonly kind: "write"; readonly value: Uint8Array }
+    | { readonly kind: "remove"; readonly operation: "remove-secret" | "remove-stale-secret" }
+  );
+
+  const persistProviderEnvironmentSecrets = (current: ServerSettings, next: ServerSettings) =>
+    Effect.sync(() => {
       const providerInstances: Record<string, ProviderInstanceConfig> = {
         ...next.providerInstances,
       };
+      const changes: SecretChange[] = [];
 
       const nextSecretKeys = new Set<string>();
       for (const [instanceId, instance] of Object.entries(next.providerInstances)) {
@@ -749,18 +857,13 @@ const make = Effect.gen(function* () {
         for (const variable of instance.environment) {
           const secretName = providerEnvironmentSecretName({ instanceId, name: variable.name });
           if (!variable.sensitive) {
-            yield* secretStore.remove(secretName).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ServerSettingsError({
-                    settingsPath,
-                    operation: "remove-secret",
-                    providerInstanceId: instanceId,
-                    environmentVariable: variable.name,
-                    cause,
-                  }),
-              ),
-            );
+            changes.push({
+              kind: "remove",
+              secretName,
+              operation: "remove-secret",
+              providerInstanceId: instanceId,
+              environmentVariable: variable.name,
+            });
             environment.push(redactProviderEnvironmentVariable(variable));
             continue;
           }
@@ -779,32 +882,22 @@ const make = Effect.gen(function* () {
           const value = inlineValue ?? variable.value;
           if (!variable.valueRedacted || inlineValue !== undefined) {
             if (value.length > 0) {
-              yield* secretStore.set(secretName, textEncoder.encode(value)).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ServerSettingsError({
-                      settingsPath,
-                      operation: "write-secret",
-                      providerInstanceId: instanceId,
-                      environmentVariable: variable.name,
-                      cause,
-                    }),
-                ),
-              );
+              changes.push({
+                kind: "write",
+                secretName,
+                value: textEncoder.encode(value),
+                providerInstanceId: instanceId,
+                environmentVariable: variable.name,
+              });
               environment.push({ ...variable, value: "", valueRedacted: true });
             } else {
-              yield* secretStore.remove(secretName).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ServerSettingsError({
-                      settingsPath,
-                      operation: "remove-secret",
-                      providerInstanceId: instanceId,
-                      environmentVariable: variable.name,
-                      cause,
-                    }),
-                ),
-              );
+              changes.push({
+                kind: "remove",
+                secretName,
+                operation: "remove-secret",
+                providerInstanceId: instanceId,
+                environmentVariable: variable.name,
+              });
               const { valueRedacted: _omit, ...rest } = variable;
               environment.push(rest);
             }
@@ -824,18 +917,13 @@ const make = Effect.gen(function* () {
           if (!variable.sensitive) continue;
           const secretName = providerEnvironmentSecretName({ instanceId, name: variable.name });
           if (nextSecretKeys.has(secretName)) continue;
-          yield* secretStore.remove(secretName).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({
-                  settingsPath,
-                  operation: "remove-stale-secret",
-                  providerInstanceId: instanceId,
-                  environmentVariable: variable.name,
-                  cause,
-                }),
-            ),
-          );
+          changes.push({
+            kind: "remove",
+            secretName,
+            operation: "remove-stale-secret",
+            providerInstanceId: instanceId,
+            environmentVariable: variable.name,
+          });
         }
       }
 
@@ -843,50 +931,165 @@ const make = Effect.gen(function* () {
       for (const [sourceId, source] of Object.entries(next.usageLimitSources)) {
         const secretName = usageLimitSourceSecretName(sourceId);
         if (source.managementKey === USAGE_LIMIT_SOURCE_KEY_REDACTED) {
-          // Unchanged from the client's point of view; the store already has it.
           usageLimitSources[sourceId] = source;
           continue;
         }
         if (source.managementKey.length === 0) {
-          yield* secretStore
-            .remove(secretName)
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ServerSettingsError({ settingsPath, operation: "remove-secret", cause }),
-              ),
-            );
+          changes.push({ kind: "remove", secretName, operation: "remove-secret" });
           usageLimitSources[sourceId] = source;
           continue;
         }
-        yield* secretStore
-          .set(secretName, textEncoder.encode(source.managementKey))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({ settingsPath, operation: "write-secret", cause }),
-            ),
-          );
+        changes.push({
+          kind: "write",
+          secretName,
+          value: textEncoder.encode(source.managementKey),
+        });
         usageLimitSources[sourceId] = { ...source, managementKey: USAGE_LIMIT_SOURCE_KEY_REDACTED };
       }
       for (const sourceId of Object.keys(current.usageLimitSources)) {
         if (sourceId in next.usageLimitSources) continue;
-        yield* secretStore
-          .remove(usageLimitSourceSecretName(sourceId))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({ settingsPath, operation: "remove-stale-secret", cause }),
-            ),
-          );
+        changes.push({
+          kind: "remove",
+          secretName: usageLimitSourceSecretName(sourceId),
+          operation: "remove-stale-secret",
+        });
       }
 
       return {
-        ...next,
-        providerInstances: providerInstances as ServerSettings["providerInstances"],
-        usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        settings: {
+          ...next,
+          providerInstances: providerInstances as ServerSettings["providerInstances"],
+          usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        },
+        changes,
       };
     });
+
+  const rollbackProviderEnvironmentSecretWrites = (
+    writes: ReadonlyArray<{
+      readonly secretName: string;
+      readonly previousValue: Option.Option<Uint8Array>;
+      readonly providerInstanceId?: string;
+      readonly environmentVariable?: string;
+    }>,
+  ) =>
+    Effect.forEach(
+      writes.toReversed(),
+      (write) =>
+        (Option.isSome(write.previousValue)
+          ? secretStore.set(write.secretName, write.previousValue.value)
+          : secretStore.remove(write.secretName)
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to roll back provider environment secret", {
+              providerInstanceId: write.providerInstanceId,
+              environmentVariable: write.environmentVariable,
+              cause,
+            }),
+          ),
+        ),
+      { discard: true },
+    );
+
+  const applyProviderEnvironmentSecretChanges = (changes: ReadonlyArray<SecretChange>) => {
+    const applied: Array<{
+      readonly secretName: string;
+      readonly previousValue: Option.Option<Uint8Array>;
+      readonly providerInstanceId?: string;
+      readonly environmentVariable?: string;
+    }> = [];
+    const rollback = Effect.suspend(() => rollbackProviderEnvironmentSecretWrites(applied));
+    return Effect.forEach(
+      changes,
+      (change) =>
+        Effect.gen(function* () {
+          const previousValue = yield* secretStore.get(change.secretName).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  operation: "read-secret",
+                  providerInstanceId: change.providerInstanceId,
+                  environmentVariable: change.environmentVariable,
+                  cause,
+                }),
+            ),
+          );
+          // A store operation may mutate before reporting an error (for example chmod after rename).
+          applied.push({ ...change, previousValue });
+          yield* (
+            change.kind === "write"
+              ? secretStore.set(change.secretName, change.value)
+              : secretStore.remove(change.secretName)
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  operation: change.kind === "write" ? "write-secret" : change.operation,
+                  providerInstanceId: change.providerInstanceId,
+                  environmentVariable: change.environmentVariable,
+                  cause,
+                }),
+            ),
+          );
+        }),
+      { discard: true },
+    ).pipe(
+      Effect.tapError(() => rollback),
+      Effect.as(rollback),
+    );
+  };
+
+  const updateSettings = (
+    patch: ServerSettingsPatch,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    writeSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* getSettingsFromCache;
+        const updated = applyServerSettingsPatch(current, patch);
+        const effectiveGuard = yield* Ref.get(effectiveSessionGuardRef);
+        if (
+          effectiveGuard !== undefined &&
+          !Equal.equals(updated.codexSessionGuard, effectiveGuard)
+        ) {
+          // Refuse before secrets, file writes or a change emission: accepting
+          // a hot change would advertise a policy that processes started under
+          // the previous one are not held to.
+          return yield* new ServerSettingsError({
+            settingsPath,
+            operation: "restart-required",
+            cause: new Error("the Codex session guard can only change when the server starts"),
+          });
+        }
+        const persisted = yield* persistProviderEnvironmentSecrets(current, updated);
+        const next = yield* normalizeServerSettings(persisted.settings);
+        const diskSettings = yield* settingsForDisk(next);
+        const materialized = yield* Effect.uninterruptibleMask(() =>
+          Effect.gen(function* () {
+            const rollbackSecretChanges = yield* applyProviderEnvironmentSecretChanges(
+              persisted.changes,
+            );
+            const materializedExit = yield* Effect.exit(
+              materializeProviderEnvironmentSecrets(next),
+            );
+            if (Exit.isFailure(materializedExit)) {
+              yield* rollbackSecretChanges;
+              return yield* Effect.failCause(materializedExit.cause);
+            }
+            const writeExit = yield* Effect.exit(writeSettingsAtomically(diskSettings));
+            if (Exit.isFailure(writeExit)) {
+              yield* rollbackSecretChanges;
+              return yield* Effect.failCause(writeExit.cause);
+            }
+            return materializedExit.value;
+          }),
+        );
+        yield* Cache.set(settingsCache, cacheKey, next);
+        yield* emitChange(next);
+        return resolveTextGenerationProvider(materialized);
+      }),
+    );
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
@@ -963,22 +1166,7 @@ const make = Effect.gen(function* () {
       Effect.flatMap(materializeProviderEnvironmentSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
-    updateSettings: (patch) =>
-      writeSemaphore.withPermits(1)(
-        Effect.gen(function* () {
-          const current = yield* getSettingsFromCache;
-          const nextPersisted = yield* persistProviderEnvironmentSecrets(
-            current,
-            applyServerSettingsPatch(current, patch),
-          );
-          const next = yield* normalizeServerSettings(nextPersisted);
-          yield* writeSettingsAtomically(next);
-          yield* Cache.set(settingsCache, cacheKey, next);
-          yield* emitChange(next);
-          const materialized = yield* materializeProviderEnvironmentSecrets(next);
-          return resolveTextGenerationProvider(materialized);
-        }),
-      ),
+    updateSettings,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
     },

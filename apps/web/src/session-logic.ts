@@ -482,6 +482,9 @@ export function deriveWorkLogEntries(
     if (activity.kind === "task.started" && !isAgentTaskStartedActivity(activity)) continue;
     if (activity.kind === "task.updated") continue;
     if (activity.kind === "tool.progress") continue;
+    // Delivery-only nudge for the post-start observation; carries no user
+    // content and must never render as a work-log row.
+    if (activity.kind === "post-start-observation") continue;
     if (activity.kind === "context-window.updated") continue;
     if (activity.kind === "turn.plan.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
@@ -1316,7 +1319,8 @@ function extractWorkLogRequestKind(
   if (
     payload?.requestKind === "command" ||
     payload?.requestKind === "file-read" ||
-    payload?.requestKind === "file-change"
+    payload?.requestKind === "file-change" ||
+    payload?.requestKind === "permission"
   ) {
     return payload.requestKind;
   }
@@ -1613,11 +1617,13 @@ export function createMessageAttachmentPreviewProjector() {
   };
 }
 
-/** Text and update time do not change a streaming assistant message's timeline structure. */
+const streamsText = (role: ChatMessage["role"]) => role === "assistant" || role === "reasoning";
+
+/** Text and update time do not change a streaming message's timeline structure. */
 export function isStreamingMessageTextUpdate(previous: ChatMessage, next: ChatMessage): boolean {
   if (
-    previous.role !== "assistant" ||
-    next.role !== "assistant" ||
+    !streamsText(previous.role) ||
+    previous.role !== next.role ||
     !previous.streaming ||
     !next.streaming
   ) {

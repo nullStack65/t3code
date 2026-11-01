@@ -8,6 +8,7 @@ import {
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
   parseOriginUrlFromGitConfig,
+  parseRepositoryNameWithOwnerFromRemoteUrl,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
 
@@ -48,6 +49,38 @@ describe("normalizeGitRemoteUrl", () => {
     );
     expect(normalizeGitRemoteUrl("deploy@bitbucket.org:workspace/repo.git")).toBe(
       "bitbucket.org/workspace/repo",
+    );
+  });
+
+  it("gives an Azure DevOps repository the same key over SSH as over HTTPS", () => {
+    expect(normalizeGitRemoteUrl("git@ssh.dev.azure.com:v3/T3Tools/Platform/T3Code")).toBe(
+      "dev.azure.com/t3tools/platform/_git/t3code",
+    );
+    expect(normalizeGitRemoteUrl("ssh://git@ssh.dev.azure.com:22/v3/T3Tools/Platform/T3Code")).toBe(
+      "dev.azure.com/t3tools/platform/_git/t3code",
+    );
+    expect(
+      normalizeGitRemoteUrl("https://T3Tools@dev.azure.com/T3Tools/Platform/_git/T3Code"),
+    ).toBe("dev.azure.com/t3tools/platform/_git/t3code");
+  });
+
+  it("puts the organization back in the host on the name dev.azure.com replaced", () => {
+    expect(
+      normalizeGitRemoteUrl("T3Tools@vs-ssh.visualstudio.com:v3/T3Tools/Platform/T3Code"),
+    ).toBe("t3tools.visualstudio.com/platform/_git/t3code");
+    expect(normalizeGitRemoteUrl("https://T3Tools.visualstudio.com/Platform/_git/T3Code")).toBe(
+      "t3tools.visualstudio.com/platform/_git/t3code",
+    );
+  });
+
+  it("leaves an Azure SSH host it cannot read as the path it was given", () => {
+    // Not `v3`, and not four segments: rewriting either would invent a repository that the web
+    // spelling has no name for, so the remote stands as it arrived.
+    expect(normalizeGitRemoteUrl("git@ssh.dev.azure.com:v4/T3Tools/Platform/T3Code")).toBe(
+      "ssh.dev.azure.com/v4/t3tools/platform/t3code",
+    );
+    expect(normalizeGitRemoteUrl("git@ssh.dev.azure.com:v3/T3Tools/T3Code")).toBe(
+      "ssh.dev.azure.com/v3/t3tools/t3code",
     );
   });
 });
@@ -240,5 +273,18 @@ describe("applyGitStatusStreamEvent", () => {
       behindCount: 1,
       pr: null,
     });
+  });
+});
+
+describe("parseRepositoryNameWithOwnerFromRemoteUrl", () => {
+  it.each([
+    [null, undefined, null],
+    ["/local/checkout", undefined, null],
+    ["git@github.com:owner/repo.git", undefined, "owner/repo"],
+    ["ssh://git@github.com/owner/repo.git", undefined, "owner/repo"],
+    ["https://gitlab.example/group/owner/repo.git", "gitlab", "group/owner/repo"],
+    ["https://forgejo.example/mount/owner/repo.git", "forgejo", "owner/repo"],
+  ] as const)("parses %s without importing server services", (url, kind, expected) => {
+    expect(parseRepositoryNameWithOwnerFromRemoteUrl(url, kind)).toBe(expected);
   });
 });

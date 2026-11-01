@@ -99,7 +99,14 @@ beforeEach(() => {
   TestNotification.sent = [];
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("Notification", TestNotification);
-  vi.stubGlobal("window", Object.assign(new EventTarget(), { focus: vi.fn() }));
+  vi.stubGlobal(
+    "window",
+    Object.assign(new EventTarget(), {
+      focus: vi.fn(),
+      setInterval: globalThis.setInterval.bind(globalThis),
+      clearInterval: globalThis.clearInterval.bind(globalThis),
+    }),
+  );
   vi.stubGlobal(
     "document",
     Object.assign(new EventTarget(), {

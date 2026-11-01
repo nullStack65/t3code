@@ -5,12 +5,14 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   ForwardCompatibleNullable,
+  ForwardCompatibleOptional,
+  OmittedWhenNull,
   ProjectId,
   TrimmedNonEmptyString,
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
-import { EnvironmentMachineKind, ThreadEnvMode } from "./environment.ts";
+import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
   CustomModelSetting,
@@ -317,6 +319,12 @@ export const ClientSettingsSchema = Schema.Struct({
   browserRecordingFrameRate: BrowserRecordingFrameRate.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_BROWSER_RECORDING_FRAME_RATE)),
   ),
+  browserRecordingShowKeyPresses: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  browserRecordingShowMousePresses: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   /**
    * Where links clicked in a thread (chat markdown, terminal output) open.
    * Only the desktop app has an in-app browser, so other clients ignore "app".
@@ -356,7 +364,7 @@ export const ClientSettingsSchema = Schema.Struct({
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
-  diffFilesCollapsed: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  diffFilesCollapsed: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffLayout: DiffLayout.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_DIFF_LAYOUT))),
   environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
@@ -430,6 +438,11 @@ export const ClientSettingsSchema = Schema.Struct({
   // Desktop resting composer: scrolling an existing thread's conversation
   // settles the composer into its single-line layout. Losing focus never does.
   composerCollapseOnScroll: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Rich text is the default; users can opt out for literal Markdown editing.
+  composerRichTextEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  sendShortcut: Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("enter")),
+  ),
   followUpBehavior: Schema.Literals(["queue", "steer"]).pipe(
     Schema.withDecodingDefault(Effect.succeed("queue")),
   ),
@@ -498,7 +511,7 @@ const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
     Schema.decodeTo(
       Schema.String,
-      SchemaTransformation.transformOrFail({
+      SchemaTransformation.transformEffect({
         decode: (value) => Effect.succeed(value || fallback),
         encode: (value) => Effect.succeed(value),
       }),
@@ -554,6 +567,39 @@ function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fields>(
   );
 }
 
+export const CodexModelCatalogMode = Schema.Literals(["app-server", "custom-only"]);
+export type CodexModelCatalogMode = typeof CodexModelCatalogMode.Type;
+
+/**
+ * Host-level requirement that every T3-owned Codex process runs behind the
+ * reviewed fenced provider launcher. Enrolled hosts must either start Codex
+ * through that launcher or refuse it; they must never fall back to an
+ * unguarded launch. `disabled` is the default and leaves the existing spawn
+ * path untouched.
+ *
+ * The references are the launcher's own required arguments, kept explicit so
+ * the enrolled device/state/source are checked instead of inferred. They are
+ * identity, not authentication, and they do not prove that the provider keeps
+ * the inherited fence descriptor. See `docs/internals/codex-session-guard.md`.
+ */
+export const CodexSessionGuardMode = Schema.Literals(["disabled", "enforce"]);
+export type CodexSessionGuardMode = typeof CodexSessionGuardMode.Type;
+
+export const CodexSessionGuardSettings = Schema.Struct({
+  mode: CodexSessionGuardMode.pipe(Schema.withDecodingDefault(Effect.succeed("disabled" as const))),
+  /** Absolute interpreter that runs `launcher`, e.g. a reviewed `python3`. */
+  interpreter: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute `launch_provider.py` path inside the reviewed checkout. */
+  launcher: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute reviewed checkout root that contains `launcher`. */
+  sourceRoot: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute admitted device file, whose `state_root` must match `stateRoot`. */
+  deviceFile: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute delivery state root holding `session-fence/`. */
+  stateRoot: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type CodexSessionGuardSettings = typeof CodexSessionGuardSettings.Type;
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -590,6 +636,22 @@ export const CodexSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    modelCatalogMode: CodexModelCatalogMode.pipe(
+      Schema.withDecodingDefault(Effect.succeed("app-server" as const)),
+      Schema.annotateKey({
+        title: "Model catalog",
+        description:
+          "Use the Codex app-server catalog, or restrict this instance to its configured custom models.",
+        providerSettingsForm: {
+          control: "select",
+          clearWhenEmpty: "omit",
+          options: [
+            { value: "app-server", label: "Codex app-server" },
+            { value: "custom-only", label: "Custom models only" },
+          ],
+        },
+      }),
+    ),
     launchArgs: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -612,7 +674,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "shadowHomePath", "modelCatalogMode", "launchArgs"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -893,6 +955,7 @@ export type UsageLimitSourceConfig = typeof UsageLimitSourceConfig.Type;
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  otlpLogsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
 });
 export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
@@ -971,11 +1034,33 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph", "token"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
+const StorageRetentionDays = Schema.NullOr(
+  Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
+);
+
+export const WorktreeCleanupRules = Schema.Struct({
+  worktreeAfterDays: StorageRetentionDays,
+  worktreeOnMerge: Schema.Boolean,
+  worktreeOnDelete: Schema.Boolean,
+  worktreeUnchanged: Schema.Boolean,
+});
+export type WorktreeCleanupRules = typeof WorktreeCleanupRules.Type;
+
+export const WorktreeCleanup = Schema.NullOr(
+  Schema.Union([
+    Schema.Struct({ mode: Schema.Literal("off") }),
+    Schema.Struct({ mode: Schema.Literal("custom"), rules: WorktreeCleanupRules }),
+  ]),
+);
+export type WorktreeCleanup = typeof WorktreeCleanup.Type;
+
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
+  "worktreeCleanup",
   "defaultModelSelection",
   "defaultRuntimeMode",
   "defaultThreadEnvMode",
   "newWorktreesStartFromOrigin",
+  "worktreeSubmodules",
   "defaultAutoPull",
   "defaultProjectScripts",
   "enableAgentBrowserAccess",
@@ -997,10 +1082,12 @@ export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTIN
  * model, no dedicated writer model, never auto-settle).
  */
 export const ProjectSettingsOverrides = Schema.Struct({
+  worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
+  worktreeSubmodules: ForwardCompatibleOptional(WorktreeSubmodules),
   defaultAutoPull: Schema.optionalKey(Schema.Boolean),
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
@@ -1016,7 +1103,45 @@ export const ProjectSettingsOverrides = Schema.Struct({
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
+/**
+ * Whether `null` is a stored override value for this key rather than "unset".
+ * Clients writing a project override treat null for every other key as a
+ * request to remove the override, so a picker's "Inherit" item and the row's
+ * reset do the same thing.
+ */
+export function isNullableProjectSettingsOverride(key: ProjectScopedServerSettingKey): boolean {
+  return NULLABLE_PROJECT_SETTINGS_OVERRIDES.has(key);
+}
+const NULLABLE_PROJECT_SETTINGS_OVERRIDES: ReadonlySet<ProjectScopedServerSettingKey> = new Set<
+  {
+    [K in ProjectScopedServerSettingKey]: null extends ProjectSettingsOverrides[K] ? K : never;
+  }[ProjectScopedServerSettingKey]
+>([
+  "defaultModelSelection",
+  "sourceControlWriterModelSelection",
+  "pullRequestMergeMethod",
+  "sidebarAutoSettleAfterDays",
+]);
+
+export const StorageCleanupSettings = Schema.Struct({
+  worktreeAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  worktreeOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  worktreeOnDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  worktreeUnchanged: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  browserArtifactsAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  logsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+});
+export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
+
 export const ServerSettings = Schema.Struct({
+  worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  storageCleanup: StorageCleanupSettings.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed(Schema.decodeUnknownSync(StorageCleanupSettings)({})),
+    ),
+  ),
   // How assistant text reaches clients during a turn. Deliberately a fresh
   // key (was `enableLegacyTokenStreaming`, before that
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
@@ -1133,13 +1258,37 @@ export const ServerSettings = Schema.Struct({
   environmentIcon: ForwardCompatibleNullable(EnvironmentMachineKind).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
-  defaultThreadEnvMode: ThreadEnvMode.pipe(
-    Schema.withDecodingDefault(Effect.succeed("local" as const satisfies ThreadEnvMode)),
-  ),
+  /**
+   * Null means inherit: the repository's t3.json, then "local". The old
+   * default "local" was never persisted (defaults are stripped on write), so
+   * it now decodes as inherit, which resolves the same way because the old
+   * chain also let t3.json outrank the environment. Null stays off the wire
+   * so older clients, which require a literal here, keep decoding.
+   */
+  defaultThreadEnvMode: OmittedWhenNull(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  /**
+   * Null defers to the repository's t3.json, then to recursive. A value
+   * picked on a newer server decodes as null here rather than failing the
+   * whole settings snapshot for an older client.
+   */
+  worktreeSubmodules: ForwardCompatibleNullable(WorktreeSubmodules).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /**
+   * The one directory this environment treats as a shared session inbox. It is
+   * an explicit, exact-root opt-in: provider sessions whose cwd resolves to
+   * this directory (and only this directory) are checked for an accidental
+   * umbrella repository, and a configured shared root is honored regardless of
+   * the backend's own working directory. Empty means ordinary — every
+   * repository session, including the server's own cwd, is treated as a normal
+   * working directory. Never inferred from a folder name, breadth, child
+   * repositories or the mere presence of Git.
+   */
+  sharedSessionRoot: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({
@@ -1154,6 +1303,14 @@ export const ServerSettings = Schema.Struct({
       }),
     ),
   ),
+  /**
+   * Whether T3 may ask a model to name or rename a thread. On by default.
+   * When off, no title-generation LLM call is made: a new thread keeps the
+   * deterministic title derived from its first prompt, and refinement and
+   * manual regeneration are skipped. Environment-wide, not project-scoped,
+   * because the title path is server-owned and must not vary per project.
+   */
+  generateThreadTitles: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   sourceControlWritingStyle: SourceControlWritingStyleSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1168,6 +1325,14 @@ export const ServerSettings = Schema.Struct({
   pullRequestMergeMethod: Schema.NullOr(PullRequestMergeMethod).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+
+  /**
+   * Enrolled-host policy for every T3-owned Codex process. Disabled by
+   * default; `enforce` makes an unguarded Codex launch a refusal instead of a
+   * silent fallback. Host-wide rather than per-instance so a managed host
+   * cannot be partly enrolled by leaving another instance unguarded.
+   */
+  codexSessionGuard: CodexSessionGuardSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 
   // Legacy single-instance-per-driver settings. Continues to be the source
   // of truth until `providerInstances` (below) lands per-driver migration
@@ -1262,6 +1427,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "write-secret",
   "write-file",
   "prepare-directory",
+  "restart-required",
 ]);
 export type ServerSettingsOperation = typeof ServerSettingsOperation.Type;
 
@@ -1276,6 +1442,9 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
   },
 ) {
   override get message(): string {
+    if (this.operation === "restart-required") {
+      return `This setting can only change when the server starts: ${this.settingsPath}.`;
+    }
     const provider =
       this.providerInstanceId === undefined ? "" : ` for provider ${this.providerInstanceId}`;
     const variable =
@@ -1307,6 +1476,7 @@ const CodexSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
+  modelCatalogMode: Schema.optionalKey(CodexModelCatalogMode),
   launchArgs: Schema.optionalKey(TrimmedString),
   resumeFailurePolicy: Schema.optionalKey(
     Schema.Literals(["fallback-to-new-thread", "fail-closed"]),
@@ -1359,6 +1529,32 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  worktreeCleanup: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Union([
+        Schema.Struct({ mode: Schema.Literal("off") }),
+        Schema.Struct({
+          mode: Schema.Literal("custom"),
+          rules: Schema.Struct({
+            worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
+            worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
+            worktreeOnDelete: Schema.optionalKey(Schema.Boolean),
+            worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
+          }),
+        }),
+      ]),
+    ),
+  ),
+  storageCleanup: Schema.optionalKey(
+    Schema.Struct({
+      worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
+      worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
+      worktreeOnDelete: Schema.optionalKey(Schema.Boolean),
+      worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
+      browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+    }),
+  ),
   // Server settings
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
@@ -1405,10 +1601,13 @@ export const ServerSettingsPatch = Schema.Struct({
   providerHealthRefreshInterval: Schema.optionalKey(Schema.DurationFromMillis),
   backgroundActivityProfile: Schema.optionalKey(BackgroundActivityProfile),
   environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
-  defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
+  defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
+  worktreeSubmodules: Schema.optionalKey(Schema.NullOr(WorktreeSubmodules)),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
+  sharedSessionRoot: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
+  generateThreadTitles: Schema.optionalKey(Schema.Boolean),
   sourceControlWritingStyle: Schema.optionalKey(
     Schema.Struct({
       mode: Schema.optionalKey(SourceControlWritingStyleMode),
@@ -1418,10 +1617,22 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
+  // Partial so an operator can flip `mode` without restating every reference.
+  codexSessionGuard: Schema.optionalKey(
+    Schema.Struct({
+      mode: Schema.optionalKey(CodexSessionGuardMode),
+      interpreter: Schema.optionalKey(TrimmedString),
+      launcher: Schema.optionalKey(TrimmedString),
+      sourceRoot: Schema.optionalKey(TrimmedString),
+      deviceFile: Schema.optionalKey(TrimmedString),
+      stateRoot: Schema.optionalKey(TrimmedString),
+    }),
+  ),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
+      otlpLogsUrl: Schema.optionalKey(TrimmedString),
     }),
   ),
   providers: Schema.optionalKey(
@@ -1464,6 +1675,8 @@ export const ClientSettingsPatch = Schema.Struct({
   browserDefaultZoomFactor: Schema.optionalKey(PreviewZoomFactor),
   browserDefaultAppearance: Schema.optionalKey(PreviewAppearancePreference),
   browserRecordingFrameRate: Schema.optionalKey(BrowserRecordingFrameRate),
+  browserRecordingShowKeyPresses: Schema.optionalKey(Schema.Boolean),
+  browserRecordingShowMousePresses: Schema.optionalKey(Schema.Boolean),
   browserLinkTarget: Schema.optionalKey(BrowserLinkTarget),
   browserAutoShowFloatingPreview: Schema.optionalKey(Schema.Boolean),
   browserProfiles: Schema.optionalKey(Schema.Array(BrowserProfile)),
@@ -1514,6 +1727,8 @@ export const ClientSettingsPatch = Schema.Struct({
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
   contextWindowMeterEnabled: Schema.optionalKey(Schema.Boolean),
   composerCollapseOnScroll: Schema.optionalKey(Schema.Boolean),
+  composerRichTextEnabled: Schema.optionalKey(Schema.Boolean),
+  sendShortcut: Schema.optionalKey(Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"])),
   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),

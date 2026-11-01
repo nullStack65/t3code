@@ -51,6 +51,8 @@ describe("DesktopEnvironment", () => {
           VITE_DEV_SERVER_URL: "http://localhost:5173",
           T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH: " /remote/server.mjs ",
           T3CODE_OTLP_TRACES_URL: " http://127.0.0.1:4318/v1/traces ",
+          T3CODE_OTLP_METRICS_URL: " http://127.0.0.1:4318/v1/metrics ",
+          T3CODE_OTLP_LOGS_URL: " http://127.0.0.1:4318/v1/logs ",
           T3CODE_OTLP_EXPORT_INTERVAL_MS: "2500",
           T3CODE_OTLP_HEADERS: "authorization=Basic%20abc%3D%3D,x-tenant=t3",
           T3CODE_OTLP_PROTOCOL: "http/protobuf",
@@ -86,6 +88,8 @@ describe("DesktopEnvironment", () => {
       assert.deepEqual(environment.configuredBackendPort, Option.some(4949));
       assert.deepEqual(environment.commitHashOverride, Option.some("0123456789abcdef"));
       assert.deepEqual(environment.otlpTracesUrl, Option.some("http://127.0.0.1:4318/v1/traces"));
+      assert.deepEqual(environment.otlpMetricsUrl, Option.some("http://127.0.0.1:4318/v1/metrics"));
+      assert.deepEqual(environment.otlpLogsUrl, Option.some("http://127.0.0.1:4318/v1/logs"));
       assert.equal(environment.otlpExportIntervalMs, 2500);
       assert.deepEqual(
         environment.otlpHeaders,
@@ -113,6 +117,34 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
       assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
       assert.equal(environment.otlpProtocol, "http/json");
+    }),
+  );
+
+  it.effect("drops inherited OTLP destinations and headers in an isolation profile", () =>
+    Effect.gen(function* () {
+      const root = "/tmp/t3-profile";
+      const environment = yield* makeEnvironment(
+        {
+          isolationProfile: {
+            root,
+            homeDirectory: root,
+            appDataDirectory: `${root}/Library/Application Support`,
+            userDataDirectory: `${root}/userData`,
+            sessionDataDirectory: `${root}/sessionData`,
+            t3Home: `${root}/.t3`,
+          },
+        },
+        {
+          T3CODE_OTLP_TRACES_URL: "https://outside.invalid/traces",
+          T3CODE_OTLP_HEADERS: "authorization=Bearer%20account-token",
+        },
+      );
+
+      assert.deepEqual(environment.otlpTracesUrl, Option.none());
+      assert.deepEqual(environment.otlpMetricsUrl, Option.none());
+      assert.deepEqual(environment.otlpLogsUrl, Option.none());
+      assert.deepEqual(environment.otlpHeaders, Option.none());
+      assert.equal(environment.baseDir, `${root}/.t3`);
     }),
   );
 

@@ -1,6 +1,7 @@
 import * as NodeOS from "node:os";
 
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
+import { ISOLATION_ROOT_ENV } from "@t3tools/shared/isolationRoot";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -67,11 +68,13 @@ export class DesktopBackendConfiguration extends Context.Service<
 interface BackendObservabilitySettings {
   readonly otlpTracesUrl: Option.Option<string>;
   readonly otlpMetricsUrl: Option.Option<string>;
+  readonly otlpLogsUrl: Option.Option<string>;
 }
 
 const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
   otlpTracesUrl: Option.none(),
   otlpMetricsUrl: Option.none(),
+  otlpLogsUrl: Option.none(),
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
@@ -85,6 +88,12 @@ const DESKTOP_BACKEND_ENV_NAMES = [
   "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
   "T3CODE_TAILSCALE_SERVE",
   "T3CODE_TAILSCALE_SERVE_PORT",
+  "T3CODE_OTLP_TRACES_URL",
+  "T3CODE_OTLP_METRICS_URL",
+  "T3CODE_OTLP_LOGS_URL",
+  "T3CODE_OTLP_HEADERS",
+  "T3CODE_OTLP_PROTOCOL",
+  ISOLATION_ROOT_ENV,
 ] as const;
 
 // Env vars that the WSL backend needs but Windows process.env won't forward
@@ -105,8 +114,27 @@ const nodeBinDirOf = (nodePath: string): string => {
   return lastSlash > 0 ? nodePath.slice(0, lastSlash) : "/usr/bin";
 };
 
-const backendChildEnvPatch = (): Record<string, string | undefined> =>
-  Object.fromEntries(DESKTOP_BACKEND_ENV_NAMES.map((name) => [name, undefined]));
+const backendChildEnvPatch = (
+  isolationRoot?: string,
+  isolationT3Home?: string,
+): Record<string, string | undefined> => ({
+  ...Object.fromEntries(DESKTOP_BACKEND_ENV_NAMES.map((name) => [name, undefined])),
+  [ISOLATION_ROOT_ENV]: isolationRoot,
+  ...(isolationRoot === undefined ? {} : { T3CODE_HOME: isolationT3Home }),
+});
+
+const isolatedChildEnvironment = (isolationRoot: string, isolationT3Home: string) => {
+  const inherited: Record<string, string> = {};
+  for (const name of ["PATH", "TMPDIR", "TMP", "TEMP", "LANG", "TERM", "NO_COLOR"] as const) {
+    const value = process.env[name];
+    if (value !== undefined) inherited[name] = value;
+  }
+  return {
+    ...inherited,
+    ...backendChildEnvPatch(isolationRoot, isolationT3Home),
+    ELECTRON_RUN_AS_NODE: "1",
+  };
+};
 
 const getWslEnvEntryName = (entry: string): string => {
   const slashIndex = entry.indexOf("/");
@@ -212,7 +240,24 @@ const readPersistedBackendObservabilitySettings = Effect.gen(function* () {
   return {
     otlpTracesUrl: Option.fromNullishOr(parsed.otlpTracesUrl),
     otlpMetricsUrl: Option.fromNullishOr(parsed.otlpMetricsUrl),
+    otlpLogsUrl: Option.fromNullishOr(parsed.otlpLogsUrl),
   };
+});
+
+// The bootstrap is the only channel that carries an OTLP endpoint to every
+// backend. A Windows-native child inherits the desktop process's env, but a
+// WSL child gets nothing across wsl.exe that WSLENV does not declare, and
+// WSLENV translation of URL-shaped values is unreliable, so the endpoints are
+// deliberately not forwarded that way. Env beats the persisted settings file,
+// matching the precedence resolveServerConfig and DesktopObservability apply.
+const readBackendObservabilitySettings = Effect.gen(function* () {
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const persisted = yield* readPersistedBackendObservabilitySettings;
+  return {
+    otlpTracesUrl: Option.orElse(environment.otlpTracesUrl, () => persisted.otlpTracesUrl),
+    otlpMetricsUrl: Option.orElse(environment.otlpMetricsUrl, () => persisted.otlpMetricsUrl),
+    otlpLogsUrl: Option.orElse(environment.otlpLogsUrl, () => persisted.otlpLogsUrl),
+  } satisfies BackendObservabilitySettings;
 });
 
 interface SharedBootstrapInput {
@@ -488,6 +533,10 @@ const buildObservabilityFragment = (observabilitySettings: BackendObservabilityS
     onNone: () => ({}),
     onSome: (otlpMetricsUrl) => ({ otlpMetricsUrl }),
   }),
+  ...Option.match(observabilitySettings.otlpLogsUrl, {
+    onNone: () => ({}),
+    onSome: (otlpLogsUrl) => ({ otlpLogsUrl }),
+  }),
 });
 
 const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolvePrimary")(
@@ -503,23 +552,36 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
     const backendExposure = yield* serverExposure.backendConfig;
+    const isolatedExposure =
+      environment.isolationProfile === undefined
+        ? backendExposure
+        : {
+            ...backendExposure,
+            bindHost: "127.0.0.1",
+            httpBaseUrl: new URL(`http://127.0.0.1:${String(backendExposure.port)}`),
+            tailscaleServeEnabled: false,
+          };
 
     const bootstrap = {
       mode: "desktop" as const,
       noBrowser: true,
       port: backendExposure.port,
       t3Home: environment.baseDir,
-      host: backendExposure.bindHost,
+      host: isolatedExposure.bindHost,
       desktopBootstrapToken: input.bootstrapToken,
-      tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
-      tailscaleServePort: backendExposure.tailscaleServePort,
+      tailscaleServeEnabled: isolatedExposure.tailscaleServeEnabled,
+      tailscaleServePort: isolatedExposure.tailscaleServePort,
       desktopTelemetryFd: 4,
       desktopTelemetryControlFd: 5,
       ...Option.match(input.resourceMonitorPath, {
         onNone: () => ({}),
         onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
       }),
-      ...buildObservabilityFragment(input.observabilitySettings),
+      ...buildObservabilityFragment(
+        environment.isolationProfile === undefined
+          ? input.observabilitySettings
+          : emptyBackendObservabilitySettings,
+      ),
     };
 
     return {
@@ -528,14 +590,15 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       entryPath: environment.backendEntryPath,
       cwd: environment.backendCwd,
       env: {
-        ...backendChildEnvPatch(),
-        ELECTRON_RUN_AS_NODE: "1",
+        ...(environment.isolationProfile === undefined
+          ? { ...backendChildEnvPatch(), ELECTRON_RUN_AS_NODE: "1" }
+          : isolatedChildEnvironment(environment.isolationProfile.root, environment.baseDir)),
       },
       // Primary wants process.env (PATH, dev-runner's T3CODE_HOME, etc.).
-      extendEnv: true,
+      extendEnv: environment.isolationProfile === undefined,
       bootstrap,
       bootstrapDelivery: "fd3",
-      httpBaseUrl: backendExposure.httpBaseUrl,
+      httpBaseUrl: isolatedExposure.httpBaseUrl,
       captureOutput: true,
       preflightFailure: Option.none(),
     } satisfies DesktopBackendManager.DesktopBackendStartConfig;
@@ -804,7 +867,7 @@ export const make = Effect.gen(function* () {
   // restart cycle without having to bounce the desktop process.
   const sharedInputs = Effect.gen(function* () {
     const bootstrapToken = yield* getOrCreateBootstrapToken;
-    const observabilitySettings = yield* readPersistedBackendObservabilitySettings.pipe(
+    const observabilitySettings = yield* readBackendObservabilitySettings.pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
     );

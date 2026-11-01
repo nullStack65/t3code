@@ -3,6 +3,18 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./device/stream": {
+      "types": "./src/device/stream.ts",
+      "default": "./src/device/stream.ts"
+    },
+    "./device/hub-access": {
+      "types": "./src/device/hubAccess.ts",
+      "default": "./src/device/hubAccess.ts"
+    },
+    "./worktree-setup": {
+      "types": "./src/worktreeSetup.ts",
+      "default": "./src/worktreeSetup.ts"
+    },
     "./load-balancing": {
       "types": "./src/load-balancing.ts",
       "default": "./src/load-balancing.ts"
@@ -194,6 +206,10 @@
     "./state/shell": {
       "types": "./src/state/shell.ts",
       "default": "./src/state/shell.ts"
+    },
+    "./state/post-start-observation-receipt": {
+      "types": "./src/state/postStartObservationReceipt.ts",
+      "default": "./src/state/postStartObservationReceipt.ts"
     },
     "./state/source-control": {
       "types": "./src/state/sourceControl.ts",

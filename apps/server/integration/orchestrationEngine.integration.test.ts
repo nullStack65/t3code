@@ -182,6 +182,63 @@ const startTurn = (input: {
     createdAt: input.createdAt ?? nowIso(),
   });
 
+it.live("uses the runtime ProviderService during serialized resume admission", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-resume-admission-session"),
+        threadId: THREAD_ID,
+        session: {
+          threadId: THREAD_ID,
+          status: "ready",
+          providerName: CODEX_PROVIDER,
+          providerInstanceId: defaultInstanceIdForDriver(CODEX_PROVIDER),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: nowIso(),
+        },
+        createdAt: nowIso(),
+      });
+      const beforeSequence = yield* harness.engine.latestSequence;
+      const error = yield* harness.engine
+        .dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-resume-admission-incompatible-route"),
+          threadId: THREAD_ID,
+          message: {
+            messageId: asMessageId("msg-resume-admission-incompatible-route"),
+            role: "user",
+            text: "This route must be rejected before message ingestion",
+            attachments: [],
+          },
+          modelSelection: {
+            instanceId: defaultInstanceIdForDriver(CLAUDE_AGENT_PROVIDER),
+            model: DEFAULT_MODEL_BY_PROVIDER[CLAUDE_AGENT_PROVIDER] ?? DEFAULT_MODEL,
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: nowIso(),
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "OrchestrationCommandInvariantError");
+      assert.match(error.message, /No message was ingested/);
+      assert.equal(yield* harness.engine.latestSequence, beforeSequence);
+      const thread = Option.getOrNull(yield* harness.snapshotQuery.getThreadDetailById(THREAD_ID));
+      assert.equal(thread?.session?.status, "ready");
+      assert.equal(
+        thread?.messages.some(
+          (message) => message.id === "msg-resume-admission-incompatible-route",
+        ),
+        false,
+      );
+    }),
+  ),
+);
+
 it.live("runs a single turn end-to-end and persists checkpoint state in sqlite + git", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
@@ -247,14 +304,7 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
       );
       assert.equal(thread.checkpoints[0]?.status, "ready");
       assert.equal(thread.checkpoints[0]?.checkpointTurnCount, 1);
-
-      const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
-        threadId: THREAD_ID,
-      });
-      assert.equal(checkpointRows.length, 1);
-      assert.equal(checkpointRows[0]?.checkpointTurnCount, 1);
-      assert.equal(checkpointRows[0]?.status, "ready");
-      assert.deepEqual(checkpointRows[0]?.files, []);
+      assert.deepEqual(thread.checkpoints[0]?.files, []);
 
       const ref0 = checkpointRefForThreadTurn(THREAD_ID, 0);
       const ref1 = checkpointRefForThreadTurn(THREAD_ID, 1);
@@ -498,11 +548,8 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
         true,
       );
 
-      const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
-        threadId: THREAD_ID,
-      });
       assert.deepEqual(
-        checkpointRows.map((row) => row.checkpointTurnCount),
+        secondTurnThread.checkpoints.map((row) => row.checkpointTurnCount),
         [1, 2],
       );
 
@@ -688,14 +735,7 @@ it.live("records failed turn runtime state and checkpoint status as error", () =
       assert.equal(thread.session?.status, "error");
       assert.equal(thread.checkpoints[0]?.status, "error");
 
-      const checkpointRow = yield* harness.checkpointRepository.getByThreadAndTurnCount({
-        threadId: THREAD_ID,
-        checkpointTurnCount: 1,
-      });
-      assert.equal(Option.isSome(checkpointRow), true);
-      if (Option.isSome(checkpointRow)) {
-        assert.equal(checkpointRow.value.status, "error");
-      }
+      assert.equal(thread.checkpoints[0]?.checkpointTurnCount, 1);
       assert.equal(
         gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 1)),
         true,
@@ -878,11 +918,6 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         false,
       );
       assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
-
-      const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
-        threadId: THREAD_ID,
-      });
-      assert.equal(checkpointRows.length, 1);
     }),
   ),
 );

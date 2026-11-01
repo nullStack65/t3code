@@ -67,7 +67,7 @@ export const resolveClaudeSdkExecutablePath = Effect.fn("resolveClaudeSdkExecuta
 
     const resolveExecutable = yield* SpawnExecutableResolution;
     const isFile = yield* ClaudeExecutableFileCheck;
-    const resolved = resolveExecutable(binaryPath, platform, environment) ?? binaryPath;
+    const resolved = (yield* resolveExecutable(binaryPath, platform, environment)) ?? binaryPath;
     const extension = NodePath.win32.extname(resolved).toLowerCase();
     if (!WINDOWS_SHIM_EXTENSIONS.has(extension)) {
       return resolved;

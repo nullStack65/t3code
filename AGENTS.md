@@ -59,7 +59,7 @@ We need to be on the same page with terminology. When communicating, use this la
 ## The three ways to hurt yourself
 
 1. **Killing by pattern.** Never `pkill -f`, `pgrep | kill`, or `kill` a PID you found by matching a name, path, or worktree string. Your own agent process has this worktree's path in its argv, and this machine runs several other dev servers at once. Kill only a PID you captured at spawn, or the owner of your port from `ss -H -ltnp` after confirming `/proc/<pid>/cwd` is your worktree.
-2. **Writing to the live install.** `~/.t3/userdata` is the developer's real T3 Code database, in use while you work. Reading it and copying from it are fine, and a good way to get real test data (see Test data). Never start a server against it, never open it read-write, never clean it up.
+2. **Writing to the live install.** `~/.t3/userdata` is the developer's real T3 Code database, in use while you work. Read-only inspection requires existing authorization; never copy it into test fixtures (see Test data). Never start a server against it, never open it read-write, never clean it up.
 3. **Baking in origins.** Never set `VITE_HTTP_URL` or `VITE_WS_URL` for dev. Dev is single-origin and Vite proxies `/api`, `/ws`, `/oauth`, and `/.well-known`. Setting them bakes localhost into the bundle and silently breaks every remote browser.
 
 ## Hit every surface
@@ -85,21 +85,12 @@ The most common defect in this repo is a change that works on the path you teste
 
 ## Test data
 
-An empty database is a bad test. Seed your worktree's `.t3` with a copy of real data instead of pointing at live state:
+Use synthetic data in a fresh disposable fixture directory. Seed the events and records needed to exercise meaningful behavior through existing test helpers; an empty database alone is not adequate evidence.
 
-- Copy from `~/.t3/userdata` (the developer's real data, the most realistic test set) or `~/.t3/dev`. Worktree state lives at `<worktree>/.t3/userdata`.
-- Snapshot the database with `VACUUM INTO`, which is safe even while a server has the source open and yields one consistent file:
-
-  ```bash
-  mkdir -p .t3/userdata
-  rm -f .t3/userdata/state.sqlite*  # VACUUM INTO refuses to overwrite
-  bun -e "new (require('bun:sqlite').Database)(process.env.HOME + '/.t3/userdata/state.sqlite', { readonly: true }).run(\"VACUUM INTO '.t3/userdata/state.sqlite'\")"
-  ```
-
-  A plain `cp` is only safe when no server has the source open, and must bring the `-wal` and `-shm` siblings along. A live file copy is a corrupt copy.
-
-- Bring `secrets` and `settings.json` only if the flow under test needs them.
-- Copy in, never symlink. Data flows one way: into your sandbox, never back out.
+- Never copy or snapshot real userdata or databases into tests. Do not use `VACUUM INTO`, database backups, live SQLite/WAL/SHM copies, or secret/session/settings copies as fixtures.
+- Keep fixture state isolated from `~/.t3/userdata`, shared dev state, and production. Use fake credentials and synthetic settings only when the tested path needs them.
+- Do not delete or replace existing userdata or `state.sqlite*` files to prepare a test. If a destination already contains state, select a new disposable fixture directory instead.
+- Stop only the test processes you started. Clean up only the synthetic fixture directory that this test created and owns; never write fixture state back to live state.
 
 ## Verifying
 
@@ -108,7 +99,7 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
 - The server is event-sourced and its async flows emit typed receipts. Wait on receipts and worker drains, never on sleeps or polling. A test that needs a timeout to pass is wrong.
-- Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
+- Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Use the task's existing authorization for routine computer use and browser verification. Escalate only a material missing decision or genuinely new effect outside that authority, through the caller for spawned sessions; preserve explicit supervised requests and security restrictions.
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
 
@@ -158,6 +149,7 @@ Full glossary with file links: `docs/internals/glossary.md`
 ## Taste
 
 - Complexity belongs at the adapter boundary. Orchestration stays pure, UI stays dumb.
+- `apps/web/src/components/ui` exports own their look. Pick a `variant` or `size`; do not restyle one with `className`. If none fits, add a variant to the component, not classes at the call site. Layout classes (width, flex, margin, position) belong on the parent. `shadcn/no-restyle` reports violations and CI caps their count.
 - Inferred types over annotations. `any` is the enemy.
 - Comments describe how a thing is used, and move when the code moves. To be used mostly to describe functions, not to annotate every line of behavior.
 - Our users drive agents all day and notice a dropped frame, a lying spinner, and a stale label. No continuously repainting animations; they peg the GPU on high-refresh displays.
@@ -165,5 +157,7 @@ Full glossary with file links: `docs/internals/glossary.md`
 
 ## Additional tips
 
-- Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
+- Use browsers or computer use when the task requests verification or its existing authorization covers that routine check. Ask only when a material decision or new effect remains outside that authority, preserving explicit supervised choices and security restrictions.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+For human assignment, review and recovery guidance, use the canonical [HUMANS guide](https://github.com/nullStack65/closura-agent-config/blob/master/HUMANS.md). Local instructions and installed controls remain authoritative for this repository.

@@ -1,3 +1,5 @@
+import { withWorkspaceLease } from "../../workspace/workspaceLease.ts";
+import { bindCurrentSkillRequest } from "../../provider/CurrentSkillRequest.ts";
 import {
   type ChatAttachment,
   CommandId,
@@ -26,6 +28,7 @@ import * as Equal from "effect/Equal";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -34,8 +37,10 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterValidationError,
+  ProviderValidationError,
   ProviderWorkspaceMissingError,
 } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
@@ -62,8 +67,10 @@ import {
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
+const isProviderValidationError = Schema.is(ProviderValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -214,6 +221,7 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
@@ -370,6 +378,9 @@ const make = Effect.gen(function* () {
     if (isProviderAdapterRequestError(failReason?.error)) {
       return failReason.error.detail;
     }
+    if (isProviderAdapterProcessError(failReason?.error)) {
+      return failReason.error.detail;
+    }
     if (isProviderAdapterValidationError(failReason?.error)) {
       return failReason.error.issue;
     }
@@ -493,8 +504,16 @@ const make = Effect.gen(function* () {
     });
     // A directory deleted without `git worktree remove` leaves an admin entry
     // that makes `git worktree add` refuse the path; prune clears it.
+    // Best effort like the rest of this recovery: a settings read failure
+    // falls back to the checkout's t3.json.
+    const submodules = yield* projectSettingsForThread(thread.id).pipe(
+      Effect.map((settings) => settings.worktreeSubmodules),
+      Effect.orElseSucceed(() => null),
+    );
     yield* gitWorkflow.pruneWorktrees({ cwd }).pipe(
-      Effect.andThen(gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath })),
+      Effect.andThen(
+        gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath }, { submodules }),
+      ),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.failCause(cause)
@@ -557,6 +576,11 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
+      readonly deferRetainedSessionLifecycle?: boolean;
+      readonly routeBinding?: Extract<
+        ProviderIntentEvent,
+        { type: "thread.turn-start-requested" }
+      >["payload"]["routeBinding"];
     },
   ) {
     const thread = yield* resolveThreadShell(threadId);
@@ -631,22 +655,6 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
-      yield* setThreadSession({
-        threadId,
-        session: {
-          threadId,
-          status: "starting",
-          providerName: activeSession?.provider ?? preferredProvider,
-          providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
-          runtimeMode: desiredRuntimeMode,
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      });
-    }
     if (thread.session !== null) {
       yield* rejectStartedThreadModelChangeIfRequired({
         threadId,
@@ -670,6 +678,7 @@ const make = Effect.gen(function* () {
         return yield* new ProviderAdapterRequestError({
           provider: preferredProvider,
           method: "thread.turn.start",
+          reason: "incompatible-resume-route",
           detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
         });
       }
@@ -680,9 +689,31 @@ const make = Effect.gen(function* () {
         return yield* new ProviderAdapterRequestError({
           provider: preferredProvider,
           method: "thread.turn.start",
+          reason: "incompatible-resume-route",
           detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
         });
       }
+    }
+    // Retained lifecycle state stays intact through ProviderService's persisted
+    // continuation check. New threads can still project startup while opening.
+    if (
+      options?.pendingTurnStart === true &&
+      (thread.session === null || options.deferRetainedSessionLifecycle !== true)
+    ) {
+      yield* setThreadSession({
+        threadId,
+        session: {
+          threadId,
+          status: "starting",
+          providerName: activeSession?.provider ?? preferredProvider,
+          providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
+          runtimeMode: desiredRuntimeMode,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
     }
     const project = yield* resolveProject(thread.projectId);
     const effectiveCwd = resolveThreadWorkspaceCwd({
@@ -699,18 +730,36 @@ const make = Effect.gen(function* () {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      providerService
-        .startSession(threadId, {
-          threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          providerInstanceId: desiredInstanceId,
-          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          ...(thread.title ? { title: thread.title } : {}),
-          modelSelection: desiredModelSelection,
-          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-          runtimeMode: desiredRuntimeMode,
-        })
-        .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
+      Effect.gen(function* () {
+        if (options?.routeBinding !== undefined) {
+          const latestThread = yield* resolveThreadShell(threadId);
+          if (
+            latestThread === undefined ||
+            !Equal.equals(latestThread.modelSelection, options.routeBinding.modelSelection) ||
+            latestThread.runtimeMode !== options.routeBinding.runtimeMode ||
+            latestThread.interactionMode !== options.routeBinding.interactionMode
+          ) {
+            return yield* new ProviderAdapterRequestError({
+              provider: preferredProvider,
+              method: "thread.turn.start",
+              reason: "incompatible-resume-route",
+              detail: `The callback destination route changed before provider startup. The result is preserved in this thread's history. Do not resend it; reconcile the existing message and continue deliberately.`,
+            });
+          }
+        }
+        return yield* providerService
+          .startSession(threadId, {
+            threadId,
+            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            providerInstanceId: desiredInstanceId,
+            ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+            ...(thread.title ? { title: thread.title } : {}),
+            modelSelection: desiredModelSelection,
+            ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+            runtimeMode: desiredRuntimeMode,
+          })
+          .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
+      });
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -819,6 +868,10 @@ const make = Effect.gen(function* () {
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
+    readonly routeBinding?: Extract<
+      ProviderIntentEvent,
+      { type: "thread.turn-start-requested" }
+    >["payload"]["routeBinding"];
     readonly interactionMode?: "default" | "plan";
     readonly createdAt: string;
   }) {
@@ -831,6 +884,8 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
+      deferRetainedSessionLifecycle: true,
+      ...(input.routeBinding !== undefined ? { routeBinding: input.routeBinding } : {}),
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -947,9 +1002,9 @@ const make = Effect.gen(function* () {
     }) {
       const attachments = input.attachments ?? [];
       yield* Effect.gen(function* () {
-        const { textGenerationModelSelection: modelSelection } = yield* projectSettingsForThread(
-          input.threadId,
-        );
+        const { textGenerationModelSelection: modelSelection, generateThreadTitles } =
+          yield* projectSettingsForThread(input.threadId);
+        if (!generateThreadTitles) return;
 
         const generated = yield* textGeneration
           .generateThreadTitle({
@@ -1006,6 +1061,8 @@ const make = Effect.gen(function* () {
       thread.session?.status !== "ready"
     )
       return;
+    const { generateThreadTitles } = yield* projectSettingsForThread(threadId);
+    if (!generateThreadTitles) return;
     const detail = yield* resolveThreadDetail(threadId);
     if (!detail || detail.messages.filter((message) => message.role === "user").length !== 1)
       return;
@@ -1045,10 +1102,11 @@ const make = Effect.gen(function* () {
         thread,
         projects: project ? [project] : [],
       }) ?? process.cwd();
-    const { textGenerationModelSelection: modelSelection } = resolveProjectSettings(
-      yield* serverSettingsService.getSettings,
-      thread.projectId,
-    ).settings;
+    const { textGenerationModelSelection: modelSelection, generateThreadTitles } =
+      resolveProjectSettings(yield* serverSettingsService.getSettings, thread.projectId).settings;
+    if (!generateThreadTitles) {
+      return { _tag: "Completed", title: undefined } as const;
+    }
     const generated = yield* textGeneration.generateThreadTitle({
       cwd,
       message,
@@ -1240,12 +1298,43 @@ const make = Effect.gen(function* () {
         "The queued message was canceled before it could resume. Send it again to continue.",
       );
     }
+    if (
+      event.payload.routeBinding !== undefined &&
+      (!Equal.equals(thread.modelSelection, event.payload.routeBinding.modelSelection) ||
+        thread.runtimeMode !== event.payload.routeBinding.runtimeMode ||
+        thread.interactionMode !== event.payload.routeBinding.interactionMode ||
+        (event.payload.modelSelection !== undefined &&
+          !Equal.equals(event.payload.modelSelection, event.payload.routeBinding.modelSelection)) ||
+        event.payload.runtimeMode !== event.payload.routeBinding.runtimeMode ||
+        event.payload.interactionMode !== event.payload.routeBinding.interactionMode)
+    ) {
+      return yield* appendTurnStartFailure(
+        "Callback destination route changed",
+        `The business result is already preserved in this thread. Do not resend it. Review the existing message '${event.payload.messageId}' here, restore a compatible destination route, then continue from its existing content.`,
+      );
+    }
 
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
+      const failure = Cause.findErrorOption(cause);
+      if (
+        Option.isSome(failure) &&
+        ((isProviderAdapterRequestError(failure.value) &&
+          failure.value.method === "thread.turn.start" &&
+          failure.value.reason === "incompatible-resume-route") ||
+          (isProviderValidationError(failure.value) &&
+            failure.value.reason === "incompatible-resume-route"))
+      ) {
+        // This is a rejected route, not a provider startup failure. Admission
+        // normally catches it before persistence; retain the surviving
+        // session if the route changed between admission and reactor handling.
+        return appendTurnStartFailure("Provider route changed before turn start", detail).pipe(
+          Effect.asVoid,
+        );
+      }
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
@@ -1422,13 +1511,15 @@ const make = Effect.gen(function* () {
         () => void compactingThreadIds.delete(event.payload.threadId),
       );
       yield* Effect.gen(function* () {
-        yield* ensureSessionForThread(
-          event.payload.threadId,
-          event.payload.createdAt,
-          event.payload.modelSelection !== undefined
-            ? { modelSelection: event.payload.modelSelection, pendingTurnStart: true }
-            : { pendingTurnStart: true },
-        );
+        yield* ensureSessionForThread(event.payload.threadId, event.payload.createdAt, {
+          ...(event.payload.modelSelection !== undefined
+            ? { modelSelection: event.payload.modelSelection }
+            : {}),
+          pendingTurnStart: true,
+          ...(event.payload.routeBinding !== undefined
+            ? { routeBinding: event.payload.routeBinding }
+            : {}),
+        });
         compactionSessionEnsured = true;
         if (event.payload.modelSelection !== undefined) {
           threadModelSelections.set(event.payload.threadId, event.payload.modelSelection);
@@ -1477,6 +1568,9 @@ const make = Effect.gen(function* () {
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }
         : {}),
+      ...(event.payload.routeBinding !== undefined
+        ? { routeBinding: event.payload.routeBinding }
+        : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
     }).pipe(
@@ -1486,6 +1580,52 @@ const make = Effect.gen(function* () {
 
     if (Option.isNone(sendTurnRequest)) {
       return;
+    }
+
+    bindCurrentSkillRequest(sendTurnRequest.value, {
+      messageId: message.id,
+      text: message.text,
+      activationAllowed:
+        !!event.metadata.origin?.surface &&
+        !event.metadata.historyImport &&
+        !event.payload.routeBinding,
+      conversation: resolveThreadDetail(event.payload.threadId).pipe(
+        Effect.map((detail) => detail?.messages ?? []),
+      ),
+    });
+
+    if (event.payload.routeBinding !== undefined) {
+      const latestThread = yield* resolveThreadShell(event.payload.threadId);
+      if (
+        latestThread === undefined ||
+        !Equal.equals(latestThread.modelSelection, event.payload.routeBinding.modelSelection) ||
+        latestThread.runtimeMode !== event.payload.routeBinding.runtimeMode ||
+        latestThread.interactionMode !== event.payload.routeBinding.interactionMode
+      ) {
+        yield* appendTurnStartFailure(
+          "Callback destination route changed",
+          `The business result is already preserved in this thread's history. Do not resend it. Review the existing message '${event.payload.messageId}' here, restore the intended route, then continue deliberately from its existing content.`,
+        );
+        return;
+      }
+    }
+
+    // Bound callbacks keep this final route fence adjacent to sendTurn: a
+    // session.set dispatch here would yield and let the route change before
+    // the provider effect. Retained bound sessions keep their current status.
+    if (event.payload.routeBinding === undefined) {
+      const latestThread = yield* resolveThreadShell(event.payload.threadId);
+      if (latestThread?.session?.status === "ready") {
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            ...latestThread.session,
+            status: "starting",
+            updatedAt: event.payload.createdAt,
+          },
+          createdAt: event.payload.createdAt,
+        });
+      }
     }
 
     const send = providerService
@@ -1784,16 +1924,23 @@ const make = Effect.gen(function* () {
           return;
         }
         const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
-        yield* ensureSessionForThread(
+        const resume = ensureSessionForThread(
           event.payload.threadId,
           event.occurredAt,
           cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
         );
+        yield* thread.worktreePath
+          ? withWorkspaceLease(path.resolve(thread.worktreePath), resume)
+          : resume;
         return;
       }
-      case "thread.turn-start-requested":
-        yield* processTurnStartRequested(event);
+      case "thread.turn-start-requested": {
+        const thread = yield* resolveThreadShell(event.payload.threadId);
+        yield* thread?.worktreePath
+          ? withWorkspaceLease(path.resolve(thread.worktreePath), processTurnStartRequested(event))
+          : processTurnStartRequested(event);
         return;
+      }
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
         return;

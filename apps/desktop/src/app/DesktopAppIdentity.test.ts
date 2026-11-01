@@ -43,6 +43,7 @@ const makeElectronAppLayer = (calls: ElectronAppCalls) =>
     name: Effect.succeed("T3 Code"),
     systemLocale: Effect.succeed("en-US"),
     whenReady: Effect.void,
+    requestSingleInstanceLock: Effect.succeed(true),
     quit: Effect.void,
     exit: () => Effect.void,
     relaunch: () => Effect.void,
@@ -57,7 +58,6 @@ const makeElectronAppLayer = (calls: ElectronAppCalls) =>
       }),
     setAppUserModelId: () => Effect.void,
     getAppMetrics: Effect.succeed([]),
-    isDefaultProtocolClient: () => Effect.succeed(false),
     setAsDefaultProtocolClient: () => Effect.succeed(true),
     setDesktopName: () => Effect.void,
     setDockIcon: (iconPath) =>

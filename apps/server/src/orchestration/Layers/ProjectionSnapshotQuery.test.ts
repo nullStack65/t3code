@@ -27,6 +27,7 @@ import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
+import * as ThreadPostStartActivity from "../ThreadPostStartActivity.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { encodeThreadDetailPageCursor } from "../threadDetailCursor.ts";
 import { projectThreadDetailSnapshot } from "../ActivityPayloadProjection.ts";
@@ -52,6 +53,7 @@ it.effect("reads project shells without loading threads or resolving excluded pr
   const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
+    Layer.provide(ThreadPostStartActivity.layer),
     Layer.provide(
       Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
         resolve: (root) =>
@@ -103,6 +105,7 @@ const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
+    Layer.provide(ThreadPostStartActivity.layer),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(NodeServices.layer),
@@ -628,6 +631,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasActionableProposedPlan: false,
           backgroundLiveness: null,
           planProgress: null,
+          postStartActivity: null,
         },
       ]);
 
@@ -1068,6 +1072,40 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         (yield* snapshotQuery.getThreadRuntimeContext(ThreadId.make("thread-active")))._tag,
         "None",
       );
+      assert.deepEqual(yield* snapshotQuery.getDeletedWorktreeThreads(), []);
+      yield* sql`
+        UPDATE projection_threads
+        SET branch = 'retained-branch', worktree_path = '/tmp/archived-worktree',
+            deleted_at = '2026-04-06T00:00:09.000Z'
+        WHERE thread_id = 'thread-archived'
+      `;
+      assert.deepEqual(yield* snapshotQuery.getDeletedWorktreeThreads(), [
+        {
+          id: ThreadId.make("thread-archived"),
+          projectId: ProjectId.make("project-archive-test"),
+          branch: "retained-branch",
+          worktreePath: "/tmp/archived-worktree",
+          workspaceRoot: "/tmp/archive-test",
+          deletedAt: "2026-04-06T00:00:09.000Z",
+        },
+      ]);
+      assert.deepEqual((yield* snapshotQuery.getArchivedShellSnapshot()).threads, []);
+      yield* sql`
+        UPDATE projection_projects
+        SET deleted_at = '2026-04-06T00:00:10.000Z', updated_at = '2026-04-06T00:00:10.000Z'
+        WHERE project_id = 'project-archive-test'
+      `;
+      assert.deepEqual((yield* snapshotQuery.getShellSnapshot()).projects, []);
+      assert.deepEqual(yield* snapshotQuery.getDeletedWorktreeThreads(), [
+        {
+          id: ThreadId.make("thread-archived"),
+          projectId: ProjectId.make("project-archive-test"),
+          branch: "retained-branch",
+          worktreePath: "/tmp/archived-worktree",
+          workspaceRoot: "/tmp/archive-test",
+          deletedAt: "2026-04-06T00:00:09.000Z",
+        },
+      ]);
     }),
   );
 
@@ -2370,6 +2408,8 @@ it.effect(
     const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(ThreadPlanProgress.layer),
+      Layer.provide(ThreadPostStartActivity.layer),
+      Layer.provide(ThreadPostStartActivity.layer),
       Layer.provideMerge(
         Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
           resolve: (cwd: string) =>
@@ -3418,6 +3458,7 @@ it.effect("omits foreign-host PRs from legacy snapshots while preserving native 
   const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
+    Layer.provide(ThreadPostStartActivity.layer),
     Layer.provide(
       Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
         resolve: () =>

@@ -36,7 +36,6 @@ import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -47,6 +46,8 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
+import { currentSkillRequest } from "../CurrentSkillRequest.ts";
+import type { CodexSkillConsumer } from "../CodexSkillConsumer.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 import {
@@ -87,6 +88,8 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const PROVIDER = ProviderDriverKind.make("codex");
 
 export interface CodexAdapterLiveOptions {
+  readonly governedSkills?: CodexSkillConsumer;
+  readonly providerKind?: ProviderDriverKind;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly makeRuntime?: (
@@ -832,6 +835,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_change_approval";
     case "mcpServer/elicitation/request":
       return "mcp_elicitation_approval";
+    case "item/permissions/requestApproval":
+      return "permission_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -857,6 +862,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_change_approval";
     case "mcp-elicitation":
       return "mcp_elicitation_approval";
+    case "permission":
+      return "permission_approval";
     default:
       return "unknown";
   }
@@ -1366,6 +1373,20 @@ function mapToRuntimeEvents(
         }
         case "mcpServer/elicitation/request":
           return elicitation?.message;
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          const requestedPaths = [
+            ...(payload?.permissions.fileSystem?.read ?? []),
+            ...(payload?.permissions.fileSystem?.write ?? []),
+          ];
+          return (
+            nonEmptyDetail(payload?.reason) ??
+            (requestedPaths.length > 0 ? `Access: ${requestedPaths.join(", ")}` : undefined)
+          );
+        }
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -2217,8 +2238,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   codexConfig: CodexSettings,
   options?: CodexAdapterLiveOptions,
 ) {
+  const PROVIDER = options?.providerKind ?? ProviderDriverKind.make("codex");
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
-  const fileSystem = yield* FileSystem.FileSystem;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* Effect.service(ServerConfig);
@@ -2256,6 +2277,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
+          ...(options?.governedSkills ? { governedSkills: options.governedSkills } : {}),
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
@@ -2494,27 +2516,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         detail: `Invalid attachment id '${attachment.id}'.`,
       });
     }
-    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "turn/start",
-            detail: `Failed to read attachment file: ${cause.message}.`,
-            cause,
-          }),
-      ),
-    );
     return {
-      type: "image" as const,
-      url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      type: "localImage" as const,
+      path: attachmentPath,
     };
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    // Codex ingests images only. Anything else would be base64-encoded as an
-    // image and rejected or misread; generic files reach the agent through the
-    // path line ProviderService puts in the prompt.
+    // Codex ingests images only. Anything else would be inlined as an image
+    // and rejected or misread; generic files reach the agent through the path
+    // line ProviderService puts in the prompt. Images are passed by path
+    // instead of base64 so the turn/start request does not scale with file
+    // size; the CLI reads the file itself.
     const codexAttachments = yield* Effect.forEach(
       (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
@@ -2522,6 +2535,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
     const session = yield* requireSession(input.threadId);
+    const skillRequest = currentSkillRequest(input);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -2532,6 +2546,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
+        ...(skillRequest ? { currentRequest: skillRequest } : {}),
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
@@ -2720,6 +2735,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       promptlessTurnContinuation: true,
     },
     startSession,
+    nativeObservation: (threadId) =>
+      requireSession(threadId).pipe(Effect.map((session) => session.runtime.nativeObservation)),
     sendTurn,
     compaction: { type: "native", start: compactThread },
     interruptTurn,

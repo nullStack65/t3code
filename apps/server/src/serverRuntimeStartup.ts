@@ -34,6 +34,8 @@ import * as Scope from "effect/Scope";
 
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
+import * as LaunchPreflight from "./environment/LaunchPreflight.ts";
+import * as LaunchPreflightWarningInboxModule from "./environment/LaunchPreflightWarningInbox.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -500,10 +502,44 @@ export const reconcileProviderSessions = Effect.gen(function* () {
           .continueThreadsAfterServerUpdate
       : false;
 
-  const liveThreadIds = new Set(
-    (yield* providerService.listSessions()).map((session) => session.threadId),
-  );
+  const liveSessions = yield* providerService.listSessions();
+  const liveSessionsByThreadId = new Map<
+    (typeof liveSessions)[number]["threadId"],
+    (typeof liveSessions)[number]
+  >();
+  const ambiguousLiveThreadIds = new Set<(typeof liveSessions)[number]["threadId"]>();
+  for (const session of liveSessions) {
+    if (ambiguousLiveThreadIds.has(session.threadId)) {
+      continue;
+    }
+    if (liveSessionsByThreadId.has(session.threadId)) {
+      liveSessionsByThreadId.delete(session.threadId);
+      ambiguousLiveThreadIds.add(session.threadId);
+    } else {
+      liveSessionsByThreadId.set(session.threadId, session);
+    }
+  }
+  const liveThreadIds = new Set(liveSessions.map((session) => session.threadId));
   const { threads } = yield* query.getCommandReadModel();
+  for (const thread of threads) {
+    const session = thread.session;
+    const liveSession = liveSessionsByThreadId.get(thread.id);
+    if (
+      session === null ||
+      session.providerInstanceId !== undefined ||
+      !liveSession?.providerInstanceId
+    ) {
+      continue;
+    }
+    const refreshedAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make(yield* crypto.randomUUIDv4),
+      threadId: thread.id,
+      session: { ...session, providerInstanceId: liveSession.providerInstanceId },
+      createdAt: refreshedAt,
+    });
+  }
   // Provider startup can report ready before the continuation is submitted.
   // Find those markers in one read rather than querying every idle thread.
   const preparedThreadIds = new Set(
@@ -907,6 +943,8 @@ export const make = (options?: StartupOptions) =>
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+    const launchPreflight = yield* LaunchPreflight.LaunchPreflight;
+    const pathService = yield* Path.Path;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
     const crypto = yield* Crypto.Crypto;
@@ -958,6 +996,68 @@ export const make = (options?: StartupOptions) =>
             }),
           ),
         ),
+      );
+
+      yield* Effect.logDebug("startup phase: running launch preflight");
+      yield* runStartupPhase(
+        "launch.preflight",
+        Effect.gen(function* () {
+          // Shared-inbox intent comes only from the explicit setting; the
+          // server's own cwd is an ordinary working directory. The configured
+          // root is carried into the bounded preflight so alias spellings of the
+          // same physical root still recognize shared intent.
+          const sharedSessionRoot = yield* serverSettings.getSettings.pipe(
+            Effect.map((settings) => settings.sharedSessionRoot),
+            Effect.orElseSucceed(() => undefined),
+          );
+          return yield* launchPreflight
+            .run(serverConfig.cwd, {
+              ...(sharedSessionRoot !== undefined ? { configuredRoot: sharedSessionRoot } : {}),
+            })
+            .pipe(
+              Effect.tap((result) =>
+                Effect.gen(function* () {
+                  yield* Effect.forEach(
+                    result.warnings,
+                    (warning) =>
+                      Effect.logWarning(`launch preflight: ${warning.message}`, {
+                        code: warning.code,
+                        severity: warning.severity,
+                        cwd: serverConfig.cwd,
+                      }),
+                    { discard: true },
+                  );
+                  // No thread exists yet, so carry these to the first provider
+                  // session in this directory, which delivers them through the
+                  // existing user-visible warning transport.
+                  const inbox =
+                    yield* LaunchPreflightWarningInboxModule.LaunchPreflightWarningInbox;
+                  LaunchPreflightWarningInboxModule.recordLaunchPreflightWarnings(
+                    inbox,
+                    LaunchPreflight.normalizePathKey(pathService, serverConfig.cwd),
+                    result.warnings.map((warning) => ({
+                      code: warning.code,
+                      message: warning.message,
+                    })),
+                  );
+                  yield* Effect.forEach(
+                    result.blockers,
+                    (blocker) =>
+                      Effect.logError(`launch preflight: ${blocker.message}`, {
+                        code: blocker.code,
+                        severity: blocker.severity,
+                        cwd: serverConfig.cwd,
+                      }),
+                    { discard: true },
+                  );
+                }),
+              ),
+              Effect.asVoid,
+              Effect.catchCause((cause) =>
+                Effect.logWarning("launch preflight failed to run", { cause }),
+              ),
+            );
+        }),
       );
 
       yield* Effect.logDebug("startup phase: parking orchestration roots at activation");
@@ -1132,6 +1232,6 @@ export const make = (options?: StartupOptions) =>
   });
 
 export const layerWithOptions = (options?: StartupOptions) =>
-  Layer.effect(ServerRuntimeStartup, make(options));
+  Layer.effect(ServerRuntimeStartup, make(options)).pipe(Layer.provide(LaunchPreflight.layer));
 
 export const layer = layerWithOptions();

@@ -336,6 +336,9 @@ export const make = Effect.gen(function* () {
   );
 
   const resolveDisabledReason = Effect.gen(function* () {
+    if (environment.isolationProfile !== undefined) {
+      return Option.some("Updates are disabled in the isolation profile.");
+    }
     const hasFeedConfig = yield* hasUpdateFeedConfig;
     return Option.fromNullishOr(
       getAutoUpdateDisabledReason({

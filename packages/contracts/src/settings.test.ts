@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -19,6 +20,90 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+
+describe("Codex resume failure policy", () => {
+  it("preserves fallback for existing settings without a policy", () => {
+    expect(decodeCodexSettings({}).resumeFailurePolicy).toBe("fallback-to-new-thread");
+  });
+
+  it.each(["fallback-to-new-thread", "fail-closed"] as const)(
+    "accepts %s in settings and patches",
+    (resumeFailurePolicy) => {
+      expect(decodeCodexSettings({ resumeFailurePolicy }).resumeFailurePolicy).toBe(
+        resumeFailurePolicy,
+      );
+      expect(
+        decodeServerSettingsPatch({ providers: { codex: { resumeFailurePolicy } } }).providers
+          ?.codex?.resumeFailurePolicy,
+      ).toBe(resumeFailurePolicy);
+    },
+  );
+
+  it("rejects unknown policies at settings and patch boundaries", () => {
+    expect(() => decodeCodexSettings({ resumeFailurePolicy: "unknown" })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { codex: { resumeFailurePolicy: "unknown" } } }),
+    ).toThrow();
+  });
+});
+
+describe("storage cleanup settings", () => {
+  it("keeps cleanup disabled for existing installations", () => {
+    expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
+    expect(decodeServerSettings({}).storageCleanup).toEqual({
+      worktreeAfterDays: null,
+      worktreeOnMerge: false,
+      worktreeOnDelete: false,
+      worktreeUnchanged: false,
+      browserArtifactsAfterDays: null,
+      logsAfterDays: null,
+    });
+  });
+
+  it("accepts eight-day retention and disabling one rule without resetting others", () => {
+    expect(decodeServerSettingsPatch({ storageCleanup: { worktreeAfterDays: 8 } })).toEqual({
+      storageCleanup: { worktreeAfterDays: 8 },
+    });
+    expect(decodeServerSettingsPatch({ storageCleanup: { worktreeAfterDays: null } })).toEqual({
+      storageCleanup: { worktreeAfterDays: null },
+    });
+  });
+
+  it("accepts partial custom patches but requires complete stored project rules", () => {
+    expect(
+      decodeServerSettingsPatch({
+        worktreeCleanup: { mode: "custom", rules: { worktreeAfterDays: 8 } },
+      }),
+    ).toEqual({ worktreeCleanup: { mode: "custom", rules: { worktreeAfterDays: 8 } } });
+    expect(() =>
+      decodeServerSettings({
+        projectSettingsOverrides: {
+          project: { worktreeCleanup: { mode: "custom", rules: { worktreeAfterDays: 8 } } },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it.each([0, -1, 1.5, 3651])("rejects invalid retention %s", (days) => {
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { browserArtifactsAfterDays: days } }),
+    ).toThrow();
+  });
+});
+
+describe("ClientSettings rich text composer", () => {
+  it("enables rich text for new and existing settings without a saved preference", () => {
+    expect(decodeClientSettings({}).composerRichTextEnabled).toBe(true);
+    expect(decodeClientSettings({ sendShortcut: "mod-enter" }).composerRichTextEnabled).toBe(true);
+  });
+
+  it("preserves an explicit opt-out through patches and persistence", () => {
+    const preference = { composerRichTextEnabled: false };
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+  });
+});
 
 describe("ServerSettings default permissions", () => {
   it("keeps full access for settings saved before a default was configured", () => {
@@ -133,6 +218,20 @@ describe("custom model settings", () => {
       decodeServerSettingsPatch({ providers: { codex: { customModels: [{ name: "no slug" }] } } }),
     ).toThrow();
   });
+
+  it("supports an instance-scoped Codex catalog mode", () => {
+    expect(decodeCodexSettings({}).modelCatalogMode).toBe("app-server");
+    expect(decodeCodexSettings({ modelCatalogMode: "custom-only" }).modelCatalogMode).toBe(
+      "custom-only",
+    );
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { modelCatalogMode: "custom-only" } } })
+        .providers?.codex?.modelCatalogMode,
+    ).toBe("custom-only");
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { codex: { modelCatalogMode: "unknown" } } }),
+    ).toThrow();
+  });
 });
 
 describe("ClaudeSettings auto-compaction", () => {
@@ -214,8 +313,8 @@ describe("ClientSettings notifications", () => {
 });
 
 describe("ClientSettings default diff file state", () => {
-  it("keeps files expanded when existing settings omit the preference", () => {
-    expect(decodeClientSettings({}).diffFilesCollapsed).toBe(false);
+  it("keeps files collapsed when existing settings omit the preference", () => {
+    expect(decodeClientSettings({}).diffFilesCollapsed).toBe(true);
   });
 
   it.each([true, false])("preserves a saved collapsed preference of %s", (diffFilesCollapsed) => {
@@ -414,6 +513,23 @@ describe("ClientSettings browser recording frame rate", () => {
   });
 });
 
+describe("ClientSettings recording input overlays", () => {
+  it("defaults both overlays off and accepts independent opt-ins", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.browserRecordingShowKeyPresses).toBe(false);
+    expect(settings.browserRecordingShowMousePresses).toBe(false);
+    expect(
+      decodeClientSettingsPatch({
+        browserRecordingShowKeyPresses: true,
+        browserRecordingShowMousePresses: false,
+      }),
+    ).toMatchObject({
+      browserRecordingShowKeyPresses: true,
+      browserRecordingShowMousePresses: false,
+    });
+  });
+});
+
 describe("ClientSettings glass opacity", () => {
   it("defaults to a readable translucent surface", () => {
     expect(decodeClientSettings({}).glassOpacity).toBe(80);
@@ -529,6 +645,17 @@ describe("ClientSettings context window meter", () => {
   });
 });
 
+describe("ClientSettings send shortcut", () => {
+  it("defaults to Enter and validates the supported choices", () => {
+    expect(decodeClientSettings({}).sendShortcut).toBe("enter");
+    for (const sendShortcut of ["enter", "mod-enter-multiline", "mod-enter"]) {
+      expect(decodeClientSettings({ sendShortcut }).sendShortcut).toBe(sendShortcut);
+      expect(decodeClientSettingsPatch({ sendShortcut }).sendShortcut).toBe(sendShortcut);
+    }
+    expect(() => decodeClientSettingsPatch({ sendShortcut: "invalid" })).toThrow();
+  });
+});
+
 describe("ClientSettings follow-up behavior", () => {
   it("defaults to queue and accepts either behavior", () => {
     expect(decodeClientSettings({}).followUpBehavior).toBe("queue");
@@ -582,6 +709,25 @@ describe("ServerSettings thread settlement", () => {
   it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
     expect(() => decodeServerSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
     expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+  });
+});
+
+describe("ServerSettings thread titles", () => {
+  it("defaults AI thread title generation on", () => {
+    expect(decodeServerSettings({}).generateThreadTitles).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.generateThreadTitles).toBe(true);
+  });
+
+  it("accepts disabling AI thread title generation", () => {
+    expect(decodeServerSettings({ generateThreadTitles: false }).generateThreadTitles).toBe(false);
+    expect(decodeServerSettingsPatch({ generateThreadTitles: false }).generateThreadTitles).toBe(
+      false,
+    );
+  });
+
+  it("rejects non-boolean thread title settings", () => {
+    expect(() => decodeServerSettings({ generateThreadTitles: "off" })).toThrow();
+    expect(() => decodeServerSettingsPatch({ generateThreadTitles: "off" })).toThrow();
   });
 });
 
@@ -720,6 +866,27 @@ describe("provider enabled defaults", () => {
 });
 
 describe("ServerSettings worktree defaults", () => {
+  it("defaults the thread env mode to inherit and keeps stored values", () => {
+    expect(decodeServerSettings({}).defaultThreadEnvMode).toBeNull();
+    expect(decodeServerSettings({ defaultThreadEnvMode: "worktree" }).defaultThreadEnvMode).toBe(
+      "worktree",
+    );
+    expect(
+      decodeServerSettings({ defaultThreadEnvMode: "remote" }).defaultThreadEnvMode,
+    ).toBeNull();
+    expect(
+      decodeServerSettingsPatch({ defaultThreadEnvMode: null }).defaultThreadEnvMode,
+    ).toBeNull();
+  });
+
+  it("keeps an inherited thread env mode off the wire for older clients", () => {
+    const encode = Schema.encodeSync(ServerSettings);
+    expect("defaultThreadEnvMode" in encode(decodeServerSettings({}))).toBe(false);
+    expect(
+      encode(decodeServerSettings({ defaultThreadEnvMode: "worktree" })).defaultThreadEnvMode,
+    ).toBe("worktree");
+  });
+
   it("defaults start-from-origin on for legacy configs", () => {
     expect(decodeServerSettings({}).newWorktreesStartFromOrigin).toBe(true);
   });
@@ -728,6 +895,15 @@ describe("ServerSettings worktree defaults", () => {
     expect(
       decodeServerSettingsPatch({ newWorktreesStartFromOrigin: false }).newWorktreesStartFromOrigin,
     ).toBe(false);
+  });
+
+  it("defaults worktree submodules to inherit and tolerates unknown modes", () => {
+    expect(decodeServerSettings({}).worktreeSubmodules).toBeNull();
+    expect(decodeServerSettings({ worktreeSubmodules: "top-level" }).worktreeSubmodules).toBe(
+      "top-level",
+    );
+    expect(decodeServerSettings({ worktreeSubmodules: "shallow" }).worktreeSubmodules).toBeNull();
+    expect(decodeServerSettingsPatch({ worktreeSubmodules: null }).worktreeSubmodules).toBeNull();
   });
 });
 

@@ -92,7 +92,7 @@ const ModelSelectionSource = Schema.Struct({
 export const ModelSelection = ModelSelectionSource.pipe(
   Schema.decodeTo(
     ModelSelectionWire,
-    SchemaTransformation.transformOrFail({
+    SchemaTransformation.transformEffect({
       decode: (raw) => {
         // Resolve the routing key: prefer an explicit `instanceId`; fall
         // back to promoting the legacy `provider` slug (the canonical
@@ -141,6 +141,7 @@ export const ProviderRequestKind = Schema.Literals([
   "file-read",
   "file-change",
   "mcp-elicitation",
+  "permission",
 ]);
 export type ProviderRequestKind = typeof ProviderRequestKind.Type;
 export const ProviderApprovalDecision = Schema.Literals([
@@ -162,8 +163,9 @@ export const ProviderUserInputAnswers = Schema.Record(Schema.String, Schema.Unkn
 export type ProviderUserInputAnswers = typeof ProviderUserInputAnswers.Type;
 
 export const PROVIDER_SEND_TURN_MAX_INPUT_CHARS = 120_000;
-export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 8;
+export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 100;
 export const PROVIDER_SEND_TURN_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const PROVIDER_SEND_TURN_MAX_TOTAL_IMAGE_BYTES = 80 * 1024 * 1024;
 export const PROVIDER_SEND_TURN_MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES = [
   "image/gif",
@@ -370,6 +372,25 @@ export const ChatAttachment = Schema.Union([
 ]);
 export type ChatAttachment = typeof ChatAttachment.Type;
 
+export function getProviderAttachmentLimitError(
+  attachments: ReadonlyArray<Pick<ChatAttachment, "type" | "mimeType" | "sizeBytes">>,
+): string | undefined {
+  if (attachments.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+    return `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message or question response.`;
+  }
+  const imageBytes = attachments.reduce(
+    (total, attachment) =>
+      total +
+      (attachment.type === "image" || isProviderSendTurnSupportedImageMimeType(attachment.mimeType)
+        ? attachment.sizeBytes
+        : 0),
+    0,
+  );
+  if (imageBytes > PROVIDER_SEND_TURN_MAX_TOTAL_IMAGE_BYTES) {
+    return "Images can total up to 80 MiB per message or question response. Use smaller images or send fewer at once.";
+  }
+}
+
 export const UserInputAttachments = Schema.Record(
   Schema.String,
   Schema.Array(Schema.Union([ChatImageAttachment, ChatFileAttachment])).pipe(
@@ -459,26 +480,62 @@ const ProjectLucideIconName = TrimmedNonEmptyString.check(
 
 const ProjectEmoji = TrimmedNonEmptyString.check(Schema.isMaxLength(32));
 
-const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+// Grapheme-count validation belongs to the server command boundary, not snapshot decoding.
 export const ProjectMonogramText = TrimmedNonEmptyString.check(
   Schema.isMaxLength(32),
   Schema.isPattern(/^[\p{L}\p{N}][\p{L}\p{N}\p{M}\u200c\u200d]*$/u),
-  Schema.makeFilter((text) => Array.from(monogramSegmenter.segment(text)).length <= 2),
 );
 
+const ProjectLucideIcon = Schema.Struct({
+  kind: Schema.Literal("lucide"),
+  name: ProjectLucideIconName,
+  color: ProjectIconColor,
+});
+const ProjectEmojiIcon = Schema.Struct({
+  kind: Schema.Literal("emoji"),
+  emoji: ProjectEmoji,
+});
+const ProjectMonogramIcon = Schema.Struct({
+  kind: Schema.Literal("monogram"),
+  text: ProjectMonogramText,
+  color: ProjectIconColor,
+});
+const ProjectIcon = Schema.Union([ProjectLucideIcon, ProjectEmojiIcon, ProjectMonogramIcon]);
+const ProjectLucideIconWire = Schema.Struct({
+  ...ProjectLucideIcon.fields,
+  monogramText: Schema.optional(ProjectMonogramText),
+  monogram: Schema.optional(ProjectMonogramText),
+});
+
+// Older peers only know lucide/emoji. Keep monograms out of their validated
+// `monogram` field too: old grapheme counters can reject otherwise valid text.
 export const ProjectIconOverride = Schema.Union([
-  Schema.Struct({
-    kind: Schema.Literal("lucide"),
-    name: ProjectLucideIconName,
-    color: ProjectIconColor,
-    // Older clients ignore this field and render the named Lucide icon instead.
-    monogram: Schema.optional(ProjectMonogramText),
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("emoji"),
-    emoji: ProjectEmoji,
-  }),
-]);
+  ProjectLucideIconWire,
+  ProjectEmojiIcon,
+  ProjectMonogramIcon,
+]).pipe(
+  Schema.decodeTo(
+    ProjectIcon,
+    SchemaTransformation.transform({
+      decode: (icon): typeof ProjectIcon.Type => {
+        if (icon.kind !== "lucide") return icon;
+        const text = icon.monogramText ?? icon.monogram;
+        return text === undefined
+          ? { kind: "lucide", name: icon.name, color: icon.color }
+          : { kind: "monogram", text, color: icon.color };
+      },
+      encode: (icon) =>
+        icon.kind === "monogram"
+          ? {
+              kind: "lucide" as const,
+              name: "folder-code",
+              color: icon.color,
+              monogramText: icon.text,
+            }
+          : icon,
+    }),
+  ),
+);
 export type ProjectIconOverride = typeof ProjectIconOverride.Type;
 
 export const OrchestrationProject = Schema.Struct({
@@ -503,7 +560,15 @@ export const OrchestrationProject = Schema.Struct({
 });
 export type OrchestrationProject = typeof OrchestrationProject.Type;
 
-export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
+/** `reasoning` carries a provider's thinking trace: a reasoning summary, or
+ *  the raw chain of thought when the model exposes one. It is a sibling of the
+ *  assistant text it precedes, not a replacement for it. */
+export const OrchestrationMessageRole = Schema.Literals([
+  "user",
+  "assistant",
+  "system",
+  "reasoning",
+]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
 export const OrchestrationMessage = Schema.Struct({
@@ -604,6 +669,53 @@ export const OrchestrationThreadActivity = Schema.Struct({
   createdAt: IsoDateTime,
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
+
+/**
+ * One tool call the server has observed as outstanding. Mirrors the shared
+ * post-start derivation's tool shape so the shell can carry live observation
+ * to clients that cannot see the thread's activity list.
+ */
+export const OrchestrationOutstandingTool = Schema.Struct({
+  toolCallId: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  itemType: Schema.NullOr(TrimmedNonEmptyString),
+  startedAt: IsoDateTime,
+  lastObservedAt: IsoDateTime,
+});
+export type OrchestrationOutstandingTool = typeof OrchestrationOutstandingTool.Type;
+
+/**
+ * Server-observed post-start provider activity for a running thread. Live-only
+ * (no persistence): after a restart the shell omits it and clients fall back to
+ * the persisted turn origin. Optional so older peers still decode.
+ */
+export const OrchestrationPostStartActivity = Schema.Struct({
+  lastProviderActivityAt: Schema.NullOr(IsoDateTime),
+  lastToolCompletedAt: Schema.NullOr(IsoDateTime),
+  outstandingTools: Schema.Array(OrchestrationOutstandingTool),
+  /**
+   * The turn this observation describes, or null while the accepted request is
+   * pending and the provider turn is not named yet. Lets a client reject a
+   * cached observation that belongs to a different turn. Optional so peers
+   * that predate the field still decode.
+   */
+  turnId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /**
+   * Tool ids the server has observed as completed this turn. Carried so a
+   * client can reconcile live evidence against persisted rows without
+   * resurrecting a finished call from stale progress in either direction.
+   * Optional so older peers still decode.
+   */
+  completedToolIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /**
+   * Server clock instant the shell was mapped. This is the observation-time
+   * basis: the client measures provider ages against the server's clock using
+   * this stamp instead of assuming the two clocks agree. Optional so peers
+   * that omit it fall back to their own clock.
+   */
+  observedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+});
+export type OrchestrationPostStartActivity = typeof OrchestrationPostStartActivity.Type;
 
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
@@ -870,6 +982,9 @@ export const OrchestrationThreadShell = Schema.Struct({
       }),
     ),
   ),
+  // Server-observed live provider activity for a running thread. Optional so
+  // old servers/clients interop; absent = unknown (fall back to turn origin).
+  postStartActivity: Schema.optional(Schema.NullOr(OrchestrationPostStartActivity)),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -937,6 +1052,8 @@ export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShel
 
 export const OrchestrationSubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
+  /** Opt in to reasoning roles; older clients receive system messages instead. */
+  reasoningMessages: Schema.optionalKey(Schema.Boolean),
   /**
    * When provided, the server skips the initial snapshot frame and instead
    * replays events after this sequence before streaming live events. Clients
@@ -1225,6 +1342,7 @@ const ThreadTurnStartBootstrapPrepareWorktree = Schema.Struct({
   baseBranch: TrimmedNonEmptyString,
   branch: Schema.optional(TrimmedNonEmptyString),
   startFromOrigin: Schema.optional(Schema.Boolean),
+  requireWorktree: Schema.optional(Schema.Boolean),
 });
 
 const ThreadTurnStartBootstrap = Schema.Struct({
@@ -1234,6 +1352,12 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 });
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
+
+export const ThreadTurnStartRouteBinding = Schema.Struct({
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
 
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
@@ -1247,6 +1371,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  /** Callback intent binding to the destination route observed before sending. */
+  routeBinding: Schema.optional(ThreadTurnStartRouteBinding),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1269,6 +1395,8 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  /** Callback intent binding to the destination route observed before sending. */
+  routeBinding: Schema.optional(ThreadTurnStartRouteBinding),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -1435,6 +1563,25 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadMessageReasoningDeltaCommand = Schema.Struct({
+  type: Schema.Literal("thread.message.reasoning.delta"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  delta: Schema.String,
+  turnId: Schema.optional(TurnId),
+  createdAt: IsoDateTime,
+});
+
+const ThreadMessageReasoningCompleteCommand = Schema.Struct({
+  type: Schema.Literal("thread.message.reasoning.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  turnId: Schema.optional(TurnId),
+  createdAt: IsoDateTime,
+});
+
 const ThreadHistoryImportCommand = Schema.Struct({
   type: Schema.Literal("thread.history.import"),
   commandId: CommandId,
@@ -1563,6 +1710,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
+  ThreadMessageReasoningDeltaCommand,
+  ThreadMessageReasoningCompleteCommand,
   ThreadHistoryImportCommand,
   ThreadMessageUserAppendCommand,
   ThreadProposedPlanUpsertCommand,
@@ -1804,7 +1953,8 @@ export const ThreadMessageSentPayload = Schema.Struct({
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   context: Schema.optional(OrchestrationMessageContext),
-  turnId: Schema.NullOr(TurnId),
+  // Events persisted before the field existed carry no key at all.
+  turnId: Schema.NullOr(TurnId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -1814,6 +1964,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
+  routeBinding: Schema.optional(ThreadTurnStartRouteBinding),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -2140,26 +2291,6 @@ export const ProviderSessionRuntimeStatus = Schema.Literals([
 ]);
 export type ProviderSessionRuntimeStatus = typeof ProviderSessionRuntimeStatus.Type;
 
-const ProjectionThreadTurnStatus = Schema.Literals([
-  "running",
-  "completed",
-  "interrupted",
-  "error",
-]);
-export type ProjectionThreadTurnStatus = typeof ProjectionThreadTurnStatus.Type;
-
-const ProjectionCheckpointRow = Schema.Struct({
-  threadId: ThreadId,
-  turnId: TurnId,
-  checkpointTurnCount: NonNegativeInt,
-  checkpointRef: CheckpointRef,
-  status: OrchestrationCheckpointStatus,
-  files: Schema.Array(OrchestrationCheckpointFile),
-  assistantMessageId: Schema.NullOr(MessageId),
-  completedAt: IsoDateTime,
-});
-export type ProjectionCheckpointRow = typeof ProjectionCheckpointRow.Type;
-
 export const ProjectionPendingApprovalStatus = Schema.Literals(["pending", "resolved"]);
 export type ProjectionPendingApprovalStatus = typeof ProjectionPendingApprovalStatus.Type;
 
@@ -2314,7 +2445,7 @@ export class OrchestrationDispatchCommandError extends Schema.TaggedError<Orches
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
-    bootstrapThreadDisposition: Schema.optional(Schema.Literal("deleted")),
+    bootstrapThreadDisposition: Schema.optional(Schema.Literals(["deleted", "not-created"])),
   },
 ) {}
 

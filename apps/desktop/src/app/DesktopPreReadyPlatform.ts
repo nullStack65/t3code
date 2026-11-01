@@ -1,6 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - pre-ready Electron setup reads settings and prepares the Linux desktop entry synchronously before app services are available.
 import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -10,6 +9,7 @@ import * as Electron from "electron";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
+import * as DesktopIsolationProfile from "./DesktopIsolationProfile.ts";
 import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
 import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
@@ -35,7 +35,7 @@ export const resolveEarlyLinuxElectronOptionsFromProcess =
   (): DesktopEarlyElectronStartup.EarlyLinuxElectronOptions =>
     DesktopEarlyElectronStartup.resolveEarlyLinuxElectronOptions({
       env: process.env,
-      homeDirectory: NodeOS.homedir(),
+      homeDirectory: DesktopIsolationProfile.homeDirectory(),
       joinPath: NodePath.posix.join,
       readFileString: (path) => NodeFS.readFileSync(path, "utf8"),
     });
@@ -64,7 +64,7 @@ export const make = Effect.gen(function* () {
       try {
         const applicationsDir = NodePath.posix.join(
           process.env.XDG_DATA_HOME?.trim() ||
-            NodePath.posix.join(NodeOS.homedir(), ".local", "share"),
+            NodePath.posix.join(DesktopIsolationProfile.homeDirectory(), ".local", "share"),
           "applications",
         );
         NodeFS.mkdirSync(applicationsDir, { recursive: true });

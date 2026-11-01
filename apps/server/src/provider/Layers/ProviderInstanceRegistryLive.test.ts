@@ -22,6 +22,11 @@
  * binaries. That keeps the assertions focused on registry routing
  * behaviour rather than the runtime details of each provider.
  */
+// @effect-diagnostics nodeBuiltinImport:off -- The isolated-profile marker and synthetic subprocess fixtures use native APIs.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -40,14 +45,16 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { ISOLATION_ROOT_ENV, prepareIsolationProfile } from "@t3tools/shared/isolationRoot";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import type { BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { AntigravityInstallation } from "../AntigravityInstallation.ts";
 import { ServerConfig } from "../../config.ts";
-import { expandHomePath } from "../../pathExpansion.ts";
+import { expandHomePathFrom } from "../../pathExpansion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
@@ -59,6 +66,10 @@ import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+
+const json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeSync(json);
+const decodeJson = Schema.decodeUnknownSync(json);
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -103,6 +114,7 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   binaryPath: "codex",
   homePath: "",
   shadowHomePath: "",
+  modelCatalogMode: "app-server",
   launchArgs: "",
   resumeFailurePolicy: "fallback-to-new-thread",
   customModels: [],
@@ -143,77 +155,33 @@ const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSetti
   ...overrides,
 });
 
-const makeTildeProviderFixtures = Effect.fn(
-  "ProviderInstanceRegistryLive.test.makeTildeProviderFixtures",
+const makePortableProviderFixtures = Effect.fn(
+  "ProviderInstanceRegistryLive.test.makePortableProviderFixtures",
 )(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const homePath = expandHomePath("~");
   const fixtureDir = yield* fileSystem.makeTempDirectoryScoped({
-    directory: homePath,
+    directory: NodeOS.tmpdir(),
     prefix: ".t3-provider-path-test-",
   });
-  const codexPath = path.join(fixtureDir, "codex");
   const claudePath = path.join(fixtureDir, "claude");
   const claudeHomePath = path.join(fixtureDir, "claude-home");
-  const codexScriptPath = path.join(fixtureDir, "codex-script.json");
-  const codexFixtureDir = path.join(import.meta.dirname, "../testFixtures");
 
-  yield* fileSystem.copyFile(path.join(codexFixtureDir, "codexCollabMockPeer.sh"), codexPath);
   yield* fileSystem.copyFile(
-    path.join(codexFixtureDir, "codexCollabMockPeer.mjs"),
-    path.join(fixtureDir, "codexCollabMockPeer.mjs"),
-  );
-  yield* fileSystem.copyFile(
-    path.join(codexFixtureDir, "codexMultiAgentWire.json"),
-    path.join(fixtureDir, "codexMultiAgentWire.json"),
-  );
-  yield* fileSystem.writeFileString(
-    codexScriptPath,
-    // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed script document read by the external Codex mock peer.
-    JSON.stringify({ rootThreadId: "probe-thread", notifications: [] }),
-  );
-  yield* fileSystem.chmod(codexPath, 0o755);
-
-  yield* fileSystem.writeFileString(
+    path.join(import.meta.dirname, "../testFixtures/claudeTildeMock.mjs"),
     claudePath,
-    [
-      "#!/usr/bin/env node",
-      'import * as NodeReadline from "node:readline";',
-      'if (process.argv.includes("--version")) {',
-      '  process.stdout.write("claude 2.1.219\\n");',
-      "  process.exit(0);",
-      "}",
-      "const lines = NodeReadline.createInterface({ input: process.stdin });",
-      'lines.on("line", (line) => {',
-      "  const message = JSON.parse(line);",
-      '  if (message.type !== "control_request" || message.request?.subtype !== "initialize") return;',
-      "  process.stdout.write(JSON.stringify({",
-      '    type: "control_response",',
-      "    response: {",
-      '      subtype: "success",',
-      "      request_id: message.request_id,",
-      "      response: {",
-      "        commands: [], agents: [], models: [],",
-      '        output_style: "default", available_output_styles: ["default"],',
-      '        account: { email: "test@example.com", subscriptionType: "pro", tokenSource: "oauth" },',
-      "      },",
-      "    },",
-      '  }) + "\\n");',
-      "});",
-      "setInterval(() => {}, 1_000);",
-      "",
-    ].join("\n"),
   );
   yield* fileSystem.chmod(claudePath, 0o755);
   yield* fileSystem.makeDirectory(claudeHomePath);
 
-  const asTildePath = (filePath: string) => `~/${path.relative(homePath, filePath)}`;
+  const asTildePath = (filePath: string) => filePath;
+  expect(expandHomePathFrom("~/synthetic-provider", fixtureDir)).toBe(
+    path.join(fixtureDir, "synthetic-provider"),
+  );
   return {
-    codexBinaryPath: asTildePath(codexPath),
+    fixtureDir,
     claudeBinaryPath: asTildePath(claudePath),
     claudeHomePath,
-    codexScriptPath,
   };
 });
 
@@ -234,6 +202,57 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(CodexResetCredit.layerTest),
   );
+
+  it.live("does not create provider drivers from a claimed isolation profile", () => {
+    const parent = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-provider-isolation-test-"),
+    );
+    const profileRoot = NodePath.join(parent, "profile");
+    prepareIsolationProfile(profileRoot, [NodePath.join(parent, "account-home")]);
+    const previousRoot = process.env[ISOLATION_ROOT_ENV];
+    process.env[ISOLATION_ROOT_ENV] = profileRoot;
+    let createCalls = 0;
+    const driver = {
+      ...CodexDriver,
+      create: () =>
+        Effect.sync(() => {
+          createCalls += 1;
+          throw new Error("provider creation must be denied in an isolation profile");
+        }),
+    } as typeof CodexDriver;
+    const instanceId = ProviderInstanceId.make("isolated_codex");
+    const configMap: ProviderInstanceConfigMap = {
+      [instanceId]: {
+        driver: ProviderDriverKind.make("codex"),
+        displayName: "Isolated Codex",
+        enabled: true,
+        config: makeCodexConfig({
+          enabled: true,
+          homePath: "/outside/account/.codex",
+          binaryPath: "/outside/account/codex",
+        }),
+      },
+    };
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const { registry } = yield* makeProviderInstanceRegistry({ drivers: [driver], configMap });
+        expect(createCalls).toBe(0);
+        expect(yield* registry.listInstances).toEqual([]);
+        expect(yield* registry.listUnavailable).toHaveLength(1);
+      }),
+    )
+      .pipe(Effect.provide(testLayer))
+      .pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (previousRoot === undefined) delete process.env[ISOLATION_ROOT_ENV];
+            else process.env[ISOLATION_ROOT_ENV] = previousRoot;
+            NodeFS.rmSync(parent, { recursive: true, force: true });
+          }),
+        ),
+      );
+  });
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
     Effect.gen(function* () {
@@ -339,27 +358,45 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  it.live("runs Codex and Claude readiness probes from configured tilde paths", () =>
+  it.live("exits the synthetic Claude fixture after stdin EOF", () =>
     Effect.gen(function* () {
       if (yield* isHostWindows) return;
 
-      const fixtures = yield* makeTildeProviderFixtures();
+      const fixtures = yield* makePortableProviderFixtures();
+      // The larger response also catches forced-exit truncation of queued stdout.
+      for (const requestId of ["stdin-eof-regression", "x".repeat(128 * 1024)]) {
+        // EOF follows initialize. The timeout is only a failure watchdog;
+        // spawnSync terminates its own child if the keepalive leaks.
+        const result = NodeChildProcess.spawnSync(process.execPath, [fixtures.claudeBinaryPath], {
+          input: `${encodeJson({
+            type: "control_request",
+            request_id: requestId,
+            request: { subtype: "initialize" },
+          })}\n`,
+          encoding: "utf8",
+          timeout: 2_000,
+        });
 
-      const codexId = ProviderInstanceId.make("codex_tilde");
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        expect(result.signal).toBeNull();
+        expect(result.stderr).toBe("");
+        expect(decodeJson(result.stdout)).toMatchObject({
+          type: "control_response",
+          response: { subtype: "success", request_id: requestId },
+        });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("runs Claude readiness probes from a portable configured path", () =>
+    Effect.gen(function* () {
+      if (yield* isHostWindows) return;
+
+      const fixtures = yield* makePortableProviderFixtures();
+
       const claudeId = ProviderInstanceId.make("claude_tilde");
       const configMap: ProviderInstanceConfigMap = {
-        [codexId]: {
-          driver: ProviderDriverKind.make("codex"),
-          enabled: true,
-          environment: [
-            {
-              name: "T3_CODEX_COLLAB_SCRIPT",
-              value: fixtures.codexScriptPath,
-              sensitive: false,
-            },
-          ],
-          config: makeCodexConfig({ enabled: true, binaryPath: fixtures.codexBinaryPath }),
-        },
         [claudeId]: {
           driver: ProviderDriverKind.make("claudeAgent"),
           enabled: true,
@@ -372,19 +409,13 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       };
 
       const { registry } = yield* makeProviderInstanceRegistry({
-        drivers: [CodexDriver, ClaudeDriver],
+        drivers: [ClaudeDriver],
         configMap,
       });
-      const codex = yield* registry.getInstance(codexId);
       const claude = yield* registry.getInstance(claudeId);
-      expect(codex).toBeDefined();
       expect(claude).toBeDefined();
 
-      const [codexSnapshot, claudeSnapshot] = yield* Effect.all(
-        [codex!.snapshot.refresh, claude!.snapshot.refresh],
-        { concurrency: "unbounded" },
-      );
-      expect(codexSnapshot).toMatchObject({ status: "ready", installed: true, version: "0.0.0" });
+      const claudeSnapshot = yield* claude!.snapshot.refresh;
       expect(claudeSnapshot).toMatchObject({
         status: "ready",
         installed: true,

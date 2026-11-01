@@ -1,3 +1,4 @@
+import * as DesktopIsolationProfile from "./app/DesktopIsolationProfile.ts";
 import * as MacPermissions from "./permissions/MacPermissions.ts";
 for (const stream of [process.stdout, process.stderr]) {
   stream.on("error", (err: NodeJS.ErrnoException) => {
@@ -8,7 +9,6 @@ for (const stream of [process.stdout, process.stderr]) {
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -77,7 +77,10 @@ const desktopEnvironmentLayer = Layer.unwrap(
     const processArch = yield* HostProcessArchitecture;
     return DesktopEnvironment.layer({
       dirname: __dirname,
-      homeDirectory: NodeOS.homedir(),
+      homeDirectory: DesktopIsolationProfile.homeDirectory(),
+      ...(DesktopIsolationProfile.isolationProfile === undefined
+        ? {}
+        : { isolationProfile: DesktopIsolationProfile.isolationProfile }),
       platform,
       processArch,
       ...metadata,
@@ -106,6 +109,7 @@ const desktopSshEnvironmentLayer = Layer.unwrap(
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     return DesktopSshEnvironment.layer({
       resolveCliRunner: Effect.succeed(resolveDesktopSshCliRunner(environment)),
+      isolationProfile: environment.isolationProfile !== undefined,
     });
   }),
 );

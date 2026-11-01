@@ -1,4 +1,5 @@
 import type {
+  ChangeRequest,
   VcsRef,
   SourceControlProviderInfo,
   VcsStatusLocalResult,
@@ -9,6 +10,29 @@ import type {
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
+
+export function parseRepositoryNameWithOwnerFromRemoteUrl(
+  url: string | null,
+  providerKind?: ChangeRequest["provider"],
+): string | null {
+  const trimmed = url?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const match =
+    /^(?:[^@/\s]+@[^:/\s]+:|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
+      trimmed,
+    );
+  const repositoryNameWithOwner = match?.[1]?.trim() ?? "";
+  // Forgejo HTTP paths can include an installation mount; its API always names owner/repo.
+  if (providerKind === "forgejo" && /^https?:\/\//iu.test(trimmed)) {
+    return repositoryNameWithOwner.length > 0
+      ? repositoryNameWithOwner.split("/").slice(-2).join("/")
+      : null;
+  }
+  return repositoryNameWithOwner.length > 0 ? repositoryNameWithOwner : null;
+}
 
 export const WORKTREE_BRANCH_PREFIX = "t3code";
 // Canonical form is `t3code/<8 hex>`. Older mobile builds generated `t3code/<uuid>`
@@ -109,6 +133,25 @@ export function isTemporaryWorktreeBranch(refName: string): boolean {
 }
 
 /**
+ * The web spelling of an Azure DevOps repository reached over SSH, or null for anything else.
+ *
+ * Azure alone addresses one repository under two names that share no part: `ssh.dev.azure.com` and
+ * `v3/{org}/{project}/{repo}` over SSH, against `dev.azure.com` and `{org}/{project}/_git/{repo}`
+ * everywhere a person sees it. A project cloned over SSH would otherwise be a different repository
+ * to every comparison made against a pull request URL, which arrives in the web spelling. So the
+ * web spelling is the one both are keyed by.
+ */
+function azureDevOpsRepositoryKey(host: string, segments: ReadonlyArray<string>): string | null {
+  if (host !== "ssh.dev.azure.com" && host !== "vs-ssh.visualstudio.com") return null;
+  const [marker, organization, project, repository] = segments;
+  if (segments.length !== 4 || marker !== "v3") return null;
+  if (!organization || !project || !repository) return null;
+  return host === "ssh.dev.azure.com"
+    ? `dev.azure.com/${organization}/${project}/_git/${repository}`
+    : `${organization}.visualstudio.com/${project}/_git/${repository}`;
+}
+
+/**
  * Normalize a git remote URL into a stable comparison key.
  */
 export function normalizeGitRemoteUrl(value: string): string {
@@ -121,12 +164,12 @@ export function normalizeGitRemoteUrl(value: string): string {
   if (/^(?:ssh|https?|git):\/\//i.test(normalized)) {
     try {
       const url = new URL(normalized);
-      const repositoryPath = url.pathname
-        .split("/")
-        .filter((segment) => segment.length > 0)
-        .join("/");
-      if (url.hostname && repositoryPath.includes("/")) {
-        return `${url.hostname}/${repositoryPath}`;
+      const repositorySegments = url.pathname.split("/").filter((segment) => segment.length > 0);
+      if (url.hostname && repositorySegments.length > 1) {
+        return (
+          azureDevOpsRepositoryKey(url.hostname, repositorySegments) ??
+          `${url.hostname}/${repositorySegments.join("/")}`
+        );
       }
     } catch {
       return normalized;
@@ -136,8 +179,10 @@ export function normalizeGitRemoteUrl(value: string): string {
   const scpStyleHostAndPath = /^[a-zA-Z0-9._-]+@([^:/\s]+):([^/\s]+(?:\/[^/\s]+)+)$/i.exec(
     normalized,
   );
-  if (scpStyleHostAndPath?.[1] && scpStyleHostAndPath[2]) {
-    return `${scpStyleHostAndPath[1]}/${scpStyleHostAndPath[2]}`;
+  const scpHost = scpStyleHostAndPath?.[1];
+  const scpPath = scpStyleHostAndPath?.[2];
+  if (scpHost && scpPath) {
+    return azureDevOpsRepositoryKey(scpHost, scpPath.split("/")) ?? `${scpHost}/${scpPath}`;
   }
 
   return normalized;

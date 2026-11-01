@@ -151,10 +151,12 @@ describe("runProcess", () => {
         PATHEXT: ".COM;.EXE;.BAT;.CMD",
       }),
       Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) =>
-        env.PATH === "C:\\Users\\tester\\AppData\\Roaming\\npm" &&
-        env.AZURE_CONFIG_DIR === "C:\\Users\\tester\\.azure"
-          ? "C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd"
-          : undefined,
+        Effect.succeed(
+          env.PATH === "C:\\Users\\tester\\AppData\\Roaming\\npm" &&
+            env.AZURE_CONFIG_DIR === "C:\\Users\\tester\\.azure"
+            ? "C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd"
+            : undefined,
+        ),
       ),
       Effect.map((result) => {
         expect(result.stdout).toBe("[]");
