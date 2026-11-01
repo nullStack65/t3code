@@ -25,6 +25,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2CodexTurnStartCall,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -1650,4 +1651,24 @@ it("roundtrips bounded request terminal provenance while legacy payloads remain 
     terminalCause: "thread_settled",
   });
   expect(command).not.toHaveProperty("terminalCause");
+});
+
+it("bounds client-call facts without inventing elapsed from reversed clocks", () => {
+  const call = {
+    source: "codex_turn_start_client_call",
+    localOperationId: "attempt:call",
+    nativeThreadId: "native",
+    providerSessionId: "session",
+    userMessageId: "message",
+    invokedAtMs: 10,
+    exitedAtMs: 0,
+    exitKind: "request_error",
+  };
+  const decode = Schema.decodeUnknownSync(OrchestrationV2CodexTurnStartCall);
+  expect(decode(call).exitedAtMs).toBe(0);
+  expect(decode({ ...call, invokedAtMs: 0 }).invokedAtMs).toBe(0);
+  for (const bad of [true, 1.5, "0", null, 8640000000000001])
+    expect(() => decode({ ...call, invokedAtMs: bad })).toThrow();
+  expect(() => decode({ ...call, nativeThreadId: "x".repeat(1025) })).toThrow();
+  expect(() => decode({ ...call, requestedModel: "x".repeat(257) })).toThrow();
 });

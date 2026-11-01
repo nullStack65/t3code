@@ -79,6 +79,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -6280,7 +6281,47 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
+            const invokedAt = yield* DateTime.now;
+            const started = yield* client.request("turn/start", turnStartParams).pipe(
+              Effect.onExit((exit) =>
+                Effect.gen(function* () {
+                  const sink = turnInput.recordCodexTurnStartCall;
+                  if (sink === undefined) return;
+                  const exitedAt = yield* DateTime.now;
+                  const nativeTurnId = Exit.isSuccess(exit) ? exit.value.turn.id : undefined;
+                  // The call may have been accepted even after a local error/interruption.
+                  // This records local facts only; it never replays or changes provider exit.
+                  yield* Effect.suspend(() =>
+                    sink({
+                      source: "codex_turn_start_client_call",
+                      localOperationId: `${turnInput.attemptId}:codex-turn-start`,
+                      nativeThreadId: threadId,
+                      providerSessionId: input.providerSessionId,
+                      userMessageId: turnInput.message.messageId,
+                      ...(turnInput.modelSelection.model.length <= 256
+                        ? { requestedModel: turnInput.modelSelection.model }
+                        : {}),
+                      invokedAtMs: DateTime.toEpochMillis(invokedAt),
+                      exitedAtMs: DateTime.toEpochMillis(exitedAt),
+                      exitKind: Exit.isSuccess(exit)
+                        ? "decoded_response"
+                        : Cause.hasInterrupts(exit.cause)
+                          ? "local_interruption"
+                          : "request_error",
+                      ...(nativeTurnId !== undefined &&
+                      nativeTurnId.length > 0 &&
+                      nativeTurnId.length <= 1024
+                        ? { nativeTurnId }
+                        : {}),
+                    }),
+                  ).pipe(
+                    Effect.catchCause(() =>
+                      Effect.logWarning("Codex client-call timing could not be persisted."),
+                    ),
+                  );
+                }),
+              ),
+            );
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,
