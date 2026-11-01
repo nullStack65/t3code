@@ -570,6 +570,36 @@ function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fields>(
 export const CodexModelCatalogMode = Schema.Literals(["app-server", "custom-only"]);
 export type CodexModelCatalogMode = typeof CodexModelCatalogMode.Type;
 
+/**
+ * Host-level requirement that every T3-owned Codex process runs behind the
+ * reviewed fenced provider launcher. Enrolled hosts must either start Codex
+ * through that launcher or refuse it; they must never fall back to an
+ * unguarded launch. `disabled` is the default and leaves the existing spawn
+ * path untouched.
+ *
+ * The references are the launcher's own required arguments, kept explicit so
+ * the enrolled device/state/source are checked instead of inferred. They are
+ * identity, not authentication, and they do not prove that the provider keeps
+ * the inherited fence descriptor. See `docs/internals/codex-session-guard.md`.
+ */
+export const CodexSessionGuardMode = Schema.Literals(["disabled", "enforce"]);
+export type CodexSessionGuardMode = typeof CodexSessionGuardMode.Type;
+
+export const CodexSessionGuardSettings = Schema.Struct({
+  mode: CodexSessionGuardMode.pipe(Schema.withDecodingDefault(Effect.succeed("disabled" as const))),
+  /** Absolute interpreter that runs `launcher`, e.g. a reviewed `python3`. */
+  interpreter: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute `launch_provider.py` path inside the reviewed checkout. */
+  launcher: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute reviewed checkout root that contains `launcher`. */
+  sourceRoot: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute admitted device file, whose `state_root` must match `stateRoot`. */
+  deviceFile: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Absolute delivery state root holding `session-fence/`. */
+  stateRoot: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type CodexSessionGuardSettings = typeof CodexSessionGuardSettings.Type;
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -1287,6 +1317,14 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
 
+  /**
+   * Enrolled-host policy for every T3-owned Codex process. Disabled by
+   * default; `enforce` makes an unguarded Codex launch a refusal instead of a
+   * silent fallback. Host-wide rather than per-instance so a managed host
+   * cannot be partly enrolled by leaving another instance unguarded.
+   */
+  codexSessionGuard: CodexSessionGuardSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+
   // Legacy single-instance-per-driver settings. Continues to be the source
   // of truth until `providerInstances` (below) lands per-driver migration
   // shims and the server starts hydrating instances from it. Driver-specific
@@ -1380,6 +1418,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "write-secret",
   "write-file",
   "prepare-directory",
+  "restart-required",
 ]);
 export type ServerSettingsOperation = typeof ServerSettingsOperation.Type;
 
@@ -1394,6 +1433,9 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
   },
 ) {
   override get message(): string {
+    if (this.operation === "restart-required") {
+      return `This setting can only change when the server starts: ${this.settingsPath}.`;
+    }
     const provider =
       this.providerInstanceId === undefined ? "" : ` for provider ${this.providerInstanceId}`;
     const variable =
@@ -1563,6 +1605,17 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
+  // Partial so an operator can flip `mode` without restating every reference.
+  codexSessionGuard: Schema.optionalKey(
+    Schema.Struct({
+      mode: Schema.optionalKey(CodexSessionGuardMode),
+      interpreter: Schema.optionalKey(TrimmedString),
+      launcher: Schema.optionalKey(TrimmedString),
+      sourceRoot: Schema.optionalKey(TrimmedString),
+      deviceFile: Schema.optionalKey(TrimmedString),
+      stateRoot: Schema.optionalKey(TrimmedString),
+    }),
+  ),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
