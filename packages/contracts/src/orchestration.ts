@@ -790,6 +790,10 @@ export const ThreadPullRequestLink = Schema.Struct({
 });
 export type ThreadPullRequestLink = typeof ThreadPullRequestLink.Type;
 
+// Null/absent belongs to pre-isolation history; new creates default to coding on the server.
+export const ThreadExecutionScope = Schema.Literals(["coding", "coordinator", "readonly"]);
+export type ThreadExecutionScope = typeof ThreadExecutionScope.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -801,6 +805,7 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   // Optional so payloads from pre-link servers still decode.
   pullRequests: Schema.Array(ThreadPullRequestLink).pipe(
@@ -888,6 +893,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.Array(ThreadPullRequestLink).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1124,6 +1130,7 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
   createdAt: IsoDateTime,
   historyImport: Schema.optional(Schema.Literal(true)),
 });
@@ -1284,6 +1291,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
   createdAt: IsoDateTime,
 });
 
@@ -1766,6 +1774,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

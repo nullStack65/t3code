@@ -1,3 +1,4 @@
+import { qualifyThreadWorktree, rejectConflictingWorktree } from "../../project/ThreadWorktree.ts";
 import type {
   OrchestrationClientOrigin,
   OrchestrationEvent,
@@ -340,6 +341,74 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        // After callback/duplicate admission, before accepting any execution event.
+        // The existing command queue serializes ownership checks with binding changes.
+        const command = envelope.command;
+        const thread =
+          "threadId" in command
+            ? commandReadModel.threads.find(
+                (item) => item.id === command.threadId && item.deletedAt === null,
+              )
+            : undefined;
+        if (
+          command.type === "thread.create" &&
+          command.historyImport !== true &&
+          command.executionScope === "coding" &&
+          command.worktreePath !== null
+        ) {
+          yield* rejectConflictingWorktree(
+            command.threadId,
+            command.worktreePath,
+            commandReadModel.threads,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail:
+                    cause instanceof Error ? cause.message : "Worktree ownership check failed.",
+                }),
+            ),
+          );
+        }
+        if (command.type === "thread.turn.start" && thread?.executionScope === "coding") {
+          const project = commandReadModel.projects.find(
+            (item) => item.id === thread.projectId && item.deletedAt === null,
+          );
+          if (!project)
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Coding project is missing.",
+            });
+          yield* qualifyThreadWorktree({
+            threadId: thread.id,
+            projectCwd: project.workspaceRoot,
+            worktreePath: thread.worktreePath,
+            branch: thread.branch,
+          }).pipe(
+            Effect.andThen(
+              thread.worktreePath === null
+                ? Effect.void
+                : rejectConflictingWorktree(
+                    thread.id,
+                    thread.worktreePath,
+                    commandReadModel.threads,
+                  ),
+            ),
+
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail:
+                    cause instanceof Error
+                      ? cause.message
+                      : "Coding worktree qualification failed.",
+                }),
+            ),
+          );
+        }
+
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
