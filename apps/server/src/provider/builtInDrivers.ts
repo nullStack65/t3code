@@ -1,3 +1,4 @@
+import { CodexTypedSkillsDriver } from "./Drivers/CodexTypedSkillsDriver.ts";
 /**
  * BUILT_IN_DRIVERS — the static set of `ProviderDriver`s this build ships
  * with.
@@ -60,6 +61,7 @@ export type BuiltInDriversEnv =
  */
 export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
   CodexDriver,
+  CodexTypedSkillsDriver,
   ClaudeDriver,
   CursorDriver,
   GrokDriver,

@@ -17,6 +17,7 @@ const SNIPPET_LENGTH = 200;
 export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
+  | { readonly kind: "checks-completed"; readonly completed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "conflicting" };
 
@@ -37,7 +38,9 @@ const isFailedCheck = (check: PullRequestCheck) =>
  * Compares a watched pull request with what its agent was last told. Each check is reported as
  * soon as it fails, so a check that never finishes (an advisory review bot) cannot hold the
  * news back. "Passed" is reported once the checks the base branch requires all passed, or all
- * checks where the host marks none required. Remarks count when someone other than the agent's
+ * checks where the host marks none required. Newly terminal native results after the first read
+ * are news independently of that gate; failures keep their existing notification path.
+ * Remarks count when someone other than the agent's
  * own account wrote them, so its own replies never wake it. `remarks` is null when the
  * conversation could not be read; remarks then wait for a later pass.
  */
@@ -52,14 +55,88 @@ export function evaluatePullRequestWatch(
 
   // An empty list keeps the last state: a host can answer with one when its check read fails.
   let failedChecks = headMoved ? [] : watch.failedChecks;
+  let failedCheckRuns = headMoved ? [] : watch.failedCheckRuns;
+  let terminalCheckRuns = headMoved ? undefined : watch.terminalCheckRuns;
   let passed = headMoved ? false : watch.passed;
   let passedChecks = headMoved ? [] : watch.passedChecks;
   if (detail.checks.length > 0) {
     const failed = detail.checks.filter(isFailedCheck);
-    const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
+    const runKey = (identity: NonNullable<PullRequestCheck["identity"]>) =>
+      JSON.stringify([identity.id, identity.attempt ?? null]);
+    const toldRuns = new Map((failedCheckRuns ?? []).map((run) => [runKey(run.identity), run]));
+    const knownNames = new Set((failedCheckRuns ?? []).map((run) => run.name));
+    const newlyFailed = failed.filter((check) => {
+      const identity = check.identity;
+      if (identity === undefined) return !failedChecks.includes(check.name);
+      const key = runKey(identity);
+      const withoutAttempt = runKey({ id: identity.id });
+      // Losing an attempt token is incomplete data, not a new attempt. Learning the first
+      // token for an already reported id establishes a baseline once, then retries are distinct.
+      const incomplete = identity.attempt === undefined;
+      const knownId = [...toldRuns.values()].some((run) => run.identity.id === identity.id);
+      const told = toldRuns.has(key) || (incomplete ? knownId : toldRuns.has(withoutAttempt));
+      if (!incomplete || !knownId) {
+        if (!incomplete) toldRuns.delete(withoutAttempt);
+        toldRuns.set(key, { name: check.name, identity });
+      } else {
+        for (const [knownKey, run] of toldRuns) {
+          if (run.identity.id === identity.id) toldRuns.set(knownKey, { ...run, name: check.name });
+        }
+      }
+      // Old names, or a host that previously omitted identity, cannot identify the reported
+      // run. Baseline that name once, without claiming its past run was verified.
+      return !told && !(failedChecks.includes(check.name) && !knownNames.has(check.name));
+    });
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
-    // A check that runs again leaves the list, so a rerun that fails again is reported.
+    // Unidentified checks retain name-based behavior; URLs must not invent run identities.
     failedChecks = failed.map((check) => check.name);
+    failedCheckRuns = [...toldRuns.values()];
+
+    // Baseline terminal results on the first useful read (also after a push or an upgrade).
+    // Keep native run/attempt/status history even when rows vanish or return out of order.
+    const baselining = terminalCheckRuns === undefined;
+    const terminalKey = (run: NonNullable<ThreadPullRequestWatch["terminalCheckRuns"]>[number]) =>
+      JSON.stringify([
+        run.identity?.id ?? null,
+        run.identity === undefined ? run.name : null,
+        run.identity?.attempt ?? null,
+        run.status,
+      ]);
+    const terminals = new Map((terminalCheckRuns ?? []).map((run) => [terminalKey(run), run]));
+    const newlyCompleted = detail.checks.filter((check) => {
+      if (check.status === "pending") return false;
+      const { name, status, identity } = check;
+      const run = { name, status, ...(identity === undefined ? {} : { identity }) };
+      const key = terminalKey(run);
+      const unidentified = terminalKey({ name, status });
+      if (identity === undefined) {
+        // Missing identity cannot establish novelty, even when the display URL changes.
+        if (
+          ![...terminals.values()].some((known) => known.name === name && known.status === status)
+        ) {
+          terminals.set(key, run);
+        }
+        return false;
+      }
+      const withoutAttempt = terminalKey({ name, status, identity: { id: identity.id } });
+      const knownId = [...terminals.values()].some(
+        (known) => known.identity?.id === identity.id && known.status === status,
+      );
+      const told =
+        terminals.has(key) ||
+        terminals.has(unidentified) ||
+        (identity.attempt === undefined ? knownId : terminals.has(withoutAttempt));
+      terminals.delete(unidentified);
+      if (identity.attempt !== undefined || !knownId) {
+        if (identity.attempt !== undefined) terminals.delete(withoutAttempt);
+        terminals.set(key, run);
+      }
+      return !baselining && !told && !isFailedCheck(check);
+    });
+    terminalCheckRuns = [...terminals.values()];
+    if (newlyCompleted.length > 0) {
+      changes.push({ kind: "checks-completed", completed: newlyCompleted });
+    }
 
     const required = detail.checks.filter((check) => check.required === true);
     const gate = required.length > 0 ? required : detail.checks;
@@ -114,6 +191,8 @@ export function evaluatePullRequestWatch(
       startedAt: watch.startedAt,
       headSha,
       failedChecks,
+      ...(failedCheckRuns === undefined ? {} : { failedCheckRuns }),
+      ...(terminalCheckRuns === undefined ? {} : { terminalCheckRuns }),
       passed,
       passedChecks,
       remarksThrough,
@@ -157,6 +236,15 @@ function changeLines(
       return [
         `- All ${change.count} ${change.required ? "required " : ""}${change.count === 1 ? "check" : "checks"} passed${context.commit}.`,
       ];
+    case "checks-completed":
+      return [
+        `- Checks completed${context.commit}:`,
+        ...listed(
+          change.completed,
+          (check) => `  - ${check.name} (${check.status})${check.url ? ` ${check.url}` : ""}`,
+        ),
+        "  These results are news, not a claim that all CI passed or authorization to merge or activate a Skill.",
+      ];
     case "remarks":
       return [
         `- ${change.remarks.length} new ${change.remarks.length === 1 ? "comment" : "comments"}:`,
@@ -175,6 +263,7 @@ function changeLines(
 const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-failed": "checks failed",
   "checks-passed": "checks passed",
+  "checks-completed": "checks completed",
   remarks: "new comments",
   conflicting: "merge conflict",
 };

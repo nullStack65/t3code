@@ -29,7 +29,135 @@ import {
   REVIEW_THREADS_GRAPHQL_QUERY,
   pullRequestCoreGraphQlQuery,
   pullRequestSearchGraphQlQuery,
+  decodePullRequestCheckContextsJson,
+  pullRequestChecksFromContexts,
+  pullRequestCheckContextsGraphQlQuery,
 } from "./gitHubPullRequestJson.ts";
+
+describe("native check identity", () => {
+  const checks = (nodes: ReadonlyArray<object>) => {
+    const page = decodePullRequestCheckContextsJson(
+      JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: "same-head",
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      statusCheckRollup: {
+                        contexts: {
+                          nodes,
+                          pageInfo: { hasNextPage: false, endCursor: null },
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    );
+    if (!Result.isSuccess(page)) throw new Error("check page did not decode");
+    return pullRequestChecksFromContexts(page.success.contexts).checks;
+  };
+
+  it("queries native ids on both initial and paginated reads, including Enterprise", () => {
+    expect(pullRequestCoreGraphQlQuery("github.com")).toContain(
+      "id name status conclusion startedAt",
+    );
+    expect(pullRequestCheckContextsGraphQlQuery("enterprise.example")).toContain(
+      "id context state targetUrl createdAt",
+    );
+    expect(pullRequestCheckContextsGraphQlQuery("enterprise.example")).toContain(
+      "id name status conclusion startedAt",
+    );
+  });
+
+  it("preserves run identity and its own retry start, not the workflow's current attempt", () => {
+    const node = {
+      __typename: "CheckRun",
+      id: "CR_1",
+      name: "test",
+      status: "COMPLETED",
+      conclusion: "FAILURE",
+      startedAt: "2026-10-16T12:00:00Z",
+      completedAt: "2026-10-16T12:01:00Z",
+      detailsUrl: "https://example.invalid/shared",
+      checkSuite: { workflowRun: { runAttempt: 2, workflow: { name: "CI" } } },
+    };
+    expect(checks([node])[0]?.identity).toEqual({
+      id: "github:CheckRun:CR_1",
+      attempt: node.startedAt,
+    });
+    expect(
+      checks([
+        { ...node, checkSuite: { workflowRun: { runAttempt: 3, workflow: { name: "CI" } } } },
+      ])[0]?.identity,
+    ).toEqual(checks([node])[0]?.identity);
+    expect(checks([{ ...node, startedAt: "2026-10-16T12:05:00Z" }])[0]?.identity).not.toEqual(
+      checks([node])[0]?.identity,
+    );
+    expect(checks([{ ...node, id: "CR_2" }])[0]?.identity).not.toEqual(checks([node])[0]?.identity);
+  });
+
+  it("preserves commit status identity independently of its shared target URL", () => {
+    const node = {
+      __typename: "StatusContext",
+      id: "SC_1",
+      context: "test",
+      state: "FAILURE",
+      createdAt: "2026-10-16T12:00:00Z",
+      targetUrl: "https://example.invalid/shared",
+    };
+    expect(checks([node])[0]?.identity).toEqual({
+      id: "github:StatusContext:SC_1",
+      attempt: node.createdAt,
+    });
+    expect(checks([{ ...node, id: "SC_2" }])[0]?.identity).not.toEqual(checks([node])[0]?.identity);
+  });
+
+  it("leaves missing native identity absent rather than using a URL or timestamp alone", () => {
+    expect(
+      checks([
+        {
+          __typename: "CheckRun",
+          name: "test",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          detailsUrl: "https://example.invalid/run/1",
+          startedAt: "2026-10-16T12:00:00Z",
+        },
+      ])[0]?.identity,
+    ).toBeUndefined();
+    expect(
+      checks([
+        {
+          __typename: "CheckRun",
+          id: "CR_1",
+          name: "test",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+        },
+      ])[0]?.identity,
+    ).toEqual({ id: "github:CheckRun:CR_1" });
+    expect(
+      checks([
+        {
+          __typename: "CheckRun",
+          id: "CR_1",
+          name: "test",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          startedAt: "0001-01-01T00:00:00Z",
+        },
+      ])[0]?.identity,
+    ).toEqual({ id: "github:CheckRun:CR_1" });
+  });
+});
 
 /**
  * Rows as a repository's own GraphQL list answers them. Entries may use flat shapes for brevity:

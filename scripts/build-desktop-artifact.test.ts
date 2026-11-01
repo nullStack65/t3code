@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
+import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { extractFile } from "@electron/asar";
@@ -8,6 +9,9 @@ import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -17,6 +21,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   BundleNotSelfContainedError,
+  buildDesktopArtifact,
   BuildCommandFailedError,
   parseWslRuntimeArchiveMembers,
   DesktopDmgBackgroundSourceMissingError,
@@ -141,7 +146,7 @@ const makeLinuxCliArchiveFixture = Effect.fn("test.makeLinuxCliArchiveFixture")(
   return archivePath;
 });
 
-function mockProcess(exitCode: number, stdout = "") {
+function mockProcess(exitCode: number, stdout = "", stderr = "") {
   const encodedStdout = new TextEncoder().encode(stdout);
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
@@ -151,7 +156,7 @@ function mockProcess(exitCode: number, stdout = "") {
     unref: Effect.succeed(Effect.void),
     stdin: Sink.drain,
     stdout: stdout ? Stream.make(encodedStdout) : Stream.empty,
-    stderr: Stream.empty,
+    stderr: stderr ? Stream.make(new TextEncoder().encode(stderr)) : Stream.empty,
     all: Stream.empty,
     getInputFd: () => Sink.drain,
     getOutputFd: () => Stream.empty,
@@ -1089,6 +1094,382 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.include(error.message, "rustup target add aarch64-apple-darwin x86_64-apple-darwin");
       }),
     ),
+  );
+
+  it.effect.each([
+    "error: invalid value 'gnu++20' in '-std=gnu++20'",
+    "fatal error: 'stdlib.h' file not found (missing SDK)",
+  ])("rejects macOS native compilation before staging: %s", (diagnostic) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directories: string[] = [];
+      const operations: string[] = [];
+      const spawner = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            assert.equal(command._tag, "StandardCommand");
+            if (command._tag !== "StandardCommand") return mockProcess(1);
+            operations.push(command.args.join(" "));
+            if (command.args.includes("configure")) {
+              assert.isString(command.options.cwd);
+              const cwd = command.options.cwd!;
+              directories.push(cwd);
+              assert.include(yield* fs.readFileString(`${cwd}/probe.cc`), "<v8.h>");
+              yield* fs.makeDirectory(`${cwd}/build`);
+              yield* fs.writeFileString(
+                `${cwd}/build/Makefile`,
+                "# synthetic generated makefile\n",
+              );
+            }
+            return mockProcess(command.args.includes("build") ? 2 : 0, "", diagnostic);
+          }),
+        ),
+      );
+      const error = yield* buildDesktopArtifact({
+        platform: "mac",
+        target: "zip",
+        arch: "x64",
+        version: undefined,
+        outputDir: "/not-created-preflight-test",
+        skipBuild: false,
+        keepStage: false,
+        signed: false,
+        verbose: false,
+        mockUpdates: false,
+        mockUpdateServerPort: undefined,
+        wslRuntime: undefined,
+      }).pipe(
+        Effect.provide(spawner),
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
+              },
+            }),
+          ),
+        ),
+        Effect.flip,
+      );
+      assert.instanceOf(error, MacDesktopBuildPrerequisitesMissingError);
+      assert.include(error.message, diagnostic);
+      assert.include(error.message, "exit code (2)");
+      assert.lengthOf(directories, 1);
+      for (const directory of directories) assert.isFalse(yield* fs.exists(directory));
+      assert.isFalse(
+        operations.some((operation) =>
+          /vite build|electron-builder|install --prod/.test(operation),
+        ),
+      );
+    }),
+  );
+
+  it.effect(
+    "uses the rebuild environment and both target architectures for macOS compile probes",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const selection = {
+            CC: "/synthetic/compiler/cc",
+            CXX: '"/synthetic/compiler/c++" --config=selected.cfg',
+            CC_target: "/synthetic/compiler/cc-target",
+            CXX_target: "/synthetic/compiler/cxx-target",
+            SDKROOT: "/synthetic/SDK",
+            DEVELOPER_DIR: "/synthetic/Developer",
+            MACOSX_DEPLOYMENT_TARGET: "14.0",
+            CXXFLAGS: "-DSELECTED=1",
+          };
+          const previous = { ...process.env };
+          yield* Effect.acquireRelease(
+            Effect.sync(() => Object.assign(process.env, selection)),
+            () =>
+              Effect.sync(() => {
+                process.env = previous;
+              }),
+          );
+          const operations: Array<readonly string[]> = [];
+          const directories = new Set<string>();
+          const spawner = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((command) =>
+              Effect.gen(function* () {
+                assert.equal(command._tag, "StandardCommand");
+                if (command._tag !== "StandardCommand") return mockProcess(1);
+                if (command.command === process.execPath) {
+                  operations.push(command.args);
+                  const cwd = command.options.cwd!;
+                  directories.add(cwd);
+                  for (const [name, value] of Object.entries(selection)) {
+                    assert.equal(command.options.env?.[name], value);
+                  }
+                  const binding = JSON.parse(yield* fs.readFileString(`${cwd}/binding.gyp`));
+                  assert.deepEqual(binding.targets[0].sources, ["probe.cc", "probe_c.c"]);
+                  assert.include(yield* fs.readFileString(`${cwd}/probe_c.c`), "<stdlib.h>");
+                  assert.isTrue(yield* fs.exists(`${cwd}/probe.cc`));
+                  if (command.args.includes("configure")) {
+                    yield* fs.makeDirectory(`${cwd}/build`);
+                    yield* fs.writeFileString(
+                      `${cwd}/build/Makefile`,
+                      "# synthetic generated makefile\n",
+                    );
+                  } else {
+                    assert.include(
+                      yield* fs.readFileString(`${cwd}/build/Makefile`),
+                      "t3-native-compile: $(OBJS)",
+                    );
+                  }
+                }
+                // An unrelated default clang need not work when CXX is supplied.
+                return mockProcess(command.command === "clang" ? 1 : 0);
+              }),
+            ),
+          );
+          yield* preflightMacDesktopBuild("universal").pipe(
+            Effect.provide(
+              Layer.merge(
+                spawner,
+                ConfigProvider.layer(
+                  ConfigProvider.fromEnv({
+                    env: {
+                      T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
+                    },
+                  }),
+                ),
+              ),
+            ),
+          );
+          assert.lengthOf(operations, 4);
+          assert.include(operations[0]!, "--arch=arm64");
+          assert.include(operations[2]!, "--arch=x64");
+          assert.include(operations[0]!, `--target=${desktopPackageJson.dependencies.electron}`);
+          assert.deepEqual(operations[1]!.slice(1), ["build", "t3-native-compile", "--verbose"]);
+          for (const directory of directories) assert.isFalse(yield* fs.exists(directory));
+        }),
+      ),
+  );
+
+  it.effect("cleans macOS probe inputs after configure failure, cancellation or timeout", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      for (const mode of ["failure", "cancel", "timeout"]) {
+        const started = yield* Deferred.make<string>();
+        const stopped = yield* Deferred.make<void>();
+        let directory = "";
+        let builds = 0;
+        const spawner = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (command._tag !== "StandardCommand") return mockProcess(1);
+              if (command.args.includes("build")) builds++;
+              if (command.args.includes("configure")) {
+                directory = command.options.cwd!;
+                if (mode !== "failure") {
+                  return yield* Effect.acquireRelease(
+                    Effect.succeed(
+                      ChildProcessSpawner.makeHandle({
+                        ...mockProcess(0),
+                        exitCode: Deferred.succeed(started, directory).pipe(
+                          Effect.andThen(Effect.never),
+                        ),
+                      }),
+                    ),
+                    () =>
+                      Effect.gen(function* () {
+                        assert.isTrue(yield* fs.exists(`${directory}/probe.cc`).pipe(Effect.orDie));
+                        yield* Deferred.succeed(stopped, undefined);
+                      }),
+                  );
+                }
+                return mockProcess(7, "", "selected SDK is unavailable");
+              }
+              return mockProcess(0);
+            }),
+          ),
+        );
+        const probe = preflightMacDesktopBuild("arm64").pipe(
+          Effect.provide(
+            Layer.merge(
+              spawner,
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({
+                  env: {
+                    T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
+                  },
+                }),
+              ),
+            ),
+          ),
+        );
+        if (mode !== "failure") {
+          const fiber = yield* probe.pipe(Effect.flip, Effect.forkChild);
+          yield* Deferred.await(started);
+          if (mode === "cancel") yield* Fiber.interrupt(fiber);
+          else {
+            yield* TestClock.adjust("60 seconds");
+            const error = yield* Fiber.join(fiber);
+            assert.include(error.message, "Timed out after 60 seconds");
+            assert.include(error.message, "configure");
+          }
+          yield* Deferred.await(stopped);
+        } else {
+          const error = yield* probe.pipe(Effect.flip);
+          assert.include(error.message, "selected SDK is unavailable");
+          assert.include(error.message, "configure");
+          assert.include(error.message, "exit code (7)");
+        }
+        assert.equal(builds, 0);
+        assert.isNotEmpty(directory);
+        assert.isFalse(yield* fs.exists(directory));
+      }
+    }),
+  );
+
+  it.effect(
+    "terminates actual macOS probe process groups on timeout and cancellation before cleanup",
+    (ctx) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          if ((yield* HostProcess.Platform) === "win32") {
+            return ctx.skip("macOS compile probe uses POSIX process-group termination");
+          }
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const witness = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-probe-witness-" });
+          for (const mode of ["timeout", "cancel"] as const) {
+            const ready = yield* Deferred.make<void, string>();
+            const marker = path.join(witness, `${mode}.json`);
+            let pid = 0;
+            let descendant = 0;
+            let directory = "";
+            let watchdogTriggered = false;
+            let watchdog: ReturnType<typeof setTimeout> | undefined;
+            const fixture = [
+              "const {spawn}=require('node:child_process');",
+              `process.on('SIGTERM',()=>{${mode === "cancel" ? "process.exit(0)" : ""}});`,
+              "const code=\"const fs=require('node:fs');process.on('SIGTERM',()=>fs.writeFileSync(process.argv[1],JSON.stringify({inputPresent:fs.existsSync('probe.cc')})));console.log(process.pid);setInterval(()=>{},1000);setTimeout(()=>process.exit(0),8000)\";",
+              `const child=spawn(process.execPath,['-e',code,${JSON.stringify(marker)}],{stdio:['ignore','pipe','ignore']});`,
+              "child.stdout.pipe(process.stdout);setInterval(()=>{},1000);",
+            ].join("\n");
+            const spawner = Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make((command) =>
+                Effect.gen(function* () {
+                  if (command._tag !== "StandardCommand") return mockProcess(1);
+                  if (!command.args.includes("configure")) return mockProcess(0);
+                  directory = command.options.cwd!;
+                  const child = yield* nativeSpawner.spawn(
+                    ChildProcess.make(process.execPath, ["-e", fixture], command.options),
+                  );
+                  pid = Number(child.pid);
+                  yield* Effect.log("probe fixture spawned", { mode, pid });
+                  return ChildProcessSpawner.makeHandle({
+                    ...child,
+                    stdout: child.stdout.pipe(
+                      Stream.decodeText(),
+                      Stream.splitLines,
+                      Stream.tap((line) =>
+                        Effect.gen(function* () {
+                          descendant = Number(line);
+                          yield* Effect.log("probe descendant ready", { mode, descendant });
+                          assert.isTrue(Number.isInteger(descendant) && descendant > 0);
+                          // @effect-diagnostics-next-line globalTimersInEffect:off - Emergency native watchdog must remain independent of the TestClock under test.
+                          watchdog = setTimeout(() => {
+                            watchdogTriggered = true;
+                            for (const ownedPid of [pid, descendant]) {
+                              try {
+                                process.kill(ownedPid, "SIGKILL");
+                              } catch {
+                                /* already exited */
+                              }
+                            }
+                          }, 4_000);
+                          yield* Deferred.succeed(ready, undefined);
+                        }),
+                      ),
+                      Stream.encodeText,
+                    ),
+                  });
+                }),
+              ),
+            );
+            yield* Effect.gen(function* () {
+              const fiber = yield* preflightMacDesktopBuild("x64").pipe(
+                Effect.provide(
+                  Layer.merge(
+                    spawner,
+                    ConfigProvider.layer(
+                      ConfigProvider.fromEnv({
+                        env: {
+                          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
+                        },
+                      }),
+                    ),
+                  ),
+                ),
+                Effect.onExit((exit) => Deferred.fail(ready, String(exit))),
+                Effect.flip,
+                Effect.forkChild,
+              );
+              yield* Deferred.await(ready);
+              if (mode === "cancel") yield* Fiber.interrupt(fiber);
+              else {
+                yield* TestClock.adjust("60 seconds");
+                const error = yield* Fiber.join(fiber);
+                assert.include(error.message, "Timed out after 60 seconds");
+              }
+              assert.isFalse(
+                watchdogTriggered,
+                "native finalization required the emergency watchdog",
+              );
+              assert.isFalse(yield* fs.exists(directory));
+              assert.equal(yield* fs.readFileString(marker), '{"inputPresent":true}');
+              // POSIX can retain a killed orphan as a zombie. It cannot read files;
+              // this check distinguishes it from a surviving active descendant.
+              for (const ownedPid of [pid, descendant]) {
+                const ps = yield* nativeSpawner.spawn(
+                  ChildProcess.make("ps", ["-o", "stat=", "-p", String(ownedPid)]),
+                );
+                const status = (yield* Stream.runFold(
+                  ps.stdout.pipe(Stream.decodeText()),
+                  () => "",
+                  (s, chunk) => s + chunk,
+                )).trim();
+                yield* ps.exitCode;
+                assert.match(status, /^(Z\S*)?$/u);
+                yield* Effect.log("probe process stopped", { mode, ownedPid, status });
+              }
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  clearTimeout(watchdog);
+                  if (pid > 0) {
+                    try {
+                      process.kill(-pid, "SIGKILL");
+                    } catch {
+                      /* owned group already exited */
+                    }
+                  }
+                  for (const ownedPid of [pid, descendant]) {
+                    if (ownedPid > 0) {
+                      try {
+                        process.kill(ownedPid, "SIGKILL");
+                      } catch {
+                        /* already exited */
+                      }
+                    }
+                  }
+                }),
+              ),
+            );
+          }
+        }),
+      ),
+    { timeout: 15_000 },
   );
 
   it.effect("reports missing Windows toolchain capabilities before building", () =>

@@ -9,6 +9,11 @@ import * as NodeReadline from "node:readline";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
+if (process.argv.includes("--version")) {
+  console.log("codex-cli 0.162.1");
+  process.exit(0);
+}
+
 const here = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const fixture = JSON.parse(
   NodeFS.readFileSync(NodePath.join(here, "codexMultiAgentWire.json"), "utf8"),
@@ -17,10 +22,96 @@ const script = JSON.parse(NodeFS.readFileSync(process.env.T3_CODEX_COLLAB_SCRIPT
 
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
+let accountReadCount = 0;
+let threadStartCount = 0;
+let currentThreadId = script.rootThreadId;
 let activeTurn;
 // Server->client requests the runtime must answer (approval prompts), keyed
 // by the numeric JSON-RPC id this peer allocated for them.
 const openServerRequests = new Map();
+const writePreviousRootCollaboration = () => {
+  const previousThreadId = `${script.rootThreadId}-fresh-${threadStartCount - 1}`;
+  const reader = script.collabReader ?? "tool";
+  if (reader === "thread-spawn" || reader === "root-thread" || reader === "root-started") {
+    write({
+      method: "thread/started",
+      params: {
+        thread: {
+          ...fixture.responses.threadStart.thread,
+          id: reader.startsWith("thread-") ? "still-reading" : currentThreadId,
+          parentThreadId: previousThreadId,
+          source:
+            reader === "root-started"
+              ? "cli"
+              : {
+                  subAgent: {
+                    thread_spawn: {
+                      depth: 1,
+                      parent_thread_id: previousThreadId,
+                      agent_path: "/root/reader",
+                    },
+                  },
+                },
+        },
+      },
+    });
+    return;
+  }
+  if (reader === "foreign-turn") {
+    write({
+      method: "turn/started",
+      params: {
+        threadId: "still-reading",
+        turn: {
+          ...fixture.responses.turnStart.turn,
+          id: "child-turn",
+          status: "inProgress",
+        },
+      },
+    });
+    return;
+  }
+  if (reader !== "tool") {
+    const started = reader === "activity-started";
+    write({
+      method: started ? "item/started" : "item/completed",
+      params: {
+        threadId: previousThreadId,
+        turnId: activeTurn.id,
+        [started ? "startedAtMs" : "completedAtMs"]: 1,
+        item: {
+          type: "subAgentActivity",
+          id: "observed-reader",
+          kind: "started",
+          agentThreadId: reader === "root-id" ? previousThreadId : "still-reading",
+          agentPath:
+            reader === "root-path" ? "/root" : reader === "root-slash" ? "/" : "/root/reader",
+        },
+      },
+    });
+    return;
+  }
+  write({
+    method: "item/started",
+    params: {
+      threadId: previousThreadId,
+      turnId: activeTurn.id,
+      startedAtMs: 1,
+      item: {
+        type: "collabAgentToolCall",
+        id: "late-child",
+        tool: "spawnAgent",
+        status: "inProgress",
+        senderThreadId: `${script.rootThreadId}-fresh-${threadStartCount - 1}`,
+        receiverThreadIds: ["still-reading"],
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: {},
+      },
+    },
+  });
+};
 const rl = NodeReadline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   let message;
@@ -30,6 +121,12 @@ rl.on("line", (line) => {
     return;
   }
   const { id, method } = message;
+  if (script.recordAllRequests && method) {
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.allRequests`,
+      `${JSON.stringify({ method, params: message.params })}\n`,
+    );
+  }
   if (openServerRequests.has(id)) {
     // The runtime answered an approval request. Record the response so tests
     // can assert settlement behavior, then emit serverRequest/resolved as a
@@ -84,10 +181,28 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "account/read") {
+    if (
+      (accountReadCount === 0 && script.accountUpdateOnFirstRead) ||
+      script.accountUpdatesOnReads?.includes(accountReadCount)
+    )
+      write({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } });
+    if (accountReadCount === 0 && script.accountErrorOnFirstRead) {
+      accountReadCount++;
+      write({ id, error: { code: -32000, message: "synthetic account unavailable" } });
+      return;
+    }
+    if (script.collabOnFinalAccount && accountReadCount === 4) writePreviousRootCollaboration();
     write({
       id,
-      result: { account: script.account ?? { type: "apiKey" }, requiresOpenaiAuth: false },
+      result: {
+        account: script.accounts
+          ? script.accounts[Math.min(accountReadCount, script.accounts.length - 1)]
+          : (script.account ?? { type: "apiKey" }),
+        requiresOpenaiAuth: false,
+      },
     });
+    accountReadCount++;
+
     return;
   }
   if (method === "account/rateLimits/read" && script.failRateLimitsRead) {
@@ -102,8 +217,44 @@ rl.on("line", (line) => {
     write({ id, result: { data: [] } });
     return;
   }
+  if (method === "skills/extraRoots/set") {
+    if (
+      (message.params.extraRoots.length === 0 && turnStartCount > 0 && script.collabOnDetach) ||
+      (message.params.extraRoots.length > 0 && turnStartCount === 1 && script.collabOnReattach)
+    ) {
+      writePreviousRootCollaboration();
+    }
+    for (const notification of script.notificationsOnExtraRoots ?? []) {
+      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
+    write({ id, result: {} });
+    return;
+  }
   if (method === "thread/start") {
-    write({ id, result: fixture.responses.threadStart });
+    threadStartCount++;
+    for (const notification of script.notificationsOnThreadStarts?.[threadStartCount] ?? []) {
+      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
+    if (script.freshThreads) {
+      currentThreadId = `${script.rootThreadId}-fresh-${threadStartCount}`;
+      write({
+        id,
+        result: {
+          ...fixture.responses.threadStart,
+          model: message.params.model ?? fixture.responses.threadStart.model,
+          thread: { ...fixture.responses.threadStart.thread, id: currentThreadId },
+        },
+      });
+    } else write({ id, result: fixture.responses.threadStart });
+    return;
+  }
+  if (method === "feedback/upload") {
+    for (const notification of script.notificationsOnFeedback ?? []) {
+      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+    }
+    // The response is a deterministic ingress receipt: the real client's
+    // sequential decoder handles preceding notifications before resolving it.
+    write({ id, result: { threadId: script.rootThreadId } });
     return;
   }
   if (method === "thread/inject_items" && script.recordRequests) {
@@ -169,8 +320,9 @@ rl.on("line", (line) => {
       : fixture.responses.turnStart.turn;
     activeTurn = turn;
     turnStartCount += 1;
-    write({ id, result: { ...fixture.responses.turnStart, turn } });
-    const rootThreadId = script.rootThreadId;
+    if (!script.holdTurnStartResponse)
+      write({ id, result: { ...fixture.responses.turnStart, turn } });
+    const rootThreadId = currentThreadId;
     if (script.onlyFirstTurnStarts !== true || turnStartCount === 1) {
       write({
         jsonrpc: "2.0",

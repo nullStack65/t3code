@@ -94,7 +94,7 @@ interface LastRead {
   readonly at: number;
   /** The sync snapshot this read saw. */
   readonly fingerprint: string;
-  /** A check was still running or mergeability unknown, so the detail can move unannounced. */
+  /** A check is running/failed or mergeability unknown, so detail can move unannounced. */
   readonly inFlight: boolean;
   /** The last activity read listed every remark; an incomplete one is read again. */
   readonly remarksComplete: boolean;
@@ -201,6 +201,8 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.startedAt === right.startedAt &&
     left.headSha === right.headSha &&
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
+    JSON.stringify(left.failedCheckRuns) === JSON.stringify(right.failedCheckRuns) &&
+    JSON.stringify(left.terminalCheckRuns) === JSON.stringify(right.terminalCheckRuns) &&
     left.passed === right.passed &&
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
     left.remarksThrough === right.remarksThrough &&
@@ -540,7 +542,15 @@ export const make = Effect.gen(function* () {
       fingerprint: group.fingerprint,
       inFlight:
         detail.mergeability === "unknown" ||
-        detail.checks.some((check) => check.status === "pending"),
+        // Failed runs can be retried and finish between sweeps without changing state counts.
+        (detail.checks.length === 0
+          ? (last?.inFlight ?? false)
+          : detail.checks.some(
+              (check) =>
+                check.status !== "success" &&
+                check.status !== "skipped" &&
+                check.status !== "neutral",
+            )),
       // Comments a partial read could not see are read again next pass.
       remarksComplete: plan.activity ? remarks !== null : (last?.remarksComplete ?? false),
       watches: new Set(group.targets.map(watchKey)),
