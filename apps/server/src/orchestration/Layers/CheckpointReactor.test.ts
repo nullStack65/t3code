@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import {
   CommandId,
+  EnvironmentId,
   CheckpointRef,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -66,6 +67,7 @@ import {
 import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
 import { ProviderValidationError } from "../../provider/Errors.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { PullRequestService } from "../../pullRequest/PullRequestService.ts";
@@ -274,6 +276,10 @@ describe("CheckpointReactor", () => {
   > | null = null;
   let scope: Scope.Closeable | null = null;
   const tempDirs: string[] = [];
+  const serverEnvironmentIdentityTestLayer = Layer.succeed(
+    ServerEnvironment.ServerEnvironmentIdentity,
+    { getEnvironmentId: Effect.succeed(EnvironmentId.make("checkpoint-reactor-test")) },
+  );
 
   afterEach(async () => {
     if (scope) {
@@ -332,6 +338,7 @@ describe("CheckpointReactor", () => {
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(serverEnvironmentIdentityTestLayer),
       Layer.provide(SqlitePersistenceMemory),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -401,6 +408,7 @@ describe("CheckpointReactor", () => {
       ),
       Layer.provideMerge(WorkspacePaths.layer),
       Layer.provideMerge(VcsProcess.layer),
+      Layer.provideMerge(serverEnvironmentIdentityTestLayer),
       Layer.provideMerge(ServerConfigLayer),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -446,6 +454,7 @@ describe("CheckpointReactor", () => {
     );
     await Effect.runPromise(
       engine
+        // These tests replay provider/checkpoint events against synthetic legacy aggregates.
         .dispatch({
           type: "thread.create",
           commandId: CommandId.make("cmd-thread-create"),
@@ -461,6 +470,7 @@ describe("CheckpointReactor", () => {
           branch: options?.threadBranch ?? null,
           worktreePath:
             options?.threadWorktreePath !== undefined ? options.threadWorktreePath : cwd,
+          historyImport: true,
           createdAt,
         })
         .pipe(
@@ -481,6 +491,7 @@ describe("CheckpointReactor", () => {
                   branch: null,
                   worktreePath:
                     options?.secondThreadWorktreePath?.(cwd) ?? options?.threadWorktreePath ?? cwd,
+                  historyImport: true,
                   createdAt,
                 }),
               )
