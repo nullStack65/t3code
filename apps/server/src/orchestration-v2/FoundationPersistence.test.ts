@@ -24,6 +24,7 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -3817,6 +3818,238 @@ it.effect("publishes live events in commit order across concurrent writers", () 
       );
     }).pipe(Effect.provide(layerEventSink));
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("retains historical telemetry through multi-page event compaction and rebuild", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const store = yield* EventStore.EventStoreV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const now = yield* DateTime.now;
+    const thread = makeThread(ThreadId.make("thread:telemetry-compaction"), now);
+    const meta = { threadId: thread.id, occurredAt: now };
+    const workAffiliation = {
+      reference: { kind: "root_assignment" as const, ref: "t3:root/message:pre-pr" },
+      establishedBy: { threadId: thread.id, messageId: MessageId.make("message:assignment") },
+    };
+    const attempt: OrchestrationV2RunAttempt = {
+      id: RunAttemptId.make("attempt:telemetry-old"),
+      runId: RunId.make("run:telemetry-old"),
+      attemptOrdinal: 1,
+      rootNodeId: NodeId.make("root:telemetry-old"),
+      providerInstanceId,
+      providerThreadId: ProviderThreadId.make("provider:telemetry-old"),
+      providerTurnId: null,
+      reason: "initial",
+      status: "completed",
+      startedAt: now,
+      completedAt: now,
+    };
+    const run: OrchestrationV2Run = {
+      id: attempt.runId,
+      threadId: thread.id,
+      ordinal: 1,
+      providerInstanceId,
+      modelSelection,
+      providerThreadId: attempt.providerThreadId,
+      userMessageId: MessageId.make("message:telemetry-old"),
+      rootNodeId: attempt.rootNodeId,
+      activeAttemptId: attempt.id,
+      status: "completed",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: now,
+      checkpointId: null,
+      contextHandoffId: null,
+      workAffiliation,
+    };
+    const unrelatedRun = {
+      ...run,
+      id: RunId.make("run:telemetry-unrelated"),
+      ordinal: 2,
+      providerInstanceId: ProviderInstanceId.make("other-route"),
+      modelSelection: { instanceId: ProviderInstanceId.make("other-route"), model: "other-alias" },
+      workAffiliation: undefined,
+      rootNodeId: null,
+      activeAttemptId: null,
+    };
+    const call: OrchestrationV2CodexTurnStartCall = {
+      source: "codex_turn_start_client_call",
+      localOperationId: `${attempt.id}:codex-turn-start`,
+      nativeThreadId: "historical-native-destination",
+      providerSessionId: ProviderSessionId.make("historical-local-session"),
+      userMessageId: run.userMessageId,
+      invokedAtMs: 0,
+      exitedAtMs: 10,
+      exitKind: "decoded_response",
+    };
+    const request = {
+      id: RuntimeRequestId.make("request:telemetry-compaction"),
+      nodeId: attempt.rootNodeId,
+      providerTurnId: null,
+      nativeRequestRef: null,
+      kind: "user_input" as const,
+      status: "resolved" as const,
+      responseCapability: { type: "message" as const },
+      createdAt: now,
+      resolvedAt: now,
+    };
+    const command: OrchestrationV2TurnItem = {
+      id: TurnItemId.make("command:telemetry-compaction"),
+      ...meta,
+      type: "command_execution",
+      runId: run.id,
+      nodeId: null,
+      providerThreadId: attempt.providerThreadId,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      input: "synthetic command",
+      nativeLifecycle: { source: "codex_item_lifecycle", startedAtMs: 0, completedAtMs: 10 },
+    };
+    const patch = (id: string, exitedAtMs: number): OrchestrationV2DomainEvent => ({
+      ...meta,
+      id: EventId.make(id),
+      type: "run-attempt.client-call-observed",
+      payload: {
+        attemptId: attempt.id,
+        runId: run.id,
+        rootNodeId: attempt.rootNodeId,
+        providerThreadId: attempt.providerThreadId,
+        providerInstanceId,
+        observation: { ...call, exitedAtMs },
+      },
+    });
+    yield* sink.write({
+      events: [
+        threadCreatedEvent({ id: "telemetry:create", thread, now }),
+        { ...meta, id: EventId.make("telemetry:run"), type: "run.created", payload: run },
+        {
+          ...meta,
+          id: EventId.make("telemetry:attempt"),
+          type: "run-attempt.created",
+          payload: attempt,
+        },
+        patch("telemetry:call:first", 10),
+        {
+          ...meta,
+          id: EventId.make("telemetry:request:cause"),
+          type: "runtime-request.updated",
+          payload: { ...request, terminalCause: "response_recorded" },
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:command:first"),
+          type: "turn-item.updated",
+          payload: command,
+        },
+        ...Array.from({ length: 501 }, (_, index) => ({
+          ...meta,
+          id: EventId.make(`telemetry:obsolete:${index}`),
+          type: "thread.metadata-updated" as const,
+          payload: { ...thread, title: `Superseded ${index}` },
+        })),
+        {
+          ...meta,
+          id: EventId.make("telemetry:unrelated"),
+          type: "run.created",
+          payload: unrelatedRun,
+        },
+        patch("telemetry:call:duplicate", 10),
+        patch("telemetry:call:correction", 12),
+        {
+          ...meta,
+          id: EventId.make("telemetry:attempt:stale"),
+          type: "run-attempt.updated",
+          payload: { ...attempt, codexTurnStartCall: call },
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:attempt:absent"),
+          type: "run-attempt.updated",
+          payload: attempt,
+        },
+        // Native snapshots can omit control provenance; its historical event remains necessary.
+        {
+          ...meta,
+          id: EventId.make("telemetry:request:absent"),
+          type: "runtime-request.updated",
+          payload: request,
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:command:correction"),
+          type: "turn-item.updated",
+          payload: {
+            ...command,
+            nativeLifecycle: { ...command.nativeLifecycle!, completedAtMs: 12 },
+          },
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:thread:current"),
+          type: "thread.metadata-updated",
+          payload: {
+            ...thread,
+            providerInstanceId: unrelatedRun.providerInstanceId,
+            modelSelection: unrelatedRun.modelSelection,
+          },
+        },
+      ],
+    });
+    const before = yield* projections.getThreadProjection(thread.id);
+    const retainedHistory = () =>
+      store.read({ threadId: thread.id }).pipe(
+        Stream.filter(({ event }) => event.type !== "thread.metadata-updated"),
+        Stream.runCollect,
+      );
+    const history = yield* retainedHistory();
+    const compacted = yield* maintenance.compactEventStore;
+    assert.equal(compacted.deletedEventCount, 501);
+    assert.deepEqual(yield* retainedHistory(), history);
+    assert.isTrue((yield* maintenance.verify).valid);
+    assert.isTrue((yield* maintenance.rebuild).valid);
+    const after = yield* projections.getThreadProjection(thread.id);
+    assert.deepEqual(after, before);
+    assert.deepEqual(
+      after.runs.find((candidate) => candidate.id === run.id)?.workAffiliation,
+      workAffiliation,
+    );
+    assert.deepEqual(
+      after.runs.find((candidate) => candidate.id === run.id)?.modelSelection,
+      modelSelection,
+    );
+    assert.isUndefined(
+      after.runs.find((candidate) => candidate.id === unrelatedRun.id)?.workAffiliation,
+    );
+    assert.deepEqual(after.attempts[0]?.codexTurnStartCall, { ...call, exitedAtMs: 12 });
+    assert.isUndefined(after.runtimeRequests[0]?.terminalCause);
+    assert.deepEqual(
+      history.flatMap(({ event }) =>
+        event.type === "runtime-request.updated" ? [event.payload.terminalCause ?? null] : [],
+      ),
+      ["response_recorded", null],
+    );
+    assert.deepEqual(
+      history.flatMap(({ event }) =>
+        event.type === "turn-item.updated" && event.payload.type === "command_execution"
+          ? [event.payload.nativeLifecycle?.completedAtMs]
+          : [],
+      ),
+      [10, 12],
+    );
+    assert.deepEqual(
+      after.turnItems[0]?.type === "command_execution" ? after.turnItems[0].nativeLifecycle : null,
+      { source: "codex_item_lifecycle", startedAtMs: 0, completedAtMs: 12 },
+    );
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );
 
 it.effect(
