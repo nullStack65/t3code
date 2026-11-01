@@ -50,7 +50,10 @@ import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as CodexResetCredit from "./provider/Layers/codexResetCredit.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "./provider/Layers/ProviderService.ts";
-import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProviderAuthServiceLive } from "./provider/Layers/ProviderAuthService.ts";
 import { AntigravityInstallation } from "./provider/AntigravityInstallation.ts";
 import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
@@ -275,18 +278,13 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 // service itself already runs inside `ProviderService` before each provider
 // start; this sink is injected here because only the composition root has the
 // orchestration engine.
-const ProviderLayerLive = Layer.unwrap(
-  Effect.gen(function* () {
-    const orchestrationEngine = yield* OrchestrationEngineService;
-    const crypto = yield* Crypto.Crypto;
-    return makeProviderServiceLive({
-      reportLaunchPreflightWarning: makeLaunchPreflightWarningReporter(orchestrationEngine, crypto),
-    });
-  }),
-).pipe(
-  Layer.provide(ProviderAdapterRegistryLive),
-  Layer.provideMerge(ProviderSessionDirectoryLayerLive),
-);
+const makeProviderLayerLive = (
+  reportLaunchPreflightWarning: ReturnType<typeof makeLaunchPreflightWarningReporter>,
+) =>
+  makeProviderServiceLive({ reportLaunchPreflightWarning }).pipe(
+    Layer.provide(ProviderAdapterRegistryLive),
+    Layer.provideMerge(ProviderSessionDirectoryLayerLive),
+  );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
 
@@ -467,8 +465,23 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
 
 // Build the orchestration engine with this same provider service instance so
 // serialized turn admission can resolve live route compatibility.
-const ProviderOrchestrationLayerLive = OrchestrationLayerLive.pipe(
-  Layer.provideMerge(ProviderLayerLive),
+const ProviderOrchestrationLayerLive = Layer.unwrap(
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    let engine: OrchestrationEngineShape | undefined;
+    // Bind the reporter after the engine captures the provider service. The
+    // provider must not require that engine while its own layer is being built.
+    const providerLayer = makeProviderLayerLive((input) =>
+      engine === undefined
+        ? Effect.succeed(false)
+        : makeLaunchPreflightWarningReporter(engine, crypto)(input),
+    );
+    return Layer.effectDiscard(
+      Effect.gen(function* () {
+        engine = yield* OrchestrationEngineService;
+      }),
+    ).pipe(Layer.provideMerge(OrchestrationLayerLive.pipe(Layer.provideMerge(providerLayer))));
+  }),
 );
 
 const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
