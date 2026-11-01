@@ -37,6 +37,7 @@ import {
   planCandidateStaging,
   planCandidateTargetVerification,
   planCandidateVerification,
+  stageCandidateResourceMonitor,
   type CandidatePlanStep,
   type CandidateTarget,
 } from "./lib/candidate-build-plan.ts";
@@ -214,13 +215,12 @@ function assertSource(args: Args): void {
 }
 
 function stageResourceMonitor(args: Args): void {
-  const target = NodePath.join(args.resourceMonitorDir, "linux-x64");
-  NodeFS.mkdirSync(target, { recursive: true });
-  NodeFS.copyFileSync(
-    NodePath.join("native/resource-monitor/target/release/t3-resource-monitor"),
-    NodePath.join(target, "t3-resource-monitor"),
-  );
-  console.log(`Staged resource monitor into ${target}`);
+  const destination = stageCandidateResourceMonitor({
+    target: args.target,
+    resourceMonitorDir: args.resourceMonitorDir,
+    repoRoot: process.cwd(),
+  });
+  console.log(`Staged resource monitor into ${destination}`);
 }
 
 function buildPlan(args: Args): ReadonlyArray<CandidatePlanStep> {
@@ -318,7 +318,10 @@ function main(): void {
   // Install once, then build; never abort the whole run for one optional step.
   for (const step of buildSteps) {
     try {
-      if (step.id === "resource-monitor" && args.target === "linux") {
+      if (
+        step.id === "resource-monitor" &&
+        (args.target === "linux" || args.target === "win")
+      ) {
         run(step, args);
         stageResourceMonitor(args);
         continue;

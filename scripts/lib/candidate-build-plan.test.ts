@@ -1,10 +1,16 @@
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, it } from "@effect/vitest";
 
 import {
+  candidateResourceMonitorStaging,
   planCandidateBuild,
   planCandidateStaging,
   planCandidateTargetVerification,
   planCandidateVerification,
+  stageCandidateResourceMonitor,
   type CandidatePlanStep,
 } from "./candidate-build-plan.ts";
 
@@ -165,3 +171,78 @@ it("emits and consumes digest-bound inspection evidence through the local route"
     "--inspection-evidence candidate/fork-inspection-evidence-win.json,candidate/fork-inspection-evidence-mac.json",
   );
 });
+
+function withTempDir(run: (dir: string) => void): void {
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-rm-stage-"));
+  try {
+    run(dir);
+  } finally {
+    NodeFS.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+it("stages the Windows MSVC helper into the directory the CLI archive consumes (real files)", () => {
+  withTempDir((root) => {
+    const repoRoot = NodePath.join(root, "repo");
+    const source = NodePath.join(
+      repoRoot,
+      candidateResourceMonitorStaging("win").sourceRelativePath,
+    );
+    NodeFS.mkdirSync(NodePath.dirname(source), { recursive: true });
+    const bytes = Buffer.from("MSVC t3-resource-monitor fixture\n");
+    NodeFS.writeFileSync(source, bytes);
+
+    // A clean staging directory whose path also contains spaces.
+    const stagingDir = NodePath.join(root, "clean staging dir");
+    const staged = stageCandidateResourceMonitor({
+      target: "win",
+      resourceMonitorDir: stagingDir,
+      repoRoot,
+    });
+
+    assert.equal(staged, NodePath.join(stagingDir, "win32-x64", "t3-resource-monitor.exe"));
+    assert.deepEqual(NodeFS.readFileSync(staged), bytes);
+
+    // The Windows CLI archive consumes exactly the directory that was staged.
+    const plan = planCandidateBuild({
+      target: "win",
+      version: VERSION,
+      outputDir: "candidate",
+      resourceMonitorDir: stagingDir,
+      linuxArchive: `candidate/t3-${VERSION}-linux-x64.tar.gz`,
+    });
+    const archive = plan.find((step) => step.id === "cli-archive")!;
+    const flag = archive.command.indexOf("--resource-monitor-dir");
+    assert.equal(archive.command[flag + 1], stagingDir);
+  });
+});
+
+it("fails closed when the Windows MSVC build output is missing and never reuses a stale helper (real files)", () => {
+  withTempDir((root) => {
+    const repoRoot = NodePath.join(root, "repo");
+    const stagingDir = NodePath.join(root, "out");
+    const destination = NodePath.join(stagingDir, "win32-x64", "t3-resource-monitor.exe");
+    NodeFS.mkdirSync(NodePath.dirname(destination), { recursive: true });
+    NodeFS.writeFileSync(destination, "stale GNU helper");
+
+    assert.throws(
+      () => stageCandidateResourceMonitor({ target: "win", resourceMonitorDir: stagingDir, repoRoot }),
+      /build output is missing/,
+    );
+    // The stale helper is untouched, but it was never accepted as staged output.
+    assert.equal(NodeFS.readFileSync(destination, "utf8"), "stale GNU helper");
+  });
+});
+
+it("resolves the correct native helper layout per target and rejects the CLI-less mac target", () => {
+  assert.equal(
+    candidateResourceMonitorStaging("linux").destinationRelativePath,
+    "linux-x64/t3-resource-monitor",
+  );
+  assert.equal(
+    candidateResourceMonitorStaging("win").destinationRelativePath,
+    "win32-x64/t3-resource-monitor.exe",
+  );
+  assert.throws(() => candidateResourceMonitorStaging("mac"), /ships no t3 CLI archive/);
+});
+

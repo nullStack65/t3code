@@ -123,6 +123,59 @@ function writeCandidate(dir: string, options: { readonly withReceipts: boolean }
   );
 }
 
+function sha256File(path: string): string {
+  return NodeChildProcess.execFileSync(
+    nodeBin,
+    [
+      "-e",
+      "const c=require('node:crypto');process.stdout.write(c.createHash('sha256').update(require('node:fs').readFileSync(process.argv[1])).digest('hex'))",
+      path,
+    ],
+    { encoding: "utf8" },
+  ).trim();
+}
+
+/**
+ * Complete digest-bound inspection evidence for the four-asset fixture candidate:
+ * every packaged component names the expected source/version/platform/arch, each
+ * record is bound to the exact observed artifact digest, and the embedded WSL
+ * runtime is recorded as byte-identical to the standalone Linux archive.
+ */
+function completeInspectionEvidence(dir: string, sha = SHA): Record<string, unknown> {
+  const exe = sha256File(NodePath.join(dir, `T3-Code-${VERSION}-x64.exe`));
+  const zip = sha256File(NodePath.join(dir, `t3-${VERSION}-win32-x64.zip`));
+  const tar = sha256File(NodePath.join(dir, `t3-${VERSION}-linux-x64.tar.gz`));
+  const dmg = sha256File(NodePath.join(dir, `T3-Code-${VERSION}-x64.dmg`));
+  const record = (platform: string) => ({
+    repository: "nullStack65/t3code",
+    sourceSha: sha,
+    version: VERSION,
+    platform,
+    arch: "x64",
+  });
+  return {
+    schemaVersion: 1,
+    host: "test-fixture",
+    records: {
+      windowsDesktop: record("win"),
+      windowsServerBundle: { name: "t3code-server", version: VERSION },
+      embeddedWsl: record("linux"),
+      windowsZip: record("win"),
+      linuxArchive: record("linux"),
+      macDmg: record("mac"),
+    },
+    digests: {
+      windowsDesktop: exe,
+      windowsServerBundle: exe,
+      embeddedWsl: exe,
+      windowsZip: zip,
+      linuxArchive: tar,
+      macDmg: dmg,
+    },
+    embeddedWslEqualsStandalone: true,
+  };
+}
+
 it("the aggregate verifier accepts a complete candidate and rejects a partial one (real process)", () => {
   const root = scratch();
   try {
@@ -262,6 +315,365 @@ it("the verifier rejects conflicting receipts through the real process", () => {
     ]);
     assert.equal(result.status, 1);
     assert.include(result.stderr, "conflicting");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("refuses --promote --skip-provenance-inspection without inspection evidence (real process)", () => {
+  const root = scratch();
+  try {
+    const dir = NodePath.join(root, "promote");
+    NodeFS.mkdirSync(dir);
+    writeCandidate(dir, { withReceipts: true });
+
+    const commonArgs = [
+      "scripts/verify-fork-candidate.ts",
+      "--candidate-dir",
+      dir,
+      "--version",
+      VERSION,
+      "--sha",
+      SHA,
+      "--repository",
+      "nullStack65/t3code",
+      "--promote",
+      "--tag-target",
+      SHA,
+      "--latest-version",
+      "0.0.42",
+      "--authorization-gate-exists",
+      "--skip-provenance-inspection",
+    ];
+
+    // No packaged inspection happened and no digest-bound evidence was supplied:
+    // promotion must fail closed instead of qualifying uninspected bytes.
+    const bypass = runNode(commonArgs);
+    assert.equal(bypass.status, 1, bypass.stderr);
+    assert.include(bypass.stderr, "packaged provenance inspection is required");
+
+    // The same invocation succeeds when valid digest-bound native evidence for
+    // the exact bytes is supplied: skipping local extraction is allowed, skipping
+    // the provenance requirement is not.
+    const evidencePath = NodePath.join(root, "native-inspection-evidence.json");
+    NodeFS.writeFileSync(
+      evidencePath,
+      JSON.stringify(completeInspectionEvidence(dir), null, 2),
+    );
+    const accepted = runNode([...commonArgs, "--inspection-evidence", evidencePath]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.include(accepted.stdout, "Promotion checks passed");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+interface FixtureAsset {
+  readonly id: number;
+  readonly name: string;
+  readonly digest: string;
+  readonly size: number;
+}
+
+function writePromotableCandidate(
+  dir: string,
+  sha: string,
+): { identityDigest: string; assets: ReadonlyArray<FixtureAsset> } {
+  const names = [
+    `T3-Code-${VERSION}-x64.exe`,
+    `T3-Code-${VERSION}-x64.dmg`,
+    `t3-${VERSION}-linux-x64.tar.gz`,
+    `t3-${VERSION}-win32-x64.zip`,
+  ];
+  const assets: FixtureAsset[] = names.map((name, index) => {
+    const bytes = Buffer.from(`promote-asset-${index}-${name}`);
+    NodeFS.writeFileSync(NodePath.join(dir, name), bytes);
+    return {
+      id: 700000 + index,
+      name,
+      digest: `sha256:${sha256File(NodePath.join(dir, name))}`,
+      size: bytes.byteLength,
+    };
+  });
+  const receipts = [
+    {
+      schemaVersion: 1,
+      owner: "W",
+      target: "win32-x64",
+      sourceSha: sha,
+      version: VERSION,
+      assetName: names[0],
+      assetSha256: assets[0]!.digest.replace(/^sha256:/, ""),
+      result: "pass",
+    },
+    {
+      schemaVersion: 1,
+      owner: "M",
+      target: "darwin-x64",
+      sourceSha: sha,
+      version: VERSION,
+      assetName: names[1],
+      assetSha256: assets[1]!.digest.replace(/^sha256:/, ""),
+      result: "pass",
+    },
+  ];
+  const manifest = {
+    schemaVersion: 1,
+    repository: "nullStack65/t3code",
+    version: VERSION,
+    sourceSha: sha,
+    workflowRevision: "local",
+    workflowRunId: "local",
+    workflowRunAttempt: "1",
+    channel: "stable",
+    createdAt: "2026-09-23T00:00:00.000Z",
+    assets: assets.map((asset) => ({
+      name: asset.name,
+      sha256: asset.digest.replace(/^sha256:/, ""),
+      size: asset.size,
+    })),
+    nativeReceipts: receipts,
+  };
+  const manifestPath = NodePath.join(dir, "fork-release-manifest.json");
+  NodeFS.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const identityDigest = sha256File(manifestPath);
+  NodeFS.writeFileSync(
+    NodePath.join(dir, "candidate-identity.json"),
+    `${JSON.stringify({ sourceSha: sha, version: VERSION, manifestSha256: identityDigest, assets: manifest.assets }, null, 2)}\n`,
+  );
+  NodeFS.writeFileSync(
+    NodePath.join(dir, "SHA256SUMS"),
+    `${manifest.assets.map((asset) => `${asset.sha256}  ${asset.name}`).sort().join("\n")}\n`,
+  );
+  NodeFS.writeFileSync(
+    NodePath.join(dir, "fork-inspection-evidence-all.json"),
+    `${JSON.stringify(completeInspectionEvidence(dir, sha), null, 2)}\n`,
+  );
+  return { identityDigest, assets };
+}
+
+function setupForkMain(root: string): { work: string; sha: string } {
+  const bare = NodePath.join(root, "fork.git");
+  const work = NodePath.join(root, "work");
+  NodeFS.mkdirSync(bare);
+  NodeFS.mkdirSync(work);
+  const git = (cwd: string, args: ReadonlyArray<string>): string =>
+    NodeChildProcess.execFileSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", ...args],
+      { cwd, encoding: "utf8" },
+    ).trim();
+  git(bare, ["init", "--bare"]);
+  git(work, ["init"]);
+  git(work, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+  NodeFS.writeFileSync(NodePath.join(work, "a.txt"), "a\n");
+  git(work, ["add", "."]);
+  git(work, ["commit", "-m", "A"]);
+  git(work, ["remote", "add", "fork", bare]);
+  git(work, ["push", "fork", "main"]);
+  return { work, sha: git(work, ["rev-parse", "HEAD"]) };
+}
+
+it("promotes a complete candidate as a simulated publication dry run (real process, mocked GitHub)", () => {
+  const root = scratch();
+  try {
+    const { work, sha } = setupForkMain(root);
+    const candidate = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(candidate);
+    const { identityDigest, assets } = writePromotableCandidate(candidate, sha);
+    const fixture = NodePath.join(root, "github.json");
+    NodeFS.writeFileSync(
+      fixture,
+      JSON.stringify({
+        releaseExists: false,
+        tagExists: false,
+        latestVersion: "0.0.42",
+        requiredReviewers: 2,
+        draft: { tag: `candidate-r4-v${VERSION}-${sha.slice(0, 12)}`, targetSha: sha, assets },
+      }),
+    );
+
+    const result = runNode(
+      [
+        "scripts/promote-fork-candidate.ts",
+        "--candidate-dir",
+        candidate,
+        "--version",
+        VERSION,
+        "--sha",
+        sha,
+        "--repository",
+        "nullStack65/t3code",
+        "--draft-release",
+        `candidate-r4-v${VERSION}-${sha.slice(0, 12)}`,
+        "--github-fixture",
+        fixture,
+        "--approve",
+        identityDigest,
+      ],
+      work,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    // This is a simulated publication: verification + dry run only, no release.
+    assert.include(result.stdout, "Promotion verification passed");
+    assert.include(result.stdout, "DRY RUN — no release was created");
+    assert.include(result.stdout, "draft asset 700000");
+    assert.include(result.stdout, `is an ancestor of fork/main`);
+    assert.include(result.stdout, `Publication approved for candidate ${identityDigest}`);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("stops a promotion that lacks explicit candidate approval (real process, mocked GitHub)", () => {
+  const root = scratch();
+  try {
+    const { work, sha } = setupForkMain(root);
+    const candidate = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(candidate);
+    writePromotableCandidate(candidate, sha);
+    const fixture = NodePath.join(root, "github.json");
+    NodeFS.writeFileSync(
+      fixture,
+      JSON.stringify({
+        releaseExists: false,
+        tagExists: false,
+        latestVersion: "0.0.42",
+        requiredReviewers: 2,
+      }),
+    );
+    const result = runNode(
+      [
+        "scripts/promote-fork-candidate.ts",
+        "--candidate-dir",
+        candidate,
+        "--version",
+        VERSION,
+        "--sha",
+        sha,
+        "--repository",
+        "nullStack65/t3code",
+        "--github-fixture",
+        fixture,
+      ],
+      work,
+    );
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, "explicit publication approval is required");
+    assert.notInclude(result.stdout, "DRY RUN");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("stops an off-main candidate before any write (real process, mocked GitHub)", () => {
+  const root = scratch();
+  try {
+    const { work, sha } = setupForkMain(root);
+    // A second commit that is not on fork/main.
+    const git = (args: ReadonlyArray<string>): string =>
+      NodeChildProcess.execFileSync(
+        "git",
+        ["-c", "user.name=t", "-c", "user.email=t@e", "-c", "commit.gpgsign=false", ...args],
+        { cwd: work, encoding: "utf8" },
+      ).trim();
+    NodeFS.writeFileSync(NodePath.join(work, "b.txt"), "b\n");
+    git(["add", "."]);
+    git(["commit", "-m", "B"]);
+    const offMain = git(["rev-parse", "HEAD"]);
+
+    const candidate = NodePath.join(root, "candidate");
+    NodeFS.mkdirSync(candidate);
+    const { identityDigest } = writePromotableCandidate(candidate, offMain);
+    const fixture = NodePath.join(root, "github.json");
+    NodeFS.writeFileSync(
+      fixture,
+      JSON.stringify({
+        releaseExists: false,
+        tagExists: false,
+        latestVersion: "0.0.42",
+        requiredReviewers: 2,
+      }),
+    );
+    const result = runNode(
+      [
+        "scripts/promote-fork-candidate.ts",
+        "--candidate-dir",
+        candidate,
+        "--version",
+        VERSION,
+        "--sha",
+        offMain,
+        "--repository",
+        "nullStack65/t3code",
+        "--github-fixture",
+        fixture,
+        "--approve",
+        identityDigest,
+      ],
+      work,
+    );
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, "is not an ancestor of nullStack65/t3code main");
+    assert.notInclude(result.stdout, "DRY RUN");
+    assert.ok(sha !== offMain);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("stops the real incomplete draft because Windows assets and acceptance are missing (real draft metadata fixture)", () => {
+  const root = scratch();
+  try {
+    // The exact asset ids/digests of draft release 395230248 at the time of the
+    // R6 repair: Intel Mac DMG + Linux runtime + inspection evidence only.
+    const fixture = NodePath.join(root, "real-draft.json");
+    NodeFS.writeFileSync(
+      fixture,
+      JSON.stringify({
+        releaseExists: false,
+        tagExists: false,
+        latestVersion: "0.0.42",
+        requiredReviewers: 0,
+        draft: {
+          tag: "candidate-r4-v0.0.43-929b63795",
+          targetSha: "929b63795e7696855ada61de5fd359dc2f51da78",
+          assets: [
+            {
+              id: 584947074,
+              name: `T3-Code-${VERSION}-x64.dmg`,
+              digest: "sha256:01af27ad8ed509f6f4af8ccc1d054999fccf6d7c47f1c70f9b461858f951ae68",
+              size: 140516937,
+            },
+            {
+              id: 585058463,
+              name: `t3-${VERSION}-linux-x64.tar.gz`,
+              digest: "sha256:a8d8a519dc572451f19167246fdba0d8eb92cf7d53ec498097b0b3e636c81772",
+              size: 64106782,
+            },
+          ],
+        },
+      }),
+    );
+    const result = runNode([
+      "scripts/promote-fork-candidate.ts",
+      "--draft-release",
+      "candidate-r4-v0.0.43-929b63795",
+      "--version",
+      VERSION,
+      "--sha",
+      "929b63795e7696855ada61de5fd359dc2f51da78",
+      "--repository",
+      "nullStack65/t3code",
+      "--github-fixture",
+      fixture,
+    ]);
+    assert.equal(result.status, 1);
+    assert.include(result.stderr, `required asset T3-Code-${VERSION}-x64.exe is missing`);
+    assert.include(result.stderr, `required asset t3-${VERSION}-win32-x64.zip is missing`);
+    assert.include(result.stderr, "no native acceptance receipt for win32-x64");
+    // It must stop before the dry-run plan (and therefore before any write).
+    assert.notInclude(result.stdout, "DRY RUN");
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });
   }

@@ -21,6 +21,8 @@
  * requires the complete required artifact set; it is never weakened to make a
  * partial build look complete.
  */
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 
 export type CandidateTarget = "linux" | "win" | "mac";
 
@@ -81,6 +83,81 @@ export function candidateTargetAssets(
   const mac = [`T3-Code-${version}-x64.dmg`];
   if (options.includeMacosArm64 === true) mac.push(`T3-Code-${version}-arm64.dmg`);
   return mac;
+}
+
+/**
+ * Where a target's native resource monitor is staged for its CLI archive.
+ *
+ * The layout mirrors the reusable workflow's `Stage resource monitor for the CLI
+ * archive` step (`$RUNNER_TEMP/cli-resource-monitor/${{ inputs.resource_key }}`):
+ * `build-cli-archive.ts` copies the whole `--resource-monitor-dir`, and the
+ * runtime resolves `resource-monitor/<platformKey>/<binary>`. Only Linux and
+ * Windows ship a `t3` CLI archive, so only they stage a helper.
+ */
+export interface ResourceMonitorStaging {
+  readonly platformKey: string;
+  readonly binaryName: string;
+  readonly rustTarget: string;
+  /** Repo-relative path of the cargo build output for this target. */
+  readonly sourceRelativePath: string;
+  /** `--resource-monitor-dir`-relative path the CLI archive must consume. */
+  readonly destinationRelativePath: string;
+}
+
+export function candidateResourceMonitorStaging(target: CandidateTarget): ResourceMonitorStaging {
+  if (target === "linux") {
+    return {
+      platformKey: "linux-x64",
+      binaryName: "t3-resource-monitor",
+      rustTarget: "x86_64-unknown-linux-gnu",
+      // The local Linux plan builds for the host, so cargo writes plain
+      // `target/release/` rather than a target-specific subdirectory.
+      sourceRelativePath: "native/resource-monitor/target/release/t3-resource-monitor",
+      destinationRelativePath: "linux-x64/t3-resource-monitor",
+    };
+  }
+  if (target === "win") {
+    return {
+      platformKey: "win32-x64",
+      binaryName: "t3-resource-monitor.exe",
+      rustTarget: "x86_64-pc-windows-msvc",
+      sourceRelativePath:
+        "native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe",
+      destinationRelativePath: "win32-x64/t3-resource-monitor.exe",
+    };
+  }
+  throw new Error(
+    "the Intel macOS target ships no t3 CLI archive, so it stages no resource monitor",
+  );
+}
+
+export interface StageResourceMonitorInput {
+  readonly target: CandidateTarget;
+  readonly resourceMonitorDir: string;
+  /** Repo root the cargo output is resolved from (normally `process.cwd()`). */
+  readonly repoRoot: string;
+}
+
+/**
+ * Copies the freshly built native helper into the directory the CLI archive
+ * consumes. It fails closed when the cargo output is missing, so a stale or
+ * wrong-toolchain helper can never be silently staged; the source path is the
+ * only input, and the bytes are copied verbatim.
+ */
+export function stageCandidateResourceMonitor(input: StageResourceMonitorInput): string {
+  const staging = candidateResourceMonitorStaging(input.target);
+  const source = NodePath.join(input.repoRoot, staging.sourceRelativePath);
+  if (!NodeFS.existsSync(source) || !NodeFS.statSync(source).isFile()) {
+    throw new Error(
+      `the ${input.target} resource monitor build output is missing at ${staging.sourceRelativePath}; ` +
+        `build it first: cargo build --locked --release --target ${staging.rustTarget} --manifest-path native/resource-monitor/Cargo.toml`,
+    );
+  }
+  const destinationDir = NodePath.join(input.resourceMonitorDir, staging.platformKey);
+  NodeFS.mkdirSync(destinationDir, { recursive: true });
+  const destination = NodePath.join(destinationDir, staging.binaryName);
+  NodeFS.copyFileSync(source, destination);
+  return destination;
 }
 
 /** The steps that build one target's artifacts into `outputDir`. */

@@ -380,7 +380,10 @@ function main(): void {
         authorizationGateExists: args.authorizationGateExists,
         packagedProvenance,
         inspectionEvidence,
-        requirePackagedProvenance: args.inspectProvenance,
+        // Promotion always requires packaged provenance: skipping local
+        // extraction (`--skip-provenance-inspection`) may only fall back to
+        // digest-bound native evidence, never to "no provenance required".
+        requirePackagedProvenance: true,
       })
     : verifyCandidate({
         manifest,
