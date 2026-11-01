@@ -147,6 +147,11 @@ export const PullRequestCheckStatus = Schema.Literals([
 ]);
 export type PullRequestCheckStatus = typeof PullRequestCheckStatus.Type;
 
+export const PullRequestCheckIdentity = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  attempt: Schema.optional(TrimmedNonEmptyString),
+});
+
 export const PullRequestCheck = Schema.Struct({
   name: TrimmedNonEmptyString,
   status: PullRequestCheckStatus,
@@ -154,6 +159,12 @@ export const PullRequestCheck = Schema.Struct({
   url: Schema.NullOr(Schema.String),
   /** The base branch requires this check to merge. Absent where the host does not say. */
   required: Schema.optional(Schema.Boolean),
+  /**
+   * Provider-native run or status identity, scoped to this pull request. Absent when unknown;
+   * a display name or details URL is not a run identity. An attempt token distinguishes retries
+   * where the provider reuses the run id (for example, the run's native start timestamp).
+   */
+  identity: Schema.optional(PullRequestCheckIdentity),
 });
 export type PullRequestCheck = typeof PullRequestCheck.Type;
 

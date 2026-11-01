@@ -10,6 +10,8 @@ import {
 } from "./baseSchemas.ts";
 import {
   PullRequestActor,
+  PullRequestCheckIdentity,
+  PullRequestCheckStatus,
   PullRequestChecksState,
   PullRequestMergeability,
   PullRequestReviewDecision,
@@ -105,6 +107,33 @@ export const ThreadPullRequestWatch = Schema.Struct({
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   /** Failed checks on that commit the agent was told about; a rerun that fails again is news. */
   failedChecks: Schema.Array(TrimmedNonEmptyString),
+  /**
+   * Runs/attempts already reported on this head, retained even when a run leaves the rollup.
+   * Absent on name-only watches: the first successful check read baselines their existing
+   * failures without replaying them. Empty means migrated, not that identity is known for all checks.
+   */
+  failedCheckRuns: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        name: TrimmedNonEmptyString,
+        identity: PullRequestCheckIdentity,
+      }),
+    ),
+  ),
+  /**
+   * Terminal results seen on this head, retained across reconnects and rollup replacements.
+   * Absent until the first nonempty check read baselines existing results. A name without
+   * identity only baselines incomplete host data; it never identifies a new run.
+   */
+  terminalCheckRuns: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        name: TrimmedNonEmptyString,
+        identity: Schema.optional(PullRequestCheckIdentity),
+        status: PullRequestCheckStatus,
+      }),
+    ),
+  ),
   /** The agent was told the required checks on that commit passed. */
   passed: Schema.Boolean,
   /**
