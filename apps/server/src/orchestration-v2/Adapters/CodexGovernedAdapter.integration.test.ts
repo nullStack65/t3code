@@ -8,6 +8,7 @@ import {
   CodexSettings,
   MessageId,
   NodeId,
+  type OrchestrationV2CodexTurnStartCall,
   ProjectId,
   ProviderSessionId,
   RunAttemptId,
@@ -236,6 +237,32 @@ const fixture = (options: Record<string, unknown> = {}) =>
       close: Scope.close(runtimeScope, Exit.void),
     };
   });
+
+it.live(
+  "records turn-start timing while committing and acknowledging governed inputs",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const calls: OrchestrationV2CodexTurnStartCall[] = [];
+      const input = f.turn(1);
+      const recordCodexTurnStartCall: NonNullable<typeof input.recordCodexTurnStartCall> = (call) =>
+        Effect.sync(() => {
+          calls.push(call);
+        });
+      Object.assign(input, { recordCodexTurnStartCall });
+      yield* f.runtime.startTurn(input);
+      yield* f.completed();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.exitKind).toBe("decoded_response");
+      expect(calls[0]!.nativeTurnId).toBe("turn-1");
+      expect(calls[0]!.exitedAtMs).toBeGreaterThanOrEqual(calls[0]!.invokedAtMs);
+      expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(1);
+      yield* f.runtime.startTurn(f.turn(2));
+      yield* f.completed();
+      expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(2);
+      expect(f.selections).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(layers)),
+);
 
 it.live(
   "submits fresh native contexts with visible continuity and only current governed inputs; monitor text is unprivileged",

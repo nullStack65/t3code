@@ -31,6 +31,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import { toolOutputImages } from "@t3tools/shared/toolOutput";
@@ -79,6 +80,7 @@ const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.4",
 } satisfies ModelSelection;
+const isEventSinkWriteError = Schema.is(EventSink.EventSinkWriteError);
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 
 function threadCreatedEvent(
@@ -1879,3 +1881,86 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 });
+
+it.effect(
+  "refuses a foreign native tool owner through real provider ingestion and later cleanup",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const store = yield* EventStore.EventStoreV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const created = yield* threadCreatedEvent(now);
+      yield* sink.write({ events: [created] });
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: created.threadId,
+      });
+      const nativeId = "ingest-ownership-native";
+      const node: OrchestrationV2ExecutionNode = {
+        id: ids.derive.nodeFromProviderItem({ driver: CODEX_DRIVER, nativeItemId: nativeId }),
+        threadId: created.threadId,
+        runId: RunId.make("ingest-owner-a"),
+        parentNodeId: null,
+        rootNodeId: NodeId.make("ingest-owner-root-a"),
+        kind: "tool_call",
+        status: "running",
+        countsForRun: false,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: { driver: CODEX_DRIVER, nativeId, strength: "strong" },
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      };
+      const input = {
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: created.threadId,
+      };
+      yield* ingestor.ingestNormalized({
+        ...input,
+        event: { type: "node.updated", driver: CODEX_DRIVER, node },
+      });
+      const before = yield* store.read({}).pipe(Stream.runCollect);
+      const projectionBefore = yield* projections.getThreadProjection(created.threadId);
+      for (const status of ["running", "failed"] as const) {
+        const result = yield* Effect.result(
+          ingestor.ingestNormalized({
+            ...input,
+            event: {
+              type: "node.updated",
+              driver: CODEX_DRIVER,
+              node: { ...node, runId: RunId.make("ingest-owner-b"), status },
+            },
+          }),
+        );
+        assert.isTrue(result._tag === "Failure");
+        if (result._tag !== "Failure" || result.failure._tag !== "ProviderEventPublishError")
+          return;
+        assert.isTrue(isEventSinkWriteError(result.failure.cause));
+        if (isEventSinkWriteError(result.failure.cause))
+          assert.equal(result.failure.cause.category, "identity_conflict");
+        assert.deepEqual(yield* store.read({}).pipe(Stream.runCollect), before);
+        assert.deepEqual(
+          yield* projections.getThreadProjection(created.threadId),
+          projectionBefore,
+        );
+      }
+      yield* ingestor.ingestNormalized({
+        ...input,
+        event: {
+          type: "node.updated",
+          driver: CODEX_DRIVER,
+          node: { ...node, status: "completed", completedAt: now },
+        },
+      });
+      assert.equal(
+        (yield* projections.getThreadProjection(created.threadId)).nodes[0]!.status,
+        "completed",
+      );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
