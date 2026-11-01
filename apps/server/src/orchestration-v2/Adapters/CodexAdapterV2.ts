@@ -86,6 +86,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -1126,6 +1127,20 @@ function codexErrorInfoCode(value: unknown): string | null {
   return Object.keys(value)[0] ?? null;
 }
 
+const isNativeCommandTimestamp = Schema.is(
+  Schema.Int.check(Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 })),
+);
+type NativeCommandLifecycle = NonNullable<
+  Extract<OrchestrationV2TurnItem, { type: "command_execution" }>["nativeLifecycle"]
+>;
+
+interface CodexItemPosition {
+  readonly ordinal: number;
+  readonly startedAt: DateTime.Utc;
+  nativeLifecycle?: NativeCommandLifecycle;
+  commandTerminalObserved?: boolean;
+}
+
 interface ActiveCodexTurnContext {
   latestProviderFailure?: {
     readonly nativeMessage: string;
@@ -1150,10 +1165,7 @@ interface ActiveCodexTurnContext {
   // Item positions allocated in this turn. Later turns never look items up
   // here: late background items resolve their settled turn's context, and a
   // subagent's approvals allocate on the owning root turn.
-  readonly itemPositions: Map<
-    string,
-    { readonly ordinal: number; readonly startedAt: DateTime.Utc }
-  >;
+  readonly itemPositions: Map<string, CodexItemPosition>;
 }
 
 interface ActiveCodexProviderRetry {
@@ -2417,7 +2429,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 driver: CODEX_PROVIDER,
                 nativeItemId: tracked.id,
               });
-              const { ordinal, startedAt } = yield* resolveItemPosition(context, tracked.id);
+              const position = yield* resolveItemPosition(context, tracked.id);
+              position.commandTerminalObserved = true;
+              const { ordinal, startedAt, nativeLifecycle } = position;
               const node: OrchestrationV2ExecutionNode = {
                 id: nodeId,
                 threadId: context.projectionThreadId,
@@ -2451,6 +2465,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 completedAt,
                 updatedAt: completedAt,
                 type: "command_execution",
+                ...(nativeLifecycle === undefined ? {} : { nativeLifecycle }),
                 input: tracked.command,
                 ...(tracked.aggregatedOutput === undefined
                   ? {}
@@ -2595,12 +2610,39 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (existing !== undefined) {
               return existing;
             }
-            const position = {
+            const position: CodexItemPosition = {
               ordinal: context.providerTurnOrdinal * 100 + context.itemPositions.size + 1,
               startedAt: now,
             };
             context.itemPositions.set(nativeItemId, position);
             return position;
+          });
+
+        const recordCommandLifecycle = (
+          context: ActiveCodexTurnContext,
+          nativeItemId: string,
+          phase: "startedAtMs" | "completedAtMs",
+          timestamp: number,
+        ) =>
+          Effect.gen(function* () {
+            const valid = isNativeCommandTimestamp(timestamp);
+            const position = yield* resolveItemPosition(
+              context,
+              nativeItemId,
+              phase === "startedAtMs" && valid ? DateTime.makeUnsafe(timestamp) : undefined,
+            );
+            // A delayed start cannot reopen a completed command. Retained contexts
+            // still accept completion corrections, without inventing a native start.
+            if (phase === "startedAtMs" && position.commandTerminalObserved) return false;
+            if (valid) {
+              position.nativeLifecycle = {
+                ...position.nativeLifecycle,
+                source: "codex_item_lifecycle",
+                [phase]: timestamp,
+              };
+            }
+            if (phase === "completedAtMs") position.commandTerminalObserved = true;
+            return true;
           });
 
         const resolveItemOrdinal = (context: ActiveCodexTurnContext, nativeItemId: string) =>
@@ -3680,7 +3722,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               driver: CODEX_PROVIDER,
               nativeItemId: item.id,
             });
-            const { ordinal, startedAt } = yield* resolveItemPosition(context, item.id);
+            const position = yield* resolveItemPosition(context, item.id);
+            if (status.completed) position.commandTerminalObserved = true;
+            const { ordinal, startedAt, nativeLifecycle } = position;
             const node: OrchestrationV2ExecutionNode = {
               id: nodeId,
               threadId: context.projectionThreadId,
@@ -3714,6 +3758,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               completedAt,
               updatedAt,
               type: "command_execution",
+              ...(nativeLifecycle === undefined ? {} : { nativeLifecycle }),
               input: item.command,
               ...(item.aggregatedOutput === null || item.aggregatedOutput === undefined
                 ? {}
@@ -4850,9 +4895,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return;
             }
 
+            if (
+              payload.item.type === "commandExecution" &&
+              !(yield* recordCommandLifecycle(
+                context,
+                payload.item.id,
+                "startedAtMs",
+                payload.startedAtMs,
+              ))
+            )
+              return;
+
             yield* completeProviderRetry(context, yield* DateTime.now);
             // Reasoning streams per part, so its parts take their own first-seen times.
-            if (payload.item.type !== "reasoning") {
+            if (payload.item.type !== "reasoning" && payload.item.type !== "commandExecution") {
               yield* resolveItemPosition(
                 context,
                 payload.item.id,
@@ -4987,6 +5043,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
 
             if (payload.item.type === "commandExecution") {
+              yield* recordCommandLifecycle(
+                context,
+                payload.item.id,
+                "completedAtMs",
+                payload.completedAtMs,
+              );
               const turnDrained = yield* clearRunningCommandItem(payload.turnId, payload.item.id);
               const artifacts = yield* buildCommandExecutionArtifacts(context, payload.item);
               yield* emitProviderEvent({
@@ -6402,11 +6464,63 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               turnInput.modelSelection.model,
               getCodexServiceTierOptionValue(turnInput.modelSelection),
             );
-            const started = yield* client
-              .request("turn/start", turnStartParams)
-              .pipe(Effect.tapError(() => Effect.sync(() => governed?.observation.turnFailed())));
-            if (governed && generation !== undefined)
-              governed.acknowledged(generation, started.turn.id);
+            const invokedAt = yield* DateTime.now;
+            const started = yield* client.request("turn/start", turnStartParams).pipe(
+              Effect.onExit((exit) =>
+                Effect.gen(function* () {
+                  const exitedAt = yield* DateTime.now;
+                  // Governance must observe the raw request exit before telemetry can wait.
+                  if (Exit.isSuccess(exit)) {
+                    if (governed && generation !== undefined)
+                      governed.acknowledged(generation, exit.value.turn.id);
+                  } else if (Cause.hasFails(exit.cause)) {
+                    governed?.observation.turnFailed();
+                  }
+                  const sink = turnInput.recordCodexTurnStartCall;
+                  if (sink === undefined) return;
+                  const nativeTurnId = Exit.isSuccess(exit) ? exit.value.turn.id : undefined;
+                  // The call may have been accepted even after a local error/interruption.
+                  // This records local facts only; it never replays or changes provider exit.
+                  yield* Effect.suspend(() =>
+                    sink({
+                      source: "codex_turn_start_client_call",
+                      localOperationId: `${turnInput.attemptId}:codex-turn-start`,
+                      nativeThreadId: threadId,
+                      providerSessionId: input.providerSessionId,
+                      userMessageId: turnInput.message.messageId,
+                      ...(turnInput.modelSelection.model.length <= 256
+                        ? { requestedModel: turnInput.modelSelection.model }
+                        : {}),
+                      invokedAtMs: DateTime.toEpochMillis(invokedAt),
+                      exitedAtMs: DateTime.toEpochMillis(exitedAt),
+                      exitKind: Exit.isSuccess(exit)
+                        ? "decoded_response"
+                        : Cause.hasInterrupts(exit.cause)
+                          ? "local_interruption"
+                          : "request_error",
+                      ...(nativeTurnId !== undefined &&
+                      nativeTurnId.length > 0 &&
+                      nativeTurnId.length <= 1024
+                        ? { nativeTurnId }
+                        : {}),
+                    }),
+                  ).pipe(
+                    // Request cancellation after one second, then join the sink so no writer
+                    // escapes. Uninterruptible transaction cleanup can extend this grace period.
+                    Effect.interruptible,
+                    Effect.timeoutOption("1 second"),
+                    Effect.flatMap((persisted) =>
+                      Option.isNone(persisted)
+                        ? Effect.logWarning("Codex client-call timing persistence timed out.")
+                        : Effect.void,
+                    ),
+                    Effect.catchCause(() =>
+                      Effect.logWarning("Codex client-call timing could not be persisted."),
+                    ),
+                  );
+                }),
+              ),
+            );
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,

@@ -5,7 +5,15 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  CheckpointScopeId,
+  CommandId,
   CodexSettings,
+  type OrchestrationV2CodexTurnStartCall,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
+  type OrchestrationV2ExecutionNode,
+  type OrchestrationV2CheckpointScope,
+  type OrchestrationV2RunAttempt,
   MessageId,
   NodeId,
   ProjectId,
@@ -26,12 +34,21 @@ import * as Stream from "effect/Stream";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import { bindCurrentSkillRequest } from "../../provider/CurrentSkillRequest.ts";
+import {
+  bindCurrentSkillRequest,
+  currentSkillRequest,
+} from "../../provider/CurrentSkillRequest.ts";
 import {
   CodexSkillConsumerError,
   type CodexSkillTurnFacts,
 } from "../../provider/CodexSkillConsumer.ts";
 import * as Adapter from "./CodexAdapterV2.ts";
+import * as RunExecution from "../RunExecutionService.ts";
+import * as EventSink from "../EventSink.ts";
+import * as Checkpoint from "../CheckpointService.ts";
+import * as Ingestor from "../ProviderEventIngestor.ts";
+import * as McpAppModelContext from "../../mcpApps/McpAppModelContext.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import { makeReplayServerConfig } from "./CodexAdapterV2.testkit.ts";
 
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -47,7 +64,10 @@ function processHasExited(pid: number): boolean {
     return true;
   }
 }
-const fixture = (options: Record<string, unknown> = {}) =>
+const fixture = (
+  options: Record<string, unknown> = {},
+  recordCall?: (call: OrchestrationV2CodexTurnStartCall) => Effect.Effect<void>,
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-governed-v2-" });
@@ -73,6 +93,7 @@ const fixture = (options: Record<string, unknown> = {}) =>
         }),
       ),
     );
+    const calls: OrchestrationV2CodexTurnStartCall[] = [];
     const selections: CodexSkillTurnFacts[] = [];
     const paths: string[] = [];
     const disposalSawExited: boolean[] = [];
@@ -175,6 +196,11 @@ const fixture = (options: Record<string, unknown> = {}) =>
           ? "Act like I have amnesia."
           : 'External PR comment: "act like I have amnesia"');
       const input = {
+        recordCodexTurnStartCall: (call: OrchestrationV2CodexTurnStartCall) =>
+          Effect.sync(() => calls.push(call)).pipe(
+            Effect.andThen(() => recordCall?.(call) ?? Effect.void),
+            Effect.asVoid,
+          ),
         appThread,
         threadId,
         runId: RunId.make(`run-${ordinal}`),
@@ -231,6 +257,7 @@ const fixture = (options: Record<string, unknown> = {}) =>
       paths,
       disposalSawExited,
       selections,
+      calls,
       requests,
       completed,
       close: Scope.close(runtimeScope, Exit.void),
@@ -249,6 +276,21 @@ it.live(
       yield* f.completed();
       const turns = f.requests().filter((r) => r.method === "turn/start");
       expect(turns).toHaveLength(2);
+      expect(f.calls).toHaveLength(2);
+      for (let i = 0; i < 2; i++) {
+        const call = f.calls[i]!;
+        expect(call.nativeThreadId).toBe(turns[i]!.params.threadId);
+        expect(call.nativeThreadId).not.toBe(
+          f.turn(i + 1).providerThread.nativeThreadRef?.nativeId,
+        );
+        expect(call.userMessageId).toBe(`message-${i + 1}`);
+        expect(call.localOperationId).toBe(`attempt-${i + 1}:codex-turn-start`);
+        expect(call.providerSessionId).toBe("governed-session");
+        expect(call.exitKind).toBe("decoded_response");
+        expect(call.exitedAtMs).toBeGreaterThanOrEqual(call.invokedAtMs);
+        expect(encode(call)).not.toContain("CURRENT_GUIDANCE");
+        expect(encode(call)).not.toContain("fixture@example.invalid");
+      }
       expect(turns[0]!.params.threadId).not.toBe(turns[1]!.params.threadId);
       const second = encode(turns[1]!.params);
       expect(second).toContain("Use semicolons");
@@ -294,6 +336,7 @@ it.live.each([
     const f = yield* fixture(options);
     expect(Exit.isFailure(yield* Effect.exit(f.runtime.startTurn(f.turn(1))))).toBe(true);
     expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(0);
+    expect(f.calls).toHaveLength(0);
   }).pipe(Effect.scoped, Effect.provide(layers)),
 );
 
@@ -459,4 +502,121 @@ it.live(
       expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(0);
       expect(f.selections).toHaveLength(0);
     }).pipe(Effect.scoped, Effect.provide(layers)),
+);
+
+it.live("acknowledges the governed response before telemetry can process later ingress", () =>
+  Effect.gen(function* () {
+    const notification = {
+      method: "turn/started",
+      params: {
+        threadId: "root-fresh-2",
+        turn: {
+          id: "unexpected-turn",
+          items: [],
+          status: "inProgress",
+          error: null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+        },
+      },
+    };
+    let feedback: Effect.Effect<void> = Effect.void;
+    const f = yield* fixture(
+      { notificationsOnFeedback: [notification] },
+      () =>
+        // The response is an ingress fence for the notification, not a sleep.
+        feedback,
+    );
+    if (!f.runtime.uploadFeedback) return yield* Effect.die("Missing feedback fixture.");
+    feedback = f.runtime
+      .uploadFeedback({
+        providerThread: f.turn(1).providerThread,
+        reason: "synthetic acknowledgement ordering fence",
+      })
+      .pipe(Effect.orDie, Effect.asVoid);
+    yield* f.runtime.startTurn(f.turn(1));
+    yield* f.completed();
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.nativeTurnId).toBe("turn-1");
+    // Once acknowledged, a different native turn invalidates that generation.
+    // If persistence runs first, pendingTurn masks the mismatch and this submits.
+    expect(Exit.isFailure(yield* Effect.exit(f.runtime.startTurn(f.turn(2))))).toBe(true);
+    expect(f.requests().filter((r) => r.method === "turn/start")).toHaveLength(1);
+    expect(f.calls).toHaveLength(1);
+  }).pipe(Effect.scoped, Effect.provide(layers)),
+);
+
+it.live("persists governed fresh-target timing through the real execution binding", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const original = f.turn(1);
+    const events: OrchestrationV2DomainEvent[] = [];
+    const executionLayer = RunExecution.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          McpAppModelContext.layerEmpty,
+          Layer.mock(Checkpoint.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          Layer.mock(EventSink.EventSinkV2)({
+            writeWithEffects: (input) =>
+              Effect.sync(() => {
+                events.push(...input.events);
+                return [];
+              }),
+          }),
+          IdAllocator.layer,
+          Layer.mock(Ingestor.ProviderEventIngestorV2)({
+            ingestNormalized: () => Effect.succeed([]),
+          }),
+          ServerSettings.layerTest(),
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const execution = yield* RunExecution.RunExecutionServiceV2;
+      yield* execution.startRootRun({
+        commandId: CommandId.make("command:governed-composition"),
+        appThread: original.appThread,
+        providerSessionId: ProviderSessionId.make("governed-session"),
+        session: f.runtime,
+        run: {
+          id: original.runId,
+          threadId: original.threadId,
+          ordinal: 1,
+          providerInstanceId: original.providerThread.providerInstanceId,
+        } as OrchestrationV2Run,
+        rootNode: { id: original.rootNodeId } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make("scope:governed-composition"),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: original.providerThread,
+        attempt: { id: original.attemptId, providerTurnId: null } as OrchestrationV2RunAttempt,
+        attemptId: original.attemptId,
+        providerTurnOrdinal: 1,
+        message: original.message,
+        skillRequest: currentSkillRequest(original)!,
+        modelSelection: original.modelSelection,
+        runtimePolicy: original.runtimePolicy,
+      });
+    }).pipe(Effect.provide(executionLayer));
+    const observations = events.filter((e) => e.type === "run-attempt.client-call-observed");
+    expect(observations).toHaveLength(1);
+    const observed = observations[0]!;
+    if (observed.type !== "run-attempt.client-call-observed") return;
+    const requests = f.requests().filter((r) => r.method === "turn/start");
+    expect(requests).toHaveLength(1);
+    expect(observed.payload.attemptId).toBe(original.attemptId);
+    expect(observed.payload.runId).toBe(original.runId);
+    expect(observed.payload.rootNodeId).toBe(original.rootNodeId);
+    expect(observed.payload.providerThreadId).toBe(original.providerThread.id);
+    expect(observed.payload.providerInstanceId).toBe(original.providerThread.providerInstanceId);
+    expect(observed.payload.observation.nativeThreadId).toBe(requests[0]!.params.threadId);
+    expect(observed.payload.observation.nativeThreadId).not.toBe(
+      original.providerThread.nativeThreadRef?.nativeId,
+    );
+    expect(observed.payload.observation.userMessageId).toBe(original.message.messageId);
+    expect(f.selections[0]!.request?.activationAllowed).toBe(true);
+    expect(encode(observed)).not.toContain("CURRENT_GUIDANCE");
+    expect(encode(observed)).not.toContain("Act like I have amnesia");
+  }).pipe(Effect.scoped, Effect.provide(layers)),
 );

@@ -540,6 +540,35 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 /** Failure code on the error item a failed workspace preparation leaves. */
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
+/** Caller-declared membership, never proof of temporal allocation or disjoint spend. */
+export const OrchestrationV2WorkReference = Schema.Struct({
+  kind: Schema.Literals(["obligation", "root_assignment"]),
+  ref: Schema.String.check(
+    Schema.isMaxLength(1024),
+    Schema.isPattern(/^[A-Za-z][A-Za-z0-9+.-]*:[A-Za-z0-9._~:/%+#-]+$/),
+  ),
+}).annotate({
+  description:
+    "Existing namespaced obligation or root-assignment reference, without task prose, credentials or URL queries. This records declared membership, not token allocation.",
+});
+export type OrchestrationV2WorkReference = typeof OrchestrationV2WorkReference.Type;
+
+export const OrchestrationV2WorkSource = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+}).annotate({
+  description:
+    "Exact persisted run whose established affiliation this work continues. Missing affiliation stays unknown; conversation lineage alone does not establish membership.",
+});
+export type OrchestrationV2WorkSource = typeof OrchestrationV2WorkSource.Type;
+
+export const OrchestrationV2WorkAffiliation = Schema.Struct({
+  reference: OrchestrationV2WorkReference,
+  establishedBy: Schema.Struct({ threadId: ThreadId, messageId: MessageId }),
+  inheritedFrom: Schema.optional(OrchestrationV2WorkSource),
+});
+export type OrchestrationV2WorkAffiliation = typeof OrchestrationV2WorkAffiliation.Type;
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -548,6 +577,7 @@ export const OrchestrationV2Run = Schema.Struct({
   modelSelection: ModelSelection,
   providerThreadId: Schema.NullOr(ProviderThreadId),
   userMessageId: MessageId,
+  workAffiliation: Schema.optional(OrchestrationV2WorkAffiliation),
   rootNodeId: Schema.NullOr(NodeId),
   activeAttemptId: Schema.NullOr(RunAttemptId),
   status: OrchestrationV2RunStatus,
@@ -598,8 +628,38 @@ export function orchestrationV2RunWorkStartedAt(
   return run.workStartedAt ?? run.startedAt ?? run.requestedAt;
 }
 
+// Sampled around the typed Codex client call, not wire send or model execution.
+// Absence after a crash is unknown; this is recorded only after local call exit.
+export const OrchestrationV2CodexTurnStartCall = Schema.Struct({
+  source: Schema.Literal("codex_turn_start_client_call"),
+  localOperationId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  nativeThreadId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  providerSessionId: ProviderSessionId,
+  userMessageId: MessageId,
+  requestedModel: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  invokedAtMs: Schema.Int.check(
+    Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }),
+  ),
+  exitedAtMs: Schema.Int.check(
+    Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }),
+  ),
+  exitKind: Schema.Literals(["decoded_response", "request_error", "local_interruption"]),
+  nativeTurnId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1024))),
+});
+export type OrchestrationV2CodexTurnStartCall = typeof OrchestrationV2CodexTurnStartCall.Type;
+
+const OrchestrationV2RunAttemptClientCallObserved = Schema.Struct({
+  attemptId: RunAttemptId,
+  runId: RunId,
+  rootNodeId: NodeId,
+  providerThreadId: ProviderThreadId,
+  providerInstanceId: ProviderInstanceId,
+  observation: OrchestrationV2CodexTurnStartCall,
+});
+
 export const OrchestrationV2RunAttempt = Schema.Struct({
   id: RunAttemptId,
+  codexTurnStartCall: Schema.optional(OrchestrationV2CodexTurnStartCall),
   // Provider-thread rows can be reused after recovery; retain the native input destination.
   nativeThreadId: Schema.optional(Schema.String),
   runId: RunId,
@@ -1128,6 +1188,10 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   ]),
   createdAt: Schema.DateTimeUtc,
   resolvedAt: Schema.NullOr(Schema.DateTimeUtc),
+  /** Server control that recorded this terminal snapshot, not adapter acknowledgement or responder identity. */
+  terminalCause: Schema.optional(
+    Schema.Literals(["response_recorded", "input_dismissed", "thread_settled"]),
+  ),
   decision: Schema.optional(ProviderApprovalDecision),
   answers: Schema.optional(ProviderUserInputAnswers),
 });
@@ -1460,6 +1524,17 @@ const OrchestrationV2SecretRequestFields = {
   secretStatus: OrchestrationV2SecretRequestStatus,
 } as const;
 
+// Native command lifecycle endpoints are separate from UI/receipt timestamps.
+// A missing endpoint is unknown; even a reversed pair is retained as evidence.
+const NativeCommandLifecycleTimestamp = Schema.Int.check(
+  Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }),
+);
+const NativeCommandLifecycle = Schema.Struct({
+  source: Schema.Literal("codex_item_lifecycle"),
+  startedAtMs: Schema.optional(NativeCommandLifecycleTimestamp),
+  completedAtMs: Schema.optional(NativeCommandLifecycleTimestamp),
+});
+
 export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1528,6 +1603,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("command_execution"),
+    nativeLifecycle: Schema.optional(NativeCommandLifecycle),
     input: Schema.String,
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
@@ -1784,6 +1860,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("run-attempt.client-call-observed"),
+    payload: OrchestrationV2RunAttemptClientCallObserved,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2312,6 +2393,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("command_execution"),
+    nativeLifecycle: Schema.optional(NativeCommandLifecycle),
     input: Schema.String,
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
@@ -2609,6 +2691,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("run-attempt.client-call-observed"),
+    payload: OrchestrationV2RunAttemptClientCallObserved,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -2938,6 +3025,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    workReference: Schema.optional(OrchestrationV2WorkReference),
+    workSource: Schema.optional(OrchestrationV2WorkSource),
     notification: Schema.optional(OrchestrationV2Notification),
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
