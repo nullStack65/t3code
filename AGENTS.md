@@ -108,6 +108,7 @@ For authorized mobile verification, a missing or outdated native client is a bui
 - Never make a PR unless the developer explicitly asks you to do so.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
+- In this fork, end the body with `Model:` and `Task:` lines, and end each commit with `Model:`, `Task:`, `Agent:` (optional `Lane:`) trailers, following the [Closura provenance trailer convention](https://github.com/nullStack65/closura-agent-config/blob/master/docs/delivery/provenance-trailers.md). This fork has no self-hosted ARC runners, so the provenance check doesn't run here.
 - UI changes need before/after images. Motion or timing needs a short video.
 - Upload PR evidence to GitHub. Never commit PR-only screenshots or assets such as `.github/pr-assets/`.
 - One concern per PR. If the description says "also", split it.
