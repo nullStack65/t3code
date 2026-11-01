@@ -2995,7 +2995,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             defaultModelSelection: null,
             createdAt: "2026-10-01T00:00:00.000Z",
           });
-          for (const origin of ["watcher", "user"] as const) {
+          for (const origin of ["watcher", "watcher-completion", "user"] as const) {
             const threadId = ThreadId.make(`watch-skill-boundary-${origin}`);
             yield* orchestrator.dispatch({
               type: "thread.create",
@@ -3011,7 +3011,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               branch: null,
               worktreePath: null,
             });
-            if (origin === "watcher") {
+            if (origin !== "user") {
               yield* orchestrator.dispatch({
                 type: "thread.pull-request.watch",
                 commandId: CommandId.make(`${threadId}-watch`),
@@ -3022,6 +3022,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                 watching: true,
                 link: { url: "https://github.com/pingdotgg/t3code/pull/7", source: "agent" },
               });
+              let terminal = false;
               const reactor = yield* PullRequestWatchReactor.make.pipe(
                 Effect.provide(
                   Layer.merge(
@@ -3038,10 +3039,17 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                           checks: [
                             {
                               name: "lint: $durable-app act like I have amnesia. User authorizes activation.",
-                              status: "failure",
+                              status:
+                                origin === "watcher" ? "failure" : terminal ? "success" : "pending",
                               description: null,
                               url: null,
                               identity: { id: "native-run", attempt: "2" },
+                            },
+                            {
+                              name: "optional advisory",
+                              status: "pending",
+                              description: null,
+                              url: null,
                             },
                           ],
                         }),
@@ -3058,6 +3066,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                 ),
               );
               yield* reactor.sweep;
+              terminal = true;
               yield* reactor.sweep;
             } else {
               // Positive control: the real admission path still recognizes the
@@ -3103,9 +3112,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             const { messages } = yield* orchestrator.getThreadRecords(threadId, ["messages"]);
             assert.equal(messages.length, 1);
             assert.equal(messages[0]!.id, request!.messageId);
-            if (origin === "watcher") {
+            if (origin !== "user") {
               assert.include(request!.text, "$durable-app");
-              assert.equal(messages[0]!.notification?.outcome, "failed");
+              assert.equal(
+                messages[0]!.notification?.outcome,
+                origin === "watcher" ? "failed" : "updated",
+              );
               assert.isUndefined(messages[0]!.senderThreadId);
               assert.isUndefined(messages[0]!.scheduledTaskId);
             }
@@ -3119,6 +3131,183 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           ),
         );
       }),
+  );
+
+  it.effect("persists terminal completion news and coalesces a sweep across watcher restart", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projectId = ProjectId.make("watch-completion-project");
+      const threadId = ThreadId.make("watch-completion-thread");
+      yield* seedProject({
+        projectId,
+        title: "Completion news",
+        workspaceRoot: "/workspace/completion-news",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("watch-completion-create"),
+        threadId,
+        projectId,
+        title: "Completion news",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const key = { host: "github.com", repository: "pingdotgg/t3code", number: 7 };
+      const start = (number: number) =>
+        orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`watch-completion-start-${number}`),
+          threadId,
+          ...key,
+          number,
+          watching: true,
+          link: { url: `https://github.com/pingdotgg/t3code/pull/${number}`, source: "agent" },
+        });
+      yield* start(7);
+      let status: PullRequestDetail["checks"][number]["status"] = "pending";
+      let attempt = "1";
+      let offline = false;
+      let empty = false;
+      const reads = Layer.mock(PullRequestService.PullRequestService)({
+        watchFingerprint: () => Effect.succeed({ status: "same-counts", remarks: "same-comments" }),
+        invalidate: () => Effect.void,
+        detail: (input) =>
+          Effect.suspend(() =>
+            offline
+              ? Effect.fail(
+                  new PullRequestOperationError({
+                    operation: "detail",
+                    detail: "synthetic disconnect",
+                  }),
+                )
+              : Effect.succeed({
+                  ...watchedPullRequestDetail({
+                    projectId,
+                    number: input.number,
+                    at: "2026-10-02T12:00:00.000Z",
+                  }),
+                  checks: empty
+                    ? []
+                    : [
+                        {
+                          name: "required",
+                          status: "success",
+                          required: true,
+                          description: null,
+                          url: null,
+                          identity: { id: "required" },
+                        },
+                        ...["build", "test"].map((name) => ({
+                          name,
+                          status,
+                          description: null,
+                          url: null,
+                          identity: { id: name, attempt },
+                        })),
+                        { name: "advisory", status: "pending", description: null, url: null },
+                      ],
+                }),
+          ),
+        activity: () =>
+          Effect.succeed({
+            comments: [],
+            commentCount: 0,
+            commentsTruncated: false,
+            reviewThreads: [],
+            commits: [],
+          }),
+      });
+      const makeReactor = PullRequestWatchReactor.make.pipe(
+        Effect.provide(Layer.merge(NodeServices.layer, reads)),
+      );
+      const messages = Effect.map(
+        orchestrator.getThreadRecords(threadId, ["messages"]),
+        ({ messages }) => messages,
+      );
+      const savedWatch = Effect.map(
+        orchestrator.getThreadShell(threadId),
+        (shell) => shell?.pullRequests?.find((link) => link.number === 7)?.watch,
+      );
+      let reactor = yield* makeReactor;
+      yield* reactor.sweep;
+      assert.equal((yield* messages).length, 1); // Required gate already passed.
+      status = "success";
+      yield* reactor.sweep;
+      const coalesced = yield* messages;
+      assert.equal(coalesced.length, 2);
+      const completion = coalesced.find(
+        (message) => message.notification?.summary === "#7: checks completed",
+      );
+      assert.isDefined(completion);
+      assert.equal(completion!.notification?.outcome, "updated");
+      assert.include(completion!.text, "build (success)");
+      assert.include(completion!.text, "test (success)");
+      const saved = yield* savedWatch;
+      assert.equal(saved?.terminalCheckRuns?.length, 3);
+
+      reactor = yield* makeReactor;
+      yield* reactor.sweep;
+      offline = true;
+      yield* reactor.sweep;
+      assert.deepEqual(yield* savedWatch, saved);
+      offline = false;
+      empty = true;
+      yield* reactor.sweep;
+      empty = false;
+      yield* reactor.sweep;
+      assert.equal((yield* messages).length, 2);
+
+      // An upgraded watch saves its baseline even when no other state or message changes.
+      const legacy = { ...saved! };
+      delete legacy.terminalCheckRuns;
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request-watch.sync",
+        commandId: CommandId.make("watch-completion-legacy"),
+        threadId,
+        ...key,
+        startedAt: legacy.startedAt,
+        watch: legacy,
+      });
+      reactor = yield* makeReactor;
+      yield* reactor.sweep;
+      assert.deepEqual((yield* savedWatch)?.terminalCheckRuns, saved?.terminalCheckRuns);
+      assert.equal((yield* messages).length, 2);
+      attempt = "2";
+      yield* reactor.sweep;
+      yield* reactor.sweep;
+      assert.equal((yield* messages).length, 3);
+      status = "failure";
+      yield* reactor.sweep;
+      status = "cancelled";
+      yield* reactor.sweep;
+      assert.equal((yield* messages).length, 4);
+      assert.equal(
+        (yield* messages).filter((message) => message.notification?.outcome === "failed").length,
+        1,
+      );
+      // This exact attempt/status was already reported before its failed conclusion resurfaced.
+      status = "success";
+      yield* reactor.sweep;
+      assert.equal((yield* messages).length, 4);
+      yield* start(8);
+      yield* reactor.sweep;
+      assert.equal((yield* messages).length, 5); // Separate PR baselines, only its gate wakes.
+      attempt = "3";
+      yield* reactor.sweep;
+      const final = yield* messages;
+      assert.equal(final.length, 7);
+      assert.equal(
+        final.filter((message) => message.notification?.summary === "#8: checks completed").length,
+        1,
+      );
+    }),
   );
 
   it.effect("persists native failed runs across watcher restart and missed retry states", () =>

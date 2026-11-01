@@ -202,6 +202,7 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.headSha === right.headSha &&
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     JSON.stringify(left.failedCheckRuns) === JSON.stringify(right.failedCheckRuns) &&
+    JSON.stringify(left.terminalCheckRuns) === JSON.stringify(right.terminalCheckRuns) &&
     left.passed === right.passed &&
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
     left.remarksThrough === right.remarksThrough &&
