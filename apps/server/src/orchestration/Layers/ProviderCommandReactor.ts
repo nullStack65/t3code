@@ -3,6 +3,7 @@ import {
   qualifyThreadWorktree,
 } from "../../project/ThreadWorktree.ts";
 import { withWorkspaceLease } from "../../workspace/workspaceLease.ts";
+import { bindCurrentSkillRequest } from "../../provider/CurrentSkillRequest.ts";
 import {
   type ChatAttachment,
   CommandId,
@@ -1645,6 +1646,18 @@ const make = Effect.gen(function* () {
     if (Option.isNone(sendTurnRequest)) {
       return;
     }
+
+    bindCurrentSkillRequest(sendTurnRequest.value, {
+      messageId: message.id,
+      text: message.text,
+      activationAllowed:
+        !!event.metadata.origin?.surface &&
+        !event.metadata.historyImport &&
+        !event.payload.routeBinding,
+      conversation: resolveThreadDetail(event.payload.threadId).pipe(
+        Effect.map((detail) => detail?.messages ?? []),
+      ),
+    });
 
     if (event.payload.routeBinding !== undefined) {
       const latestThread = yield* resolveThreadShell(event.payload.threadId);

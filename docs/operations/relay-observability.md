@@ -20,6 +20,19 @@ Deploy from `infra/relay` with the normal Alchemy workflow:
 vp run deploy
 ```
 
+The GitHub production relay workflow requires an explicit manual dispatch by
+`nullStack65` (account ID `112618179`) on `nullStack65/t3code`'s default `main`
+branch. Supply the full lowercase SHA of the reviewed current main commit as
+`reviewed_source_sha`. The workflow checks that it matches the dispatched source,
+workflow and current main before admitting the production job, then checks out
+that exact commit. Source pushes and PR merges do not trigger this deployment.
+The `production` environment name does not establish approval. Runs using this
+workflow definition refuse reruns; review current main and make a new explicit
+dispatch when another attempt is authorized. Historical runs retain their old
+workflow definition, so these guards do not contain replay of an older unguarded
+run. Historical-run containment requires a separate operational decision. A main
+update after admission does not change the pinned deployment source.
+
 Alchemy resolves account-level Axiom deployment credentials through its provider. At runtime, the
 Worker receives only its scoped ingest token. Mobile and relay clients use their own separately
 provisioned scoped ingest tokens.

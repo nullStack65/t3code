@@ -25,28 +25,33 @@ import {
   ProviderVersionCache,
   resolveLatestProviderVersion,
 } from "../providerMaintenance.ts";
+import { makeCodexGuardFixture } from "../../testUtils/codexGuardFixture.ts";
+import { CodexSessionGuardRefused } from "../CodexSessionGuard.ts";
 import { CodexDriver } from "./CodexDriver.ts";
 
-const testLayer = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-codex-driver-maintenance-",
-}).pipe(
-  Layer.provideMerge(NodeServices.layer),
-  Layer.provideMerge(ServerSettingsService.layerTest()),
-  Layer.provideMerge(ModelManifest.layerTest),
-  Layer.provideMerge(codexResetCreditLayerTest),
-  Layer.provideMerge(
-    Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-      shouldRunScopeWork: () => Effect.succeed(false),
-    }),
-  ),
-  Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
-  Layer.provideMerge(
-    Layer.succeed(
-      HttpClient.HttpClient,
-      HttpClient.make(() => Effect.die("Disabled Codex must not make an HTTP request")),
+const makeTestLayer = (settings: Parameters<typeof ServerSettingsService.layerTest>[0] = {}) =>
+  ServerConfig.layerTest(process.cwd(), {
+    prefix: "t3-codex-driver-maintenance-",
+  }).pipe(
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(ServerSettingsService.layerTest(settings)),
+    Layer.provideMerge(ModelManifest.layerTest),
+    Layer.provideMerge(codexResetCreditLayerTest),
+    Layer.provideMerge(
+      Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+        shouldRunScopeWork: () => Effect.succeed(false),
+      }),
     ),
-  ),
-);
+    Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("Disabled Codex must not make an HTTP request")),
+      ),
+    ),
+  );
+
+const testLayer = makeTestLayer();
 
 // The `#!/bin/sh` stub below cannot be resolved as an executable on Windows.
 const windowsHost = HostProcessPlatform.defaultValue() === "win32";
@@ -368,5 +373,68 @@ it.layer(testLayer)("CodexDriver", (it) => {
         }
       }).pipe(Effect.scoped),
     { skip: windowsHost },
+  );
+  it.effect.skipIf(windowsHost)(
+    "refuses an enrolled host before creating the shadow home or spawning Codex",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const fixture = yield* makeCodexGuardFixture();
+        const sharedHome = NodePath.join(fixture.sourceRoot, "codex-home");
+        const shadowHome = NodePath.join(fixture.sourceRoot, "codex-shadow");
+
+        const failure = yield* CodexDriver.create({
+          instanceId: ProviderInstanceId.make("codex-guarded"),
+          displayName: "Guarded Codex",
+          enabled: false,
+          environment: [],
+          config: {
+            ...CodexDriver.defaultConfig(),
+            binaryPath: NodePath.join(fixture.sourceRoot, "bin", "codex"),
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          },
+        }).pipe(
+          Effect.provide(makeTestLayer({ codexSessionGuard: fixture.settings })),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
+          Effect.flip,
+        );
+
+        if (failure._tag !== "ProviderDriverError") {
+          throw new Error(`Expected a provider driver refusal, received ${failure._tag}`);
+        }
+        expect(failure.detail).toContain("Codex session guard refused");
+        expect(failure.cause).toBeInstanceOf(CodexSessionGuardRefused);
+        const refused = failure.cause as CodexSessionGuardRefused;
+        expect(refused.reason).toBe("unqualified-host");
+        expect(refused.blockers).toContain("provider-descriptor-retention-unqualified");
+        expect(refused.blockers).toContain("provider-root-override");
+        // A refusal happens before the guard could write anything.
+        expect(yield* fs.exists(sharedHome)).toBe(false);
+        expect(yield* fs.exists(shadowHome)).toBe(false);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(windowsHost)("keeps creating instances on a host that never opted in", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-guard-legacy-" });
+      const sharedHome = NodePath.join(tempDir, "codex-home");
+      const shadowHome = NodePath.join(tempDir, "codex-shadow");
+
+      yield* CodexDriver.create({
+        instanceId: ProviderInstanceId.make("codex-legacy"),
+        displayName: "Legacy Codex",
+        enabled: false,
+        environment: [],
+        config: {
+          ...CodexDriver.defaultConfig(),
+          homePath: sharedHome,
+          shadowHomePath: shadowHome,
+        },
+      });
+
+      expect(yield* fs.exists(shadowHome)).toBe(true);
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn), Effect.scoped),
   );
 });
