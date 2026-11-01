@@ -22,6 +22,32 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
 
+describe("Codex resume failure policy", () => {
+  it("preserves fallback for existing settings without a policy", () => {
+    expect(decodeCodexSettings({}).resumeFailurePolicy).toBe("fallback-to-new-thread");
+  });
+
+  it.each(["fallback-to-new-thread", "fail-closed"] as const)(
+    "accepts %s in settings and patches",
+    (resumeFailurePolicy) => {
+      expect(decodeCodexSettings({ resumeFailurePolicy }).resumeFailurePolicy).toBe(
+        resumeFailurePolicy,
+      );
+      expect(
+        decodeServerSettingsPatch({ providers: { codex: { resumeFailurePolicy } } }).providers
+          ?.codex?.resumeFailurePolicy,
+      ).toBe(resumeFailurePolicy);
+    },
+  );
+
+  it("rejects unknown policies at settings and patch boundaries", () => {
+    expect(() => decodeCodexSettings({ resumeFailurePolicy: "unknown" })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { codex: { resumeFailurePolicy: "unknown" } } }),
+    ).toThrow();
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
