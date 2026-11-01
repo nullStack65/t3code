@@ -42,6 +42,7 @@ import {
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   detectSourceControlProviderFromGitRemoteUrl,
+  parseRepositoryNameWithOwnerFromRemoteUrl,
   mergeGitStatusParts,
   normalizeGitRemoteUrl,
   resolveAutoFeatureBranchName,
@@ -278,28 +279,7 @@ function resolvePullRequestWorktreeLocalBranchName(
   return `t3code/pr-${pullRequest.number}/${suffix}`;
 }
 
-export function parseRepositoryNameWithOwnerFromRemoteUrl(
-  url: string | null,
-  providerKind?: ChangeRequest["provider"],
-): string | null {
-  const trimmed = url?.trim() ?? "";
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  const match =
-    /^(?:[^@/\s]+@[^:/\s]+:|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
-      trimmed,
-    );
-  const repositoryNameWithOwner = match?.[1]?.trim() ?? "";
-  // Forgejo HTTP paths can include an installation mount; its API always names owner/repo.
-  if (providerKind === "forgejo" && /^https?:\/\//iu.test(trimmed)) {
-    return repositoryNameWithOwner.length > 0
-      ? repositoryNameWithOwner.split("/").slice(-2).join("/")
-      : null;
-  }
-  return repositoryNameWithOwner.length > 0 ? repositoryNameWithOwner : null;
-}
+export { parseRepositoryNameWithOwnerFromRemoteUrl } from "@t3tools/shared/git";
 
 function parseRepositoryOwnerLogin(nameWithOwner: string | null): string | null {
   const trimmed = nameWithOwner?.trim() ?? "";

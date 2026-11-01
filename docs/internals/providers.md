@@ -93,6 +93,74 @@ checkpoints but cannot roll back its conversation. The [checkpoint boundary](./o
 therefore rejects revert before touching files. Native permission and question option IDs must
 also survive normalization; a display label is not necessarily a valid reply.
 
+## Governed Skills use a separate route
+
+`codex-typed-skills` keeps selected-model policy separate from legacy Codex.
+Configure its `launch` with ordinary `codex` settings and a `source` containing an
+absolute canonical checkout `directory`, clean immutable `sourceCommit`, `pythonPath`,
+selected `provider` namespace, `principal: { id, emailSha256 }`, and `generations`
+map from exact selected model IDs to explicitly qualified generation IDs. The
+operator must authorize that exact source and principal mapping. This is server
+configuration, not model-provided input; a hash alone does not authenticate source.
+Existing offline `candidate` references without `launch` still refuse before
+reading files or starting a provider. Older builds reject this driver kind rather
+than silently dropping a policy flag. Never translate it to legacy `codex`.
+
+The [consumer](../../apps/server/src/provider/CodexSkillConsumer.ts) runs the pinned
+canonical `scripts/build_skill_session.py --context/--output` and `--verify` for
+discovery, bootstrap, startup and the current request. It checks the source head/clean tree,
+returned context, admission and content digests, then supplies only positive load
+paths as supported native Skill inputs alongside generated AGENTS instructions.
+Compatibility patches stay outside the candidate's ordinary discovery root.
+Discovery metadata can match a current natural-language request; it does not grant
+permission. Quoted or historical mentions and bound agent callbacks do not select
+request-only Skills. Matching is conservative and source-description based, not a
+universal natural-language classifier.
+
+The runtime uses its owned PID/stdio/thread observation, current selected model
+acknowledgment, actual executable version and supported `account/read` response.
+A configured email digest maps that account to a policy principal without logging
+account data. A mismatched or unknown account excludes user-scoped apps. Unknown
+selected generation or mismatched model acknowledgment excludes patches while
+model-neutral apps can remain eligible. These facts do not attest the actual
+served model, served effort, billing or fallback, and do not grant tool effects.
+The PR33 observer's portable-admission result remains denied; this consumer does
+not turn its unknown fields into positive PR371 evidence.
+
+Every governed request opens a new provider thread and never resumes old provider
+context, including after source/model changes. It reprojects prior visible user
+and assistant text as attributed conversation data, preserving task corrections
+and reported status. It omits hidden system/developer frames and old Skill inputs.
+Missing current-message identity or oversized visible history refuses rather than
+silently dropping the conversation. Earlier attachments are not replayed. A source
+or observed lifecycle change during resolution refuses; already consumed request
+IDs cannot be retried in that runtime. Accepted T3 history is preserved.
+
+Candidates belong to request scopes: failures or cancellation before discovery
+exposure remove their files. Once discovery is exposed, failed or uncertain
+preparation retains inputs until process disposal. Completed sequential-root inputs
+retire at the reader-state check immediately before scope cleanup, after a fresh
+context has detached old discovery and finished preparation. Collaboration decoded
+before that decision preserves reader inputs and requires a provider restart.
+Collaboration first observed after retirement commits prevents an as-yet
+unsubmitted turn and requires restart, but cannot undo already-committed file
+removal or revoke a previously submitted turn; this is not an atomic native reader
+lease. Active and uncertain inputs stay intact until process
+disposal stops readers before removing files. Account updates revoke applicability
+at decoded ingress, and account identity is reread immediately before submission.
+Intent/task-context activation and capability/condition/native-data positives
+remain unsupported; unknown inputs continue to exclude dependent policies.
+
+This route governs the inputs T3 constructs, not arbitrary filesystem reads or all
+provider discovery. Codex 0.162.1's `skills/extraRoots/set` is additive; shared homes,
+plugins, repository instructions and full-access tools remain unmanaged. Keep
+compatibility patches out of those roots. Config CLI receipts remain
+`runtime-admission-candidate`, with installed and behavior-verified false; building
+or verifying a candidate is not installed/model behavior acceptance. Legacy Codex,
+other providers, delegated children and maintenance text generation are outside
+this governed turn path. No live provider configuration or installation is changed
+by adding the source implementation.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)

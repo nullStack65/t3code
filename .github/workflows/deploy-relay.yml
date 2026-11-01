@@ -1,22 +1,84 @@
 name: Deploy T3 Connect relay
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      reviewed_source_sha:
+        description: "Reviewed current main commit to deploy (full lowercase SHA)"
+        required: true
+        type: string
 
 permissions:
   contents: read
   id-token: none
-  statuses: write
 
 concurrency:
   group: relay-production
   cancel-in-progress: false
 
 jobs:
+  admit:
+    name: Validate manual production request
+    # Reject before assigning a runner; the script also checks the exact values.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'nullStack65/t3code' &&
+      github.repository_owner_id == '112618179' &&
+      github.event.repository.default_branch == 'main' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'nullStack65' &&
+      github.actor_id == '112618179' &&
+      github.triggering_actor == 'nullStack65' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+    steps:
+      - name: Validate owner and reviewed source
+        id: validate
+        uses: actions/github-script@v8
+        env:
+          REVIEWED_SOURCE_SHA: ${{ inputs.reviewed_source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        with:
+          script: |
+            const repository = context.payload.repository;
+            if (context.eventName !== 'workflow_dispatch' ||
+                repository?.full_name !== 'nullStack65/t3code' ||
+                String(repository?.owner?.id) !== '112618179' ||
+                repository?.default_branch !== 'main' ||
+                context.ref !== 'refs/heads/main' ||
+                context.actor !== 'nullStack65' ||
+                process.env.GITHUB_ACTOR_ID !== '112618179' ||
+                process.env.GITHUB_TRIGGERING_ACTOR !== 'nullStack65' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1') {
+              throw new Error('Only a first-attempt owner dispatch on this repository main is allowed.');
+            }
+            const source = process.env.REVIEWED_SOURCE_SHA;
+            if (!/^[0-9a-f]{40}$/.test(source ?? '') ||
+                source !== context.sha || source !== process.env.WORKFLOW_SHA) {
+              throw new Error('Reviewed source must exactly match the dispatched source and workflow commit.');
+            }
+            const { data: main } = await github.rest.repos.getBranch({
+              owner: 'nullStack65', repo: 't3code', branch: 'main',
+            });
+            if (main.commit.sha !== source) {
+              throw new Error('Main changed after dispatch; review its current source and dispatch a new request.');
+            }
+            core.setOutput('source_sha', source);
+
   deploy_relay:
     name: Deploy production relay
+    needs: admit
+    if: >-
+      needs.admit.result == 'success' &&
+      needs.admit.outputs.source_sha == github.sha &&
+      github.run_attempt == '1'
+    permissions:
+      contents: read
+      id-token: none
+      statuses: write
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     environment:
@@ -39,6 +101,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          ref: ${{ needs.admit.outputs.source_sha }}
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
