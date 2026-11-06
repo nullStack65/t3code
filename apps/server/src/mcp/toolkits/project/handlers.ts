@@ -151,6 +151,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   messageId,
                   ...(caller === undefined ? {} : { senderThreadId: caller.id }),
                   text: input.message ?? "",
+                  ...(input.workReference === undefined
+                    ? {}
+                    : { workReference: input.workReference }),
+                  ...(input.workSource === undefined ? {} : { workSource: input.workSource }),
                   attachments,
                 },
               }),

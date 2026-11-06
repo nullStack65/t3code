@@ -40,6 +40,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
+  OrchestrationV2CodexTurnStartCall,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -779,12 +780,35 @@ export function applyToProjection(
             : run,
         ),
       };
+    case "run-attempt.client-call-observed":
+      return {
+        ...base,
+        attempts: base.attempts.map((attempt) =>
+          attempt.id === event.payload.attemptId &&
+          attempt.runId === event.payload.runId &&
+          attempt.rootNodeId === event.payload.rootNodeId &&
+          attempt.providerThreadId === event.payload.providerThreadId &&
+          attempt.providerInstanceId === event.payload.providerInstanceId
+            ? {
+                ...attempt,
+                codexTurnStartCall: { ...attempt.codexTurnStartCall, ...event.payload.observation },
+              }
+            : attempt,
+        ),
+      };
     case "run-attempt.created":
-    case "run-attempt.updated":
+    case "run-attempt.updated": {
+      const recorded = base.attempts.find(
+        (attempt) => attempt.id === event.payload.id,
+      )?.codexTurnStartCall;
       return withLocalVisibleTurnItems({
         ...base,
-        attempts: upsertById(base.attempts, event.payload),
+        attempts: upsertById(base.attempts, {
+          ...event.payload,
+          ...(recorded === undefined ? {} : { codexTurnStartCall: recorded }),
+        }),
       });
+    }
     case "node.updated":
       return {
         ...base,
@@ -1043,6 +1067,9 @@ const encodeThreadUpdatedAt = Schema.encodeEffect(
 const encodeRunPayload = Schema.encodeEffect(Schema.fromJsonString(OrchestrationV2RunJsonSchema));
 const encodeRestartCancelledBackgroundWork = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2RunJsonSchema.fields.restartCancelledBackgroundWork),
+);
+const encodeCodexTurnStartCall = Schema.encodeEffect(
+  Schema.fromJsonString(OrchestrationV2CodexTurnStartCall),
 );
 const encodeRunAttemptPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2RunAttemptJsonSchema),
@@ -1974,6 +2001,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `;
             break;
           }
+          case "run-attempt.client-call-observed": {
+            const call = yield* encodeCodexTurnStartCall(event.payload.observation);
+            // Patch only the historical attempt's evidence; a response can arrive
+            // after terminalization or after a newer attempt has taken ownership.
+            yield* sql`
+              UPDATE orchestration_v2_projection_run_attempts
+              SET payload_json = json_set(payload_json, '$.codexTurnStartCall',
+                json_patch(COALESCE(json_extract(payload_json, '$.codexTurnStartCall'), '{}'), json(${call})))
+              WHERE attempt_id = ${event.payload.attemptId} AND thread_id = ${event.threadId}
+                AND run_id = ${event.payload.runId} AND root_node_id = ${event.payload.rootNodeId}
+                AND provider_thread_id = ${event.payload.providerThreadId}
+                AND provider_instance_id = ${event.payload.providerInstanceId}
+            `;
+            break;
+          }
           case "run-attempt.created":
           case "run-attempt.updated": {
             const payloadJson = yield* encodeRunAttemptPayload(event.payload);
@@ -2015,7 +2057,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 provider_thread_id = excluded.provider_thread_id,
                 provider_turn_id = excluded.provider_turn_id,
                 status = excluded.status,
-                payload_json = excluded.payload_json
+                payload_json = CASE
+                  WHEN json_type(orchestration_v2_projection_run_attempts.payload_json, '$.codexTurnStartCall') IS NOT NULL
+                  THEN json_set(excluded.payload_json, '$.codexTurnStartCall',
+                    json_extract(orchestration_v2_projection_run_attempts.payload_json, '$.codexTurnStartCall'))
+                  ELSE excluded.payload_json END
             `;
             break;
           }

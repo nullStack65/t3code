@@ -192,6 +192,7 @@ function makeDeterministicAdapter(input: {
   readonly driver: ProviderDriverKind;
   readonly capabilities: OrchestrationV2ProviderCapabilities;
   readonly capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>;
+  readonly beforeStart?: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) => Effect.Effect<void>;
   readonly shouldComplete: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) => boolean;
   readonly terminalGate?: (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -262,6 +263,7 @@ function makeDeterministicAdapter(input: {
           resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
           startTurn: (turnInput) =>
             Effect.gen(function* () {
+              if (input.beforeStart !== undefined) yield* input.beforeStart(turnInput);
               yield* Ref.update(input.capturedTurns, (turns) => [
                 ...turns,
                 {
@@ -530,11 +532,15 @@ describe("orchestrator MCP toolkit", () => {
         Effect.gen(function* () {
           const cwd = yield* checkpointWorkspace("orchestrator-mcp-toolkit");
           const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          let beforeWorkStart: (
+            turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+          ) => Effect.Effect<void> = () => Effect.void;
           const parentTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
           const deliveryTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
           const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
             makeDeterministicAdapter({
               instanceId: codexInstanceId,
+              beforeStart: (turn) => beforeWorkStart(turn),
               driver: ProviderDriverKind.make("codex"),
               // Exercise queued completion ownership on a session without native steering.
               // Native mailbox delivery and its completion races have dedicated integration tests.
@@ -554,6 +560,7 @@ describe("orchestrator MCP toolkit", () => {
             }),
             makeDeterministicAdapter({
               instanceId: claudeInstanceId,
+              beforeStart: (turn) => beforeWorkStart(turn),
               driver: ProviderDriverKind.make("claudeAgent"),
               capabilities: ClaudeProviderCapabilitiesV2,
               capturedTurns,
@@ -721,6 +728,20 @@ describe("orchestrator MCP toolkit", () => {
           yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const server = yield* McpServer.McpServer;
+            beforeWorkStart = (turn) =>
+              turn.message.text !== parentPrompt && turn.message.text !== delegatedPrompt
+                ? Effect.void
+                : orchestrator.getThreadProjection(turn.threadId).pipe(
+                    Effect.orDie,
+                    Effect.tap((projection) =>
+                      Effect.sync(() => {
+                        expect(
+                          projection.runs.find((run) => run.id === turn.runId)?.workAffiliation
+                            ?.reference,
+                        ).toEqual({ kind: "obligation", ref: "github:fixture/repo#42" });
+                      }),
+                    ),
+                  );
             yield* orchestrator.dispatch({
               type: "thread.create",
               createdBy: "user",
@@ -743,6 +764,7 @@ describe("orchestrator MCP toolkit", () => {
               threadId: parentThreadId,
               messageId: MessageId.make("message:mcp-parent:start"),
               text: parentPrompt,
+              workReference: { kind: "obligation", ref: "github:fixture/repo#42" },
               attachments: [],
               modelSelection: codexSelection,
               dispatchMode: { type: "start_immediately" },
@@ -999,6 +1021,10 @@ describe("orchestrator MCP toolkit", () => {
               (run) => run.userMessageId === coalescedDelivery.messageId,
             );
             expect(queuedCoalescedRun?.status).toBe("queued");
+            expect(queuedCoalescedRun?.workAffiliation).toEqual({
+              ...parentRun.workAffiliation!,
+              inheritedFrom: { threadId: parentThreadId, runId: parentRun.id },
+            });
             if (queuedCoalescedRun === undefined) {
               return yield* Effect.die(new Error("Queued coalesced delivery missing."));
             }
@@ -1710,6 +1736,21 @@ describe("orchestrator MCP toolkit", () => {
             );
             const delegatedSource = yield* orchestrator.getThreadProjection(
               delegated.childThreadId,
+            );
+            expect(delegatedSource.runs[0]?.workAffiliation).toEqual({
+              ...parentRun.workAffiliation!,
+              inheritedFrom: { threadId: parentThreadId, runId: parentRun.id },
+            });
+            const affiliatedRead = yield* invoke("t3_thread_read", {
+              threadId: delegated.childThreadId,
+              limit: 1,
+              runLimit: 1,
+            });
+            const readWork = yield* decodeThreadReadResult(affiliatedRead.structuredContent).pipe(
+              Effect.orDie,
+            );
+            expect(readWork.recentRuns[0]?.workAffiliation).toEqual(
+              delegatedSource.runs[0]?.workAffiliation,
             );
             expect(delegatedSource.messages[0]).toMatchObject({
               senderThreadId: parentThreadId,

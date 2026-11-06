@@ -114,6 +114,8 @@ export type ThreadManagementTerminalRunStatus = Extract<
 >;
 
 export interface ThreadManagementSendInput {
+  readonly workReference?: import("@t3tools/contracts").OrchestrationV2WorkReference;
+  readonly workSource?: import("@t3tools/contracts").OrchestrationV2WorkSource;
   readonly projectId: ProjectId;
   readonly commandId: CommandId;
   readonly threadId: ThreadId;
@@ -784,6 +786,8 @@ const make = Effect.gen(function* () {
         ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
         ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
         text: input.text,
+        ...(input.workReference === undefined ? {} : { workReference: input.workReference }),
+        ...(input.workSource === undefined ? {} : { workSource: input.workSource }),
         attachments: input.attachments,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
         dispatchMode,

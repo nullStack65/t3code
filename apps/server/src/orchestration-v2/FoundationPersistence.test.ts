@@ -12,7 +12,10 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ExecutionNode,
   type OrchestrationV2Run,
+  type OrchestrationV2RunAttempt,
+  type OrchestrationV2CodexTurnStartCall,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   ProjectId,
@@ -20,8 +23,10 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -351,6 +356,275 @@ it.effect("keeps other database work runnable while discovering compaction candi
 );
 
 it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
+  it.effect(
+    "preserves historical client-call evidence through late response, stale snapshots and rebuild",
+    () =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const now = yield* DateTime.now;
+        const thread = makeThread(ThreadId.make("thread:client-call-evidence"), now);
+        const runId = RunId.make("run:client-call-evidence");
+        const attempt: OrchestrationV2RunAttempt = {
+          id: RunAttemptId.make("attempt:client-call-evidence"),
+          runId,
+          attemptOrdinal: 1,
+          rootNodeId: NodeId.make("root:client-call-evidence"),
+          providerInstanceId,
+          providerThreadId: ProviderThreadId.make("provider:client-call-evidence"),
+          providerTurnId: null,
+          reason: "initial",
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        };
+        const newer = {
+          ...attempt,
+          id: RunAttemptId.make("attempt:client-call-newer"),
+          attemptOrdinal: 2,
+          rootNodeId: NodeId.make("root:client-call-newer"),
+          status: "running" as const,
+          completedAt: null,
+        };
+        const run: OrchestrationV2Run = {
+          id: runId,
+          threadId: thread.id,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: attempt.providerThreadId,
+          userMessageId: MessageId.make("message:client-call"),
+          rootNodeId: newer.rootNodeId,
+          activeAttemptId: newer.id,
+          status: "running",
+          queuePosition: null,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        };
+        yield* sink.write({
+          events: [
+            threadCreatedEvent({ id: "client-call-thread", thread, now }),
+            {
+              id: EventId.make("client-call-run"),
+              type: "run.created",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: run,
+            },
+            ...[attempt, newer].map((payload) => ({
+              id: EventId.make(`client-call-${payload.id}`),
+              type: "run-attempt.created" as const,
+              threadId: thread.id,
+              occurredAt: now,
+              payload,
+            })),
+          ],
+        });
+        let replay = yield* projections.getThreadProjection(thread.id);
+        const call: OrchestrationV2CodexTurnStartCall = {
+          source: "codex_turn_start_client_call",
+          localOperationId: `${attempt.id}:codex-turn-start`,
+          nativeThreadId: "native-client-thread",
+          providerSessionId: ProviderSessionId.make("client-session"),
+          userMessageId: run.userMessageId,
+          requestedModel: "requested-alias",
+          invokedAtMs: 0,
+          exitedAtMs: 10,
+          exitKind: "decoded_response",
+          nativeTurnId: "native-client-turn",
+        };
+        const patch = (id: string, observation = call): OrchestrationV2DomainEvent => ({
+          id: EventId.make(id),
+          type: "run-attempt.client-call-observed",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: {
+            attemptId: attempt.id,
+            runId,
+            rootNodeId: attempt.rootNodeId,
+            providerThreadId: attempt.providerThreadId,
+            providerInstanceId,
+            observation,
+          },
+        });
+        const {
+          nativeTurnId: _nativeTurnId,
+          requestedModel: _requestedModel,
+          ...partialCall
+        } = call;
+        for (const event of [
+          patch("client-call-first"),
+          patch("client-call-duplicate"),
+          patch("client-call-correction", { ...partialCall, exitedAtMs: 12 }),
+          {
+            id: EventId.make("client-call-stale-snapshot"),
+            type: "run-attempt.updated" as const,
+            threadId: thread.id,
+            occurredAt: now,
+            payload: { ...attempt, codexTurnStartCall: call },
+          },
+          {
+            id: EventId.make("client-call-legacy-snapshot"),
+            type: "run-attempt.updated" as const,
+            threadId: thread.id,
+            occurredAt: now,
+            payload: attempt,
+          },
+        ]) {
+          replay = ProjectionStore.applyToProjection(replay, event);
+          yield* sink.write({ events: [event] });
+        }
+        const original = patch("client-call-invalid");
+        if (original.type !== "run-attempt.client-call-observed") return;
+        for (const [n, changes] of [
+          { runId: RunId.make("foreign") },
+          { rootNodeId: NodeId.make("foreign") },
+          { providerThreadId: ProviderThreadId.make("foreign") },
+          { providerInstanceId: ProviderInstanceId.make("foreign") },
+          { attemptId: RunAttemptId.make("missing") },
+        ].entries()) {
+          const event = {
+            ...original,
+            id: EventId.make(`client-call-foreign-${n}`),
+            payload: { ...original.payload, ...changes, observation: { ...call, exitedAtMs: 999 } },
+          };
+          yield* sink.write({ events: [event] });
+          replay = ProjectionStore.applyToProjection(replay, event);
+        }
+        const check = Effect.gen(function* () {
+          const projection = yield* projections.getThreadProjection(thread.id);
+          const old = projection.attempts.find((a) => a.id === attempt.id)!;
+          assert.deepEqual(old.codexTurnStartCall, { ...call, exitedAtMs: 12 });
+          assert.equal(old.status, "completed");
+          assert.equal(old.completedAt?.epochMilliseconds, now.epochMilliseconds);
+          assert.equal(projection.attempts.find((a) => a.id === newer.id)?.status, "running");
+          assert.isUndefined(
+            projection.attempts.find((a) => a.id === newer.id)?.codexTurnStartCall,
+          );
+          assert.equal(projection.runs[0]?.activeAttemptId, newer.id);
+          assert.deepEqual(
+            replay.attempts.find((a) => a.id === attempt.id)?.codexTurnStartCall,
+            old.codexTurnStartCall,
+          );
+        });
+        yield* check;
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        yield* check;
+        // A committed running attempt without the post-call fact cannot prove
+        // whether a client call happened before process loss. Recovery keeps it unknown.
+        const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+          Effect.provide(ServerSettings.layerTest()),
+          Effect.provideService(
+            EffectWorker.OrchestrationEffectWorkerV2,
+            EffectWorker.OrchestrationEffectWorkerV2.of({
+              awaitWork: Effect.void,
+              runRecoveryOnce: Effect.succeed(false),
+              runOnce: Effect.succeed(false),
+              nextClaimableAt: Effect.succeed(Option.none()),
+              drain: () => Effect.succeed(0),
+            }),
+          ),
+        );
+        yield* recovery.recover;
+        const recovered = yield* projections.getThreadProjection(thread.id);
+        assert.equal(recovered.runs[0]?.status, "cancelled");
+        assert.isUndefined(recovered.attempts.find((a) => a.id === newer.id)?.codexTurnStartCall);
+        assert.deepEqual(recovered.attempts.find((a) => a.id === attempt.id)?.codexTurnStartCall, {
+          ...call,
+          exitedAtMs: 12,
+        });
+      }).pipe(Effect.provide(Layer.fresh(layerTest))),
+  );
+
+  it.effect(
+    "retains native command evidence through corrected snapshots and projection rebuild",
+    () =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* EventStore.EventStoreV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const now = yield* DateTime.now;
+        const thread = makeThread(ThreadId.make("thread:native-command-evidence"), now);
+        const item: OrchestrationV2TurnItem = {
+          id: TurnItemId.make("native-command-evidence"),
+          type: "command_execution",
+          threadId: thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "running",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          input: "example",
+          nativeLifecycle: { source: "codex_item_lifecycle", startedAtMs: 0 },
+        };
+        yield* sink.write({
+          events: [
+            threadCreatedEvent({ id: "native-command-thread", thread, now }),
+            {
+              id: EventId.make("native-command-start"),
+              type: "turn-item.updated",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: item,
+            },
+          ],
+        });
+        for (const end of [10, 12]) {
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`native-command-end-${end}`),
+                type: "turn-item.updated",
+                threadId: thread.id,
+                occurredAt: now,
+                payload: {
+                  ...item,
+                  status: "completed",
+                  completedAt: now,
+                  nativeLifecycle: { ...item.nativeLifecycle!, completedAtMs: end },
+                },
+              },
+            ],
+          });
+        }
+        const assertLatest = Effect.gen(function* () {
+          const latest = (yield* projections.getThreadProjection(thread.id)).turnItems[0]!;
+          assert.equal(latest.type, "command_execution");
+          if (latest.type !== "command_execution") return;
+          assert.deepEqual(latest.nativeLifecycle, {
+            source: "codex_item_lifecycle",
+            startedAtMs: 0,
+            completedAtMs: 12,
+          });
+          assert.equal(latest.completedAt?.epochMilliseconds, now.epochMilliseconds);
+        });
+        yield* assertLatest;
+        const history = yield* store.read({ threadId: thread.id }).pipe(Stream.runCollect);
+        assert.deepEqual(
+          history.flatMap(({ event }) =>
+            event.type === "turn-item.updated" && event.payload.type === "command_execution"
+              ? [event.payload.nativeLifecycle?.completedAtMs ?? null]
+              : [],
+          ),
+          [null, 10, 12],
+        );
+        assert.isTrue((yield* maintenance.rebuild).valid);
+        yield* assertLatest;
+      }),
+  );
+
   it.effect("projects oversized tool bodies before both replay and live RPC retention", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -3546,4 +3820,932 @@ it.effect("publishes live events in commit order across concurrent writers", () 
       );
     }).pipe(Effect.provide(layerEventSink));
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("retains historical telemetry through multi-page event compaction and rebuild", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const store = yield* EventStore.EventStoreV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const now = yield* DateTime.now;
+    const thread = makeThread(ThreadId.make("thread:telemetry-compaction"), now);
+    const meta = { threadId: thread.id, occurredAt: now };
+    const workAffiliation = {
+      reference: { kind: "root_assignment" as const, ref: "t3:root/message:pre-pr" },
+      establishedBy: { threadId: thread.id, messageId: MessageId.make("message:assignment") },
+    };
+    const attempt: OrchestrationV2RunAttempt = {
+      id: RunAttemptId.make("attempt:telemetry-old"),
+      runId: RunId.make("run:telemetry-old"),
+      attemptOrdinal: 1,
+      rootNodeId: NodeId.make("root:telemetry-old"),
+      providerInstanceId,
+      providerThreadId: ProviderThreadId.make("provider:telemetry-old"),
+      providerTurnId: null,
+      reason: "initial",
+      status: "completed",
+      startedAt: now,
+      completedAt: now,
+    };
+    const run: OrchestrationV2Run = {
+      id: attempt.runId,
+      threadId: thread.id,
+      ordinal: 1,
+      providerInstanceId,
+      modelSelection,
+      providerThreadId: attempt.providerThreadId,
+      userMessageId: MessageId.make("message:telemetry-old"),
+      rootNodeId: attempt.rootNodeId,
+      activeAttemptId: attempt.id,
+      status: "completed",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: now,
+      checkpointId: null,
+      contextHandoffId: null,
+      workAffiliation,
+    };
+    const unrelatedRun = {
+      ...run,
+      id: RunId.make("run:telemetry-unrelated"),
+      ordinal: 2,
+      providerInstanceId: ProviderInstanceId.make("other-route"),
+      modelSelection: { instanceId: ProviderInstanceId.make("other-route"), model: "other-alias" },
+      workAffiliation: undefined,
+      rootNodeId: null,
+      activeAttemptId: null,
+    };
+    const call: OrchestrationV2CodexTurnStartCall = {
+      source: "codex_turn_start_client_call",
+      localOperationId: `${attempt.id}:codex-turn-start`,
+      nativeThreadId: "historical-native-destination",
+      providerSessionId: ProviderSessionId.make("historical-local-session"),
+      userMessageId: run.userMessageId,
+      invokedAtMs: 0,
+      exitedAtMs: 10,
+      exitKind: "decoded_response",
+    };
+    const request = {
+      id: RuntimeRequestId.make("request:telemetry-compaction"),
+      nodeId: attempt.rootNodeId,
+      providerTurnId: null,
+      nativeRequestRef: null,
+      kind: "user_input" as const,
+      status: "resolved" as const,
+      responseCapability: { type: "message" as const },
+      createdAt: now,
+      resolvedAt: now,
+    };
+    const command: OrchestrationV2TurnItem = {
+      id: TurnItemId.make("command:telemetry-compaction"),
+      ...meta,
+      type: "command_execution",
+      runId: run.id,
+      nodeId: null,
+      providerThreadId: attempt.providerThreadId,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      input: "synthetic command",
+      nativeLifecycle: { source: "codex_item_lifecycle", startedAtMs: 0, completedAtMs: 10 },
+    };
+    const patch = (id: string, exitedAtMs: number): OrchestrationV2DomainEvent => ({
+      ...meta,
+      id: EventId.make(id),
+      type: "run-attempt.client-call-observed",
+      payload: {
+        attemptId: attempt.id,
+        runId: run.id,
+        rootNodeId: attempt.rootNodeId,
+        providerThreadId: attempt.providerThreadId,
+        providerInstanceId,
+        observation: { ...call, exitedAtMs },
+      },
+    });
+    yield* sink.write({
+      events: [
+        threadCreatedEvent({ id: "telemetry:create", thread, now }),
+        { ...meta, id: EventId.make("telemetry:run"), type: "run.created", payload: run },
+        {
+          ...meta,
+          id: EventId.make("telemetry:attempt"),
+          type: "run-attempt.created",
+          payload: attempt,
+        },
+        patch("telemetry:call:first", 10),
+        {
+          ...meta,
+          id: EventId.make("telemetry:request:cause"),
+          type: "runtime-request.updated",
+          payload: { ...request, terminalCause: "response_recorded" },
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:command:first"),
+          type: "turn-item.updated",
+          payload: command,
+        },
+        ...Array.from({ length: 501 }, (_, index) => ({
+          ...meta,
+          id: EventId.make(`telemetry:obsolete:${index}`),
+          type: "thread.metadata-updated" as const,
+          payload: { ...thread, title: `Superseded ${index}` },
+        })),
+        {
+          ...meta,
+          id: EventId.make("telemetry:unrelated"),
+          type: "run.created",
+          payload: unrelatedRun,
+        },
+        patch("telemetry:call:duplicate", 10),
+        patch("telemetry:call:correction", 12),
+        {
+          ...meta,
+          id: EventId.make("telemetry:attempt:stale"),
+          type: "run-attempt.updated",
+          payload: { ...attempt, codexTurnStartCall: call },
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:attempt:absent"),
+          type: "run-attempt.updated",
+          payload: attempt,
+        },
+        // Native snapshots can omit control provenance; its historical event remains necessary.
+        {
+          ...meta,
+          id: EventId.make("telemetry:request:absent"),
+          type: "runtime-request.updated",
+          payload: request,
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:command:correction"),
+          type: "turn-item.updated",
+          payload: {
+            ...command,
+            nativeLifecycle: { ...command.nativeLifecycle!, completedAtMs: 12 },
+          },
+        },
+        {
+          ...meta,
+          id: EventId.make("telemetry:thread:current"),
+          type: "thread.metadata-updated",
+          payload: {
+            ...thread,
+            providerInstanceId: unrelatedRun.providerInstanceId,
+            modelSelection: unrelatedRun.modelSelection,
+          },
+        },
+      ],
+    });
+    const before = yield* projections.getThreadProjection(thread.id);
+    const retainedHistory = () =>
+      store.read({ threadId: thread.id }).pipe(
+        Stream.filter(({ event }) => event.type !== "thread.metadata-updated"),
+        Stream.runCollect,
+      );
+    const history = yield* retainedHistory();
+    const compacted = yield* maintenance.compactEventStore;
+    assert.equal(compacted.deletedEventCount, 501);
+    assert.deepEqual(yield* retainedHistory(), history);
+    assert.isTrue((yield* maintenance.verify).valid);
+    assert.isTrue((yield* maintenance.rebuild).valid);
+    const after = yield* projections.getThreadProjection(thread.id);
+    assert.deepEqual(after, before);
+    assert.deepEqual(
+      after.runs.find((candidate) => candidate.id === run.id)?.workAffiliation,
+      workAffiliation,
+    );
+    assert.deepEqual(
+      after.runs.find((candidate) => candidate.id === run.id)?.modelSelection,
+      modelSelection,
+    );
+    assert.isUndefined(
+      after.runs.find((candidate) => candidate.id === unrelatedRun.id)?.workAffiliation,
+    );
+    assert.deepEqual(after.attempts[0]?.codexTurnStartCall, { ...call, exitedAtMs: 12 });
+    assert.isUndefined(after.runtimeRequests[0]?.terminalCause);
+    assert.deepEqual(
+      history.flatMap(({ event }) =>
+        event.type === "runtime-request.updated" ? [event.payload.terminalCause ?? null] : [],
+      ),
+      ["response_recorded", null],
+    );
+    assert.deepEqual(
+      history.flatMap(({ event }) =>
+        event.type === "turn-item.updated" && event.payload.type === "command_execution"
+          ? [event.payload.nativeLifecycle?.completedAtMs]
+          : [],
+      ),
+      [10, 12],
+    );
+    assert.deepEqual(
+      after.turnItems[0]?.type === "command_execution" ? after.turnItems[0].nativeLifecycle : null,
+      { source: "codex_item_lifecycle", startedAtMs: 0, completedAtMs: 12 },
+    );
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "preserves declared affiliation through event persistence, lifecycle update and projection rebuild",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:work-persistence");
+      const runId = RunId.make("run:work-persistence");
+      const messageId = MessageId.make("message:work-persistence");
+      const workAffiliation = {
+        reference: { kind: "root_assignment" as const, ref: "t3:root/message:assignment" },
+        establishedBy: { threadId, messageId },
+      };
+      const run: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: messageId,
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "starting",
+        requestedAt: now,
+        startedAt: null,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+        workAffiliation,
+      };
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({ id: "event:work:thread", thread: makeThread(threadId, now), now }),
+          {
+            id: EventId.make("event:work:run"),
+            type: "run.created",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: run,
+          },
+        ],
+      });
+      const persisted = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+      assert.deepEqual(persisted.workAffiliation, workAffiliation);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:work:update"),
+            type: "run.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: { ...persisted, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      const rebuilt = (yield* projections.getThreadProjection(threadId)).runs[0]!;
+      assert.equal(rebuilt.status, "completed");
+      assert.deepEqual(rebuilt.workAffiliation, workAffiliation);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+function ownershipToolEvents(
+  threadId: ThreadId,
+  owner: string,
+  version: string,
+  now: DateTime.Utc,
+  nativeItemId = "ownership-shared",
+) {
+  const nodeId = IdAllocator.derive.nodeFromProviderItem({
+    driver: providerDriver,
+    nativeItemId,
+  });
+  const nativeItemRef = {
+    driver: providerDriver,
+    nativeId: nativeItemId,
+    strength: "strong" as const,
+  };
+  const runId = RunId.make(`ownership:run:${owner}`);
+  const providerThreadId = ProviderThreadId.make(`ownership:thread:${owner}`);
+  const providerTurnId = ProviderTurnId.make(`ownership:turn:${owner}`);
+  const rootNodeId = NodeId.make(`ownership:root:${owner}`);
+  return [
+    {
+      id: EventId.make(`ownership:node:${version}`),
+      type: "node.updated",
+      threadId,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: nodeId,
+        threadId,
+        runId,
+        parentNodeId: rootNodeId,
+        rootNodeId,
+        providerThreadId,
+        providerTurnId,
+        nativeItemRef,
+        kind: "tool_call",
+        status: "running",
+        countsForRun: false,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      },
+    },
+    {
+      id: EventId.make(`ownership:item:${version}`),
+      type: "turn-item.updated",
+      threadId,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: IdAllocator.derive.turnItemFromProviderItem({
+          driver: providerDriver,
+          nativeItemId,
+        }),
+        threadId,
+        runId,
+        nodeId,
+        providerThreadId,
+        providerTurnId,
+        nativeItemRef,
+        parentItemId: null,
+        ordinal: 1,
+        status: "running",
+        title: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        type: "dynamic_tool",
+        toolName: "synthetic-private-name",
+        input: { secret: "synthetic-private-input" },
+      },
+    },
+  ] as const satisfies ReadonlyArray<OrchestrationV2DomainEvent>;
+}
+
+const ownershipSnapshot = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* Effect.forEach(
+    [
+      "orchestration_events",
+      "orchestration_command_receipts",
+      "orchestration_v2_projection_nodes",
+      "orchestration_v2_projection_turn_items",
+      "orchestration_v2_turn_item_positions",
+      "orchestration_v2_effect_outbox",
+      "orchestration_v2_projection_metadata",
+    ],
+    (table) => sql.unsafe(`SELECT * FROM ${table} ORDER BY rowid`),
+  );
+});
+
+it.effect("ownership preflight rejects same-batch reassignment atomically in either order", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("ownership:batch");
+    yield* sink.write({
+      events: [
+        threadCreatedEvent({ id: "ownership:create", thread: makeThread(threadId, now), now }),
+      ],
+    });
+    for (const owners of [
+      ["a", "b"],
+      ["b", "a"],
+    ]) {
+      const before = yield* ownershipSnapshot;
+      const result = yield* Effect.result(
+        sink.commitCommand({
+          commandId: CommandId.make(`ownership:rejected:${owners.join("")}`),
+          threadId,
+          commandType: "synthetic",
+          acceptedAt: now,
+          effects: [],
+          events: owners.flatMap((owner) =>
+            ownershipToolEvents(threadId, owner, `${owners.join("")}:${owner}`, now),
+          ),
+        }),
+      );
+      assert.isTrue(result._tag === "Failure");
+      assert.deepEqual(yield* ownershipSnapshot, before);
+    }
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "ownership preflight protects persisted and sibling-only ownership including dropped flags",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("ownership:persisted");
+      const [node, item] = ownershipToolEvents(threadId, "a", "seed", now);
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({
+            id: "ownership:create:persisted",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+          node,
+          item,
+        ],
+      });
+      const nodeChanges: ReadonlyArray<Partial<OrchestrationV2ExecutionNode>> = [
+        { threadId: ThreadId.make("ownership:foreign") },
+        { runId: null },
+        { parentNodeId: null },
+        { rootNodeId: NodeId.make("ownership:foreign-root") },
+        { providerThreadId: null },
+        { providerTurnId: null },
+        { kind: "system" },
+        { nativeItemRef: null },
+        {
+          nativeItemRef: {
+            ...node.payload.nativeItemRef,
+            driver: ProviderDriverKind.make("claude"),
+          },
+        },
+        { nativeItemRef: { ...node.payload.nativeItemRef, nativeId: "other-native-secret" } },
+        { nativeItemRef: { ...node.payload.nativeItemRef, strength: "weak" } },
+      ];
+      const itemChanges: ReadonlyArray<
+        Partial<Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>>
+      > = [
+        { threadId: ThreadId.make("ownership:foreign") },
+        { runId: null },
+        { nodeId: NodeId.make("ownership:other-node") },
+        { providerThreadId: null },
+        { providerTurnId: null },
+        { parentItemId: TurnItemId.make("ownership:parent") },
+        { nativeItemRef: null },
+      ];
+      const attempts: OrchestrationV2DomainEvent[] = [
+        ...nodeChanges.map((change, i) => ({
+          ...node,
+          id: EventId.make(`ownership:node:change:${i}`),
+          threadId: change.threadId ?? threadId,
+          payload: { ...node.payload, ...change },
+        })),
+        ...itemChanges.map((change, i) => ({
+          ...item,
+          id: EventId.make(`ownership:item:change:${i}`),
+          threadId: change.threadId ?? threadId,
+          payload: { ...item.payload, ...change },
+        })),
+        {
+          ...item,
+          id: EventId.make("ownership:item:drop-family"),
+          payload: {
+            ...item.payload,
+            type: "assistant_message",
+            messageId: MessageId.make("ownership:message"),
+            text: "synthetic",
+            streaming: false,
+          },
+        },
+      ];
+      for (const event of attempts) {
+        const before = yield* ownershipSnapshot;
+        const result = yield* Effect.result(sink.write({ events: [event] }));
+        assert.isTrue(result._tag === "Failure");
+        if (result._tag !== "Failure") return;
+        assert.equal(result.failure._tag, "EventSinkWriteError");
+        if (result.failure._tag !== "EventSinkWriteError") return;
+        assert.equal(result.failure.category, "identity_conflict");
+        assert.isUndefined(result.failure.cause);
+        assert.notInclude(JSON.stringify(result.failure), "synthetic-private");
+        assert.notInclude(JSON.stringify(result.failure), "other-native-secret");
+        assert.deepEqual(yield* ownershipSnapshot, before);
+      }
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each(["node", "item"] as const)(
+  "ownership preflight checks %s-only persisted sibling before the other representation",
+  (existing) =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make(`ownership:sibling:${existing}`);
+      const first = ownershipToolEvents(threadId, "a", "seed", now);
+      const second = ownershipToolEvents(threadId, "b", "foreign", now);
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({
+            id: "ownership:create:sibling",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+          existing === "node" ? first[0] : first[1],
+        ],
+      });
+      const before = yield* ownershipSnapshot;
+      const result = yield* Effect.result(
+        sink.write({ events: [existing === "node" ? second[1] : second[0]] }),
+      );
+      assert.isTrue(result._tag === "Failure");
+      assert.deepEqual(yield* ownershipSnapshot, before);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "ownership preflight guards all append sites while preserving stale and accepted receipt short-circuits",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("ownership:entry-points");
+      const runId = RunId.make("ownership:run:a");
+      const attemptId = RunAttemptId.make("ownership:attempt:a");
+      const providerThreadId = ProviderThreadId.make("ownership:thread:a");
+      const run: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make("ownership:user"),
+        rootNodeId: null,
+        activeAttemptId: attemptId,
+        status: "running",
+        queuePosition: null,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const commandId = CommandId.make("ownership:accepted");
+      const original = yield* sink.commitCommand({
+        commandId,
+        threadId,
+        commandType: "synthetic",
+        acceptedAt: now,
+        effects: [],
+        events: [
+          threadCreatedEvent({
+            id: "ownership:create:entry",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+          {
+            id: EventId.make("ownership:run:create"),
+            type: "run.created",
+            threadId,
+            occurredAt: now,
+            payload: run,
+          },
+          {
+            id: EventId.make("ownership:provider-thread:create"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerThreadId,
+              driver: providerDriver,
+              providerInstanceId,
+              providerSessionId: null,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              status: "active",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 1,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          ...ownershipToolEvents(threadId, "a", "seed", now),
+        ],
+      });
+      const events = ownershipToolEvents(threadId, "b", "foreign", now);
+      const current = {
+        threadId,
+        runId,
+        activeAttemptId: attemptId,
+        expectedStatus: "running" as const,
+        events,
+      };
+      const providerOwner = {
+        providerThreadId,
+        runId,
+        activeAttemptId: attemptId,
+        expectedLastRunOrdinal: 1,
+        events,
+      };
+      const effect = {
+        id: "ownership:effect",
+        commandId: CommandId.make("ownership:refused"),
+        threadId,
+        request: { type: "terminal.cleanup" as const },
+      };
+      const before = yield* ownershipSnapshot;
+      const writes: ReadonlyArray<Effect.Effect<unknown, EventSink.EventSinkV2Error>> = [
+        sink.write({ events }),
+        sink.writeWithEffects({ events, effects: [effect] }),
+        sink.writeIfRunCurrent({ ...current, effects: [effect] }),
+        sink.writeIfProviderThreadOwner(providerOwner),
+        sink.commitCommand({
+          commandId: effect.commandId,
+          threadId,
+          commandType: "synthetic",
+          acceptedAt: now,
+          events,
+          effects: [effect],
+        }),
+      ];
+      for (const write of writes) {
+        const result = yield* Effect.result(write);
+        assert.isTrue(result._tag === "Failure");
+        if (result._tag === "Failure" && result.failure._tag === "EventSinkWriteError")
+          assert.equal(result.failure.category, "identity_conflict");
+        assert.deepEqual(yield* ownershipSnapshot, before);
+      }
+      assert.isFalse(
+        (yield* sink.writeIfRunCurrent({ ...current, activeAttemptId: RunAttemptId.make("stale") }))
+          .committed,
+      );
+      assert.isFalse(
+        (yield* sink.writeIfProviderThreadOwner({ ...providerOwner, expectedLastRunOrdinal: 2 }))
+          .committed,
+      );
+      const duplicate = yield* sink.commitCommand({
+        commandId,
+        threadId,
+        commandType: "synthetic",
+        acceptedAt: now,
+        events,
+        effects: [effect],
+      });
+      assert.isFalse(duplicate.committed);
+      assert.deepEqual(duplicate.receipt, original.receipt);
+      assert.deepEqual(duplicate.storedEvents, original.storedEvents);
+      assert.deepEqual(yield* ownershipSnapshot, before);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "ownership preflight preserves runless unknowns and same-owner corrections, and serializes competing owners",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("ownership:concurrent");
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({
+            id: "ownership:create:concurrent",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+        ],
+      });
+      const results = yield* Effect.all(
+        ["a", "b"].map((owner) =>
+          Effect.result(sink.write({ events: ownershipToolEvents(threadId, owner, owner, now) })),
+        ),
+        { concurrency: "unbounded" },
+      );
+      assert.equal(results.filter((r) => r._tag === "Success").length, 1);
+      assert.equal(results.filter((r) => r._tag === "Failure").length, 1);
+      const projection = yield* projections.getThreadProjection(threadId);
+      const winner = projection.nodes[0]!.runId === RunId.make("ownership:run:a") ? "a" : "b";
+      const [node, item] = ownershipToolEvents(threadId, winner, "correction", now);
+      yield* sink.write({
+        events: [
+          { ...node, payload: { ...node.payload, status: "completed", completedAt: now } },
+          {
+            ...item,
+            payload: {
+              ...item.payload,
+              status: "completed",
+              completedAt: now,
+              title: "corrected",
+              nativeItemRef: { ...item.payload.nativeItemRef, fingerprint: "optional", ordinal: 2 },
+            },
+          },
+        ],
+      });
+      assert.equal(
+        (yield* projections.getThreadProjection(threadId)).turnItems[0]!.status,
+        "completed",
+      );
+      // Null native/run context stays structurally stable, not authenticated or filled from a parent.
+      const runless = ownershipToolEvents(threadId, "child", "runless", now).map(
+        (event): OrchestrationV2DomainEvent => {
+          if (event.type === "node.updated")
+            return {
+              ...event,
+              payload: {
+                ...event.payload,
+                id: NodeId.make(`${event.payload.id}:child`),
+                runId: null,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+              },
+            };
+          return {
+            ...event,
+            payload: {
+              ...event.payload,
+              id: TurnItemId.make(`${event.payload.id}:child`),
+              nodeId: NodeId.make(`${node.payload.id}:child`),
+              runId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+            },
+          };
+        },
+      );
+      yield* sink.write({ events: runless });
+      yield* sink.write({
+        events: runless.map((event) => ({ ...event, id: EventId.make(`${event.id}:again`) })),
+      });
+      assert.equal((yield* projections.getThreadProjection(threadId)).nodes.length, 2);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect("ownership preflight leaves already accepted conflicting history replayable", () =>
+  Effect.gen(function* () {
+    const store = yield* EventStore.EventStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("ownership:historical");
+    yield* store.append({
+      events: [
+        threadCreatedEvent({
+          id: "ownership:create:historical",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+        ...ownershipToolEvents(threadId, "a", "historical-a", now),
+        ...ownershipToolEvents(threadId, "b", "historical-b", now),
+      ],
+    });
+    const before = yield* sql`SELECT * FROM orchestration_events ORDER BY sequence`;
+    assert.isTrue((yield* maintenance.rebuild).valid);
+    assert.equal(
+      (yield* projections.getThreadProjection(threadId)).nodes[0]!.runId,
+      RunId.make("ownership:run:b"),
+    );
+    assert.deepEqual(yield* sql`SELECT * FROM orchestration_events ORDER BY sequence`, before);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "ownership preflight refuses before position allocation, append, projection, outbox and publication",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const store = yield* EventStore.EventStoreV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const positions = yield* TurnItemPositionStore.TurnItemPositionStoreV2.pipe(
+        Effect.provide(TurnItemPositionStore.layer),
+      );
+      const projects = yield* ProjectStore.ProjectStoreV2.pipe(Effect.provide(ProjectStore.layer));
+      const calls = { normalize: 0, append: 0, apply: 0, enqueue: 0, notify: 0, publish: 0 };
+      const observed = yield* EventSink.EventSinkV2.pipe(
+        Effect.provide(EventSink.layerFromStores),
+        Effect.provideService(TurnItemPositionStore.TurnItemPositionStoreV2, {
+          ...positions,
+          normalize: (...args) => {
+            calls.normalize++;
+            return positions.normalize(...args);
+          },
+        }),
+        Effect.provideService(ProjectStore.ProjectStoreV2, projects),
+        Effect.provideService(EventStore.EventStoreV2, {
+          ...store,
+          append: (...args) => {
+            calls.append++;
+            return store.append(...args);
+          },
+          publishCommitted: (...args) => {
+            calls.publish++;
+            return store.publishCommitted(...args);
+          },
+        }),
+        Effect.provideService(ProjectionStore.ProjectionStoreV2, {
+          ...projections,
+          apply: (...args) => {
+            calls.apply++;
+            return projections.apply(...args);
+          },
+        }),
+        Effect.provideService(EffectOutbox.EffectOutboxV2, {
+          ...outbox,
+          enqueue: (...args) => {
+            calls.enqueue++;
+            return outbox.enqueue(...args);
+          },
+          notifyAvailable: (...args) => {
+            calls.notify++;
+            return outbox.notifyAvailable(...args);
+          },
+        }),
+      );
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("ownership:before-effects");
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({
+            id: "ownership:create:before-effects",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+        ],
+      });
+      const before = yield* ownershipSnapshot;
+      const result = yield* Effect.result(
+        observed.commitCommand({
+          commandId: CommandId.make("ownership:effects:refused"),
+          threadId,
+          commandType: "synthetic",
+          acceptedAt: now,
+          events: [
+            ...ownershipToolEvents(threadId, "a", "first", now),
+            ...ownershipToolEvents(threadId, "b", "second", now),
+          ],
+          effects: [],
+        }),
+      );
+      assert.isTrue(result._tag === "Failure");
+      assert.deepEqual(calls, {
+        normalize: 0,
+        append: 0,
+        apply: 0,
+        enqueue: 0,
+        notify: 0,
+        publish: 0,
+      });
+      assert.deepEqual(yield* ownershipSnapshot, before);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "ownership preflight rejects conflicting attested batch headers but permits distinct equal items",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("ownership:headers");
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({
+            id: "ownership:create:headers",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+        ],
+      });
+      const [node, item] = ownershipToolEvents(threadId, "a", "headers", now);
+      const before = yield* ownershipSnapshot;
+      for (const changed of [
+        { ...item, threadId: ThreadId.make("ownership:foreign-envelope") },
+        { ...item, providerInstanceId: ProviderInstanceId.make("ownership-other-instance") },
+      ]) {
+        for (const events of [
+          [node, changed],
+          [changed, node],
+        ]) {
+          const result = yield* Effect.result(sink.write({ events }));
+          assert.isTrue(result._tag === "Failure");
+          assert.deepEqual(yield* ownershipSnapshot, before);
+        }
+      }
+      yield* sink.write({
+        events: [
+          ...ownershipToolEvents(threadId, "a", "equal-one", now, "one"),
+          ...ownershipToolEvents(threadId, "a", "equal-two", now, "two"),
+        ],
+      });
+      assert.equal((yield* projections.getThreadProjection(threadId)).turnItems.length, 2);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );

@@ -683,6 +683,127 @@ it.effect("rechecks run ownership immediately before calling the provider", () =
   }).pipe(Effect.provide(layerRunExecutionTest)),
 );
 
+it.effect(
+  "binds client-call sink to immutable execution identities and isolates persistence failure",
+  () =>
+    Effect.gen(function* () {
+      const events: Array<OrchestrationV2DomainEvent> = [];
+      let starts = 0;
+      let failWrite = false;
+      let observedInput: ProviderAdapter.ProviderAdapterV2TurnInput | undefined;
+      const instance = ProviderInstanceId.make("codex");
+      const threadId = ThreadId.make("thread:client-call-sink");
+      const attemptId = RunAttemptId.make("attempt:client-call-sink");
+      const sessionId = ProviderSessionId.make("session:client-call-sink");
+      const runId = RunId.make("run:client-call-sink");
+      const rootId = NodeId.make("root:client-call-sink");
+      const providerId = ProviderThreadId.make("provider:client-call-sink");
+      const layer = RunExecutionService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            McpAppModelContext.layerEmpty,
+            Layer.mock(CheckpointService.CheckpointServiceV2)({
+              captureBaseline: () => Effect.void,
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              writeWithEffects: (payload) =>
+                Effect.sync(() => {
+                  if (failWrite) throw new Error("PRIVATE-write-failure");
+                  events.push(...payload.events);
+                  return [];
+                }),
+            }),
+            IdAllocator.layer,
+            Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              ingestNormalized: () => Effect.succeed([]),
+            }),
+            ServerSettings.layerTest(),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const execution = yield* RunExecutionService.RunExecutionServiceV2;
+        yield* execution.startRootRun({
+          commandId: CommandId.make("command:client-call-sink"),
+          appThread: { id: threadId } as OrchestrationV2AppThread,
+          providerSessionId: sessionId,
+          session: {
+            instanceId: instance,
+            driver,
+            events: Stream.never,
+            startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              Effect.sync(() => {
+                observedInput = input;
+                starts += 1;
+              }),
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          run: {
+            id: runId,
+            threadId,
+            ordinal: 1,
+            providerInstanceId: instance,
+          } as OrchestrationV2Run,
+          rootNode: { id: rootId } as OrchestrationV2ExecutionNode,
+          checkpointScope: {
+            id: CheckpointScopeId.make("scope:client-call-sink"),
+          } as OrchestrationV2CheckpointScope,
+          providerThread: {
+            id: providerId,
+            driver,
+            providerInstanceId: instance,
+          } as OrchestrationV2ProviderThread,
+          attempt: { id: attemptId, providerTurnId: null } as OrchestrationV2RunAttempt,
+          attemptId,
+          providerTurnOrdinal: 1,
+          message: {
+            messageId: MessageId.make("message:client-call-sink"),
+            text: "PRIVATE-prompt",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+          modelSelection: { instanceId: instance, model: "requested-alias" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: process.cwd(),
+          },
+        });
+      }).pipe(Effect.provide(layer));
+      assert.equal(starts, 1);
+      assert.isDefined(observedInput?.recordCodexTurnStartCall);
+      const sink = observedInput!.recordCodexTurnStartCall!;
+      const observation = {
+        source: "codex_turn_start_client_call" as const,
+        localOperationId: `${attemptId}:codex-turn-start`,
+        nativeThreadId: "native-target",
+        providerSessionId: sessionId,
+        userMessageId: observedInput!.message.messageId,
+        invokedAtMs: 0,
+        exitedAtMs: 0,
+        exitKind: "decoded_response" as const,
+      };
+      yield* sink(observation);
+      assert.lengthOf(events, 1);
+      const event = events[0]!;
+      assert.equal(event.type, "run-attempt.client-call-observed");
+      if (event.type !== "run-attempt.client-call-observed") return;
+      assert.equal(event.payload.attemptId, attemptId);
+      assert.equal(event.payload.runId, runId);
+      assert.equal(event.payload.rootNodeId, rootId);
+      assert.equal(event.payload.providerThreadId, providerId);
+      assert.notInclude(JSON.stringify(event), "PRIVATE-prompt");
+      yield* sink({ ...observation, userMessageId: MessageId.make("foreign") });
+      yield* sink({ ...observation, providerSessionId: ProviderSessionId.make("foreign") });
+      yield* sink({ ...observation, localOperationId: "foreign" });
+      assert.lengthOf(events, 1);
+      failWrite = true;
+      yield* sink(observation);
+      assert.equal(starts, 1);
+      assert.lengthOf(events, 1);
+    }),
+);
+
 it.effect("passes the thread's MCP app context to the provider under a safe key", () =>
   Effect.gen(function* () {
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;

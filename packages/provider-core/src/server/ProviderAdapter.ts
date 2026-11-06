@@ -7,6 +7,7 @@ import {
   NodeId,
   OrchestrationV2AppThread,
   OrchestrationV2ConversationMessage,
+  OrchestrationV2CodexTurnStartCall,
   OrchestrationV2ExecutionNode,
   OrchestrationV2ProviderSession,
   OrchestrationV2PlanArtifact,
@@ -403,6 +404,10 @@ export interface ProviderAdapterV2EnsureThreadInput {
 }
 
 export interface ProviderAdapterV2TurnInput {
+  /** Internal post-call observation sink. Never a retry or provider acceptance gate. */
+  readonly recordCodexTurnStartCall?: (
+    observation: OrchestrationV2CodexTurnStartCall,
+  ) => Effect.Effect<void>;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;

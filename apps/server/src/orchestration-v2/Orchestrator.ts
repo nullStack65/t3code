@@ -42,6 +42,8 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2WorkAffiliation,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadShellSnapshot,
@@ -2698,6 +2700,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
           events,
           effects,
+          "thread_settled",
         );
       }
       for (const run of automaticQueuedRuns) {
@@ -4828,6 +4831,84 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           taskIds: delivery.taskIds,
         };
       }
+      const continuationIds = [
+        command.restartContinuationOfRunId,
+        command.usageLimitContinuationOfRunId,
+        command.manualContinuationOfRunId,
+        delegatedCompletion?.parentRunId,
+      ].filter((id): id is RunId => id !== undefined);
+      const workSource =
+        command.workSource ??
+        (continuationIds[0] === undefined
+          ? undefined
+          : {
+              threadId: command.threadId,
+              runId: continuationIds[0],
+            });
+      if (
+        continuationIds.some(
+          (id) => workSource?.threadId !== command.threadId || workSource.runId !== id,
+        )
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Work source conflicts with the referenced continuation.",
+        });
+      }
+      const workSourceProjection =
+        workSource === undefined
+          ? undefined
+          : workSource.threadId === command.threadId
+            ? projection
+            : yield* projectionStore
+                .getThreadRecords(workSource.threadId, ["runs"], {
+                  runIds: [workSource.runId],
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestratorProjectionError({
+                        threadId: workSource.threadId,
+                        cause,
+                      }),
+                  ),
+                );
+      const affiliationSourceRun = workSourceProjection?.runs.find(
+        (run) => run.id === workSource?.runId,
+      );
+      if (workSource !== undefined && affiliationSourceRun === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Work source run is unavailable.",
+        });
+      }
+      const inherited = affiliationSourceRun?.workAffiliation;
+      if (
+        inherited !== undefined &&
+        command.workReference !== undefined &&
+        (inherited.reference.kind !== command.workReference.kind ||
+          inherited.reference.ref !== command.workReference.ref)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Declared work reference conflicts with its source run.",
+        });
+      }
+      // Preserve only the immediate proven inheritance edge; the event graph
+      // retains earlier edges. Missing source affiliation never means zero work.
+      const workAffiliation: OrchestrationV2WorkAffiliation | undefined =
+        inherited !== undefined && workSource !== undefined
+          ? { ...inherited, inheritedFrom: workSource }
+          : command.workReference === undefined
+            ? undefined
+            : {
+                reference: command.workReference,
+                establishedBy: { threadId: command.threadId, messageId: command.messageId },
+              };
+
       // Route durable mailbox deliveries under the thread lock, using the live
       // session's capabilities. Never interrupt/restart a turn for a notification.
       if (
@@ -4920,6 +5001,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             });
 
       if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
+        const workTargetRunId = dispatchMode.targetRunId;
+        const activeReference = projection.runs.find((run) => run.id === workTargetRunId)
+          ?.workAffiliation?.reference;
+        if (
+          (command.workReference !== undefined || command.workSource !== undefined) &&
+          (activeReference?.kind !== workAffiliation?.reference.kind ||
+            activeReference?.ref !== workAffiliation?.reference.ref)
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Steering cannot change a run's work affiliation.",
+          });
+        }
         yield* dispatchSteerIntoRun({
           command,
           events,
@@ -5098,6 +5193,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           completedAt: null,
           checkpointId: null,
           contextHandoffId: null,
+          ...(workAffiliation === undefined ? {} : { workAffiliation }),
           ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
           ...(command.restartContinuationOfRunId === undefined
             ? {}
@@ -5438,6 +5534,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           completedAt: null,
           checkpointId: null,
           contextHandoffId: legacyImportHandoff?.id ?? null,
+          ...(workAffiliation === undefined ? {} : { workAffiliation }),
           ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
           ...(command.restartContinuationOfRunId === undefined
             ? {}
@@ -6135,6 +6232,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           mergeBackHandoff?.id ??
           legacyImportRecoveryHandoff?.id ??
           null,
+        ...(workAffiliation === undefined ? {} : { workAffiliation }),
         ...(command.sourcePlanRef === undefined ? {} : { sourcePlanRef: command.sourcePlanRef }),
         ...(command.restartContinuationOfRunId === undefined
           ? {}
@@ -6812,6 +6910,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         text: command.task,
         attachments: [],
         modelSelection: command.modelSelection,
+        workSource: { threadId: command.parentThreadId, runId: parentRun.id },
         dispatchMode:
           command.workspaceStrategy === undefined
             ? { type: "start_immediately" }
@@ -7352,6 +7451,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "runtime-request.respond" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    terminalCause: NonNullable<
+      OrchestrationV2RuntimeRequest["terminalCause"]
+    > = "response_recorded",
   ) =>
     Effect.gen(function* () {
       const context = yield* projectionStore
@@ -7399,6 +7501,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...runtimeRequest,
         status: "resolved" as const,
         resolvedAt: now,
+        terminalCause,
         ...(command.decision === undefined ? {} : { decision: command.decision }),
         ...(command.answers === undefined ? {} : { answers: command.answers }),
       };
@@ -7612,6 +7715,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
         events,
         effects,
+        "input_dismissed",
       );
     });
 

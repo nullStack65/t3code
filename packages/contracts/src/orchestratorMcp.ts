@@ -29,6 +29,9 @@ import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
+  OrchestrationV2WorkReference,
+  OrchestrationV2WorkSource,
+  OrchestrationV2WorkAffiliation,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import {
@@ -394,6 +397,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
 export type OrchestratorMcpThreadDetail = typeof OrchestratorMcpThreadDetail.Type;
 
 export const OrchestratorMcpThreadRun = Schema.Struct({
+  workAffiliation: Schema.optional(OrchestrationV2WorkAffiliation),
   runId: RunId,
   ordinal: PositiveInt,
   status: OrchestrationV2RunStatus,
@@ -436,6 +440,8 @@ export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadRe
 
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
   threadId: ThreadId,
+  workReference: Schema.optional(OrchestrationV2WorkReference),
+  workSource: Schema.optional(OrchestrationV2WorkSource),
   message: OrchestratorMcpPrompt,
   mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),

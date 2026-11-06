@@ -14,21 +14,28 @@ import {
   RunAttemptId,
   RunId,
   RuntimeRequestId,
+  OrchestrationV2Command,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
+const decodeCommand = Schema.decodeUnknownEffect(OrchestrationV2Command);
 const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.1-codex" };
 const adapter = {
@@ -221,6 +228,10 @@ it.effect(
         assert.equal(
           (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
           "resolved",
+        );
+        assert.equal(
+          (yield* projections.getRuntimeRequest(threadId, requestId))?.terminalCause,
+          mode === "live" ? "response_recorded" : "input_dismissed",
         );
         const response = yield* projections.getRuntimeResponseContext(threadId, requestId);
         assert.equal(response.node?.status, mode === "live" ? "completed" : "cancelled");
@@ -623,4 +634,222 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
     assert.deepEqual(parentAfterChildLink.thread.linkedPullRequest, parentPullRequest);
     assert.deepEqual(parentAfterChildLink.thread.pullRequests, parent.thread.pullRequests);
   }).pipe(Effect.provide(layerTest)),
+);
+
+const layerRequestEvidence = Layer.mergeAll(
+  layerTest,
+  EventStore.layer.pipe(Layer.provide(layerDatabase)),
+  ProjectionMaintenance.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        layerDatabase,
+        EventStore.layer.pipe(Layer.provide(layerDatabase)),
+        ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+      ),
+    ),
+  ),
+);
+
+it.effect("persists distinct request terminal causes before effects and through replay", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const eventStore = yield* EventStore.EventStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const now = yield* DateTime.now;
+    for (const mode of ["accept", "decline", "cancel", "dismiss", "settle"] as const) {
+      const threadId = ThreadId.make(`thread:terminal:${mode}`);
+      const requestId = RuntimeRequestId.make(`request:terminal:${mode}`);
+      const nodeId = NodeId.make(`node:terminal:${mode}`);
+      const sessionId = ProviderSessionId.make(`session:terminal:${mode}`);
+      const live = mode !== "dismiss" && mode !== "settle";
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`create:terminal:${mode}`),
+        threadId,
+        projectId: ProjectId.make("project:terminal"),
+        title: mode,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const request = {
+        id: requestId,
+        nodeId,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input" as const,
+        status: "pending" as const,
+        responseCapability: live
+          ? { type: "live" as const, providerSessionId: sessionId }
+          : { type: "message" as const },
+        createdAt: now,
+        resolvedAt: null,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`session:terminal:${mode}`),
+            type: "provider-session.attached",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: sessionId,
+              driver: adapter.driver,
+              providerInstanceId: instanceId,
+              status: "ready",
+              cwd: "/repo",
+              model: "gpt-6",
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+          },
+          {
+            id: EventId.make(`request:terminal:${mode}`),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: request,
+          },
+          {
+            id: EventId.make(`node:terminal:${mode}`),
+            type: "node.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: nodeId,
+              threadId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: nodeId,
+              kind: "user_input_request",
+              status: "waiting",
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: requestId,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make(`item:terminal:${mode}`),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`item:terminal:${mode}`),
+              threadId,
+              runId: null,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              type: "user_input_request",
+              requestId,
+              questions: [],
+            },
+          },
+        ],
+      });
+      const command = yield* decodeCommand(
+        mode === "settle"
+          ? {
+              type: "thread.settle",
+              commandId: CommandId.make(`control:terminal:${mode}`),
+              threadId,
+            }
+          : mode === "dismiss"
+            ? {
+                type: "thread.user-input.dismiss",
+                commandId: CommandId.make(`control:terminal:${mode}`),
+                threadId,
+                requestId,
+              }
+            : {
+                type: "runtime-request.respond",
+                commandId: CommandId.make(`control:terminal:${mode}`),
+                threadId,
+                requestId,
+                decision: mode,
+                // Unknown public fields cannot nominate a server-owned cause.
+                terminalCause: "thread_settled",
+              },
+      );
+      yield* orchestrator.dispatch(command);
+      const cause =
+        mode === "settle"
+          ? "thread_settled"
+          : mode === "dismiss"
+            ? "input_dismissed"
+            : "response_recorded";
+      const resolved = yield* projections.getRuntimeRequest(threadId, requestId);
+      assert.equal(resolved?.status, "resolved");
+      assert.equal(resolved?.terminalCause, cause);
+      assert.isNotNull(resolved?.resolvedAt);
+      const context = yield* projections.getRuntimeResponseContext(threadId, requestId);
+      assert.equal(context.node?.status, mode === "accept" ? "completed" : "cancelled");
+      assert.equal(context.item?.status, mode === "accept" ? "completed" : "cancelled");
+      // No effect worker ran: response_recorded precedes any adapter acknowledgement.
+      yield* orchestrator.dispatch(command);
+      const reject = yield* Effect.exit(
+        orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make(`reject:terminal:${mode}`),
+          threadId,
+          requestId,
+          decision: "accept",
+        }),
+      );
+      assert.equal(reject._tag, "Failure");
+      const history = (yield* Stream.runCollect(
+        eventStore.read({ threadId, eventType: "runtime-request.updated" }),
+      ))
+        .map((stored) => stored.event)
+        .filter((event) => event.type === "runtime-request.updated");
+      assert.equal(history.length, 2);
+      assert.equal(history[0]?.payload.terminalCause, undefined);
+      assert.equal(history[1]?.payload.terminalCause, cause);
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.deepEqual(yield* projections.getRuntimeRequest(threadId, requestId), resolved);
+      // A later native terminal snapshot can lack provenance; the annotated event is still retained.
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`native:terminal:${mode}`),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...request, status: "resolved", resolvedAt: now },
+          },
+        ],
+      });
+      assert.equal(
+        (yield* projections.getRuntimeRequest(threadId, requestId))?.terminalCause,
+        undefined,
+      );
+      const retained = (yield* Stream.runCollect(
+        eventStore.read({ threadId, eventType: "runtime-request.updated" }),
+      ))
+        .map((stored) => stored.event)
+        .filter((event) => event.type === "runtime-request.updated");
+      assert.equal(retained[1]?.payload.terminalCause, cause);
+    }
+  }).pipe(Effect.provide(Layer.fresh(layerRequestEvidence))),
 );

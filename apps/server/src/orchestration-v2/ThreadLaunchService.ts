@@ -65,6 +65,8 @@ export type ThreadLaunchWorkspaceStrategy =
     };
 
 export interface ThreadLaunchInitialMessage {
+  readonly workReference?: import("@t3tools/contracts").OrchestrationV2WorkReference;
+  readonly workSource?: import("@t3tools/contracts").OrchestrationV2WorkSource;
   readonly messageId?: MessageId;
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly senderThreadId?: ThreadId;
@@ -934,6 +936,12 @@ const make = Effect.gen(function* () {
               threadId,
               messageId,
               text: input.initialMessage.text,
+              ...(input.initialMessage.workReference === undefined
+                ? {}
+                : { workReference: input.initialMessage.workReference }),
+              ...(input.initialMessage.workSource === undefined
+                ? {}
+                : { workSource: input.initialMessage.workSource }),
               ...(input.initialMessage.scheduledTaskId === undefined
                 ? {}
                 : { scheduledTaskId: input.initialMessage.scheduledTaskId }),
