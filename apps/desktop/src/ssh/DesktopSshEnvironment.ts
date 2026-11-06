@@ -66,6 +66,7 @@ export class DesktopSshEnvironment extends Context.Service<
 
 export interface DesktopSshEnvironmentLayerOptions {
   readonly resolveCliRunner?: Effect.Effect<SshTunnel.RemoteT3RunnerOptions>;
+  readonly isolationProfile?: boolean;
 }
 
 function discoverDesktopSshHostsEffect(input?: { readonly homeDir?: string }) {
@@ -124,44 +125,66 @@ const makePasswordPrompt = (
 });
 
 /** @public Service construction is part of the canonical Effect module API. */
-export const make = Effect.gen(function* () {
-  const manager = yield* SshTunnel.SshEnvironmentManager;
-  const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
-  const runtimeContext = yield* Effect.context<DesktopSshEnvironmentRuntimeServices>();
-  const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
+const make = (isolationProfile: boolean) =>
+  Effect.gen(function* () {
+    const manager = yield* SshTunnel.SshEnvironmentManager;
+    const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
+    const runtimeContext = yield* Effect.context<DesktopSshEnvironmentRuntimeServices>();
+    const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
 
-  return DesktopSshEnvironment.of({
-    discoverHosts: (input) =>
-      discoverDesktopSshHostsEffect(input).pipe(
-        Effect.provide(runtimeContext),
-        Effect.withSpan("desktop.ssh.discoverHosts"),
-      ),
-    resolveHost: (alias) =>
-      resolveSshTarget(alias.trim()).pipe(
-        Effect.provide(runtimeContext),
-        Effect.withSpan("desktop.ssh.resolveHost"),
-      ),
-    ensureEnvironment: (target, ensureOptions) =>
-      manager
-        .ensureEnvironment(target, ensureOptions)
-        .pipe(
+    return DesktopSshEnvironment.of({
+      discoverHosts: (input) =>
+        (isolationProfile
+          ? Effect.fail(
+              new SshHostDiscoveryError({
+                message: "SSH discovery is disabled in the isolation profile.",
+                cause: new Error("isolation profile"),
+              }),
+            )
+          : discoverDesktopSshHostsEffect(input)
+        ).pipe(Effect.provide(runtimeContext), Effect.withSpan("desktop.ssh.discoverHosts")),
+      resolveHost: (alias) =>
+        (isolationProfile
+          ? Effect.fail(
+              new SshInvalidTargetError({
+                message: "SSH is disabled in the isolation profile.",
+              }),
+            )
+          : resolveSshTarget(alias.trim())
+        ).pipe(Effect.provide(runtimeContext), Effect.withSpan("desktop.ssh.resolveHost")),
+      ensureEnvironment: (target, ensureOptions) =>
+        (isolationProfile
+          ? Effect.fail(
+              new SshLaunchError({
+                message: "SSH launches are disabled in the isolation profile.",
+                stdout: "",
+              }),
+            )
+          : manager.ensureEnvironment(target, ensureOptions)
+        ).pipe(
           Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
           Effect.provide(runtimeContext),
           Effect.withSpan("desktop.ssh.ensureEnvironment"),
         ),
-    disconnectEnvironment: (target) =>
-      manager
-        .disconnectEnvironment(target)
-        .pipe(
+      disconnectEnvironment: (target) =>
+        (isolationProfile
+          ? Effect.fail(
+              new SshLaunchError({
+                message: "SSH disconnects are disabled in the isolation profile.",
+                stdout: "",
+              }),
+            )
+          : manager.disconnectEnvironment(target)
+        ).pipe(
           Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
           Effect.provide(runtimeContext),
           Effect.withSpan("desktop.ssh.disconnectEnvironment"),
         ),
+    });
   });
-});
 
 export const layer = (options: DesktopSshEnvironmentLayerOptions = {}) =>
-  Layer.effect(DesktopSshEnvironment, make).pipe(
+  Layer.effect(DesktopSshEnvironment, make(options.isolationProfile === true)).pipe(
     Layer.provide(
       SshTunnel.SshEnvironmentManager.layer(
         options.resolveCliRunner === undefined

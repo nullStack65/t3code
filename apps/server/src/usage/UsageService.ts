@@ -28,6 +28,7 @@ import {
   UsageReadError,
 } from "@t3tools/contracts";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -709,4 +710,6 @@ export const make = Effect.gen(function* () {
   return { readSummary, refreshRates } as const;
 });
 
-export const layer = Layer.effect(UsageService, make);
+// Disposable packaged profiles must never scan provider transcripts, even
+// when a configured provider instance points at an account-owned directory.
+export const layer = isIsolationProfileActive() ? layerTest : Layer.effect(UsageService, make);

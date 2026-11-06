@@ -234,6 +234,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         shadowHomePath: "",
         modelCatalogMode: "app-server",
         launchArgs: "",
+        resumeFailurePolicy: "fallback-to-new-thread",
         customModels: [],
       });
       assert.deepEqual(next.providers.claudeAgent, {
@@ -944,6 +945,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         shadowHomePath: "",
         modelCatalogMode: "app-server",
         launchArgs: "",
+        resumeFailurePolicy: "fallback-to-new-thread",
         customModels: [],
       });
       assert.deepEqual(next.providers.claudeAgent, {

@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The isolation regression fixture claims and removes a private profile root.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import * as Cache from "effect/Cache";
 import * as TestClock from "effect/testing/TestClock";
@@ -10,6 +14,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
+import { ISOLATION_ROOT_ENV, prepareIsolationProfile } from "@t3tools/shared/isolationRoot";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubCli from "./GitHubCli.ts";
@@ -44,6 +49,36 @@ const layer = GitHubCli.layer.pipe(
 
 afterEach(() => {
   mockRun.mockReset();
+});
+
+it.live("does not probe gh credentials or launch gh in a claimed isolation profile", () => {
+  const parent = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-github-isolation-test-"));
+  const profileRoot = NodePath.join(parent, "profile");
+  prepareIsolationProfile(profileRoot, [NodePath.join(parent, "account-home")]);
+  const previousRoot = process.env[ISOLATION_ROOT_ENV];
+  process.env[ISOLATION_ROOT_ENV] = profileRoot;
+
+  return Effect.gen(function* () {
+    const github = yield* GitHubCli.make.pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: mockRun,
+      }),
+    );
+    const error = yield* github
+      .execute({ cwd: "/repo", args: ["auth", "status"] })
+      .pipe(Effect.flip);
+    assert.strictEqual(error._tag, "GitHubCliAuthenticationError");
+    expect(mockRun).not.toHaveBeenCalled();
+  }).pipe(
+    Effect.provide(Layer.merge(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer)),
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (previousRoot === undefined) delete process.env[ISOLATION_ROOT_ENV];
+        else process.env[ISOLATION_ROOT_ENV] = previousRoot;
+        NodeFS.rmSync(parent, { recursive: true, force: true });
+      }),
+    ),
+  );
 });
 
 it.effect("shares quota checks, preserves the reserve, and resumes after reset", () =>

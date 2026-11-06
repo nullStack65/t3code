@@ -97,27 +97,30 @@ export const make = Effect.gen(function* () {
   const userDataPath = yield* DesktopAppIdentity.resolveUserDataPath;
   yield* electronApp.setPath("userData", userDataPath);
 
-  const bridge = yield* Effect.acquireRelease(
-    Effect.try({
-      try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
-      catch: (cause) =>
-        new DesktopClerkBridgeInitializationError({
-          stateDir: environment.stateDir,
-          isDevelopment: environment.isDevelopment,
-          cause,
-        }),
-    }),
-    (bridge) =>
-      Effect.try({
-        try: () => bridge.cleanup(),
-        catch: (cause) =>
-          new DesktopClerkBridgeCleanupError({
-            stateDir: environment.stateDir,
-            isDevelopment: environment.isDevelopment,
-            cause,
+  const isPrimaryInstance =
+    environment.isolationProfile !== undefined
+      ? yield* electronApp.requestSingleInstanceLock
+      : yield* Effect.acquireRelease(
+          Effect.try({
+            try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
+            catch: (cause) =>
+              new DesktopClerkBridgeInitializationError({
+                stateDir: environment.stateDir,
+                isDevelopment: environment.isDevelopment,
+                cause,
+              }),
           }),
-      }).pipe(Effect.orDie),
-  );
+          (bridge) =>
+            Effect.try({
+              try: () => bridge.cleanup(),
+              catch: (cause) =>
+                new DesktopClerkBridgeCleanupError({
+                  stateDir: environment.stateDir,
+                  isDevelopment: environment.isDevelopment,
+                  cause,
+                }),
+            }).pipe(Effect.orDie),
+        ).pipe(Effect.map((bridge) => bridge.isPrimaryInstance));
 
   return DesktopClerk.of({
     configure: Effect.gen(function* () {
@@ -131,7 +134,7 @@ export const make = Effect.gen(function* () {
       // forwarded to the running app. In a secondary instance the bridge has
       // already begun quitting the app; app.quit() is asynchronous, so stop
       // bootstrap here before whenReady can fire.
-      if (!bridge.isPrimaryInstance) {
+      if (!isPrimaryInstance) {
         yield* electronApp.quit;
         return yield* Effect.interrupt;
       }

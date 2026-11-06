@@ -1165,6 +1165,8 @@ export const make = Effect.gen(function* () {
   };
 });
 
+export const layerDisabled = Layer.effect(DeviceService, makeWithHosts(new Map()));
+
 export const layer = Layer.effect(DeviceService, make).pipe(Layer.provide(LocalDeviceHost.layer));
 
 /** State stream for WS subscribers: current snapshot first, then every change. */

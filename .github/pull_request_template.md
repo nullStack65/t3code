@@ -31,3 +31,11 @@ we may close it without merging it, or never review it.
 - [ ] I explained what changed and why
 - [ ] I included before/after screenshots for any UI changes
 - [ ] I included a video for animation/interaction changes
+
+## Provenance
+
+<!-- Fork convention: https://github.com/nullStack65/closura-agent-config/blob/master/docs/delivery/provenance-trailers.md
+     Use `Model: human` for your own work. Commits carry Model/Task/Agent (optional Lane) trailers. -->
+
+Model: <model id or 'human'>
+Task: <type>

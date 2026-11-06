@@ -29,17 +29,29 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
-const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
+const makeDesktopClerkLayer = (
+  isDevelopment = true,
+  events: string[] = [],
+  isolationProfile?: NonNullable<
+    DesktopEnvironment.DesktopEnvironment["Service"]["isolationProfile"]
+  >,
+) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: "/tmp/t3-state",
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
+    userDataDirectory: isolationProfile?.userDataDirectory ?? "/tmp/app-data/t3code-dev",
+    isolationProfile,
     userDataDirName: isDevelopment ? "t3code-dev" : "t3code",
     legacyUserDataDirName: isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)",
     path: { join: (...parts: ReadonlyArray<string>) => parts.join("/") },
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
   const electronApp = {
+    requestSingleInstanceLock: Effect.sync(() => {
+      events.push("requestSingleInstanceLock");
+      return true;
+    }),
     setPath: (name: string, value: string) =>
       Effect.sync(() => {
         events.push(`setPath:${name}:${value}`);
@@ -61,6 +73,28 @@ describe("DesktopClerk", () => {
   beforeEach(() => {
     createClerkBridgeMock.mockReset();
     storageMock.mockReset();
+  });
+
+  it.effect("uses the isolated Electron lock without creating a Clerk bridge", () => {
+    const profile = {
+      root: "/tmp/t3-profile",
+      homeDirectory: "/tmp/t3-profile",
+      appDataDirectory: "/tmp/t3-profile/Library/Application Support",
+      userDataDirectory: "/tmp/t3-profile/userData",
+      sessionDataDirectory: "/tmp/t3-profile/sessionData",
+      t3Home: "/tmp/t3-profile/.t3",
+    };
+    const events: string[] = [];
+
+    return Effect.gen(function* () {
+      yield* Effect.scoped(Layer.build(makeDesktopClerkLayer(true, events, profile)));
+      assert.deepEqual(events, [
+        `setPath:userData:${profile.userDataDirectory}`,
+        "requestSingleInstanceLock",
+      ]);
+      assert.equal(createClerkBridgeMock.mock.calls.length, 0);
+      assert.equal(storageMock.mock.calls.length, 0);
+    });
   });
 
   it.effect("acquires and releases the SDK bridge with the layer", () => {

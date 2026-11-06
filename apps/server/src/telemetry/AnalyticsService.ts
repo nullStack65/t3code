@@ -20,6 +20,7 @@ import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import packageJson from "../../package.json" with { type: "json" };
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import * as ServerConfig from "../config.ts";
 import { getTelemetryIdentifier } from "./Identify.ts";
 
@@ -84,6 +85,12 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  if (isIsolationProfileActive()) {
+    return AnalyticsService.of({
+      record: () => Effect.void,
+      flush: Effect.void,
+    });
+  }
   const telemetryConfig = yield* TelemetryEnvConfig;
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;

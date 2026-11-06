@@ -25,6 +25,28 @@ import * as SourceControlDiscovery from "./SourceControlDiscovery.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import { firstNonEmptyLine } from "./SourceControlProviderDiscovery.ts";
 
+it.effect(
+  "isolation discovery returns without constructing providers or probing host tools",
+  () => {
+    let liveProviderLayerConstructed = false;
+    const discoveryLayer = SourceControlDiscovery.layerForIsolationProfile(
+      true,
+      (): Layer.Layer<SourceControlDiscovery.SourceControlDiscovery, never, never> => {
+        liveProviderLayerConstructed = true;
+        throw new Error("live source-control adapters must not be constructed in isolation");
+      },
+    );
+
+    return Effect.gen(function* () {
+      const service = yield* SourceControlDiscovery.SourceControlDiscovery;
+      const result = yield* service.discover;
+      assert.isFalse(liveProviderLayerConstructed);
+      assert.deepStrictEqual(result.sourceControlProviders, []);
+      assert.isTrue(result.versionControlSystems.every((item) => item.status === "missing"));
+    }).pipe(Effect.provide(discoveryLayer));
+  },
+);
+
 const sourceControlProviderRegistryTestLayer = (input: {
   readonly bitbucket: Partial<BitbucketApi.BitbucketApi["Service"]>;
   readonly process: Partial<VcsProcess.VcsProcess["Service"]>;

@@ -582,4 +582,28 @@ export const make = Effect.gen(function* () {
   return CloudCliTokenManager.of({ get, getExisting, hasCredential, store, clear });
 });
 
+export const layerDisabled = Layer.succeed(
+  CloudCliTokenManager,
+  CloudCliTokenManager.of({
+    get: Effect.fail(
+      new CloudCliAuthorizationError({
+        cause: new Error("Cloud authentication is disabled in the isolation profile."),
+      }),
+    ),
+    getExisting: Effect.succeed(Option.none()),
+    hasCredential: Effect.succeed(false),
+    store: () =>
+      Effect.fail(
+        new CloudCliAuthorizationError({
+          cause: new Error("Cloud authentication is disabled in the isolation profile."),
+        }),
+      ),
+    clear: Effect.fail(
+      new CloudCliAuthorizationError({
+        cause: new Error("Cloud authentication is disabled in the isolation profile."),
+      }),
+    ),
+  }),
+);
+
 export const layer = Layer.effect(CloudCliTokenManager, make);

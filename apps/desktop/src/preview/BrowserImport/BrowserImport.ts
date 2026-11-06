@@ -11,6 +11,7 @@ import type {
   BrowserImportUnavailableReason,
 } from "@t3tools/contracts";
 import { BrowserImportFailureReason } from "@t3tools/contracts";
+import { isIsolationProfileActive } from "@t3tools/shared/isolationRoot";
 import * as Context from "effect/Context";
 import type { Session } from "electron";
 import * as Effect from "effect/Effect";
@@ -178,21 +179,23 @@ export const make = Effect.gen(function* BrowserImportMake() {
   >();
   const pathContext = yield* sourcePathContext;
 
-  const listSources: Effect.Effect<ReadonlyArray<BrowserImportSource>> = Effect.forEach(
-    BROWSER_IMPORT_SOURCES,
-    Effect.fnUntraced(function* (definition) {
-      const unavailable = yield* unavailableReason(definition, pathContext);
-      return {
-        id: definition.id,
-        name: definition.name,
-        // Listing profiles touches the source's own files, so skip it when the
-        // source is unusable anyway.
-        profiles:
-          unavailable === undefined ? yield* listSourceProfiles(definition, pathContext) : [],
-        ...(unavailable === undefined ? {} : { unavailable }),
-      } satisfies BrowserImportSource;
-    }),
-  ).pipe(Effect.provide(platformServices));
+  const listSources: Effect.Effect<ReadonlyArray<BrowserImportSource>> = isIsolationProfileActive()
+    ? Effect.succeed([])
+    : Effect.forEach(
+        BROWSER_IMPORT_SOURCES,
+        Effect.fnUntraced(function* (definition) {
+          const unavailable = yield* unavailableReason(definition, pathContext);
+          return {
+            id: definition.id,
+            name: definition.name,
+            // Listing profiles touches the source's own files, so skip it when the
+            // source is unusable anyway.
+            profiles:
+              unavailable === undefined ? yield* listSourceProfiles(definition, pathContext) : [],
+            ...(unavailable === undefined ? {} : { unavailable }),
+          } satisfies BrowserImportSource;
+        }),
+      ).pipe(Effect.provide(platformServices));
 
   const importCookies = Effect.fn("BrowserImport.importCookies")(function* (input: {
     readonly input: BrowserImportInput;
@@ -200,6 +203,12 @@ export const make = Effect.gen(function* BrowserImportMake() {
     readonly persistent: boolean;
     readonly namespace?: BrowserSession.BrowserSessionPartitionNamespace;
   }) {
+    if (isIsolationProfileActive()) {
+      return yield* new BrowserImportFailedError({
+        sourceId: input.input.sourceId,
+        reason: "readFailed",
+      });
+    }
     const definition = BROWSER_IMPORT_SOURCES.find(
       (candidate) => candidate.id === input.input.sourceId,
     );

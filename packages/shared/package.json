@@ -283,6 +283,10 @@
       "types": "./src/hostProcess.ts",
       "import": "./src/hostProcess.ts"
     },
+    "./isolationRoot": {
+      "types": "./src/isolationRoot.ts",
+      "import": "./src/isolationRoot.ts"
+    },
     "./testing/longTempDir": {
       "types": "./src/testing/longTempDir.ts",
       "import": "./src/testing/longTempDir.ts"
