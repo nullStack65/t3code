@@ -1,10 +1,30 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  newThreadCreationPreparesWorktree,
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskBranchLabel,
   resolveNewTaskLocalWorkspaceSelection,
 } from "./new-task-context-presentation";
+
+describe("newThreadCreationPreparesWorktree", () => {
+  it("reports worktree preparation for local-mode coding and legacy coding creations", () => {
+    expect(
+      newThreadCreationPreparesWorktree({ executionScope: "coding", workspaceMode: "local" }),
+    ).toBe(true);
+    expect(newThreadCreationPreparesWorktree({ workspaceMode: "local" })).toBe(true);
+  });
+
+  it("does not report repository setup for Coordinator creation", () => {
+    expect(
+      newThreadCreationPreparesWorktree({
+        executionScope: "coordinator",
+        workspaceMode: "worktree",
+      }),
+    ).toBe(false);
+    expect(newThreadCreationPreparesWorktree(null)).toBe(false);
+  });
+});
 
 describe("resolveNewTaskLocalWorkspaceSelection", () => {
   it("waits for refs instead of carrying a worktree base into Current checkout", () => {

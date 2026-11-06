@@ -36,6 +36,7 @@ export interface ProjectThreadStartTurnSpec {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly executionScope: "coding" | "coordinator";
   readonly workspaceMode: "local" | "worktree";
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -51,7 +52,8 @@ export interface ProjectThreadStartTurnSpec {
  */
 export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpec) {
   const title = deriveThreadTitleFromPrompt(spec.text);
-  const isWorktree = spec.workspaceMode === "worktree";
+  const isCoordinator = spec.executionScope === "coordinator";
+  const isWorktree = !isCoordinator && spec.workspaceMode === "worktree";
   return {
     commandId: CommandId.make(spec.commandId),
     threadId: ThreadId.make(spec.threadId),
@@ -73,8 +75,11 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
         modelSelection: spec.modelSelection,
         runtimeMode: spec.runtimeMode,
         interactionMode: spec.interactionMode,
-        branch: spec.branch,
-        worktreePath: isWorktree ? null : spec.worktreePath,
+        executionScope: spec.executionScope,
+        branch: isCoordinator ? null : spec.branch,
+        // Coding creates always ask the server for a destination-owned worktree.
+        // Coordinator gets its dedicated scratch directory from the server.
+        worktreePath: null,
         createdAt: spec.createdAt,
       },
       ...(isWorktree

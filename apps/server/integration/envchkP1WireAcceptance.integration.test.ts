@@ -9,6 +9,7 @@ import {
   WsRpcGroup,
   type OrchestrationThreadStreamItem,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { assert, it } from "@effect/vitest";
@@ -52,6 +53,7 @@ const findFreePort = (): Promise<number> =>
 
 interface Fixture {
   readonly baseDir: string;
+  readonly workspaceRoot: string;
   readonly root: string;
   readonly fakeDir: string;
   readonly argvLogPath: string;
@@ -65,6 +67,9 @@ const makeFixture = (): Effect.Effect<Fixture> =>
     const fs = yield* Effect.promise(() => import("node:fs/promises"));
     const baseDir = yield* Effect.promise(() =>
       fs.mkdtemp(NodePath.join(NodeOS.tmpdir(), "envchk-p1-")),
+    );
+    const workspaceRoot = yield* Effect.promise(() =>
+      fs.mkdtemp(NodePath.join(NodeOS.tmpdir(), "envchk-p1-repo-")),
     );
     const root = yield* Effect.promise(() =>
       fs.mkdtemp(NodePath.join(NodeOS.tmpdir(), "envchk-p1-root-")),
@@ -92,15 +97,36 @@ const makeFixture = (): Effect.Effect<Fixture> =>
         ', String(process.pid) + "\\n");\n' +
         execScriptSource({ scriptPath: mockAgentPath, argvLogPath }),
     });
-    yield* Effect.promise(
-      () =>
-        new Promise<void>((resolve, reject) => {
-          NodeChildProcess.execFile("git", ["init", "-q"], { cwd: root }, (error) =>
-            error ? reject(error) : resolve(),
-          );
-        }),
-    );
-    return { baseDir, root, fakeDir, argvLogPath, pidLogPath, wrapperPath };
+    yield* Effect.promise(async () => {
+      NodeChildProcess.execFileSync("git", ["init", "-q", "--initial-branch=main"], {
+        cwd: workspaceRoot,
+        stdio: "ignore",
+      });
+      NodeChildProcess.execFileSync("git", ["config", "user.email", "test@example.com"], {
+        cwd: workspaceRoot,
+        stdio: "ignore",
+      });
+      NodeChildProcess.execFileSync("git", ["config", "user.name", "Test User"], {
+        cwd: workspaceRoot,
+        stdio: "ignore",
+      });
+      await fs.writeFile(NodePath.join(workspaceRoot, "README.md"), "committed base\n");
+      NodeChildProcess.execFileSync("git", ["add", "README.md"], {
+        cwd: workspaceRoot,
+        stdio: "ignore",
+      });
+      NodeChildProcess.execFileSync("git", ["commit", "-m", "Initial"], {
+        cwd: workspaceRoot,
+        stdio: "ignore",
+      });
+      await fs.rm(root, { recursive: true, force: true });
+      NodeChildProcess.execFileSync(
+        "git",
+        ["worktree", "add", "-b", "t3/envchk-p1", root, "main"],
+        { cwd: workspaceRoot, stdio: "ignore" },
+      );
+    });
+    return { baseDir, workspaceRoot, root, fakeDir, argvLogPath, pidLogPath, wrapperPath };
   }).pipe(Effect.orDie);
 
 interface SpawnedServer {
@@ -221,6 +247,18 @@ interface OwnedProcessSignal {
 const defaultOwnedProcessSignal: OwnedProcessSignal = {
   terminate: (pid) => process.kill(pid, "SIGKILL"),
   isAlive: (pid) => {
+    if (HostProcessPlatform.defaultValue() === "linux") {
+      try {
+        const stat = NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8");
+        const state = stat
+          .slice(stat.lastIndexOf(")") + 1)
+          .trimStart()
+          .split(" ", 1)[0];
+        if (state === "Z" || state === "X") return false;
+      } catch {
+        // Fall through to the signal probe if procfs is unavailable.
+      }
+    }
     try {
       process.kill(pid, 0);
       return true;
@@ -372,6 +410,7 @@ const cleanupFixtureProcesses = async (input: FixtureCleanupInput): Promise<void
     const fs = await import("node:fs/promises");
     await Promise.all([
       fs.rm(fixture.baseDir, { recursive: true, force: true }),
+      fs.rm(fixture.workspaceRoot, { recursive: true, force: true }),
       fs.rm(fixture.fakeDir, { recursive: true, force: true }),
       fs.rm(fixture.root, { recursive: true, force: true }),
     ]);
@@ -504,7 +543,7 @@ it.live(
               commandId: CommandId.make("envchk-p1-project-create"),
               projectId: PROJECT_ID,
               title: "ENVCHK:P1",
-              workspaceRoot: fixture.root,
+              workspaceRoot: fixture.workspaceRoot,
               createdAt: "2026-09-28T00:00:00.000Z",
             });
             yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
@@ -516,8 +555,8 @@ it.live(
               modelSelection: { instanceId: GROK_INSTANCE, model: GROK_MODEL },
               runtimeMode: "full-access",
               interactionMode: "default",
-              branch: null,
-              worktreePath: null,
+              branch: "t3/envchk-p1",
+              worktreePath: fixture.root,
               createdAt: "2026-09-28T00:00:00.000Z",
             });
 
@@ -777,6 +816,7 @@ it.live(
           );
           return {
             baseDir,
+            workspaceRoot: root,
             root,
             fakeDir,
             argvLogPath: NodePath.join(fakeDir, "argv.log"),

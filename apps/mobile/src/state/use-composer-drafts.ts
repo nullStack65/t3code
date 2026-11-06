@@ -326,6 +326,7 @@ export interface ComposerDraft {
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly executionScope?: "coding" | "coordinator";
   readonly workspaceSelection?: ComposerDraftWorkspaceSelection;
   /**
    * Set on new-task drafts only. The project is stored here rather than in
@@ -357,7 +358,12 @@ export interface ComposerDraftWorkspaceSelection {
 
 export type ComposerDraftSettingsUpdate = Pick<
   ComposerDraft,
-  "modelSelection" | "runtimeMode" | "interactionMode" | "workspaceSelection" | "project"
+  | "modelSelection"
+  | "runtimeMode"
+  | "interactionMode"
+  | "executionScope"
+  | "workspaceSelection"
+  | "project"
 >;
 
 const ComposerDraftWorkspaceSelectionSchema = Schema.Struct({
@@ -388,6 +394,7 @@ const ComposerDraftSchema = Schema.Struct({
   modelSelection: Schema.optional(ModelSelectionSchema),
   runtimeMode: Schema.optional(RuntimeModeSchema),
   interactionMode: Schema.optional(ProviderInteractionModeSchema),
+  executionScope: Schema.optional(Schema.Literals(["coding", "coordinator"])),
   workspaceSelection: Schema.optional(ComposerDraftWorkspaceSelectionSchema),
   project: Schema.optional(ComposerDraftProjectSchema),
 });
@@ -543,6 +550,7 @@ function isEmptyDraft(draft: ComposerDraft): boolean {
     draft.modelSelection === undefined &&
     draft.runtimeMode === undefined &&
     draft.interactionMode === undefined &&
+    draft.executionScope === undefined &&
     draft.workspaceSelection === undefined
   );
 }
@@ -619,7 +627,7 @@ export function decodePersistedComposerState(value: unknown): {
             // model-precedence fix carry a bare modelSelection with no
             // other selector settings. Strip it so the next compose pass
             // re-resolves project → sticky → provider defaults. Drafts
-            // with runtime/interaction/workspace settings or actual text /
+            // with runtime/interaction/scope/workspace settings or actual text /
             // attachments were deliberately configured and are left alone.
             isNewTaskDraftKey(key) &&
               draft.modelSelection &&
@@ -627,6 +635,7 @@ export function decodePersistedComposerState(value: unknown): {
               draft.attachments.length === 0 &&
               draft.runtimeMode === undefined &&
               draft.interactionMode === undefined &&
+              draft.executionScope === undefined &&
               draft.workspaceSelection === undefined
               ? { ...draft, modelSelection: undefined }
               : draft,
@@ -1148,6 +1157,8 @@ export async function removeDeliveredCloudQueuedMessage(
         (editor.runtimeMode !== undefined && editor.runtimeMode !== message.runtimeMode) ||
         (editor.interactionMode !== undefined &&
           editor.interactionMode !== message.interactionMode) ||
+        (editor.executionScope !== undefined &&
+          editor.executionScope !== message.creation?.executionScope) ||
         (editor.workspaceSelection !== undefined &&
           (editor.workspaceSelection.mode !== message.creation?.workspaceMode ||
             editor.workspaceSelection.branch !== message.creation?.branch ||
@@ -1471,6 +1482,7 @@ export function clearComposerDraftContentState(
   draftKey: string,
   options?: {
     readonly clearModelSelection?: boolean;
+    readonly clearExecutionScope?: boolean;
     readonly clearWorkspaceSelection?: boolean;
   },
 ): Record<string, ComposerDraft> {
@@ -1485,6 +1497,7 @@ export function clearComposerDraftContentState(
     importedShareIds: _importedShareIds,
     context: _context,
     modelSelection,
+    executionScope,
     workspaceSelection,
     project: _project,
     ...retained
@@ -1492,6 +1505,7 @@ export function clearComposerDraftContentState(
   const draft = {
     ...retained,
     ...(options?.clearModelSelection || modelSelection === undefined ? {} : { modelSelection }),
+    ...(options?.clearExecutionScope || executionScope === undefined ? {} : { executionScope }),
     ...(options?.clearWorkspaceSelection || workspaceSelection === undefined
       ? {}
       : { workspaceSelection }),
@@ -1675,6 +1689,7 @@ export function sameComposerDraftState(a: ComposerDraft, b: ComposerDraft): bool
     a.modelSelection === b.modelSelection &&
     a.runtimeMode === b.runtimeMode &&
     a.interactionMode === b.interactionMode &&
+    a.executionScope === b.executionScope &&
     a.workspaceSelection === b.workspaceSelection
   );
 }
@@ -1708,7 +1723,12 @@ export function undoComposerDraftMergeState(
   // A setting still holding the merge's value is the merge's doing: restore
   // the snapshot's. One the user changed since the merge stays theirs.
   const undoSetting = <
-    K extends "modelSelection" | "runtimeMode" | "interactionMode" | "workspaceSelection",
+    K extends
+      | "modelSelection"
+      | "runtimeMode"
+      | "interactionMode"
+      | "executionScope"
+      | "workspaceSelection",
   >(
     key: K,
   ): ComposerDraft[K] => (existing[key] === merged[key] ? snapshot[key] : existing[key]);
@@ -1728,6 +1748,7 @@ export function undoComposerDraftMergeState(
     modelSelection: undoSetting("modelSelection"),
     runtimeMode: undoSetting("runtimeMode"),
     interactionMode: undoSetting("interactionMode"),
+    executionScope: undoSetting("executionScope"),
     workspaceSelection: undoSetting("workspaceSelection"),
   };
   return withComposerDraft(current, draftKey, draft);
@@ -1763,6 +1784,7 @@ export function clearComposerDraftContent(
   draftKey: string,
   options?: {
     readonly clearModelSelection?: boolean;
+    readonly clearExecutionScope?: boolean;
     readonly clearWorkspaceSelection?: boolean;
     // Send clears the draft while the durable outbox write is still in
     // flight. Sweeping then would race the write: a failed enqueue rolls the

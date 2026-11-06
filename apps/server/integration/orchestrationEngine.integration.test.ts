@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
 
 import {
   ApprovalRequestId,
@@ -49,6 +50,21 @@ const APPROVAL_REQUEST_ID = asApprovalRequestId("req-approval-1");
 type IntegrationProvider = ProviderDriverKind;
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_PROVIDER = ProviderDriverKind.make("claudeAgent");
+
+function threadWorktreePath(harness: OrchestrationIntegrationHarness, name: string) {
+  return NodePath.join(harness.rootDir, "worktrees", name);
+}
+
+function createThreadWorktree(harness: OrchestrationIntegrationHarness, name: string) {
+  const branch = `t3/integration-${name}`;
+  const worktreePath = threadWorktreePath(harness, name);
+  NodeFS.mkdirSync(NodePath.dirname(worktreePath), { recursive: true });
+  NodeChildProcess.execFileSync("git", ["worktree", "add", "-b", branch, worktreePath, "main"], {
+    cwd: harness.workspaceDir,
+    stdio: "ignore",
+  });
+  return { branch, worktreePath };
+}
 
 function nowIso() {
   return "2026-05-01T00:00:00.000Z";
@@ -136,6 +152,8 @@ const seedProjectAndThread = (harness: OrchestrationIntegrationHarness) =>
       createdAt,
     });
 
+    const worktree = createThreadWorktree(harness, "thread-1");
+
     yield* harness.engine.dispatch({
       type: "thread.create",
       commandId: CommandId.make("cmd-thread-create"),
@@ -148,8 +166,8 @@ const seedProjectAndThread = (harness: OrchestrationIntegrationHarness) =>
       },
       interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       runtimeMode: "approval-required",
-      branch: null,
-      worktreePath: harness.workspaceDir,
+      branch: worktree.branch,
+      worktreePath: worktree.worktreePath,
       createdAt,
     });
   });
@@ -336,6 +354,8 @@ it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
           createdAt,
         });
 
+        const worktree = createThreadWorktree(harness, "real-codex-thread");
+
         yield* harness.engine.dispatch({
           type: "thread.create",
           commandId: CommandId.make("cmd-thread-create-real-codex"),
@@ -348,8 +368,8 @@ it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",
-          branch: null,
-          worktreePath: harness.workspaceDir,
+          branch: worktree.branch,
+          worktreePath: worktree.worktreePath,
           createdAt,
         });
 
@@ -910,7 +930,10 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         true,
       );
       assert.equal(
-        NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
+        NodeFS.readFileSync(
+          NodePath.join(threadWorktreePath(harness, "thread-1"), "README.md"),
+          "utf8",
+        ),
         "v2\n",
       );
       assert.equal(

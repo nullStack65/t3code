@@ -984,7 +984,6 @@ export function NewTaskDraftScreen(props: {
   });
   const workspaceLabel = resolveNewTaskWorkspaceLabel({
     workspaceMode: flow.workspaceMode,
-    worktreePath: flow.selectedWorktreePath,
   });
   const showBranchLoading = flow.branchesLoading && flow.availableBranches.length === 0;
 
@@ -1186,6 +1185,7 @@ export function NewTaskDraftScreen(props: {
         draft.modelSelection ?? null,
       ) ?? flow.selectedModel;
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
+    const executionScope = draft.executionScope ?? flow.executionScope;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
     const initialMessageText = draft.text.trim();
 
@@ -1194,7 +1194,7 @@ export function NewTaskDraftScreen(props: {
       !modelSelection ||
       initialMessageText.length === 0 ||
       flow.submitting ||
-      (workspaceMode === "worktree" && !selectedBranchName)
+      (executionScope === "coding" && workspaceMode === "worktree" && !selectedBranchName)
     ) {
       return;
     }
@@ -1299,6 +1299,7 @@ export function NewTaskDraftScreen(props: {
       // until the write confirms it.
       clearComposerDraftContent(draftKey, {
         clearModelSelection: true,
+        clearExecutionScope: true,
         clearWorkspaceSelection: true,
         deferAttachmentCleanup: true,
       });
@@ -1347,7 +1348,11 @@ export function NewTaskDraftScreen(props: {
     !flow.submitting &&
     pendingPastedTextAttachmentCount === 0 &&
     !voiceInput.blocksSubmission &&
-    !(flow.workspaceMode === "worktree" && !flow.selectedBranchName);
+    !(
+      flow.executionScope === "coding" &&
+      flow.workspaceMode === "worktree" &&
+      !flow.selectedBranchName
+    );
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
     // A draft attachment lives only in the draft. Without its key the screen would fall through
     // to a remote lookup for bytes the server has never seen.
@@ -1514,30 +1519,56 @@ export function NewTaskDraftScreen(props: {
   const workspaceControls = (
     <View className="flex-row items-center gap-1 px-2">
       <ComposerInlineControl
-        accessibilityHint={`Switches to ${flow.workspaceMode === "local" ? "a new worktree" : "the current checkout"}`}
-        accessibilityLabel={workspaceLabel}
-        disabled={isComposerInteractionLocked || voiceInput.isBusy}
-        iconNode={
-          <NewTaskWorkspaceIcon
-            workspaceMode={flow.workspaceMode}
-            worktreePath={flow.selectedWorktreePath}
-          />
+        accessibilityHint={
+          flow.executionScope === "coordinator"
+            ? "Runs in an isolated coordination workspace without repository checkout"
+            : "Runs as a coding thread in its own Git worktree"
         }
-        label={workspaceLabel}
-        maxWidth={flow.workspaceMode === "local" ? 220 : 148}
-        onPress={() => flow.setWorkspaceMode(flow.workspaceMode === "local" ? "worktree" : "local")}
+        accessibilityLabel={`Execution scope: ${flow.executionScope === "coordinator" ? "Coordinator" : "Coding"}`}
+        disabled={isComposerInteractionLocked || voiceInput.isBusy}
+        icon={flow.executionScope === "coordinator" ? "text.bubble" : "hammer"}
+        label={flow.executionScope === "coordinator" ? "Coordinator" : "Coding"}
+        maxWidth={136}
+        onPress={() =>
+          flow.setExecutionScope(flow.executionScope === "coordinator" ? "coding" : "coordinator")
+        }
         showChevron={false}
       />
+      {flow.executionScope === "coding" ? (
+        <>
+          <ComposerInlineControl
+            accessibilityHint={
+              flow.workspaceMode === "local"
+                ? "Uses a server-assigned coding worktree"
+                : "Creates a new worktree and runs its setup script"
+            }
+            accessibilityLabel={workspaceLabel}
+            disabled={isComposerInteractionLocked || voiceInput.isBusy}
+            iconNode={
+              <NewTaskWorkspaceIcon
+                workspaceMode={flow.workspaceMode}
+                worktreePath={flow.selectedWorktreePath}
+              />
+            }
+            label={workspaceLabel}
+            maxWidth={flow.workspaceMode === "local" ? 220 : 148}
+            onPress={() =>
+              flow.setWorkspaceMode(flow.workspaceMode === "local" ? "worktree" : "local")
+            }
+            showChevron={false}
+          />
 
-      <ComposerInlineControl
-        accessibilityLabel={`${flow.workspaceMode === "worktree" ? "Base branch" : "Branch"}: ${selectedBranchLabel}`}
-        chevronDirection="right"
-        disabled={isComposerInteractionLocked}
-        icon="arrow.triangle.branch"
-        label={showBranchLoading ? "Loading branches…" : selectedBranchLabel}
-        maxWidth={190}
-        onPress={() => openContextPicker("NewTaskBranch")}
-      />
+          <ComposerInlineControl
+            accessibilityLabel={`${flow.workspaceMode === "worktree" ? "Base branch" : "Branch"}: ${selectedBranchLabel}`}
+            chevronDirection="right"
+            disabled={isComposerInteractionLocked}
+            icon="arrow.triangle.branch"
+            label={showBranchLoading ? "Loading branches…" : selectedBranchLabel}
+            maxWidth={190}
+            onPress={() => openContextPicker("NewTaskBranch")}
+          />
+        </>
+      ) : null}
     </View>
   );
 

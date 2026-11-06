@@ -4,6 +4,7 @@ import {
   CommandId,
   CorrelationId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EnvironmentId,
   EventId,
   MessageId,
   ProjectId,
@@ -46,6 +47,12 @@ import * as ThreadPostStartActivity from "../ThreadPostStartActivity.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+
+const serverEnvironmentIdentityTestLayer = Layer.succeed(
+  ServerEnvironment.ServerEnvironmentIdentity,
+  { getEnvironmentId: Effect.succeed(EnvironmentId.make("projection-pipeline-test")) },
+);
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
   OrchestrationProjectionPipelineLive.pipe(
@@ -4371,6 +4378,7 @@ const engineLayer = it.layer(
       }),
     ),
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(serverEnvironmentIdentityTestLayer),
   ),
 );
 
@@ -4547,6 +4555,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           interactionMode: "default",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
       const countRowsForThread = (table: string) =>
@@ -4710,6 +4719,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          historyImport: true,
           createdAt,
         });
       }

@@ -1395,6 +1395,7 @@ describe("thread outbox", () => {
       creation: {
         projectId: ProjectId.make("project-1"),
         workspaceMode: "worktree",
+        executionScope: "coordinator",
         branch: "main",
         worktreePath: null,
         startFromOrigin: true,
@@ -1410,11 +1411,21 @@ describe("thread outbox", () => {
         ...creationMessage,
         creation: { ...creationMessage.creation, branch: null },
       }),
+    ).toBe(true);
+    expect(
+      isQueuedThreadCreationSendable({
+        ...creationMessage,
+        creation: { ...creationMessage.creation, executionScope: "coding", branch: null },
+      }),
     ).toBe(false);
     expect(
       isQueuedThreadCreationSendable({
         ...creationMessage,
-        creation: { ...creationMessage.creation, branch: "" },
+        creation: {
+          ...creationMessage.creation,
+          executionScope: "coding",
+          branch: "",
+        },
       }),
     ).toBe(false);
     expect(isQueuedThreadCreationSendable({ ...creationMessage, modelSelection: undefined })).toBe(

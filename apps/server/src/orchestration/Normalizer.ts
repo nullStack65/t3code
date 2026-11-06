@@ -131,6 +131,10 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       } satisfies OrchestrationCommand;
     }
 
+    if (canonicalCommand.type === "thread.create" && canonicalCommand.historyImport !== true) {
+      return { ...canonicalCommand, executionScope: canonicalCommand.executionScope ?? "coding" };
+    }
+
     if (
       canonicalCommand.type !== "thread.turn.start" &&
       canonicalCommand.type !== "thread.user-input.respond"
@@ -335,6 +339,17 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           };
     return {
       ...canonicalCommand,
+      ...(canonicalCommand.bootstrap?.createThread
+        ? {
+            bootstrap: {
+              ...canonicalCommand.bootstrap,
+              createThread: {
+                ...canonicalCommand.bootstrap.createThread,
+                executionScope: canonicalCommand.bootstrap.createThread.executionScope ?? "coding",
+              },
+            },
+          }
+        : {}),
       message: {
         ...canonicalCommand.message,
         attachments: normalizedAttachments,

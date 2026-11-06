@@ -5,6 +5,7 @@ import {
   clearComposerDraftContent,
 } from "../../state/use-composer-drafts";
 import { useWorktreeSetup } from "./use-worktree-setup";
+import { newThreadCreationPreparesWorktree } from "./new-task-context-presentation";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";
@@ -817,7 +818,8 @@ function ThreadRouteContent(
     threadId: selectedThread?.id ?? null,
     activities: selectedThreadDetail?.activities ?? [],
     preparing:
-      selectedThreadCreation?.message.creation?.workspaceMode === "worktree" &&
+      selectedThreadCreation !== null &&
+      newThreadCreationPreparesWorktree(selectedThreadCreation.message.creation) &&
       selectedThreadCreation.outcome == null,
     turnStarted: selectedThreadDetail?.latestTurn?.startedAt != null,
     followUpSent:
@@ -901,7 +903,7 @@ function ThreadRouteContent(
       })
       .catch((error) =>
         Alert.alert(
-          "Could not work locally",
+          "Could not retry coding worktree",
           error instanceof Error ? error.message : String(error),
         ),
       );
@@ -919,7 +921,7 @@ function ThreadRouteContent(
     }
     return {
       kind: "preparing",
-      preparingWorktree: selectedThreadCreation.message.creation?.workspaceMode === "worktree",
+      preparingWorktree: newThreadCreationPreparesWorktree(selectedThreadCreation.message.creation),
     };
   })();
   if (!environmentId || !threadId) {

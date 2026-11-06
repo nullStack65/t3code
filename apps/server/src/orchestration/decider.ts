@@ -404,6 +404,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          executionScope:
+            command.executionScope ?? (command.historyImport === true ? null : "coding"),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },

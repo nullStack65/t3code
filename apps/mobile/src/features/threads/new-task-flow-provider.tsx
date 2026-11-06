@@ -141,6 +141,7 @@ type NewTaskFlowContextValue = {
   readonly selectedProjectKey: string | null;
   readonly selectedModelKey: string | null;
   readonly workspaceMode: WorkspaceMode;
+  readonly executionScope: "coding" | "coordinator";
   readonly selectedBranchName: string | null;
   readonly selectedWorktreePath: string | null;
   readonly startFromOrigin: boolean;
@@ -185,6 +186,7 @@ type NewTaskFlowContextValue = {
     options?: ReadonlyArray<ProviderOptionSelection>,
   ) => void;
   readonly setWorkspaceMode: (mode: WorkspaceMode) => void;
+  readonly setExecutionScope: (scope: "coding" | "coordinator") => void;
   readonly selectBranch: (branch: VcsRef) => void;
   readonly setStartFromOrigin: (value: boolean) => void;
   readonly beginEditingPendingTask: (messageId: string) => boolean;
@@ -457,6 +459,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     projectSettings.sources.defaultThreadEnvMode !== "environment" ||
     !t3ProjectFileQuery.isPending;
   const workspaceMode = selectedProjectDraft.workspaceSelection?.mode ?? defaultWorkspaceMode;
+  const executionScope = selectedProjectDraft.executionScope ?? "coding";
   const selectedBranchName = selectedProjectDraft.workspaceSelection?.branch ?? null;
   const selectedWorktreePath = selectedProjectDraft.workspaceSelection?.worktreePath ?? null;
   // Keep the user's explicit choice separate from the resolved display value:
@@ -781,6 +784,14 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     ],
   );
 
+  const setExecutionScope = useCallback(
+    (scope: "coding" | "coordinator") => {
+      if (!selectedProjectDraftKey) return;
+      updateComposerDraftSettings(selectedProjectDraftKey, { executionScope: scope });
+    },
+    [selectedProjectDraftKey],
+  );
+
   useEffect(() => {
     if (
       workspaceMode !== "local" ||
@@ -933,6 +944,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         modelSelection: message.modelSelection,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
+        executionScope: message.creation.executionScope ?? "coding",
         workspaceSelection: {
           mode: message.creation.workspaceMode,
           branch: message.creation.branch,
@@ -976,6 +988,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       // Fall back to the resolved mode (server default) so queued tasks drain
       // with the same mode the composer displayed.
       const mode = workspaceSelection?.mode ?? workspaceMode;
+      const scope = draft.executionScope ?? executionScope;
       // When the selection is the stand-in built from the queued snapshot,
       // persist the original (possibly absent) snapshot values — the
       // stand-in's placeholder title/workspaceRoot must never be written back
@@ -1011,16 +1024,20 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           ...(projectTitle !== undefined ? { projectTitle } : {}),
           ...(projectCwd !== undefined ? { projectCwd } : {}),
           workspaceMode: mode,
+          executionScope: scope,
           // An explicit picker choice wins. Otherwise only a task sending now
           // records the current checkout: a queued local task drains days
           // later against whatever is checked out then, so a queue-time
           // guess would pin a stale label to a thread that ran somewhere else.
-          branch: resolveProjectThreadCreationBranch({
-            workspaceMode: mode,
-            selectedBranch: workspaceSelection?.branch ?? null,
-            currentCheckoutBranch: options?.currentCheckoutBranch ?? null,
-          }),
-          worktreePath: mode === "worktree" ? null : (workspaceSelection?.worktreePath ?? null),
+          branch:
+            scope === "coordinator"
+              ? null
+              : resolveProjectThreadCreationBranch({
+                  workspaceMode: mode,
+                  selectedBranch: workspaceSelection?.branch ?? null,
+                  currentCheckoutBranch: options?.currentCheckoutBranch ?? null,
+                }),
+          worktreePath: null,
           // The draft only carries the flag when the user touched it; fall
           // back to the resolved default (server settings) so queued tasks
           // drain with the same origin mode the composer displayed.
@@ -1042,6 +1059,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       legacyPlanModeEnabled,
       planModePreferenceLoaded,
       startFromOrigin,
+      executionScope,
       workspaceMode,
     ],
   );
@@ -1155,6 +1173,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedProjectKey,
       selectedModelKey,
       workspaceMode,
+      executionScope,
       selectedBranchName,
       selectedWorktreePath,
       startFromOrigin,
@@ -1188,6 +1207,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectEnvironment,
       setSelectedModelKey,
       setWorkspaceMode,
+      setExecutionScope,
       selectBranch,
       setStartFromOrigin,
       beginEditingPendingTask,
@@ -1220,6 +1240,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       cancelEditingPendingTask,
       currentCheckoutBranchName,
       editingPendingTask,
+      executionScope,
       environments,
       expandedProvider,
       filteredBranches,
@@ -1257,6 +1278,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       setSelectedModelKey,
       setStartFromOrigin,
       setWorkspaceMode,
+      setExecutionScope,
       startFromOrigin,
       submitting,
       workspaceMode,

@@ -54,6 +54,7 @@ describe("project thread title", () => {
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
+      executionScope: "coding",
       workspaceMode: "local",
       branch: null,
       worktreePath: null,
@@ -67,9 +68,9 @@ describe("project thread title", () => {
   });
 });
 
-describe("new thread on an existing branch", () => {
+describe("coding thread bootstrap", () => {
   it.each([null, "/worktrees/existing"])(
-    "reuses the selected workspace %s without preparing a new worktree",
+    "requests a server-assigned worktree when the selected workspace is %s",
     (worktreePath) => {
       const input = buildProjectThreadStartTurnInput({
         projectId: ProjectId.make("project"),
@@ -83,6 +84,7 @@ describe("new thread on an existing branch", () => {
         modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
         runtimeMode: "full-access",
         interactionMode: "default",
+        executionScope: "coding",
         workspaceMode: "local",
         branch: "feature/existing",
         worktreePath,
@@ -93,11 +95,42 @@ describe("new thread on an existing branch", () => {
       expect(input.bootstrap.createThread).toMatchObject({
         projectId: "project",
         branch: "feature/existing",
-        worktreePath,
+        executionScope: "coding",
+        worktreePath: null,
       });
       expect(input.bootstrap).not.toHaveProperty("prepareWorktree");
       expect(input.bootstrap).not.toHaveProperty("runSetupScript");
       expect(input.threadId).toBe("new-thread");
     },
   );
+
+  it("starts an explicitly selected Coordinator in its server-owned scratch workspace", () => {
+    const input = buildProjectThreadStartTurnInput({
+      projectId: ProjectId.make("project"),
+      projectCwd: "/workspace",
+      threadId: "coordinator-thread",
+      commandId: "command",
+      messageId: "message",
+      createdAt: "2026-09-06T00:00:00Z",
+      text: "Plan the migration",
+      uploadedAttachments: [],
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      executionScope: "coordinator",
+      workspaceMode: "worktree",
+      branch: "feature/existing",
+      worktreePath: "/repo/.t3/worktrees/existing",
+      startFromOrigin: true,
+      worktreeBranchName: "unused",
+    });
+
+    expect(input.bootstrap.createThread).toMatchObject({
+      executionScope: "coordinator",
+      branch: null,
+      worktreePath: null,
+    });
+    expect(input.bootstrap).not.toHaveProperty("prepareWorktree");
+    expect(input.bootstrap).not.toHaveProperty("runSetupScript");
+  });
 });
