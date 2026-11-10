@@ -112,6 +112,25 @@ describe("production relay admission", () => {
     });
   });
 
+  it("admits the destination owner and resolves main under the live repository", async () => {
+    const input = fixture();
+    input.context.actor = "kameron-smith-closura";
+    input.context.payload.repository.full_name = "kameron-smith-closura/t3code";
+    input.context.payload.repository.owner.id = 274969253;
+    input.env.GITHUB_ACTOR_ID = "274969253";
+    input.env.GITHUB_TRIGGERING_ACTOR = "kameron-smith-closura";
+    expect(await execute(input)).toEqual({
+      admitted: true,
+      outputs: { source_sha: source },
+      requests: [{ owner: "kameron-smith-closura", repo: "t3code", branch: "main" }],
+    });
+    input.env.GITHUB_ACTOR_ID = "112618179";
+    expect(await execute(input)).toEqual({ admitted: false, outputs: {}, requests: [] });
+    input.env.GITHUB_ACTOR_ID = "274969253";
+    input.context.payload.repository.owner.id = 112618179;
+    expect(await execute(input)).toEqual({ admitted: false, outputs: {}, requests: [] });
+  });
+
   for (const field of ["eventName", "ref", "sha", "actor"] as const) {
     it(`denies wrong ${field} without producing a deployment source`, async () => {
       const input = fixture();
