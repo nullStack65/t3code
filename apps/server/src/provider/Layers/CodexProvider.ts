@@ -61,6 +61,44 @@ type CodexRateLimitsProbe =
     }
   | { readonly failure: string };
 
+const CodexRoutingConfig = Schema.Struct({
+  model_provider: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  openai_base_url: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  model_providers: Schema.optionalKey(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({ base_url: Schema.optionalKey(Schema.NullOr(Schema.String)) }),
+    ),
+  ),
+});
+const decodeCodexRoutingConfig = Schema.decodeUnknownOption(CodexRoutingConfig);
+
+function routesToNativeOpenai(config: unknown): boolean {
+  const decoded = decodeCodexRoutingConfig(config);
+  if (Option.isNone(decoded)) return false;
+  const routing = decoded.value;
+  const providerId = routing.model_provider ?? "openai";
+  const provider = routing.model_providers?.[providerId];
+  if (providerId !== "openai" && !provider) return false;
+  const baseUrl =
+    providerId === "openai" ? routing.openai_base_url || undefined : provider?.base_url;
+  // A provider without an override uses Codex's auth-dependent OpenAI default.
+  if (baseUrl == null) return true;
+  if (!URL.canParse(baseUrl)) return false;
+  const url = new URL(baseUrl);
+  return (
+    url.protocol === "https:" &&
+    (url.hostname === "api.openai.com" || url.hostname === "chatgpt.com")
+  );
+}
+
+// A stored login does not mean this provider's traffic spends that login's quota.
+export const codexRoutesSpendNativeQuota = (
+  account: CodexSchema.V2GetAccountResponse,
+  config: unknown,
+): boolean =>
+  account.requiresOpenaiAuth && account.account?.type !== "apiKey" && routesToNativeOpenai(config);
+
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
 
 const CODEX_PRESENTATION = {
@@ -71,6 +109,7 @@ const CODEX_PRESENTATION = {
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
+  readonly nativeUsage?: boolean;
   readonly rateLimits?: CodexRateLimitsProbe;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
@@ -430,6 +469,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
   readonly modelCatalogMode?: CodexSettings["modelCatalogMode"];
   readonly environment?: NodeJS.ProcessEnv;
+  readonly skipNativeUsage?: boolean;
 }) {
   const { client, initialize } = yield* withCodexAppServerClient(input);
 
@@ -447,6 +487,18 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
+  const routing = input.skipNativeUsage
+    ? undefined
+    : yield* client.request("config/read", { cwd: input.cwd, includeLayers: false }).pipe(
+        Effect.timeoutOption("3 seconds"),
+        Effect.map(Option.getOrUndefined),
+        Effect.orElseSucceed(() => undefined),
+      );
+  const nativeUsage =
+    !input.skipNativeUsage &&
+    routing !== undefined &&
+    codexRoutesSpendNativeQuota(accountResponse, routing.config);
+
   const [skillsResponse, models, rateLimits] = yield* Effect.all(
     [
       client.request("skills/list", {
@@ -457,31 +509,34 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
         : requestAllCodexModels(client),
       // Usage is an enrichment: a failure or a slow answer degrades to "no
       // usage this probe" rather than costing the account and models.
-      client.request("account/rateLimits/read", undefined).pipe(
-        Effect.map((response): CodexRateLimitsProbe => ({
-          snapshot: response.rateLimits,
-          rateLimitsByLimitId: response.rateLimitsByLimitId,
-          resetCredits: response.rateLimitResetCredits,
-        })),
-        Effect.timeoutOption(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
-        Effect.map(
-          Option.getOrElse((): CodexRateLimitsProbe => ({
-            failure: "Codex did not answer the usage request.",
-          })),
-        ),
-        Effect.catch((error) =>
-          Effect.logDebug("Codex rate-limit read failed.", { cause: error }).pipe(
-            Effect.as<CodexRateLimitsProbe>({ failure: codexRateLimitsFailureMessage(error) }),
-          ),
-        ),
-      ),
+      nativeUsage
+        ? client.request("account/rateLimits/read", undefined).pipe(
+            Effect.map((response): CodexRateLimitsProbe => ({
+              snapshot: response.rateLimits,
+              rateLimitsByLimitId: response.rateLimitsByLimitId,
+              resetCredits: response.rateLimitResetCredits,
+            })),
+            Effect.timeoutOption(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
+            Effect.map(
+              Option.getOrElse((): CodexRateLimitsProbe => ({
+                failure: "Codex did not answer the usage request.",
+              })),
+            ),
+            Effect.catch((error) =>
+              Effect.logDebug("Codex rate-limit read failed.").pipe(
+                Effect.as<CodexRateLimitsProbe>({ failure: codexRateLimitsFailureMessage(error) }),
+              ),
+            ),
+          )
+        : Effect.undefined,
     ],
     { concurrency: "unbounded" },
   );
 
   return {
     account: accountResponse,
-    rateLimits,
+    nativeUsage,
+    ...(rateLimits ? { rateLimits } : {}),
     version,
     models: applyPreferredCodexDefaultModel(
       resolveCodexProviderModels(
@@ -588,12 +643,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly customModels: ReadonlyArray<CustomModelSetting>;
     readonly modelCatalogMode?: CodexSettings["modelCatalogMode"];
     readonly environment?: NodeJS.ProcessEnv;
+    readonly skipNativeUsage?: boolean;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   > = probeCodexAppServerProvider,
   environment?: NodeJS.ProcessEnv,
+  skipNativeUsage = false,
 ): Effect.fn.Return<
   ServerProviderDraft,
   ServerSettingsError,
@@ -628,6 +685,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     customModels: codexSettings.customModels,
     modelCatalogMode: codexSettings.modelCatalogMode,
     environment: resolvedEnvironment,
+    skipNativeUsage,
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
@@ -678,7 +736,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const snapshot = probeResult.success.value;
   const accountStatus = accountProbeStatus(snapshot.account);
   const usageLimits =
-    snapshot.account.account?.type === "apiKey"
+    skipNativeUsage || snapshot.nativeUsage === false || snapshot.account.account?.type === "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
       : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
         ? makeUnavailableUsageLimits({
@@ -692,6 +750,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
             resetCredits: snapshot.rateLimits.resetCredits,
             checkedAt,
           });
+
+  if (usageLimits.unavailable?.reason === "probeFailed") {
+    yield* Effect.logWarning("usage-reader-error", {
+      event: "usage-reader-error",
+      sourceKind: "codex",
+      code: "native_quota_read_failed",
+    });
+  }
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,

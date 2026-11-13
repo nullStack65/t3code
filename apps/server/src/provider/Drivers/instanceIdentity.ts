@@ -1,4 +1,10 @@
-import type { ProviderDriverKind, ServerProvider } from "@t3tools/contracts";
+import type {
+  ProviderDriverKind,
+  ProviderInstanceConfig,
+  ServerProvider,
+} from "@t3tools/contracts";
+
+import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
@@ -17,9 +23,19 @@ export const withInstanceIdentity =
     readonly displayName: string | undefined;
     readonly accentColor: string | undefined;
     readonly continuationGroupKey: string;
+    readonly usageSource?: ProviderInstanceConfig["usageSource"];
   }) =>
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
+    ...(input.usageSource
+      ? {
+          usageLimits: makeUnavailableUsageLimits({
+            checkedAt: snapshot.checkedAt,
+            reason: "unsupported",
+            message: "Usage is reported by the configured billing source.",
+          }),
+        }
+      : {}),
     instanceId: input.instanceId,
     driver: input.driverKind,
     ...(input.displayName ? { displayName: input.displayName } : {}),

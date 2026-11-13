@@ -35,6 +35,7 @@ import * as Stream from "effect/Stream";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { readMagpieAccounts } from "./magpieApi.ts";
 import { makeCliproxyApi } from "./cliproxyApi.ts";
 
 export class UsageLimitSources extends Context.Service<
@@ -77,13 +78,28 @@ export const make = Effect.gen(function* () {
   ) {
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
     const base = { id, kind: config.kind, label: sourceLabel(id, config), checkedAt } as const;
-    if (config.managementKey.length === 0) {
+    if (config.kind === "cliproxy" && config.managementKey.length === 0) {
       return { ...base, accounts: [], error: "No management key configured." };
     }
-    const accounts = yield* api.readAccounts(config).pipe(Effect.result);
+    const accounts = yield* (
+      config.kind === "magpie" ? readMagpieAccounts(config) : api.readAccounts(config)
+    ).pipe(Effect.result);
     if (accounts._tag === "Failure") {
-      yield* Effect.logDebug("usage limit source read failed", { id, cause: accounts.failure });
+      yield* Effect.logWarning("usage-reader-error", {
+        event: "usage-reader-error",
+        sourceId: id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64),
+        sourceKind: config.kind,
+        code: "source_read_failed",
+      });
       return { ...base, accounts: [], error: accounts.failure.detail };
+    }
+    if (accounts.success.some((account) => account.usageLimits.unavailable)) {
+      yield* Effect.logWarning("usage-reader-error", {
+        event: "usage-reader-error",
+        sourceId: id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64),
+        sourceKind: config.kind,
+        code: "account_usage_unavailable",
+      });
     }
     return { ...base, accounts: accounts.success };
   });
@@ -124,7 +140,7 @@ export const make = Effect.gen(function* () {
         ),
       );
       const config = settings.usageLimitSources[input.sourceId];
-      if (!config?.enabled || !config.managementKey) {
+      if (!config?.enabled || config.kind !== "cliproxy" || !config.managementKey) {
         return yield* new UsageLimitSourceError({
           detail: "The usage limit source is missing or disabled.",
         });

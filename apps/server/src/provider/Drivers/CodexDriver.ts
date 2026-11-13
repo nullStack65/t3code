@@ -130,7 +130,7 @@ export const makeCodexDriver = (
     },
     configSchema: CodexSettings,
     defaultConfig: (): CodexSettings => decodeCodexSettings({}),
-    create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+    create: ({ instanceId, displayName, accentColor, environment, usageSource, enabled, config }) =>
       Effect.gen(function* () {
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const resetCreditCoordinator = yield* CodexResetCreditCoordinator;
@@ -183,6 +183,7 @@ export const makeCodexDriver = (
           displayName,
           accentColor,
           continuationGroupKey: continuationIdentity.continuationKey,
+          usageSource,
         });
         yield* materializeCodexShadowHome(homeLayout).pipe(
           Effect.mapError(
@@ -252,7 +253,12 @@ export const makeCodexDriver = (
         const checkProvider = modelManifest.refreshInBackground.pipe(
           Effect.andThen(
             Effect.zipWith(
-              checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
+              checkCodexProviderStatus(
+                effectiveConfig,
+                undefined,
+                processEnv,
+                usageSource !== undefined,
+              ),
               modelManifest.current,
               (draft, manifest) =>
                 stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
@@ -406,7 +412,7 @@ export const makeCodexDriver = (
           enabled,
           snapshot,
           snapshotForCwd,
-          consumeResetCredit,
+          ...(usageSource ? {} : { consumeResetCredit }),
           adapter,
           textGeneration,
         } satisfies ProviderInstance;

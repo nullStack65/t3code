@@ -23,6 +23,7 @@
  */
 import type {
   ProviderConsumeResetCreditOutcome,
+  ProviderInstanceConfig,
   ProviderDriverKind,
   ProviderInstanceEnvironment,
   ProviderInstanceId,
@@ -116,6 +117,7 @@ export interface ProviderDriverCreateInput<Config> {
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
   readonly environment: ProviderInstanceEnvironment;
+  readonly usageSource?: ProviderInstanceConfig["usageSource"];
   readonly enabled: boolean;
   readonly config: Config;
 }

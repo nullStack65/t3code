@@ -35,6 +35,7 @@
  */
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROVIDER_SLUG_MAX_CHARS = 64;
@@ -126,6 +127,13 @@ export const ProviderInstanceConfig = Schema.Struct({
   displayName: Schema.optional(TrimmedNonEmptyString),
   accentColor: Schema.optional(TrimmedNonEmptyString),
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
+  /** Billing account owns quota; suppress harness-local readers even if the source is unavailable. */
+  usageSource: Schema.optionalKey(
+    Schema.Struct({
+      sourceId: UsageLimitSourceId,
+      accountId: TrimmedNonEmptyString,
+    }),
+  ),
   enabled: Schema.optionalKey(Schema.Boolean),
   config: Schema.optionalKey(Schema.Unknown),
 });

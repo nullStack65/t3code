@@ -206,3 +206,21 @@ describe("ProviderInstanceConfigMap", () => {
     ).toThrow();
   });
 });
+
+it("round-trips an explicit billing source without choosing by display name", () => {
+  const instance = decodeProviderInstanceConfig({
+    driver: "codex",
+    displayName: "Claude or Go is not a billing selector",
+    usageSource: { sourceId: "syntheticHub", accountId: "magpie-go:synthetic-go" },
+  });
+  expect(instance.usageSource).toEqual({
+    sourceId: "syntheticHub",
+    accountId: "magpie-go:synthetic-go",
+  });
+  expect(() =>
+    decodeProviderInstanceConfig({
+      driver: "opencode",
+      usageSource: { sourceId: "syntheticHub" },
+    }),
+  ).toThrow();
+});
