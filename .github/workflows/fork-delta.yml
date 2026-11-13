@@ -1,0 +1,41 @@
+name: Fork delta inventory
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch immutable inventory references
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          sys.path.insert(0, 'scripts/fork_delta')
+          from guard import parse_manifest, resolve
+          manifest = parse_manifest(open('FORK_DELTA.md').read())
+          groups = [(manifest['references'], 'https://github.com/pingdotgg/t3code.git'),
+                    (manifest['lineages'], 'https://github.com/nullStack65/t3code.git')]
+          for refs, url in groups:
+              for sha in refs.values():
+                  if not __import__('re').fullmatch('[a-f0-9]{40}', sha):
+                      raise ValueError('unknown source ref')
+                  try:
+                      resolve('.', sha)
+                  except subprocess.CalledProcessError:
+                      subprocess.run(['git', 'fetch', '--no-tags', url, sha], check=True)
+          PY
+      - name: Synthetic Git and release ingress negatives
+        run: python3 -m unittest discover -s scripts/fork_delta -p 'test_*.py' -v
+      - name: Fail on unlisted fork patches (including merge result)
+        run: python3 scripts/fork_delta/guard.py
