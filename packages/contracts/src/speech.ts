@@ -8,23 +8,26 @@ export const CloudSpeechApiKey = TrimmedNonEmptyString.check(
   Schema.isPattern(/^(?![a-z][a-z\d+.-]*:\/\/)[!-~]+$/i),
 );
 
-export const CloudSpeechProvider = Schema.Literals(["openai", "xai", "openrouter"]);
+export const CloudSpeechProvider = Schema.Literals(["openai", "xai", "openrouter", "assemblyai"]);
 export type CloudSpeechProvider = typeof CloudSpeechProvider.Type;
 export const CLOUD_SPEECH_LABELS = {
   openai: "OpenAI",
   xai: "Grok Voice Transcribe",
   openrouter: "OpenRouter",
+  assemblyai: "AssemblyAI",
 } as const;
 export const CLOUD_SPEECH_PROVIDER_NAMES = {
   openai: "OpenAI",
   xai: "xAI",
   openrouter: "OpenRouter",
+  assemblyai: "AssemblyAI",
 } as const;
 /** Servers that predate OpenRouter report only the first two providers. */
 export const CloudSpeechKeys = Schema.Struct({
   openai: Schema.Boolean,
   xai: Schema.Boolean,
   openrouter: Schema.optionalKey(Schema.Boolean),
+  assemblyai: Schema.optionalKey(Schema.Boolean),
 });
 export type CloudSpeechKeys = typeof CloudSpeechKeys.Type;
 
@@ -45,6 +48,7 @@ export class CloudSpeechError extends Schema.TaggedError<CloudSpeechError>()(
   {
     provider: CloudSpeechProvider,
     reason: Schema.Literals([
+      "audio-duration",
       "missing-key",
       "key-changed",
       "unreadable-key",
@@ -59,6 +63,8 @@ export class CloudSpeechError extends Schema.TaggedError<CloudSpeechError>()(
   override get message() {
     const name = CLOUD_SPEECH_PROVIDER_NAMES[this.provider];
     switch (this.reason) {
+      case "audio-duration":
+        return `${name} dictation accepts recordings from 80 milliseconds to two minutes. Record a shorter clip.`;
       case "missing-key":
         return `Add your ${name} API key in Settings → Voice.`;
       case "key-changed":
