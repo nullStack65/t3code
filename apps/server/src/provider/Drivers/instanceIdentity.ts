@@ -29,6 +29,7 @@ export const withInstanceIdentity =
     ...snapshot,
     ...(input.usageSource
       ? {
+          usageSource: input.usageSource,
           usageLimits: makeUnavailableUsageLimits({
             checkedAt: snapshot.checkedAt,
             reason: "unsupported",

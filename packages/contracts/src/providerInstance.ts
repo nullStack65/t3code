@@ -113,6 +113,12 @@ export type ProviderInstanceEnvironmentVariable = typeof ProviderInstanceEnviron
 export const ProviderInstanceEnvironment = Schema.Array(ProviderInstanceEnvironmentVariable);
 export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Type;
 
+export const ProviderUsageSourceBinding = Schema.Struct({
+  sourceId: UsageLimitSourceId,
+  accountId: TrimmedNonEmptyString,
+});
+export type ProviderUsageSourceBinding = typeof ProviderUsageSourceBinding.Type;
+
 /**
  * Envelope shape for a provider instance configuration in `ServerSettings`.
  *
@@ -128,12 +134,7 @@ export const ProviderInstanceConfig = Schema.Struct({
   accentColor: Schema.optional(TrimmedNonEmptyString),
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
   /** Billing account owns quota; suppress harness-local readers even if the source is unavailable. */
-  usageSource: Schema.optionalKey(
-    Schema.Struct({
-      sourceId: UsageLimitSourceId,
-      accountId: TrimmedNonEmptyString,
-    }),
-  ),
+  usageSource: Schema.optionalKey(ProviderUsageSourceBinding),
   enabled: Schema.optionalKey(Schema.Boolean),
   config: Schema.optionalKey(Schema.Unknown),
 });

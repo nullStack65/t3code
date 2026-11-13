@@ -16,6 +16,8 @@ import {
   type ServerProviderUsageLimits,
   type ServerProviderUsageWindow,
   type UsageLimitSourceSnapshots,
+  type UsageLimitSourceSnapshot,
+  type UsageLimitSourceAccount,
 } from "@t3tools/contracts";
 
 import * as DateTime from "effect/DateTime";
@@ -157,7 +159,12 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
   for (const [environmentId, presentation] of presentations) {
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
-      if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
+      if (
+        provider.usageSource ||
+        !provider.usageLimits ||
+        limitsNotice(provider.usageLimits) !== null
+      )
+        continue;
       merge(
         accountKey(provider.driver, provider.auth.email) ??
           `${environmentId}:${provider.instanceId}`,
@@ -227,6 +234,17 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
   for (const presentation of presentations.values()) {
     const environmentLabel = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
+      if (provider.usageSource) {
+        const resolved = resolveUsageSourceBinding(
+          provider.usageSource,
+          presentation.serverConfig?.usageLimitSources ?? [],
+        );
+        if (resolved.notice) {
+          const name = provider.displayName?.trim() || String(provider.driver);
+          notices.push(`${label(environmentLabel, name)}: ${resolved.notice}`);
+        }
+        continue;
+      }
       // An account that can never report (API key) is left out; one that
       // failed, or reported nothing at all, is worth a line.
       if (provider.usageLimits?.unavailable?.reason === "unsupported") continue;
@@ -239,6 +257,11 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
         notices.push(`${label(environmentLabel, source.label)}: ${source.error}`);
       } else if (source.accounts.length === 0) {
         notices.push(`${label(environmentLabel, source.label)}: No accounts reported.`);
+      }
+      for (const account of source.accounts) {
+        const notice = limitsNotice(account.usageLimits);
+        if (notice)
+          notices.push(`${label(environmentLabel, source.label)} · ${account.id}: ${notice}`);
       }
     }
   }
@@ -399,6 +422,9 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
   if (limits.unavailable?.reason === "probeFailed") {
     return limits.unavailable.message ?? "Could not read limits.";
   }
+  if (limits.unavailable?.reason === "stale") {
+    return `${limits.unavailable.message ?? "Quota data is stale."} Last read: ${limits.checkedAt}.`;
+  }
   return limits.windows.length === 0 ? "No limits reported." : null;
 }
 
@@ -512,13 +538,38 @@ export function sameUsageLimitCommandCoverage(
   return before.size === after.size && [...before].every((driver) => after.has(driver));
 }
 
+function resolveUsageSourceBinding(
+  binding: NonNullable<ServerProvider["usageSource"]>,
+  sources: UsageLimitSourceSnapshots,
+):
+  | {
+      readonly source: UsageLimitSourceSnapshot;
+      readonly account: UsageLimitSourceAccount;
+      readonly notice: null;
+    }
+  | { readonly notice: string } {
+  const matching = sources.filter((source) => source.id === binding.sourceId);
+  if (matching.length !== 1) {
+    return { notice: "Configured billing source is missing, disabled, or ambiguous." };
+  }
+  const source = matching[0]!;
+  if (source.error)
+    return { notice: `Configured billing source could not be read: ${source.error}` };
+  const accounts = source.accounts.filter((account) => account.id === binding.accountId);
+  if (accounts.length !== 1) {
+    return { notice: "Configured billing account is missing from its source or ambiguous." };
+  }
+  return { source, account: accounts[0]!, notice: null };
+}
+
 /** Advertise on workspace catalogs too, which replace the global command list. */
 export function withUsageLimitsCommands(
   providers: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
 ): ServerProvider[] {
   return providers.map((provider) => {
-    if (!hasProviderUsageLimits(provider.driver, providers, sources)) return provider;
+    if (!provider.usageSource && !hasProviderUsageLimits(provider.driver, providers, sources))
+      return provider;
     const commands = (items: readonly ServerProviderSlashCommand[]) => [
       ...items.filter((command) => command.name !== USAGE_LIMITS_COMMAND.name),
       USAGE_LIMITS_COMMAND,
@@ -546,9 +597,41 @@ export function collectProviderUsageLimits(
   now: number,
 ): UsageLimitsReport | null {
   const selected = providers.find((provider) => provider.instanceId === instanceId);
-  if (!selected || !hasProviderUsageLimits(selected.driver, providers, sources)) return null;
+  if (!selected) return null;
+  if (selected.usageSource) {
+    const createdAt = DateTime.formatIso(DateTime.makeUnsafe(now));
+    const resolved = resolveUsageSourceBinding(selected.usageSource, sources);
+    if (resolved.notice !== null) return { createdAt, accounts: [], notices: [resolved.notice] };
+    const { source, account } = resolved;
+    const notice = limitsNotice(account.usageLimits);
+    return {
+      createdAt,
+      accounts: [
+        {
+          id: `${source.id}:${account.id}`,
+          driver: account.driver,
+          label: `${source.label} · ${account.id}`,
+          sourceLabel: source.label,
+          ...(account.plan ? { plan: account.plan } : {}),
+          ...(account.email ? { email: account.email } : {}),
+          ...(account.usageLimits.resetCredits?.nextCreditId
+            ? {
+                resetCreditInput: {
+                  sourceId: source.id,
+                  accountId: account.id,
+                  creditId: account.usageLimits.resetCredits.nextCreditId,
+                },
+              }
+            : {}),
+          limits: account.usageLimits,
+        },
+      ],
+      notices: notice ? [`${source.label} · ${account.id}: ${notice}`] : [],
+    };
+  }
+  if (!hasProviderUsageLimits(selected.driver, providers, sources)) return null;
   const native = providersWithLimits(providers).filter(
-    (provider) => provider.driver === selected.driver,
+    (provider) => !provider.usageSource && provider.driver === selected.driver,
   );
   const nativeAccounts = new Set(
     native.flatMap((provider) => {

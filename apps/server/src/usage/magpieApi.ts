@@ -69,6 +69,38 @@ function accountError(error: unknown): string | undefined {
   return "Magpie reported an account error.";
 }
 
+function claudeWindowIdentity(
+  name: string,
+): { readonly id: string; readonly model?: string } | undefined {
+  switch (name.toLowerCase()) {
+    case "5h":
+    case "five_hour":
+    case "session":
+    case "rolling":
+      return { id: "five_hour" };
+    case "7d":
+    case "seven_day":
+    case "week":
+    case "weekly":
+      return { id: "seven_day" };
+    case "month":
+    case "monthly":
+      return { id: "monthly" };
+    default: {
+      const model = /^seven_day_(sonnet|opus)(_[a-z0-9]+)*$/i.exec(name);
+      if (!model) return undefined;
+      const scope = name.slice("seven_day_".length).toLowerCase();
+      return {
+        id: `seven_day_${scope}`,
+        model: scope
+          .split("_")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" "),
+      };
+    }
+  }
+}
+
 export const readMagpieAccounts = Effect.fn("MagpieApi.readAccounts")(function* (
   config: UsageLimitSourceConfig,
   environment: NodeJS.ProcessEnv = process.env,
@@ -186,8 +218,28 @@ export const readMagpieAccounts = Effect.fn("MagpieApi.readAccounts")(function* 
       usedPercent: window.used,
       ...(window.resetsAt ? { resetsAt: DateTime.formatIso(window.resetsAt) } : {}),
     }));
-    const session = windows.find((window) => window.kind === "session");
-    const weekly = windows.find((window) => window.kind === "weekly");
+    const claudeWindows = [];
+    const windowIds = new Set<string>();
+    if (card.provider === "claude") {
+      for (const window of windows) {
+        const identity = claudeWindowIdentity(window.id);
+        if (!identity || windowIds.has(identity.id)) {
+          return yield* new UsageLimitSourceError({
+            detail: "Magpie returned unknown or duplicate Claude quota window identities.",
+          });
+        }
+        windowIds.add(identity.id);
+        claudeWindows.push({ ...window, ...identity });
+      }
+    }
+    const session =
+      card.provider === "claude"
+        ? claudeWindows.find((window) => window.id === "five_hour")
+        : windows.find((window) => window.kind === "session");
+    const weekly =
+      card.provider === "claude"
+        ? claudeWindows.find((window) => window.id === "seven_day")
+        : windows.find((window) => window.kind === "weekly");
     const claudeWindow = (window: typeof session) =>
       window ? { utilization: window.usedPercent, resets_at: window.resetsAt ?? null } : null;
     const codexWindow = (window: typeof session) =>
@@ -197,13 +249,28 @@ export const readMagpieAccounts = Effect.fn("MagpieApi.readAccounts")(function* 
             resetsAt: window.resetsAt ? Date.parse(window.resetsAt) / 1000 : null,
           }
         : null;
+    const claudeRateLimits = {
+      five_hour: claudeWindow(session),
+      seven_day: claudeWindow(weekly),
+      model_scoped: claudeWindows.flatMap((window) =>
+        window.model
+          ? [
+              {
+                display_name: window.model,
+                utilization: window.usedPercent,
+                resets_at: window.resetsAt ?? null,
+              },
+            ]
+          : [],
+      ),
+    };
     const mapped =
       card.provider === "claude"
         ? claudeUsageResponseToLimits({
             checkedAt,
             response: {
               rate_limits_available: true,
-              rate_limits: { five_hour: claudeWindow(session), seven_day: claudeWindow(weekly) },
+              rate_limits: claudeRateLimits,
             },
           }).limits
         : card.provider === "codex"
@@ -227,7 +294,9 @@ export const readMagpieAccounts = Effect.fn("MagpieApi.readAccounts")(function* 
             checkedAt,
             windows: [
               ...mapped.windows,
-              ...windows.filter((window) => window.kind === "monthly" || window.kind === "other"),
+              ...(card.provider === "claude"
+                ? claudeWindows.filter((window) => window.id === "monthly")
+                : windows.filter((window) => window.kind === "monthly" || window.kind === "other")),
             ],
           });
     accounts.push({
