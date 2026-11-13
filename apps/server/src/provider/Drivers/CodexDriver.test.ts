@@ -3,7 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId, UsageLimitSourceId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -98,6 +98,29 @@ it.layer(testLayer)("CodexDriver", (it) => {
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
         Effect.scoped,
       ),
+  );
+
+  it.effect("a billing source suppresses native quota and reset capability from startup", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const homePath = yield* fs.makeTempDirectoryScoped({ prefix: "t3-synthetic-bound-codex-" });
+      const instance = yield* CodexDriver.create({
+        instanceId: ProviderInstanceId.make("synthetic-go-codex"),
+        displayName: "Synthetic Go",
+        environment: [],
+        enabled: false,
+        config: { ...CodexDriver.defaultConfig(), homePath },
+        usageSource: {
+          sourceId: UsageLimitSourceId.make("syntheticHub"),
+          accountId: "magpie-go:synthetic-go",
+        },
+      });
+      expect(instance.consumeResetCredit).toBeUndefined();
+      expect((yield* instance.snapshot.getSnapshot).usageLimits).toMatchObject({
+        windows: [],
+        unavailable: { reason: "unsupported" },
+      });
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn), Effect.scoped),
   );
 
   it.effect("stays manual-only when the configured executable does not exist", () =>

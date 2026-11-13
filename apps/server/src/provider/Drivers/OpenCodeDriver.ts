@@ -98,7 +98,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
   },
   configSchema: OpenCodeSettings,
   defaultConfig: (): OpenCodeSettings => decodeOpenCodeSettings({}),
-  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
+  create: ({ instanceId, displayName, accentColor, environment, usageSource, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -119,6 +119,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         displayName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
+        usageSource,
       });
       const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
@@ -154,6 +155,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           provider: checkOpenCodeProviderStatus(effectiveConfig, serverConfig.cwd, processEnv),
           usageLimits: readOpenCodeGoUsageLimits({
             enabled: effectiveConfig.enabled,
+            skipNativeUsage: usageSource !== undefined,
             serverUrl: effectiveConfig.serverUrl,
             environment: processEnv,
           }),

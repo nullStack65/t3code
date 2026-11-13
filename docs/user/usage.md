@@ -96,6 +96,49 @@ This connection supplies usage information; configure
 the provider separately to send agent requests through the hub. Remove the hub from the same
 settings section when you no longer need it.
 
+## Magpie quota sources
+
+A Magpie source reports Claude, Codex, and Go billing accounts independently of the runtime
+used to run an agent. In the server's settings file, add a `usageLimitSources` entry:
+
+```json
+{
+  "magpieHub": {
+    "kind": "magpie",
+    "url": "http://127.0.0.1:3425",
+    "apiKeyEnv": "MAGPIE_QUOTA_KEY",
+    "enabled": true
+  }
+}
+```
+
+Inject the named variable into the server process through Infisical. The reference is saved;
+the key is never saved in this entry. The server reads `/v1/magpie/quotas`, refuses redirects,
+and does not request resets. A scoped key that cannot read quotas remains an HTTP 403 error.
+Account-specific failures appear alongside healthy accounts in Limits.
+Readings older than ten minutes are marked stale, with their original read time and no active
+quota windows. Account login, subscription, and payment errors remain visible.
+
+For a Codex or OpenCode instance whose billing belongs to that source, add an explicit
+`usageSource` to its `providerInstances` entry, alongside `driver` and `config`:
+
+```json
+{
+  "sourceId": "magpieHub",
+  "accountId": "claude:synthetic-account-name"
+}
+```
+
+The instance's `/usage-limits` report selects exactly that source and account, even when its
+runtime uses a different provider. A missing or disabled source, or a missing account, shows a
+binding error until the binding is corrected; it never selects another account by name.
+
+Use the exact card `provider:name` identity returned by Magpie. This binding suppresses the
+instance's local quota reader from startup, including streamed limits. The source accounts
+appear separately in Limits under their billing provider; the binding does not select local
+credentials or copy those accounts onto the runtime's row. A missing or disabled source does
+not enable a fallback reader. Remove `usageSource` to restore native quota discovery.
+
 ## Subscription usage widget
 
 Add **Subscription usage** from your iOS or Android widget gallery to see remaining Codex and

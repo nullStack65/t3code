@@ -36,6 +36,7 @@ import {
   PreviewZoomFactor,
 } from "./preview.ts";
 import {
+  ProviderInstanceEnvironmentVariableName,
   ProviderInstanceConfig,
   ProviderInstanceId,
   type ProviderDriverKind,
@@ -944,7 +945,9 @@ export type OpenCodeSettings = typeof OpenCodeSettings.Type;
  * provider environment secrets; it is redacted before reaching a client.
  */
 export const UsageLimitSourceConfig = Schema.Struct({
-  kind: Schema.Literal("cliproxy"),
+  kind: Schema.Literals(["cliproxy", "magpie"]),
+  /** Name of an Infisical-injected server environment variable; never a persisted key. */
+  apiKeyEnv: Schema.optionalKey(ProviderInstanceEnvironmentVariableName),
   label: Schema.optional(TrimmedNonEmptyString),
   url: TrimmedNonEmptyString,
   managementKey: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),

@@ -53,7 +53,7 @@ export const ServerProviderUsageLimits = Schema.Struct({
   resetCredits: Schema.optional(ServerProviderResetCredits),
   unavailable: Schema.optional(
     Schema.Struct({
-      reason: Schema.Literals(["unsupported", "probeFailed"]),
+      reason: Schema.Literals(["unsupported", "probeFailed", "stale"]),
       message: Schema.optional(TrimmedNonEmptyString),
     }),
   ),
@@ -94,7 +94,7 @@ export type UsageLimitSourceAccount = typeof UsageLimitSourceAccount.Type;
  */
 export const UsageLimitSourceSnapshot = Schema.Struct({
   id: UsageLimitSourceId,
-  kind: Schema.Literal("cliproxy"),
+  kind: Schema.Literals(["cliproxy", "magpie"]),
   label: TrimmedNonEmptyString,
   checkedAt: IsoDateTime,
   accounts: ForwardCompatibleArray(UsageLimitSourceAccount),

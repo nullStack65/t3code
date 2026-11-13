@@ -30,12 +30,13 @@ const UsageResponse = Schema.Struct({
 /** External OpenCode servers own their credentials; never read the host's account for them. */
 export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(function* (input: {
   readonly enabled: boolean;
+  readonly skipNativeUsage?: boolean;
   readonly serverUrl: string;
   readonly environment: NodeJS.ProcessEnv;
 }) {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const unsupported = makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
-  if (!input.enabled || input.serverUrl.trim()) return unsupported;
+  if (input.skipNativeUsage || !input.enabled || input.serverUrl.trim()) return unsupported;
 
   return yield* Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -98,6 +99,13 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     return makeUsageLimits({ checkedAt, windows });
   }).pipe(
     Effect.timeout("5 seconds"),
+    Effect.tapError(() =>
+      Effect.logWarning("usage-reader-error", {
+        event: "usage-reader-error",
+        sourceKind: "opencode",
+        code: "native_quota_read_failed",
+      }),
+    ),
     Effect.orElseSucceed(() =>
       makeUnavailableUsageLimits({
         checkedAt,

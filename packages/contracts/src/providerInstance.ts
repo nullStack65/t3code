@@ -35,6 +35,7 @@
  */
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROVIDER_SLUG_MAX_CHARS = 64;
@@ -112,6 +113,12 @@ export type ProviderInstanceEnvironmentVariable = typeof ProviderInstanceEnviron
 export const ProviderInstanceEnvironment = Schema.Array(ProviderInstanceEnvironmentVariable);
 export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Type;
 
+export const ProviderUsageSourceBinding = Schema.Struct({
+  sourceId: UsageLimitSourceId,
+  accountId: TrimmedNonEmptyString,
+});
+export type ProviderUsageSourceBinding = typeof ProviderUsageSourceBinding.Type;
+
 /**
  * Envelope shape for a provider instance configuration in `ServerSettings`.
  *
@@ -126,6 +133,8 @@ export const ProviderInstanceConfig = Schema.Struct({
   displayName: Schema.optional(TrimmedNonEmptyString),
   accentColor: Schema.optional(TrimmedNonEmptyString),
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
+  /** Billing account owns quota; suppress harness-local readers even if the source is unavailable. */
+  usageSource: Schema.optionalKey(ProviderUsageSourceBinding),
   enabled: Schema.optionalKey(Schema.Boolean),
   config: Schema.optionalKey(Schema.Unknown),
 });

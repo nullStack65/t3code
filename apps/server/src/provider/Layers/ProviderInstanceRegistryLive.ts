@@ -192,6 +192,7 @@ const buildEntry = <R>(input: {
         displayName: entry.displayName,
         accentColor: entry.accentColor,
         environment: entry.environment ?? [],
+        usageSource: entry.usageSource,
         enabled: resolveEntryEnabled(entry, typedConfig),
         config: typedConfig,
       })
