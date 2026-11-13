@@ -156,3 +156,5 @@ same environment, language, and dictionary as the composer, but skips transcript
 cleanup even when it is on, so you see what the model heard. Browser recording
 needs HTTPS or localhost and microphone permission; for a remote server over
 plain HTTP, use the desktop app.
+
+AssemblyAI uses the Sync API with Universal-3.5 Pro and your existing AssemblyAI API key. Each recording must be between 80 milliseconds and two minutes. Choose AssemblyAI under the cloud providers in Settings → Voice.

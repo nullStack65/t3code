@@ -49,7 +49,12 @@ it.effect.each(["openai", "xai"] as const)("sends only to %s using its own saved
     yield* service.setKey(provider === "openai" ? "xai" : "openai", Redacted.make("other"));
     expect((yield* Effect.flip(transcribe()))._tag).toBe("CloudSpeechError");
     yield* service.setKey(provider, Redacted.make("chosen"));
-    expect(yield* service.configured).toEqual({ openai: true, xai: true, openrouter: false });
+    expect(yield* service.configured).toEqual({
+      openai: true,
+      xai: true,
+      openrouter: false,
+      assemblyai: false,
+    });
     yield* Effect.flip(transcribe(new Uint8Array(3)));
     expect(upstream).not.toHaveBeenCalled();
     expect(yield* transcribe()).toBe("hello");
@@ -197,4 +202,51 @@ it.effect("removing a key while a catalog read is pending prevents the upload", 
     expect(uploads).toEqual([]);
     expect(exit._tag).toBe("Failure");
   }),
+);
+
+it.effect(
+  "AssemblyAI sends WAV and config only to the Sync API and bounds clips before upload",
+  () =>
+    Effect.gen(function* () {
+      const upstream = vi.fn<typeof fetch>(async () => Response.json({ text: "hello T3" }));
+      const service = yield* CloudSpeech.CloudSpeech.pipe(
+        Effect.provide(
+          CloudSpeech.layer.pipe(
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
+            Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+          ),
+        ),
+      );
+      yield* service.setKey("assemblyai", Redacted.make("assembly-fixture"));
+      const transcribe = (samples: number) =>
+        service
+          .transcribe("assemblyai", new Uint8Array(new Float32Array(samples).buffer), {
+            ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
+            speechLanguage: "en",
+            speechCustomWords: [{ term: "Closura", aliases: [] }],
+          })
+          .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream));
+      expect(yield* transcribe(1600)).toBe("hello T3");
+      const [url, init] = upstream.mock.calls[0]!;
+      expect(String(url)).toBe("https://sync.assemblyai.com/v1/transcribe");
+      expect(init?.redirect).toBe("error");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("assembly-fixture");
+      expect(headers.get("X-AAI-Model")).toBe("universal-3-5-pro");
+      const form = init?.body as FormData;
+      expect(JSON.parse(String(form.get("config")))).toEqual({
+        language_code: "en",
+        word_boost: ["Closura"],
+      });
+      expect((form.get("audio") as Blob).type).toBe("audio/wav");
+      expect(yield* Effect.flip(transcribe(1_920_001))).toMatchObject({ reason: "audio-duration" });
+      expect(yield* Effect.flip(transcribe(100))).toMatchObject({ reason: "audio-duration" });
+      expect(upstream).toHaveBeenCalledTimes(1);
+      upstream.mockResolvedValueOnce(new Response("private diagnostic", { status: 401 }));
+      expect(yield* Effect.flip(transcribe(1600))).toMatchObject({ reason: "rejected-key" });
+      yield* service.setKey("assemblyai", null);
+      expect((yield* service.configured).assemblyai).toBe(false);
+      expect(yield* Effect.flip(transcribe(1600))).toMatchObject({ reason: "missing-key" });
+    }),
 );
