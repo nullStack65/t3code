@@ -1,0 +1,132 @@
+--- a/packages/shared/src/cliRelease.ts
++++ b/packages/shared/src/cliRelease.ts
+@@ -5,10 +5,31 @@
+  * platform key, so a rename here is a release-breaking change.
+  */
+ 
+-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
++/**
++ * The repository this build resolves its own releases from. This is a fork, so
++ * the default must never be upstream: an install that fell back to
++ * `pingdotgg/t3code` would silently update onto an official build and lose the
++ * fork. `T3CODE_RELEASE_REPOSITORY` overrides it for mirrors and tests; unlike
++ * `T3CODE_RELEASE_BASE_URL` it also retargets the release-index lookup that
++ * `t3 update` and the install scripts use to discover a version.
++ */
++export const CLI_RELEASE_REPOSITORY = "nullStack65/t3code";
++const CLI_RELEASE_REPOSITORY_ENV = "T3CODE_RELEASE_REPOSITORY";
+ export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
+ /** Overrides the download origin for mirrors and air-gapped installs. */
+ export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
++
++const REPOSITORY_PATTERN = /^[^/\s]+\/[^/\s]+$/;
++
++/** The `owner/repo` this build downloads and discovers releases from. */
++export function resolveCliReleaseRepository(
++  env: Readonly<Record<string, string | undefined>> = process.env,
++): string {
++  const override = env[CLI_RELEASE_REPOSITORY_ENV]?.trim();
++  return override !== undefined && override !== "" && REPOSITORY_PATTERN.test(override)
++    ? override
++    : CLI_RELEASE_REPOSITORY;
++}
+ 
+ /**
+  * The archives a release attaches. Kept in step with the build_linux_cli
+@@ -54,14 +75,17 @@
+   return `t3-${version}-${platformKey}.${platformKey.startsWith("win32") ? "zip" : "tar.gz"}`;
+ }
+ 
+-const CLI_RELEASE_DEFAULT_BASE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases/download`;
++const CLI_RELEASE_DEFAULT_BASE_URL = (repository: string) =>
++  `https://github.com/${repository}/releases/download`;
+ 
+ /** Directory that `releases/download/<tag>/<asset>` lives under. */
+ export function cliReleaseDownloadBaseUrl(
+   version: string,
+-  baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
++  baseUrl: string | undefined = undefined,
++  repository: string = resolveCliReleaseRepository(),
+ ): string {
+-  return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
++  const origin = baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL(repository);
++  return `${origin.replace(/\/+$/, "")}/v${version}`;
+ }
+ 
+ /**
+@@ -97,8 +121,11 @@
+  * until a channel match turns up; a busy nightly train can push the newest
+  * preview or stable release past any single page.
+  */
+-export function cliReleaseIndexPageUrl(page: number): string {
+-  return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases?per_page=100&page=${page}`;
++export function cliReleaseIndexPageUrl(
++  page: number,
++  repository: string = resolveCliReleaseRepository(),
++): string {
++  return `https://api.github.com/repos/${repository}/releases?per_page=100&page=${page}`;
+ }
+ 
+ /**
+--- a/packages/shared/src/cliRelease.test.ts
++++ b/packages/shared/src/cliRelease.test.ts
+@@ -9,6 +9,7 @@
+   cliReleaseIndexPageUrl,
+   newestCliReleaseVersion,
+   parseChecksums,
++  resolveCliReleaseRepository,
+ } from "./cliRelease.ts";
+ 
+ describe("cliRelease", () => {
+@@ -33,10 +34,29 @@
+ 
+   it("resolves download URLs under the tagged release, honoring a mirror", () => {
+     expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
+-      "https://github.com/pingdotgg/t3code/releases/download/v1.2.3",
++      "https://github.com/nullStack65/t3code/releases/download/v1.2.3",
+     );
+     expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
+       "https://mirror.example/t3/v1.2.3",
++    );
++    expect(cliReleaseDownloadBaseUrl("1.2.3", undefined, "example-org/fork")).toBe(
++      "https://github.com/example-org/fork/releases/download/v1.2.3",
++    );
++  });
++
++  it("defaults the release repository to the fork and honors an override", () => {
++    // The shipped default must never be upstream, or a fork install would
++    // discover and download official `pingdotgg` builds.
++    expect(resolveCliReleaseRepository({})).toBe("nullStack65/t3code");
++    expect(resolveCliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "example-org/fork" })).toBe(
++      "example-org/fork",
++    );
++    // A blank or malformed override must not silently redirect to nothing.
++    expect(resolveCliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "   " })).toBe(
++      "nullStack65/t3code",
++    );
++    expect(resolveCliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "not-a-repo" })).toBe(
++      "nullStack65/t3code",
+     );
+   });
+ 
+@@ -87,8 +107,11 @@
+ 
+   it("pages through the release index at the largest page GitHub allows", () => {
+     expect(cliReleaseIndexPageUrl(1)).toBe(
+-      "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
++      "https://api.github.com/repos/nullStack65/t3code/releases?per_page=100&page=1",
+     );
+     expect(cliReleaseIndexPageUrl(3)).toContain("page=3");
++    expect(cliReleaseIndexPageUrl(2, "example-org/fork")).toBe(
++      "https://api.github.com/repos/example-org/fork/releases?per_page=100&page=2",
++    );
+   });
+ });
+--- a/apps/server/src/provider/testing/ClaudeCapabilitiesProbe.fixture.mjs
++++ b/apps/server/src/provider/testing/ClaudeCapabilitiesProbe.fixture.mjs
+@@ -62,5 +62,4 @@
+ const keepAlive = setInterval(() => {}, 1_000);
+ lines.on("close", () => {
+   clearInterval(keepAlive);
+-  process.exit(0);
+ });
