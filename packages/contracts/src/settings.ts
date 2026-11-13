@@ -391,7 +391,7 @@ export const VoiceTranscriptionDestination = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("cloud"),
     environmentId: EnvironmentId,
-    provider: Schema.Literals(["openai", "xai"]),
+    provider: Schema.Literals(["openai", "xai", "assemblyai"]),
   }),
   Schema.Struct({
     kind: Schema.Literal("cloud"),
@@ -1355,6 +1355,7 @@ export const CloudSpeechCredentials = Schema.Struct({
   openai: CloudSpeechCredential,
   xai: CloudSpeechCredential,
   openrouter: CloudSpeechCredential,
+  assemblyai: CloudSpeechCredential,
 });
 
 export const ServerSettings = Schema.Struct({
@@ -1391,7 +1392,9 @@ export const ServerSettings = Schema.Struct({
 
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   cloudSpeechCredentials: CloudSpeechCredentials.pipe(
-    Schema.withDecodingDefault(Effect.succeed({ openai: "", xai: "", openrouter: "" })),
+    Schema.withDecodingDefault(
+      Effect.succeed({ openai: "", xai: "", openrouter: "", assemblyai: "" }),
+    ),
   ),
   speechModelId: Schema.String.pipe(
     Schema.withDecodingDefault(Effect.succeed("handy-computer/parakeet-unified-en-0.6b-gguf")),
@@ -1853,6 +1856,7 @@ export const ServerSettingsPatch = Schema.Struct({
       openai: Schema.optionalKey(SettingsSecretValue),
       xai: Schema.optionalKey(SettingsSecretValue),
       openrouter: Schema.optionalKey(SettingsSecretValue),
+      assemblyai: Schema.optionalKey(SettingsSecretValue),
     }),
   ),
   speechModelId: Schema.optionalKey(Schema.String),
