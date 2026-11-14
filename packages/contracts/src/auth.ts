@@ -114,6 +114,99 @@ export const AuthAdministrativeScopes = [
   AuthRelayWriteScope,
 ] as const;
 
+/**
+ * Access a pairing code grants an MCP client, including another T3 environment
+ * that links here. `full-access` is this fork's standard client set.
+ */
+export const AuthMcpClientAccess = Schema.Literals([
+  "read-only",
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+]);
+export type AuthMcpClientAccess = typeof AuthMcpClientAccess.Type;
+
+export const MCP_PEER_LINK_SOFTWARE_ID = "t3code-peer-link";
+export const CONNECT_PAIRING_DISCOVERY_PATH = "/.well-known/oauth-authorization-server";
+export const MCP_PAIRING_TOKEN_PATH = "/oauth/mcp/token";
+export const MCP_PAIRING_AUTHORIZE_PATH = "/oauth/mcp/authorize";
+export const MCP_PAIRING_REGISTER_PATH = "/oauth/mcp/register";
+export const MCP_PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
+export const MCP_PROTECTED_RESOURCE_MCP_PATH = "/.well-known/oauth-protected-resource/mcp";
+
+/** Scopes advertised for Connect pairing. Every `mcpClientScopes` result is a subset. */
+export const MCP_PAIRING_SCOPES = AuthStandardClientScopes;
+
+export function mcpClientScopes(access: AuthMcpClientAccess): ReadonlyArray<AuthEnvironmentScope> {
+  switch (access) {
+    case "read-only":
+      return [AuthOrchestrationReadScope];
+    case "approval-required":
+    case "auto-accept-edits":
+    case "auto":
+      return [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+    case "full-access":
+      return MCP_PAIRING_SCOPES;
+    default: {
+      const unreachable: never = access;
+      return unreachable;
+    }
+  }
+}
+
+export const AuthMcpProtectedResourceMetadata = Schema.Struct({
+  resource: Schema.String,
+  authorization_servers: Schema.Array(Schema.String),
+  scopes_supported: Schema.Array(AuthEnvironmentScope),
+  bearer_methods_supported: Schema.Array(Schema.Literal("header")),
+  resource_name: Schema.String,
+});
+export type AuthMcpProtectedResourceMetadata = typeof AuthMcpProtectedResourceMetadata.Type;
+
+export const AuthMcpAuthorizationServerMetadata = Schema.Struct({
+  issuer: Schema.String,
+  authorization_endpoint: Schema.String,
+  token_endpoint: Schema.String,
+  registration_endpoint: Schema.String,
+  response_types_supported: Schema.Array(Schema.Literal("code")),
+  grant_types_supported: Schema.Array(Schema.Literal("authorization_code")),
+  code_challenge_methods_supported: Schema.Array(Schema.Literal("S256")),
+  token_endpoint_auth_methods_supported: Schema.Array(Schema.Literal("none")),
+  scopes_supported: Schema.Array(AuthEnvironmentScope),
+  authorization_response_iss_parameter_supported: Schema.Boolean,
+});
+export type AuthMcpAuthorizationServerMetadata = typeof AuthMcpAuthorizationServerMetadata.Type;
+
+export const AuthMcpAuthorizeResult = Schema.Struct({
+  pairing: Schema.Literal("code"),
+  token_endpoint: Schema.String,
+  scopes_supported: Schema.Array(AuthEnvironmentScope),
+  peer_software_id: Schema.Literal(MCP_PEER_LINK_SOFTWARE_ID),
+});
+export type AuthMcpAuthorizeResult = typeof AuthMcpAuthorizeResult.Type;
+
+export const AuthMcpClientRegistration = Schema.Struct({
+  client_name: Schema.optionalKey(Schema.String),
+  software_id: Schema.optionalKey(Schema.String),
+  redirect_uris: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+export type AuthMcpClientRegistration = typeof AuthMcpClientRegistration.Type;
+
+export const AuthMcpRegisteredClient = Schema.Struct({
+  client_id: Schema.String,
+  client_name: Schema.String,
+  token_endpoint_auth_method: Schema.Literal("none"),
+});
+export type AuthMcpRegisteredClient = typeof AuthMcpRegisteredClient.Type;
+
+export const AuthMcpPairingTokenRequest = Schema.Struct({
+  grant_type: Schema.Literal("authorization_code"),
+  code: TrimmedNonEmptyString,
+  access: Schema.optionalKey(AuthMcpClientAccess),
+}).pipe(HttpApiSchema.asFormUrlEncoded());
+export type AuthMcpPairingTokenRequest = typeof AuthMcpPairingTokenRequest.Type;
+
 export const AuthTokenExchangeGrantType =
   "urn:ietf:params:oauth:grant-type:token-exchange" as const;
 export const AuthAccessTokenType = "urn:ietf:params:oauth:token-type:access_token" as const;
@@ -215,6 +308,8 @@ export const AuthPairingCredentialResult = Schema.Struct({
   credential: TrimmedNonEmptyString,
   label: Schema.optionalKey(TrimmedNonEmptyString),
   expiresAt: Schema.DateTimeUtc,
+  /** Set when the code was minted for an MCP client at this access level. */
+  access: Schema.optionalKey(AuthMcpClientAccess),
 });
 export type AuthPairingCredentialResult = typeof AuthPairingCredentialResult.Type;
 
@@ -342,6 +437,8 @@ export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.T
 export const AuthCreatePairingCredentialInput = Schema.Struct({
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
+  /** When `scopes` is omitted, the code carries `mcpClientScopes(access)`. */
+  access: Schema.optionalKey(AuthMcpClientAccess),
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;
 
