@@ -14,6 +14,12 @@ import {
   AuthBrowserSessionResult,
   AuthClientSession,
   AuthCreatePairingCredentialInput,
+  AuthMcpAuthorizationServerMetadata,
+  AuthMcpAuthorizeResult,
+  AuthMcpClientRegistration,
+  AuthMcpPairingTokenRequest,
+  AuthMcpProtectedResourceMetadata,
+  AuthMcpRegisteredClient,
   AuthPairingCredentialResult,
   AuthPairingLink,
   AuthRevokeClientSessionInput,
@@ -22,6 +28,12 @@ import {
   AuthTokenExchangeRequest,
   AuthSessionState,
   AuthWebSocketTicketResult,
+  CONNECT_PAIRING_DISCOVERY_PATH,
+  MCP_PAIRING_AUTHORIZE_PATH,
+  MCP_PAIRING_REGISTER_PATH,
+  MCP_PAIRING_TOKEN_PATH,
+  MCP_PROTECTED_RESOURCE_MCP_PATH,
+  MCP_PROTECTED_RESOURCE_PATH,
   ServerAuthSessionMethod,
 } from "./auth.ts";
 import {
@@ -554,6 +566,50 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
+/**
+ * MCP clients and linked environments discover Connect pairing here.
+ * `authorizationServer` lists the scopes a pairing code must carry.
+ */
+class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")
+  .add(
+    HttpApiEndpoint.get("protectedResource", MCP_PROTECTED_RESOURCE_PATH, {
+      success: AuthMcpProtectedResourceMetadata,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("mcpProtectedResource", MCP_PROTECTED_RESOURCE_MCP_PATH, {
+      success: AuthMcpProtectedResourceMetadata,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("authorizationServer", CONNECT_PAIRING_DISCOVERY_PATH, {
+      success: AuthMcpAuthorizationServerMetadata,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("authorize", MCP_PAIRING_AUTHORIZE_PATH, {
+      success: AuthMcpAuthorizeResult,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("register", MCP_PAIRING_REGISTER_PATH, {
+      payload: AuthMcpClientRegistration,
+      success: AuthMcpRegisteredClient,
+      error: [EnvironmentRequestInvalidError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("token", MCP_PAIRING_TOKEN_PATH, {
+      payload: AuthMcpPairingTokenRequest,
+      success: AuthAccessTokenResult,
+      error: [
+        EnvironmentAuthInvalidError,
+        EnvironmentRequestInvalidError,
+        EnvironmentInternalError,
+      ],
+    }),
+  ) {}
+
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -620,4 +676,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
-  .add(EnvironmentConnectHttpApi) {}
+  .add(EnvironmentConnectHttpApi)
+  .add(EnvironmentMcpOAuthHttpApi) {}
