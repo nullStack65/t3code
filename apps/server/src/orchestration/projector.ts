@@ -431,6 +431,9 @@ export function projectEvent(
             branch: payload.branch,
             worktreePath: payload.worktreePath,
             executionScope: payload.executionScope ?? null,
+            ...(payload.owner !== undefined ? { owner: payload.owner } : {}),
+            ...(payload.threadType !== undefined ? { threadType: payload.threadType } : {}),
+            ...(payload.startedBy !== undefined ? { startedBy: payload.startedBy } : {}),
             pullRequests: [],
             branchPullRequest: null,
             latestTurn: null,
@@ -627,6 +630,9 @@ export function projectEvent(
               ...(payload.activeOrderKey !== undefined
                 ? { activeOrderKey: payload.activeOrderKey }
                 : {}),
+              ...(payload.owner !== undefined ? { owner: payload.owner } : {}),
+              ...(payload.threadType !== undefined ? { threadType: payload.threadType } : {}),
+              ...(payload.startedBy !== undefined ? { startedBy: payload.startedBy } : {}),
               ...(payload.branchPullRequest !== undefined
                 ? { branchPullRequest: payload.branchPullRequest }
                 : {}),

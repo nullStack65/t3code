@@ -158,7 +158,7 @@ import {
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
-import { useUiStateStore } from "../uiStateStore";
+import { readInboxCreateRouting, useUiStateStore } from "../uiStateStore";
 import {
   latestWorkspaceMutationId,
   useWorkspaceMutationRefresh,
@@ -8085,6 +8085,7 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: null,
                       createdAt: messageCreatedAt,
+                      ...readInboxCreateRouting(),
                     },
                     prepareWorktree: {
                       projectCwd: activeProject.workspaceRoot,
@@ -8423,6 +8424,7 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...readInboxCreateRouting(),
                     },
                   }
                 : {}),

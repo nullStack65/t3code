@@ -468,6 +468,62 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
     }),
   );
 
+  it.effect("round-trips inbox owner, type, and starter", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      yield* threads.upsert({
+        threadId: ThreadId.make("thread-inbox"),
+        projectId: ProjectId.make("project-1"),
+        title: "Inbox thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurnId: null,
+        createdAt: "2026-11-14T00:00:00.000Z",
+        updatedAt: "2026-11-14T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        unsettledAt: null,
+        snoozedUntil: null,
+        snoozedAt: null,
+        pinnedAt: null,
+        owner: "Kameron",
+        threadType: "needs-human",
+        startedBy: "Lead",
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+      });
+      const row = Option.getOrNull(
+        yield* threads.getById({ threadId: ThreadId.make("thread-inbox") }),
+      );
+      assert.strictEqual(row?.owner, "Kameron");
+      assert.strictEqual(row?.threadType, "needs-human");
+      assert.strictEqual(row?.startedBy, "Lead");
+      if (!row) return yield* Effect.die("Expected inbox projection row.");
+
+      yield* threads.upsert({
+        ...row,
+        owner: null,
+        threadType: "bot-work",
+      });
+      const cleared = Option.getOrNull(
+        yield* threads.getById({ threadId: ThreadId.make("thread-inbox") }),
+      );
+      assert.strictEqual(cleared?.owner, null);
+      assert.strictEqual(cleared?.threadType, "bot-work");
+      assert.strictEqual(cleared?.startedBy, "Lead");
+    }),
+  );
+
   it.effect("round-trips manual and branch pull requests through the thread row", () =>
     Effect.gen(function* () {
       const threads = yield* ProjectionThreadRepository;

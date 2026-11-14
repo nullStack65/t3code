@@ -620,6 +620,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
             executionScope: event.payload.executionScope ?? null,
+            owner: event.payload.owner ?? null,
+            threadType: event.payload.threadType ?? null,
+            startedBy: event.payload.startedBy ?? null,
             linkedPullRequest: null,
             branchPullRequest: null,
             latestTurnId: null,
@@ -832,6 +835,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             ...(event.payload.branchPullRequest !== undefined
               ? { branchPullRequest: event.payload.branchPullRequest }
+              : {}),
+            ...(event.payload.owner !== undefined ? { owner: event.payload.owner } : {}),
+            ...(event.payload.threadType !== undefined
+              ? { threadType: event.payload.threadType }
+              : {}),
+            ...(event.payload.startedBy !== undefined
+              ? { startedBy: event.payload.startedBy }
               : {}),
             updatedAt: event.payload.updatedAt,
           });

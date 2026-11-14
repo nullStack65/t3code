@@ -18,6 +18,7 @@ import {
   ThreadTitleState,
   ThreadId,
   ThreadExecutionScope,
+  ThreadInboxType,
   TurnId,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -50,6 +51,9 @@ export const ProjectionThread = Schema.Struct({
   snoozedUntil: Schema.NullOr(IsoDateTime),
   snoozedAt: Schema.NullOr(IsoDateTime),
   pinnedAt: Schema.NullOr(IsoDateTime),
+  owner: Schema.optional(Schema.NullOr(Schema.String)),
+  threadType: Schema.optional(Schema.NullOr(ThreadInboxType)),
+  startedBy: Schema.optional(Schema.NullOr(Schema.String)),
   pinOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
   activeOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),

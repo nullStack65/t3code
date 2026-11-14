@@ -7,6 +7,7 @@ import {
   type ProjectId,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ThreadInboxType,
 } from "@t3tools/contracts";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 
@@ -43,6 +44,9 @@ export interface ProjectThreadStartTurnSpec {
   readonly startFromOrigin: boolean;
   /** Generated temp branch for worktree mode; unused for local mode. */
   readonly worktreeBranchName: string;
+  readonly owner?: string | null;
+  readonly threadType?: ThreadInboxType | null;
+  readonly startedBy?: string | null;
 }
 
 /**
@@ -81,6 +85,9 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
         // Coordinator gets its dedicated scratch directory from the server.
         worktreePath: null,
         createdAt: spec.createdAt,
+        ...(spec.owner !== undefined ? { owner: spec.owner } : {}),
+        ...(spec.threadType !== undefined ? { threadType: spec.threadType } : {}),
+        ...(spec.startedBy !== undefined ? { startedBy: spec.startedBy } : {}),
       },
       ...(isWorktree
         ? {
