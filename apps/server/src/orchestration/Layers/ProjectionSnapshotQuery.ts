@@ -378,6 +378,19 @@ function mapTitleRegeneration(row: Schema.Schema.Type<typeof ProjectionThreadDbR
     : null;
 }
 
+/** Omit unset routing so historical rows stay byte-identical for older readers. */
+function threadRoutingFromRow(row: {
+  readonly owner?: string | null | undefined;
+  readonly threadType?: "needs-human" | "fyi" | "bot-work" | null | undefined;
+  readonly startedBy?: string | null | undefined;
+}) {
+  return {
+    ...(row.owner != null ? { owner: row.owner } : {}),
+    ...(row.threadType != null ? { threadType: row.threadType } : {}),
+    ...(row.startedBy != null ? { startedBy: row.startedBy } : {}),
+  };
+}
+
 function mapSessionRow(
   row: Schema.Schema.Type<typeof ProjectionThreadSessionDbRowSchema>,
 ): OrchestrationSession {
@@ -596,6 +609,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          owner,
+          thread_type AS "threadType",
+          started_by AS "startedBy",
           pin_order_key AS "pinOrderKey",
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
@@ -638,6 +654,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          owner,
+          thread_type AS "threadType",
+          started_by AS "startedBy",
           pin_order_key AS "pinOrderKey",
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
@@ -712,6 +731,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          owner,
+          thread_type AS "threadType",
+          started_by AS "startedBy",
           pin_order_key AS "pinOrderKey",
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
@@ -1278,6 +1300,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          owner,
+          thread_type AS "threadType",
+          started_by AS "startedBy",
           pin_order_key AS "pinOrderKey",
           active_order_key AS "activeOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
@@ -2356,6 +2381,7 @@ pending_approval_requests AS (
                 snoozedAt: row.snoozedAt,
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
+                ...threadRoutingFromRow(row),
                 activeOrderKey: row.activeOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
                 titleState: row.titleState,
@@ -2602,6 +2628,7 @@ pending_approval_requests AS (
                   snoozedAt: row.snoozedAt,
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
+                  ...threadRoutingFromRow(row),
                   activeOrderKey: row.activeOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
                   titleState: row.titleState,
@@ -2760,6 +2787,7 @@ pending_approval_requests AS (
                         snoozedAt: row.snoozedAt,
                         pinnedAt: row.pinnedAt,
                         pinOrderKey: row.pinOrderKey ?? null,
+                        ...threadRoutingFromRow(row),
                         activeOrderKey: row.activeOrderKey ?? null,
                         titleRegeneration: mapTitleRegeneration(row),
                         titleState: row.titleState,
@@ -2926,6 +2954,7 @@ pending_approval_requests AS (
                   snoozedAt: row.snoozedAt,
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
+                  ...threadRoutingFromRow(row),
                   activeOrderKey: row.activeOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
                   titleState: row.titleState,
@@ -3286,6 +3315,7 @@ pending_approval_requests AS (
         snoozedAt: threadRow.value.snoozedAt,
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
+        ...threadRoutingFromRow(threadRow.value),
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         titleState: threadRow.value.titleState,
@@ -3589,6 +3619,7 @@ pending_approval_requests AS (
         snoozedAt: threadRow.value.snoozedAt,
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
+        ...threadRoutingFromRow(threadRow.value),
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         titleState: threadRow.value.titleState,

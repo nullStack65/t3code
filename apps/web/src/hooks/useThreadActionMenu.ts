@@ -7,6 +7,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import { inboxOwnerNames } from "@t3tools/client-runtime/state/thread-inbox";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { useRouter } from "@tanstack/react-router";
@@ -15,6 +16,7 @@ import { useCallback, useMemo } from "react";
 import { resolveSnoozePresets } from "../components/Sidebar.snooze";
 import {
   buildThreadActionMenuItems,
+  threadRoutingUpdateFromMenuAction,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -161,6 +163,11 @@ export function useThreadActionMenu(input: {
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
           snoozePresets,
+          routing: {
+            owners: inboxOwnerNames(useUiStateStore.getState().inboxOwners),
+            owner: thread.owner ?? null,
+            threadType: thread.threadType ?? null,
+          },
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
         if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -186,6 +193,16 @@ export function useThreadActionMenu(input: {
             failureToast(title, squashAtomCommandFailure(result));
           }
         };
+        const routingUpdate = threadRoutingUpdateFromMenuAction(action);
+        if (routingUpdate) {
+          await reportFailure("Failed to update thread", () =>
+            updateThreadMetadata({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, ...routingUpdate },
+            }),
+          );
+          return;
+        }
         switch (action) {
           case "project-settings": {
             const project = projects.find(

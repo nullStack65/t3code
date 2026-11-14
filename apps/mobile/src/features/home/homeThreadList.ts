@@ -1,4 +1,5 @@
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
+import { threadVisibleInInbox } from "@t3tools/client-runtime/state/thread-inbox";
 import {
   buildProjectGroups,
   derivePhysicalProjectKey,
@@ -218,8 +219,13 @@ export function buildHomeThreadGroups(input: {
   readonly projectGroupingMode: SidebarProjectGroupingMode;
   /** Current time used for the recency window; defaults to now. Injectable for tests. */
   readonly now?: number;
+  /** Founder inbox. Null keeps the shared list. */
+  readonly inboxIdentity?: string | null;
+  /** Bot-to-bot threads stay hidden unless this or a search query asks for them. */
+  readonly showBotWork?: boolean;
 }): ReadonlyArray<HomeThreadGroup> {
   const now = input.now ?? Date.now();
+  const searching = input.searchQuery.trim().length > 0;
   const groups = new Map<string, MutableHomeThreadGroup>();
   const groupTitleByKey = new Map<string, string>();
   const groupKeyByProjectKey = new Map<string, string>();
@@ -277,6 +283,14 @@ export function buildHomeThreadGroups(input: {
 
   for (const thread of input.threads) {
     if (thread.archivedAt !== null) {
+      continue;
+    }
+    if (
+      !threadVisibleInInbox(thread, {
+        identity: input.inboxIdentity ?? null,
+        showBotWork: input.showBotWork ?? searching,
+      })
+    ) {
       continue;
     }
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) {

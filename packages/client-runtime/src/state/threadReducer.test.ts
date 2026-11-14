@@ -318,6 +318,51 @@ describe("applyThreadDetailEvent", () => {
       },
     );
 
+    it("sets and clears inbox routing", () => {
+      const tagged = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 5,
+        occurredAt: "2026-04-01T05:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: baseThread.id,
+        type: "thread.meta-updated",
+        payload: {
+          threadId: baseThread.id,
+          owner: "Kameron",
+          threadType: "needs-human",
+          startedBy: "Lead",
+          updatedAt: "2026-04-01T05:00:00.000Z",
+        },
+      });
+      expect(tagged.kind).toBe("updated");
+      if (tagged.kind !== "updated") return;
+      expect(tagged.thread).toMatchObject({
+        owner: "Kameron",
+        threadType: "needs-human",
+        startedBy: "Lead",
+      });
+
+      const cleared = applyThreadDetailEvent(tagged.thread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: baseThread.id,
+        type: "thread.meta-updated",
+        payload: {
+          threadId: baseThread.id,
+          owner: null,
+          threadType: null,
+          updatedAt: "2026-04-01T06:00:00.000Z",
+        },
+      });
+      expect(cleared.kind).toBe("updated");
+      if (cleared.kind !== "updated") return;
+      expect(cleared.thread.owner).toBeNull();
+      expect(cleared.thread.threadType).toBeNull();
+      expect(cleared.thread.startedBy).toBe("Lead");
+    });
+
     it("patches title and branch", () => {
       const result = applyThreadDetailEvent(
         { ...baseThread, activeOrderKey: "m" },
