@@ -100,7 +100,7 @@ export function threadInboxAccess(
         if (!canRouteInbox(identity, routing)) return yield* denied(true);
         const inbox: ThreadInbox = {
           ...routing,
-          requestedBy: identity.actor,
+          requestedBy: identity.requestedBy ?? identity.actor,
           actor: identity.actor,
           executorEnvironmentId: environmentId,
         };

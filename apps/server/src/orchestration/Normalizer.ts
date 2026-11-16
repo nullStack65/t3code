@@ -1,3 +1,4 @@
+import { requireFleetPlacementSupport } from "./fleetPlacementGate.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -76,6 +77,9 @@ const removeClaimedAttachmentPaths = Effect.fn("Normalizer.removeClaimedAttachme
 
 export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
   Effect.gen(function* () {
+    yield* requireFleetPlacementSupport(command).pipe(
+      Effect.mapError((cause) => new OrchestrationDispatchCommandError({ message: cause.message })),
+    );
     const receivedAt = DateTime.formatIso(yield* DateTime.now);
     const canonicalCommand = canonicalizeClientCommandTimestamps(command, receivedAt);
     const fileSystem = yield* FileSystem.FileSystem;

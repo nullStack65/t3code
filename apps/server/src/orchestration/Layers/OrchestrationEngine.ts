@@ -1,3 +1,4 @@
+import { requireFleetPlacementSupport } from "../fleetPlacementGate.ts";
 import {
   qualifyCoordinatorWorkspace,
   qualifyThreadWorktree,
@@ -181,6 +182,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
         }
+
+        yield* requireFleetPlacementSupport(envelope.command);
 
         if (
           envelope.command.type === "thread.auto-settle" &&

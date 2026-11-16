@@ -170,4 +170,34 @@ describe("destination inbox authorization", () => {
         ).toEqual([]);
       }),
   );
+  it.effect("keeps an authenticated original requester separate from the acting agent", () =>
+    Effect.gen(function* () {
+      const delegated: InboxIdentity = {
+        actor: { kind: "agent", id: "lead" },
+        requestedBy: actor,
+        delegatesTo: ["jeff"],
+        operational: false,
+      };
+      const access = threadInboxAccess(inboxIdentitySubject(delegated), {
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      });
+      const prepared = yield* access.prepareCommand(
+        {
+          ...create,
+          inboxRouting: {
+            assignee: { kind: "human", id: "jeff" },
+            audience: "jeff",
+            attentionKind: "FYI",
+          },
+        },
+        environmentId,
+      );
+      expect("inbox" in prepared && prepared.inbox).toMatchObject({
+        requestedBy: actor,
+        actor: { kind: "agent", id: "lead" },
+        assignee: { kind: "human", id: "jeff" },
+        executorEnvironmentId: environmentId,
+      });
+    }),
+  );
 });

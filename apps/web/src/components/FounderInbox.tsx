@@ -1,8 +1,19 @@
+import { useAtomValue } from "@effect/atom-react";
+import { Atom, AsyncResult } from "effect/unstable/reactivity";
+import * as Option from "effect/Option";
+import { environmentSession } from "../state/session";
 import { useAtomCommand } from "../state/use-atom-command";
 import { threadEnvironment } from "../state/threads";
-import { founderInboxLane, compositeThreadKey, type Founder } from "@t3tools/contracts";
+import {
+  founderInboxLane,
+  compositeThreadKey,
+  defaultFounderInboxView,
+  inboxIdentityFromSubject,
+  canReadInbox,
+  type Founder,
+} from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useThreadShells, readEnvironmentSupportsInbox } from "../state/entities";
 import { useEnvironments } from "../state/environments";
 import { buildThreadRouteParams } from "../threadRoutes";
@@ -13,9 +24,42 @@ import { isElectron } from "../env";
 
 /** A projection over native linked environments; every link retains its destination identity. */
 export function FounderInbox() {
-  const threads = useThreadShells();
+  const allThreads = useThreadShells();
   const { environments } = useEnvironments();
-  const [view, setView] = useState<Founder | "operations">("kameron");
+  const subjectsAtom = useMemo(
+    () =>
+      Atom.make((get) =>
+        environments.map((environment) => {
+          const state = get(environmentSession.sessionStateAtom(environment.environmentId));
+          const session = Option.getOrNull(AsyncResult.value(state));
+          return {
+            environmentId: environment.environmentId,
+            subject: session?.authenticated ? (session.subject ?? null) : null,
+          };
+        }),
+      ),
+    [environments],
+  );
+  const sessions = useAtomValue(subjectsAtom);
+  const subjects = sessions.flatMap((session) =>
+    session.subject === null ? [] : [session.subject],
+  );
+  const threads = allThreads.filter((thread) => {
+    const subject = sessions.find(
+      (session) => session.environmentId === thread.environmentId,
+    )?.subject;
+    if (subject === null || subject === undefined) return false;
+    const identity = inboxIdentityFromSubject(subject);
+    return identity === null || canReadInbox(identity, thread.inbox);
+  });
+  const identityKey = JSON.stringify(sessions);
+  const [selection, setSelection] = useState<{
+    identityKey: string;
+    view: Founder | "operations";
+  } | null>(null);
+  const view =
+    selection?.identityKey === identityKey ? selection.view : defaultFounderInboxView(subjects);
+  const setView = (next: Founder | "operations") => setSelection({ identityKey, view: next });
   const updateMetadata = useAtomCommand(threadEnvironment.updateMetadata);
   const lanes = view === "operations" ? ["operations"] : ["action", "FYI"];
   return (

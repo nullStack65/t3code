@@ -2269,6 +2269,31 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
         });
         const owner = yield* getAuthenticatedSessionCookieHeader();
+        for (const mode of ["auto", "pinned"] as const) {
+          const refused = yield* HttpClient.post("/api/orchestration/dispatch", {
+            headers: { cookie: owner },
+            body: yield* HttpBody.json({
+              type: "thread.create",
+              commandId: CommandId.make(`unqualified-${mode}`),
+              threadId: ThreadId.make(`unqualified-${mode}`),
+              projectId: defaultProjectId,
+              title: "Synthetic fleet request",
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt: "2026-11-16T00:00:00.000Z",
+              fleetPlacement: {
+                mode,
+                clientRequestId: `stable-${mode}`,
+                ...(mode === "pinned" ? { environmentId: "remote-synthetic" } : {}),
+              },
+            }),
+          });
+          assert.equal(refused.status, 400);
+        }
+
         const issue = yield* HttpClient.post("/api/auth/pairing-token", {
           headers: { cookie: owner },
           body: yield* HttpBody.json({

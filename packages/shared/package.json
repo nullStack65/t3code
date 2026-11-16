@@ -350,6 +350,14 @@
     "./gitPatchPath": {
       "types": "./src/gitPatchPath.ts",
       "import": "./src/gitPatchPath.ts"
+    },
+    "./loadBalancing": {
+      "types": "./src/loadBalancing.ts",
+      "import": "./src/loadBalancing.ts"
+    },
+    "./threadPlacement": {
+      "types": "./src/threadPlacement.ts",
+      "import": "./src/threadPlacement.ts"
     }
   },
   "scripts": {

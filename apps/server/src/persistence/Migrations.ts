@@ -1,3 +1,4 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import Migration0057 from "./Migrations/057_ThreadInbox.ts";
 /**
  * Migration runner with an inline loader.
@@ -142,6 +143,34 @@ const migrationEntries = [
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
+/** Refuse newer or foreign lineage before any migration or journal-mode write. */
+export const assertMigrationCompatibility = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{
+    name: string;
+  }>`SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`;
+  if (!tables.some((table) => table.name === "effect_sql_migrations")) {
+    if (tables.length !== 0)
+      return yield* new Migrator.MigrationError({
+        kind: "BadState",
+        message: "Refusing an existing database without recognized migration lineage.",
+      });
+    return;
+  }
+  const known = new Map<number, string>(migrationManifest);
+  const applied = yield* sql<{
+    migration_id: number;
+    name: string;
+  }>`SELECT migration_id, name FROM effect_sql_migrations`;
+  if (applied.some((row) => known.get(row.migration_id) !== row.name)) {
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message:
+        "This database has newer or incompatible migrations. Refusing source-version downgrade; use its qualified server version.",
+    });
+  }
+});
+
 const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
     Object.fromEntries(
@@ -174,6 +203,7 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* assertMigrationCompatibility;
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0

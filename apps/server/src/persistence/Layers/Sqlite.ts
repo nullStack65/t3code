@@ -5,12 +5,13 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { runMigrations } from "../Migrations.ts";
+import { assertMigrationCompatibility, runMigrations } from "../Migrations.ts";
 import { ServerConfig } from "../../config.ts";
 
 const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    yield* assertMigrationCompatibility;
     // CLI and server write from separate processes; wait rather than fail with SQLITE_BUSY.
     yield* sql`PRAGMA busy_timeout = 5000;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
@@ -24,6 +25,11 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  if (yield* fs.exists(dbPath)) {
+    yield* assertMigrationCompatibility.pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: dbPath, readonly: true })),
+    );
+  }
   yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
 
   return Layer.provideMerge(

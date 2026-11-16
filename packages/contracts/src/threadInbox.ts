@@ -23,6 +23,7 @@ export const ThreadInbox = Schema.Struct({
 export type ThreadInbox = typeof ThreadInbox.Type;
 export const InboxIdentity = Schema.Struct({
   actor: InboxActor,
+  requestedBy: Schema.optionalKey(InboxActor),
   delegatesTo: Schema.Array(Founder),
   operational: Schema.Boolean,
 });
@@ -57,16 +58,12 @@ export function canReadInbox(identity: InboxIdentity, inbox: ThreadInbox | null 
       inbox.audience === "shared"
         ? identity.delegatesTo.includes("kameron") && identity.delegatesTo.includes("jeff")
         : identity.delegatesTo.includes(inbox.audience);
-    return (
-      audienceAllowed &&
-      inbox.requestedBy.kind === "agent" &&
-      inbox.requestedBy.id === identity.actor.id
-    );
+    return audienceAllowed && inbox.actor.kind === "agent" && inbox.actor.id === identity.actor.id;
   }
   return (
     inbox.audience === "agent-only" &&
     ((inbox.assignee.kind === "agent" && inbox.assignee.id === identity.actor.id) ||
-      (inbox.requestedBy.kind === "agent" && inbox.requestedBy.id === identity.actor.id))
+      (inbox.actor.kind === "agent" && inbox.actor.id === identity.actor.id))
   );
 }
 export function canRouteInbox(identity: InboxIdentity, routing: ThreadInboxRouting) {
@@ -88,4 +85,14 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
   if (inbox.audience !== "shared" && inbox.audience !== founder) return "hidden";
   if (inbox.assignee.kind !== "human" || inbox.assignee.id !== founder) return "hidden";
   return inbox.attentionKind;
+}
+
+/** Defaults follow authenticated session subjects, never machine names or titles. */
+export function defaultFounderInboxView(subjects: ReadonlyArray<string>): Founder | "operations" {
+  const founders = new Set<Founder>();
+  for (const subject of subjects) {
+    const identity = inboxIdentityFromSubject(subject);
+    if (identity?.actor.kind === "human") founders.add(identity.actor.id);
+  }
+  return founders.size === 1 ? [...founders][0]! : "operations";
 }

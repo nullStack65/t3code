@@ -1,3 +1,4 @@
+import { FleetPlacementIntent } from "./fleetPlacement.ts";
 import { ThreadInbox, ThreadInboxRouting } from "./threadInbox.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -1173,6 +1174,7 @@ const ProjectDeleteCommand = Schema.Struct({
 });
 
 const ThreadCreateCommand = Schema.Struct({
+  fleetPlacement: Schema.optional(FleetPlacementIntent),
   inboxRouting: Schema.optional(ThreadInboxRouting),
   type: Schema.Literal("thread.create"),
   commandId: CommandId,
@@ -1344,6 +1346,7 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
+  fleetPlacement: Schema.optional(FleetPlacementIntent),
   inboxRouting: Schema.optional(ThreadInboxRouting),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,

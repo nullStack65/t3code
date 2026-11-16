@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "./baseSchemas.ts";
 import {
+  defaultFounderInboxView,
   canReadInbox,
   canRouteInbox,
   compositeThreadKey,
@@ -58,5 +59,16 @@ describe("founder inbox policy", () => {
     const malformed = inboxIdentityFromSubject("closura-inbox-v1:invalid");
     expect(malformed).not.toBeNull();
     expect(canReadInbox(malformed!, inbox)).toBe(false);
+  });
+  it("defaults to the signed founder and does not infer identity from a host credential", () => {
+    expect(defaultFounderInboxView([inboxIdentitySubject(human("jeff"))])).toBe("jeff");
+    expect(defaultFounderInboxView([inboxIdentitySubject(human("kameron"))])).toBe("kameron");
+    expect(defaultFounderInboxView(["Jeff Air", "one-time-token"])).toBe("operations");
+    expect(
+      defaultFounderInboxView([
+        inboxIdentitySubject(human("jeff")),
+        inboxIdentitySubject(human("kameron")),
+      ]),
+    ).toBe("operations");
   });
 });

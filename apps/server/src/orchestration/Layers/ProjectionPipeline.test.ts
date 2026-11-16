@@ -4383,6 +4383,43 @@ const engineLayer = it.layer(
 );
 
 engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
+  it.effect(
+    "rejects unqualified fleet placement before events and retains the rejection receipt on retry",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const sql = yield* SqlClient.SqlClient;
+        const before = yield* engine.latestSequence;
+        const command = {
+          type: "thread.create",
+          commandId: CommandId.make("fleet-gate-direct"),
+          threadId: ThreadId.make("fleet-gate-direct"),
+          projectId: ProjectId.make("fleet-no-project"),
+          title: "Synthetic",
+          modelSelection: { instanceId: ProviderInstanceId.make("synthetic"), model: "synthetic" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-11-16T00:00:00.000Z",
+          fleetPlacement: { mode: "auto", clientRequestId: "stable-fleet-gate" },
+        } as const;
+        const first = yield* Effect.result(engine.dispatch(command));
+        assert.equal(first._tag, "Failure");
+        if (first._tag === "Failure")
+          assert.equal(first.failure._tag, "OrchestrationCommandInvariantError");
+        const second = yield* Effect.result(engine.dispatch(command));
+        assert.equal(second._tag, "Failure");
+        if (second._tag === "Failure")
+          assert.equal(second.failure._tag, "OrchestrationCommandPreviouslyRejectedError");
+        assert.equal(yield* engine.latestSequence, before);
+        const rows = yield* sql<{
+          status: string;
+        }>`SELECT status FROM orchestration_command_receipts WHERE command_id = ${command.commandId}`;
+        assert.deepEqual(rows, [{ status: "rejected" }]);
+      }),
+  );
+
   it.effect("projects dispatched engine events immediately", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;
