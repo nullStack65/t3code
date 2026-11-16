@@ -267,7 +267,10 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 });
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
+import { ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
+
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
+  inboxRouting: Schema.optional(ThreadInboxRoutingPatch),
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
@@ -375,6 +378,7 @@ export const OrchestratorMcpThreadBackgroundTask = Schema.Struct({
 export type OrchestratorMcpThreadBackgroundTask = typeof OrchestratorMcpThreadBackgroundTask.Type;
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
+  inbox: Schema.optionalKey(ThreadInbox),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -449,6 +453,7 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
 export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInput.Type;
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
+  inbox: Schema.optionalKey(ThreadInbox),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,

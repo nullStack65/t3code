@@ -18,6 +18,7 @@ import type {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { makeThreadInbox } from "@t3tools/contracts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
@@ -63,6 +64,16 @@ export function makeSubagentChildThread(input: {
 }): OrchestrationV2AppThread {
   return {
     ...input.parentThread,
+    inbox: makeThreadInbox({
+      actor: { kind: "agent", id: input.childThreadId },
+      routing: {
+        audience: "agent-only",
+        assignee: { kind: "agent", id: input.childThreadId },
+        attentionKind: "background",
+      },
+      ...(input.parentThread.inbox === undefined ? {} : { parent: input.parentThread.inbox }),
+      executorEnvironmentId: input.parentThread.inbox?.executorEnvironmentId ?? null,
+    }),
     createdBy: input.createdBy,
     creationSource: input.creationSource,
     id: input.childThreadId,

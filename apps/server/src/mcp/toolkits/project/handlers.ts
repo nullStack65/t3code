@@ -255,6 +255,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           });
         }
         const result = yield* ThreadMessageIntake.launchThread({
+          inboxOrigin: { kind: "agent", id: caller?.id ?? "agent" },
+          ...(input.inboxRouting !== undefined
+            ? { inboxRouting: input.inboxRouting }
+            : caller?.inbox === undefined
+              ? {}
+              : { inboxRouting: caller.inbox }),
           commandId,
           threadId,
           projectId,
