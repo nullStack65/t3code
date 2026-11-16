@@ -5,6 +5,7 @@ name: Agent Context Budget
 # To accept growth on purpose, a maintainer adds the agent-context-increase label.
 on:
   pull_request:
+    branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
