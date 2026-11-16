@@ -297,6 +297,7 @@ function makeHarness(options: HarnessOptions = {}) {
       layerTitleRegeneration,
       layerOutbox,
       layerDatabase,
+      layerReceipts,
       layerExternalServices,
     ),
     createWorktree,

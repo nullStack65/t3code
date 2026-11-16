@@ -9,12 +9,23 @@ import * as SqlError from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { hasPendingMigrations, runMigrations } from "./Migrations.ts";
-import { initializeV2Database } from "./initializeV2Database.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
 import { admitProtocol2Database } from "./Protocol2DatabaseAdmission.ts";
 
 const WAL_SIZE_LIMIT_BYTES = 128 * 1024 * 1024;
+
+// Keep the persistence layer's existing SqlError channel for callers while the
+// refusal's typed cause retains the exact compatibility diagnosis.
+const admitCandidateDatabase = (dbPath: string, requireCurrentSchema = false) =>
+  admitProtocol2Database(dbPath, requireCurrentSchema).pipe(
+    Effect.mapError(
+      (cause) =>
+        new SqlError.SqlError({
+          reason: new SqlError.UnknownError({ cause, operation: "open", message: cause.message }),
+        }),
+    ),
+  );
 
 export class ServerOwnsDatabaseError extends Schema.TaggedError<ServerOwnsDatabaseError>()(
   "ServerOwnsDatabaseError",
@@ -103,7 +114,7 @@ const layerSetup = makeLayerSetup(runMigrations());
 
 const makeLayerFromPath = <E, R>(makeSetup: (dbPath: string) => Layer.Layer<never, E, R>) =>
   Effect.fn("makeSqlitePersistenceLive")(function* (dbPath: string) {
-    yield* admitProtocol2Database(dbPath);
+    yield* admitCandidateDatabase(dbPath);
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
@@ -147,8 +158,9 @@ const makeLayerConfig = <E, R>(
   Layer.unwrap(
     Effect.gen(function* () {
       const { dbPath } = yield* ServerConfig.ServerConfig;
-      yield* admitProtocol2Database(dbPath, true);
-      yield* initializeV2Database(dbPath);
+      yield* admitCandidateDatabase(dbPath, true);
+      // Candidate startup never imports V1 data or runs upstream's abandoned
+      // import cleanup. Matching V2 state and fresh fixtures need neither.
       return fromPath(dbPath);
     }),
   );

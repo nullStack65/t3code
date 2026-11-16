@@ -11,6 +11,7 @@ import * as Path from "effect/Path";
 import { migrationManifest } from "./Migrations.ts";
 import { admitProtocol2Database } from "./Protocol2DatabaseAdmission.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
+import * as ServerConfig from "../config.ts";
 
 function seed(path: string, rows: ReadonlyArray<readonly [number, string]>) {
   const db = new NodeSqlite.DatabaseSync(path);
@@ -63,7 +64,16 @@ it.effect("accepts matching schema read-only and refuses implicit upgrades and i
     const legacy = path.join(directory, "state.sqlite");
     seed(legacy, [[1, "OrchestrationEvents"]]);
     const legacyBefore = NodeFS.readFileSync(legacy);
-    const refused = yield* Effect.exit(admitProtocol2Database(fresh, true));
+    const config = yield* ServerConfig.ServerConfig.pipe(
+      Effect.provide(ServerConfig.layerTest(directory, directory)),
+    );
+    const refused = yield* Effect.exit(
+      Layer.build(
+        SqlitePersistence.layerConfig.pipe(
+          Layer.provide(ServerConfig.layer({ ...config, dbPath: fresh })),
+        ),
+      ).pipe(Effect.scoped),
+    );
     assert.isTrue(Exit.isFailure(refused));
     assert.include(String(refused), "separately approved import");
     assert.isFalse(NodeFS.existsSync(fresh));
