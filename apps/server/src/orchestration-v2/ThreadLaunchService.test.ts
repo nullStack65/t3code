@@ -15,6 +15,7 @@ import {
   ComposerContextId,
   type ChatAttachment,
   CommandId,
+  EnvironmentId,
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
   MessageId,
@@ -337,6 +338,39 @@ function launchInput(input: {
     creationSource: "web" as const,
   };
 }
+
+it.effect("refuses unqualified fleet intent before native launch effects", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    for (const mode of ["auto", "pinned"] as const) {
+      const input = launchInput({
+        command: `fleet:${mode}`,
+        thread: `fleet-thread:${mode}`,
+        message: "must not launch",
+        workspace: { type: "worktree", baseRef: "main" },
+      });
+      const result = yield* Effect.exit(
+        launches.launch({
+          ...input,
+          fleetPlacement: {
+            mode,
+            clientRequestId: `fleet:${mode}`,
+            ...(mode === "pinned" ? { environmentId: EnvironmentId.make("remote") } : {}),
+          },
+        }),
+      );
+      assert.isTrue(Exit.isFailure(result));
+      assert.include(String(result), "qualified native placement adapter");
+      assert.isTrue(Option.isNone(yield* receipts.getByCommandId(input.commandId)));
+    }
+    assert.deepEqual(yield* threads.listProjectThreads({ projectId, includeSubagents: false }), []);
+    assert.equal(harness.createWorktree.mock.calls.length, 0);
+    assert.equal(harness.runSetup.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>

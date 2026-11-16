@@ -12,6 +12,7 @@ import { hasPendingMigrations, runMigrations } from "./Migrations.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
+import { admitProtocol2Database } from "./Protocol2DatabaseAdmission.ts";
 
 const WAL_SIZE_LIMIT_BYTES = 128 * 1024 * 1024;
 
@@ -102,6 +103,7 @@ const layerSetup = makeLayerSetup(runMigrations());
 
 const makeLayerFromPath = <E, R>(makeSetup: (dbPath: string) => Layer.Layer<never, E, R>) =>
   Effect.fn("makeSqlitePersistenceLive")(function* (dbPath: string) {
+    yield* admitProtocol2Database(dbPath);
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
@@ -145,6 +147,7 @@ const makeLayerConfig = <E, R>(
   Layer.unwrap(
     Effect.gen(function* () {
       const { dbPath } = yield* ServerConfig.ServerConfig;
+      yield* admitProtocol2Database(dbPath, true);
       yield* initializeV2Database(dbPath);
       return fromPath(dbPath);
     }),
