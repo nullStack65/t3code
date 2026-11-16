@@ -3,6 +3,7 @@ import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { FleetPlacementIntent } from "./fleetPlacement.ts";
 import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaGetter from "effect/SchemaGetter";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -3065,6 +3066,7 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
+    fleetPlacement: Schema.optionalKey(FleetPlacementIntent),
     threadId: ThreadId,
     projectId: ProjectId,
     title: TrimmedNonEmptyString,
@@ -3840,6 +3842,7 @@ export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2Archive
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   commandId: CommandId,
+  fleetPlacement: Schema.optionalKey(FleetPlacementIntent),
   creationSource: Schema.optional(OrchestrationV2CreationSource),
   threadId: Schema.optional(ThreadId),
   reuseExistingThread: Schema.optional(Schema.Boolean),

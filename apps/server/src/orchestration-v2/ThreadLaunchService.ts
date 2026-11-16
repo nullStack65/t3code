@@ -159,6 +159,20 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
   }
 }
 
+/** Reuse before attachment claims, workspace preflight and direct native launch. */
+export const requireQualifiedFleetPlacement = Effect.fn("requireQualifiedFleetPlacement")(
+  function* (request: Pick<ThreadLaunchInput, "commandId" | "projectId" | "fleetPlacement">) {
+    if (request.fleetPlacement !== undefined) {
+      return yield* new ThreadLaunchError({
+        operation: "resolve-project",
+        commandId: request.commandId,
+        projectId: request.projectId,
+        cause: FLEET_PLACEMENT_UNAVAILABLE,
+      });
+    }
+  },
+);
+
 export class ThreadLaunchBaseRefError extends Schema.TaggedError<ThreadLaunchBaseRefError>()(
   "ThreadLaunchBaseRefError",
   {
@@ -1031,14 +1045,7 @@ const make = Effect.gen(function* () {
     function* (request) {
       // Protocol 2 alone does not qualify remote admission. Keep intent explicit
       // until the native destination adapter persists and reconciles acceptance.
-      if (request.fleetPlacement !== undefined) {
-        return yield* new ThreadLaunchError({
-          operation: "resolve-project",
-          commandId: request.commandId,
-          projectId: request.projectId,
-          cause: FLEET_PLACEMENT_UNAVAILABLE,
-        });
-      }
+      yield* requireQualifiedFleetPlacement(request);
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
       const input: ThreadLaunchInput =

@@ -23,6 +23,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   OrchestrationV2ThreadProjectionJson,
+  OrchestrationV2ThreadLaunchInput,
   ScheduledTaskId,
   type ServerProvider,
   ThreadId,
@@ -73,6 +74,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");
 const encodeThreadProjection = Schema.encodeEffect(OrchestrationV2ThreadProjectionJson);
+const decodeThreadLaunchInput = Schema.decodeUnknownEffect(OrchestrationV2ThreadLaunchInput);
 const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.1-codex",
@@ -353,22 +355,38 @@ it.effect("refuses unqualified fleet intent before native launch effects", () =>
         message: "must not launch",
         workspace: { type: "worktree", baseRef: "main" },
       });
+      const wire = yield* decodeThreadLaunchInput({
+        ...input,
+        fleetPlacement:
+          mode === "auto"
+            ? { mode, clientRequestId: `fleet:${mode}` }
+            : {
+                mode,
+                clientRequestId: `fleet:${mode}`,
+                environmentId: EnvironmentId.make("remote"),
+              },
+      });
       const result = yield* Effect.exit(
-        launches.launch({
-          ...input,
-          fleetPlacement:
-            mode === "auto"
-              ? { mode, clientRequestId: `fleet:${mode}` }
-              : {
-                  mode,
-                  clientRequestId: `fleet:${mode}`,
-                  environmentId: EnvironmentId.make("remote"),
-                },
-        }),
+        launches.launch({ ...wire, createdBy: "user", creationSource: "web" }),
       );
       assert.isTrue(Exit.isFailure(result));
       assert.include(String(result), "qualified native placement adapter");
       assert.isTrue(Option.isNone(yield* receipts.getByCommandId(input.commandId)));
+      const command = {
+        ...input,
+        type: "thread.create" as const,
+        branch: null,
+        worktreePath: null,
+        ...(wire.fleetPlacement === undefined ? {} : { fleetPlacement: wire.fleetPlacement }),
+      };
+      // Native callers bypassing launch still meet serialized admission. The
+      // native rejection receipt, including its identity, survives retries.
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(threads.dispatch(command))));
+      const receipt = yield* receipts.getByCommandId(input.commandId);
+      assert.isTrue(Option.isSome(receipt));
+      if (Option.isSome(receipt)) assert.equal(receipt.value.status, "rejected");
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(threads.dispatch(command))));
+      assert.deepEqual(yield* receipts.getByCommandId(input.commandId), receipt);
     }
     assert.deepEqual(yield* threads.listProjectThreads({ projectId, includeSubagents: false }), []);
     assert.equal(harness.createWorktree.mock.calls.length, 0);
@@ -1249,7 +1267,13 @@ it.effect.each(["stable", "upstream/release"])(
       const worktreePath = `${directory}/worktree`;
       yield* fs.makeDirectory(cwd);
       const command = (at: string, args: string[]) =>
-        git.execute({ operation: "launch-test", cwd: at, args });
+        git
+          .execute({ operation: "launch-test", cwd: at, args, allowNonZeroExit: true })
+          .pipe(
+            Effect.tap((result) =>
+              Effect.sync(() => assert.equal(result.exitCode, 0, result.stderr)),
+            ),
+          );
       yield* command(cwd, ["init", "-b", "stable"]);
       yield* command(cwd, ["config", "user.name", "Test"]);
       yield* command(cwd, ["config", "user.email", "test@example.test"]);

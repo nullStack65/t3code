@@ -22,6 +22,7 @@ import {
 } from "../sourceControl/threadPullRequests.ts";
 import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+  FLEET_PLACEMENT_UNAVAILABLE,
   type ChatAttachment,
   CommandId,
   type GuestMessageId,
@@ -3620,6 +3621,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "thread.create" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
+    if (command.fleetPlacement !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: FLEET_PLACEMENT_UNAVAILABLE,
+      });
+    }
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
       "orchestration_v2.command_type": command.type,
