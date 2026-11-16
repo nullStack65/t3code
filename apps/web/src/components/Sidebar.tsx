@@ -1125,8 +1125,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const inboxThreads = threads.filter(
     (thread) =>
       threadSearchQuery.trim().length > 0 ||
-      matchesInboxView(thread.inbox, inboxView) ||
-      (inboxView === "agents" && thread.createdBy === "agent"),
+      matchesInboxView(thread.source.inbox, inboxView) ||
+      (inboxView === "agents" && thread.source.createdBy === "agent"),
   );
   const listedThreads =
     promotingDraftThreadKeys.length === 0
