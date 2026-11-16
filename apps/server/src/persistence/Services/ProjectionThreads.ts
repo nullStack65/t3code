@@ -1,3 +1,4 @@
+import { ThreadInbox } from "@t3tools/contracts";
 /**
  * ProjectionThreadRepository - Projection repository interface for threads.
  *
@@ -38,6 +39,7 @@ export const ProjectionThread = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  inbox: Schema.optional(Schema.NullOr(ThreadInbox)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   latestTurnId: Schema.NullOr(TurnId),

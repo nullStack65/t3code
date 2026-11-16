@@ -406,6 +406,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           worktreePath: command.worktreePath,
           executionScope:
             command.executionScope ?? (command.historyImport === true ? null : "coding"),
+          inbox: command.inbox ?? null,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -1027,6 +1028,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ? { modelSelection: command.modelSelection }
             : {}),
           ...(branch !== undefined ? { branch } : {}),
+          ...(command.inboxRouting !== undefined ? { inboxRouting: command.inboxRouting } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
           ...(command.linkedPullRequest !== undefined
             ? { linkedPullRequest: command.linkedPullRequest }

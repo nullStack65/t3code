@@ -431,6 +431,7 @@ export function projectEvent(
             branch: payload.branch,
             worktreePath: payload.worktreePath,
             executionScope: payload.executionScope ?? null,
+            inbox: payload.inbox ?? null,
             pullRequests: [],
             branchPullRequest: null,
             latestTurn: null,
@@ -614,6 +615,9 @@ export function projectEvent(
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
+              ...(payload.inboxRouting !== undefined && thread?.inbox
+                ? { inbox: { ...thread.inbox, ...payload.inboxRouting } }
+                : {}),
               ...(payload.title !== undefined ? { title: payload.title } : {}),
               ...(payload.titleState !== undefined ? { titleState: payload.titleState } : {}),
               ...(payload.titleRegeneration !== undefined

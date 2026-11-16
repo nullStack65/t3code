@@ -1,3 +1,4 @@
+import { inboxHttpAllowed } from "./ThreadInboxAccess.ts";
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
@@ -216,6 +217,9 @@ export const environmentAuthenticatedAuthLayer = Layer.effect(
             failEnvironmentInternal("internal_error", error),
           ),
         );
+        if (!inboxHttpAllowed(session.subject, request.url)) {
+          return yield* failEnvironmentAuthInvalid("invalid_credential");
+        }
         return yield* httpEffect.pipe(
           Effect.provideService(EnvironmentAuthenticatedPrincipal, {
             ...session,

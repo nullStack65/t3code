@@ -1,3 +1,4 @@
+import { ThreadInbox } from "@t3tools/contracts";
 import {
   AgentSessionImportSource,
   ApprovalRequestId,
@@ -130,6 +131,7 @@ const ProjectionThreadPullRequestDbRowSchema = ProjectionThreadPullRequest.mapFi
 );
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
+    inbox: Schema.NullOr(Schema.fromJsonString(ThreadInbox)),
     modelSelection: Schema.fromJsonString(ModelSelection),
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
@@ -584,6 +586,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           branch,
           worktree_path AS "worktreePath",
           execution_scope AS "executionScope",
+          inbox_json AS "inbox",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -626,6 +629,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           branch,
           worktree_path AS "worktreePath",
           execution_scope AS "executionScope",
+          inbox_json AS "inbox",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -700,6 +704,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           branch,
           worktree_path AS "worktreePath",
           execution_scope AS "executionScope",
+          inbox_json AS "inbox",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -1266,6 +1271,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           branch,
           worktree_path AS "worktreePath",
           execution_scope AS "executionScope",
+          inbox_json AS "inbox",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -2050,6 +2056,7 @@ pending_approval_requests AS (
           projects.workspace_root AS "workspaceRoot",
           threads.worktree_path AS "worktreePath",
           threads.execution_scope AS "executionScope",
+          threads.inbox_json AS "inbox",
           (
             SELECT MAX(turns.checkpoint_turn_count)
             FROM projection_turns AS turns
@@ -2339,6 +2346,7 @@ pending_approval_requests AS (
                 branch: row.branch,
                 worktreePath: row.worktreePath,
                 executionScope: row.executionScope ?? null,
+                inbox: row.inbox ?? null,
                 ...mapThreadPullRequests(
                   pullRequestsByThread.get(row.threadId) ?? [],
                   row.projectId,
@@ -2585,6 +2593,7 @@ pending_approval_requests AS (
                   branch: row.branch,
                   worktreePath: row.worktreePath,
                   executionScope: row.executionScope ?? null,
+                  inbox: row.inbox ?? null,
                   ...mapThreadPullRequests(
                     pullRequestsByThread.get(row.threadId) ?? [],
                     row.projectId,
@@ -2743,6 +2752,7 @@ pending_approval_requests AS (
                         branch: row.branch,
                         worktreePath: row.worktreePath,
                         executionScope: row.executionScope ?? null,
+                        inbox: row.inbox ?? null,
                         branchPullRequest: row.branchPullRequest,
                         ...mapThreadPullRequests(
                           pullRequestsByThread.get(row.threadId) ?? [],
@@ -2909,6 +2919,7 @@ pending_approval_requests AS (
                   branch: row.branch,
                   worktreePath: row.worktreePath,
                   executionScope: row.executionScope ?? null,
+                  inbox: row.inbox ?? null,
                   branchPullRequest: row.branchPullRequest,
                   ...mapThreadPullRequests(
                     pullRequestsByThread.get(row.threadId) ?? [],
@@ -3266,6 +3277,7 @@ pending_approval_requests AS (
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
         executionScope: threadRow.value.executionScope ?? null,
+        inbox: threadRow.value.inbox ?? null,
         ...mapThreadPullRequests(
           pullRequestRows.map(mapPullRequestRow),
           threadRow.value.projectId,
@@ -3569,6 +3581,7 @@ pending_approval_requests AS (
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
         executionScope: threadRow.value.executionScope ?? null,
+        inbox: threadRow.value.inbox ?? null,
         ...mapThreadPullRequests(
           pullRequestRows.map(mapPullRequestRow),
           threadRow.value.projectId,

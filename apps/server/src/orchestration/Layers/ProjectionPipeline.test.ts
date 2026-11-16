@@ -4821,3 +4821,89 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-inbox-replay-")))(
+  "inbox persistence and replay",
+  (it) => {
+    it.effect(
+      "persists classification and reassignment without rewriting provenance or legacy history",
+      () =>
+        Effect.gen(function* () {
+          const pipeline = yield* OrchestrationProjectionPipeline;
+          const store = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const now = "2026-11-15T00:00:00.000Z";
+          const threadId = ThreadId.make("synthetic-inbox");
+          const actor = { kind: "human", id: "kameron" } as const;
+          const inbox = {
+            actor,
+            requestedBy: actor,
+            assignee: actor,
+            audience: "kameron",
+            attentionKind: "action",
+            executorEnvironmentId: EnvironmentId.make("synthetic-host"),
+          } as const;
+          const base = {
+            aggregateKind: "thread" as const,
+            aggregateId: threadId,
+            occurredAt: now,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+          };
+          const created = yield* store.append({
+            ...base,
+            type: "thread.created",
+            eventId: EventId.make("inbox-created"),
+            commandId: CommandId.make("inbox-created"),
+            payload: {
+              threadId,
+              projectId: ProjectId.make("synthetic-project"),
+              title: "Synthetic inbox",
+              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "synthetic" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              inbox,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* pipeline.projectEvent(created);
+          const changed = yield* store.append({
+            ...base,
+            type: "thread.meta-updated",
+            eventId: EventId.make("inbox-reassigned"),
+            commandId: CommandId.make("inbox-reassigned"),
+            payload: {
+              threadId,
+              inboxRouting: {
+                assignee: { kind: "human", id: "jeff" },
+                audience: "shared",
+                attentionKind: "FYI",
+              },
+              updatedAt: now,
+            },
+          });
+          yield* pipeline.projectEvent(changed);
+          // A duplicate receipt/replay must preserve the accepted state.
+          yield* pipeline.projectEvent(changed);
+          const rows = yield* sql<{
+            inbox_json: string;
+          }>`SELECT inbox_json FROM projection_threads WHERE thread_id = ${threadId}`;
+          assert.deepEqual(JSON.parse(rows[0]!.inbox_json), {
+            ...inbox,
+            assignee: { kind: "human", id: "jeff" },
+            audience: "shared",
+            attentionKind: "FYI",
+          });
+          yield* pipeline.bootstrap;
+          const replayed = yield* sql<{
+            inbox_json: string;
+          }>`SELECT inbox_json FROM projection_threads WHERE thread_id = ${threadId}`;
+          assert.deepEqual(replayed, rows);
+        }),
+    );
+  },
+);

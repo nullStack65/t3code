@@ -1,3 +1,4 @@
+import { ThreadInbox } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
@@ -16,6 +17,7 @@ import { ModelSelection, ThreadLinkedPullRequest, ThreadTitleState } from "@t3to
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
+    inbox: Schema.NullOr(Schema.fromJsonString(ThreadInbox)),
     modelSelection: Schema.fromJsonString(ModelSelection),
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
@@ -41,6 +43,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           branch,
           worktree_path,
           execution_scope,
+          inbox_json,
           linked_pull_request_json,
           branch_pull_request_json,
           latest_turn_id,
@@ -74,6 +77,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.branch},
           ${row.worktreePath},
           ${row.executionScope ?? null},
+          ${row.inbox ? JSON.stringify(row.inbox) : null},
           ${row.linkedPullRequest === undefined || row.linkedPullRequest === null ? null : JSON.stringify(row.linkedPullRequest)},
           ${row.branchPullRequest === undefined || row.branchPullRequest === null ? null : JSON.stringify(row.branchPullRequest)},
           ${row.latestTurnId},
@@ -107,6 +111,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           branch = excluded.branch,
           worktree_path = excluded.worktree_path,
           execution_scope = excluded.execution_scope,
+          inbox_json = excluded.inbox_json,
           linked_pull_request_json = excluded.linked_pull_request_json,
           branch_pull_request_json = excluded.branch_pull_request_json,
           latest_turn_id = excluded.latest_turn_id,
@@ -147,6 +152,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           branch,
           worktree_path AS "worktreePath",
           execution_scope AS "executionScope",
+          inbox_json AS "inbox",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",

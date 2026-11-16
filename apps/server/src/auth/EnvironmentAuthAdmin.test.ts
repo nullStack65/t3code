@@ -1,3 +1,4 @@
+import { inboxIdentityFromSubject } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -125,6 +126,27 @@ it.layer(NodeServices.layer)("EnvironmentAuth administrative operations", (it) =
 
       expect(beforeConnect[0]?.lastConnectedAt).toBeNull();
       expect(afterConnect[0]?.lastConnectedAt).not.toBeNull();
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
+  );
+  it.effect("binds a founder identity through pairing and authenticated session verification", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const identity = {
+        actor: { kind: "human", id: "jeff" },
+        delegatesTo: [],
+        operational: false,
+      } as const;
+      const pairing = yield* auth.issuePairingCredential({
+        inboxIdentity: identity,
+        scopes: ["orchestration:read"],
+      });
+      const session = yield* auth.createBrowserSession(pairing.credential, {
+        deviceType: "unknown",
+      });
+      const verified = yield* sessions.verify(session.sessionToken);
+      expect(inboxIdentityFromSubject(verified.subject)).toEqual(identity);
+      expect(verified.scopes).toEqual(["orchestration:read"]);
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
   );
 });

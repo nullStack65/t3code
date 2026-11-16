@@ -620,6 +620,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
             executionScope: event.payload.executionScope ?? null,
+            inbox: event.payload.inbox ?? null,
             linkedPullRequest: null,
             branchPullRequest: null,
             latestTurnId: null,
@@ -807,6 +808,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
+            ...(event.payload.inboxRouting !== undefined && existingRow.value.inbox
+              ? { inbox: { ...existingRow.value.inbox, ...event.payload.inboxRouting } }
+              : {}),
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.activeOrderKey !== undefined
               ? { activeOrderKey: event.payload.activeOrderKey }

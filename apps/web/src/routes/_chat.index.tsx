@@ -1,3 +1,4 @@
+import { FounderInbox } from "../components/FounderInbox";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -25,12 +26,14 @@ import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 function ChatIndexRouteView() {
   const { authGateState } = Route.useRouteContext();
   const { environments, isReady } = useEnvironments();
+  const threads = useThreadShells();
 
   if (authGateState.status === "hosted-static") {
     if (!isReady) return null;
     if (environments.length === 0) return <HostedStaticOnboardingState />;
   }
 
+  if (threads.some((thread) => thread.inbox != null)) return <FounderInbox />;
   return <IndexDraftLanding />;
 }
 

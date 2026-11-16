@@ -255,6 +255,9 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: {
           ...thread,
+          ...(event.payload.inboxRouting && thread.inbox
+            ? { inbox: { ...thread.inbox, ...event.payload.inboxRouting } }
+            : {}),
           ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
           ...(event.payload.titleState !== undefined
             ? { titleState: event.payload.titleState }

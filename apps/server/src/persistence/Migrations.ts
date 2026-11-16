@@ -1,3 +1,4 @@
+import Migration0057 from "./Migrations/057_ThreadInbox.ts";
 /**
  * Migration runner with an inline loader.
  *
@@ -136,6 +137,7 @@ const migrationEntries = [
   [54, "ProviderSessionHistory", Migration0054],
   [55, "ThreadRouteEvents", Migration0055],
   [56, "ThreadExecutionScope", Migration0056],
+  [57, "ThreadInbox", Migration0057],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

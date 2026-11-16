@@ -1,3 +1,4 @@
+import { ThreadInbox, ThreadInboxRouting } from "./threadInbox.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
@@ -853,6 +854,8 @@ export const OrchestrationThread = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  inbox: Schema.optional(Schema.NullOr(ThreadInbox)),
+
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   // Optional so payloads from pre-link servers still decode.
   pullRequests: Schema.Array(ThreadPullRequestLink).pipe(
@@ -941,6 +944,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  inbox: Schema.optional(Schema.NullOr(ThreadInbox)),
+
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.Array(ThreadPullRequestLink).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1168,6 +1173,7 @@ const ProjectDeleteCommand = Schema.Struct({
 });
 
 const ThreadCreateCommand = Schema.Struct({
+  inboxRouting: Schema.optional(ThreadInboxRouting),
   type: Schema.Literal("thread.create"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1181,6 +1187,8 @@ const ThreadCreateCommand = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  inbox: Schema.optional(Schema.NullOr(ThreadInbox)),
+
   createdAt: IsoDateTime,
   historyImport: Schema.optional(Schema.Literal(true)),
 });
@@ -1283,7 +1291,9 @@ const ThreadActiveReorderCommand = Schema.Struct({
 });
 
 const ThreadMetaUpdateCommand = Schema.Struct({
+  inboxRouting: Schema.optional(ThreadInboxRouting),
   type: Schema.Literal("thread.meta.update"),
+
   commandId: CommandId,
   threadId: ThreadId,
   title: Schema.optional(TrimmedNonEmptyString),
@@ -1334,6 +1344,7 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
+  inboxRouting: Schema.optional(ThreadInboxRouting),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
@@ -1342,6 +1353,8 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  inbox: Schema.optional(Schema.NullOr(ThreadInbox)),
+
   createdAt: IsoDateTime,
 });
 
@@ -1825,6 +1838,8 @@ export const ThreadCreatedPayload = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  inbox: Schema.optional(Schema.NullOr(ThreadInbox)),
+
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1895,6 +1910,8 @@ export const ThreadPinReorderedPayload = Schema.Struct({
 });
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
+  inboxRouting: Schema.optional(ThreadInboxRouting),
+
   threadId: ThreadId,
   // Order updates use this existing event so older clients can ignore the
   // new field while continuing to decode the event stream.

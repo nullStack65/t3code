@@ -1,3 +1,4 @@
+import { InboxIdentity } from "./threadInbox.ts";
 import * as Schema from "effect/Schema";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 
@@ -340,6 +341,7 @@ export const AuthRevokeClientSessionInput = Schema.Struct({
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
 
 export const AuthCreatePairingCredentialInput = Schema.Struct({
+  inboxIdentity: Schema.optionalKey(InboxIdentity),
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
 });

@@ -1,3 +1,4 @@
+import { threadInboxAccess, inboxRpcAllowed } from "./auth/ThreadInboxAccess.ts";
 import { coordinationWorkspacePath, safeThreadPathSegment } from "./project/ThreadWorktree.ts";
 import {
   sameUsageLimitCommandCoverage,
@@ -699,6 +700,11 @@ const makeWsRpcLayer = (
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
       const relayClient = yield* RelayClient.RelayClient;
+      const inboxAccess = threadInboxAccess(currentSession.subject, projectionSnapshotQuery);
+      const requireInboxMethod = (method: string) =>
+        inboxRpcAllowed(currentSession.subject, method)
+          ? Effect.void
+          : Effect.fail(inboxAccess.denied());
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
           message: `The authenticated token is missing required scope: ${requiredScope}.`,
@@ -725,7 +731,10 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcEffect(
           method,
-          authorizeEffect(requiredScopeForRpcMethod(method), effect),
+          authorizeEffect(
+            requiredScopeForRpcMethod(method),
+            requireInboxMethod(method).pipe(Effect.andThen(effect)),
+          ),
           traceAttributes,
         );
       const observeRpcStream = <A, E, R>(
@@ -735,7 +744,10 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcStream(
           method,
-          authorizeStream(requiredScopeForRpcMethod(method), stream),
+          authorizeStream(
+            requiredScopeForRpcMethod(method),
+            Stream.unwrap(requireInboxMethod(method).pipe(Effect.as(stream))),
+          ),
           traceAttributes,
         );
       const observeRpcStreamEffect = <A, StreamError, StreamContext, EffectError, EffectContext>(
@@ -749,7 +761,10 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcStreamEffect(
           method,
-          authorizeEffect(requiredScopeForRpcMethod(method), effect),
+          authorizeEffect(
+            requiredScopeForRpcMethod(method),
+            requireInboxMethod(method).pipe(Effect.andThen(effect)),
+          ),
           traceAttributes,
         );
       const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
@@ -1573,6 +1588,7 @@ const makeWsRpcLayer = (
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
                 executionScope: bootstrap.createThread.executionScope ?? "coding",
+                inbox: bootstrap.createThread.inbox ?? null,
                 createdAt: bootstrap.createThread.createdAt,
               });
               // The successful create is a fence in the engine command queue:
@@ -1753,6 +1769,7 @@ const makeWsRpcLayer = (
                   branch,
                   worktreePath: targetWorktreePath,
                   executionScope: "coding",
+                  inbox: bootstrap.createThread.inbox ?? null,
                   createdAt: bootstrap.createThread.createdAt,
                 });
                 createdThread = true;
@@ -2183,7 +2200,11 @@ const makeWsRpcLayer = (
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
               yield* ProjectCloneTracker.rejectCommandsDuringClone(projectCloneTracker, command);
-              const normalizedCommand = yield* normalizeDispatchCommand(command);
+              const prepared = yield* inboxAccess.prepareCommand(
+                command,
+                yield* serverEnvironment.getEnvironmentId,
+              );
+              const normalizedCommand = yield* normalizeDispatchCommand(prepared);
               // Archive removes the thread from the client, so this transport
               // closes its session and terminals after the command lands.
               // Settlement cleanup is driven by thread.settled events in the
@@ -2303,6 +2324,21 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.searchThreads,
             projectionSnapshotQuery.searchThreads(input).pipe(
+              Effect.flatMap((result) =>
+                Effect.forEach(result.matches, (match) =>
+                  projectionSnapshotQuery
+                    .getThreadShellById(match.threadId)
+                    .pipe(
+                      Effect.map((thread) =>
+                        Option.isSome(thread) && inboxAccess.canRead(thread.value.inbox)
+                          ? match
+                          : null,
+                      ),
+                    ),
+                ).pipe(
+                  Effect.map((matches) => ({ matches: matches.filter((match) => match !== null) })),
+                ),
+              ),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationSearchThreadsError({
@@ -2317,6 +2353,27 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
+              if (inboxAccess.identity !== null) {
+                const events = yield* orchestrationEngine.subscribeDomainEvents;
+                const load = projectionSnapshotQuery.getShellSnapshot().pipe(
+                  Effect.map(inboxAccess.filterSnapshot),
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({ message: "Failed to load inbox", cause }),
+                  ),
+                );
+                // Attach first, then snapshot: no reconnect gap. Coalesce by the native shell window.
+                return Stream.concat(
+                  Stream.fromEffect(
+                    load.pipe(Effect.map((snapshot) => ({ kind: "snapshot" as const, snapshot }))),
+                  ),
+                  events.pipe(
+                    Stream.groupedWithin(SHELL_COALESCE_MAX_CHUNK, SHELL_COALESCE_WINDOW),
+                    Stream.mapEffect(() => load),
+                    Stream.map((snapshot) => ({ kind: "snapshot" as const, snapshot })),
+                  ),
+                );
+              }
               // Coalesce the live shell stream per aggregate over a small window
               // so bursts of high-frequency events (streaming message deltas,
               // activity appends) collapse into a single shell refetch and never
@@ -2473,6 +2530,7 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
             projectionSnapshotQuery.getArchivedShellSnapshot().pipe(
+              Effect.map(inboxAccess.filterSnapshot),
               Effect.tapError((cause) =>
                 Effect.logError("orchestration archived shell snapshot load failed", { cause }),
               ),
@@ -2490,6 +2548,14 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeThread,
             Effect.gen(function* () {
+              yield* inboxAccess
+                .requireThread(input.threadId)
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({ message: "Thread unavailable", cause }),
+                  ),
+                );
               const isThisThreadDetailEvent = (event: OrchestrationEvent) =>
                 event.aggregateKind === "thread" &&
                 event.aggregateId === input.threadId &&
@@ -2497,6 +2563,17 @@ const makeWsRpcLayer = (
 
               const liveStream = orchestrationEngine.streamDomainEvents.pipe(
                 Stream.filter(isThisThreadDetailEvent),
+                Stream.tap(() =>
+                  inboxAccess.requireThread(input.threadId).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationGetSnapshotError({
+                          message: "Thread unavailable",
+                          cause,
+                        }),
+                    ),
+                  ),
+                ),
                 Stream.map((event) => ({
                   kind: "event" as const,
                   event: projectActivityEvent(event, input.reasoningMessages === true),
@@ -2567,6 +2644,17 @@ const makeWsRpcLayer = (
                     .readThreadEvents({ ...range, limit: THREAD_RESUME_MAX_EVENTS })
                     .pipe(
                       Stream.filter(isThisThreadDetailEvent),
+                      Stream.tap(() =>
+                        inboxAccess.requireThread(input.threadId).pipe(
+                          Effect.mapError(
+                            (cause) =>
+                              new OrchestrationGetSnapshotError({
+                                message: "Thread unavailable",
+                                cause,
+                              }),
+                          ),
+                        ),
+                      ),
                       Stream.map((event) => ({
                         kind: "event" as const,
                         event: projectActivityEvent(event, input.reasoningMessages === true),
@@ -2647,7 +2735,25 @@ const makeWsRpcLayer = (
                 }),
                 afterSnapshot,
               );
-            }),
+            }).pipe(
+              Effect.map((stream) =>
+                inboxAccess.identity === null
+                  ? stream
+                  : stream.pipe(
+                      Stream.tap(() =>
+                        inboxAccess.requireThread(input.threadId).pipe(
+                          Effect.mapError(
+                            (cause) =>
+                              new OrchestrationGetSnapshotError({
+                                message: "Thread unavailable",
+                                cause,
+                              }),
+                          ),
+                        ),
+                      ),
+                    ),
+              ),
+            ),
             { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.serverProbe]: (_input) =>
