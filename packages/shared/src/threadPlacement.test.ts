@@ -38,7 +38,7 @@ describe("shared native placement policy", () => {
       environmentId: "r720",
       reason: "capacity",
     });
-    expect(chooseThreadPlacement(request, [...fleet].reverse(), now)).toEqual(
+    expect(chooseThreadPlacement(request, [...fleet.slice(2), ...fleet.slice(0, 2)], now)).toEqual(
       chooseThreadPlacement(request, fleet, now),
     );
   });

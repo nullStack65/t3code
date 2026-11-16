@@ -74,6 +74,7 @@ const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pip
 const encodeThreadLinkedPullRequest = Schema.encodeSync(
   Schema.fromJsonString(ThreadLinkedPullRequest),
 );
+const decodeThreadInbox = Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadInbox));
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-cursor-batch-")))(
   "OrchestrationProjectionPipeline cursor batches",
@@ -4930,17 +4931,12 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-inbox-replay-")
           const rows = yield* sql<{
             inbox_json: string;
           }>`SELECT inbox_json FROM projection_threads WHERE thread_id = ${threadId}`;
-          assert.deepEqual(
-            yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadInbox))(
-              rows[0]!.inbox_json,
-            ),
-            {
-              ...inbox,
-              assignee: { kind: "human", id: "jeff" },
-              audience: "shared",
-              attentionKind: "FYI",
-            },
-          );
+          assert.deepEqual(yield* decodeThreadInbox(rows[0]!.inbox_json), {
+            ...inbox,
+            assignee: { kind: "human", id: "jeff" },
+            audience: "shared",
+            attentionKind: "FYI",
+          });
           yield* pipeline.bootstrap;
           const replayed = yield* sql<{
             inbox_json: string;

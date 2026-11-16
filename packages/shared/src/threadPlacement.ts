@@ -92,7 +92,7 @@ export function chooseThreadPlacement(
         candidate.contextCompatible &&
         (target === undefined || target === candidate.environmentId),
     )
-    .toSorted((a, b) =>
+    .sort((a, b) =>
       a.environmentId < b.environmentId ? -1 : a.environmentId > b.environmentId ? 1 : 0,
     );
   const environmentId = chooseLoadBalancedEnvironment(eligible, now);
