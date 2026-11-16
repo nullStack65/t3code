@@ -1,0 +1,140 @@
+name: T3 fork ARC CI
+
+# Self-hosted, repository-scoped ARC only. No paid Blacksmith, hosted fallback,
+# macOS/Windows runners, new controller or deployment side effects.
+on:
+  push:
+    branches: [feat/assemblyai-current]
+  pull_request:
+    branches: [feat/assemblyai-current]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t3-fork-arc-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  voice-and-inbox:
+    # This is a public fork. Never run untrusted PR code on the private ARC LAN.
+    # Same-repo PR + trusted human author/actor only; push and manual runs
+    # require an authorized actor and the exact native release branch.
+    if: >-
+      ${{
+        github.repository == 'nullStack65/t3code' &&
+        (
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
+          ||
+          (github.event_name != 'pull_request' &&
+           github.ref == 'refs/heads/feat/assemblyai-current' &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor))
+        )
+      }}
+    name: Voice + founder inbox (Linux ARC)
+    runs-on: t3code-ci-arc
+    timeout-minutes: 90
+    env:
+      CI: "true"
+      GIT_CONFIG_NOSYSTEM: "1"
+      NODE_OPTIONS: "--max-old-space-size=3072"
+      GOMAXPROCS: "2"
+    steps:
+      - name: Checkout trusted source (no persistent credentials)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+
+      - name: Prove exact ARC repository and worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'nullStack65/t3code'
+          test -n "${RUNNER_NAME:-}"
+          test "$RUNNER_OS" = Linux
+          printf 'T3 ARC: repo=%s runner=%s ref=%s source=%s\n' \
+            "$GITHUB_REPOSITORY" "$RUNNER_NAME" "$GITHUB_REF" "$(git rev-parse HEAD)"
+
+      - name: Set up pinned Node, pnpm and Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1.15.0
+        env:
+          VP_DOWNLOAD_TIMEOUT: "120"
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Install locked dependencies
+        shell: bash
+        run: vp install
+
+      - name: Guard indispensable AssemblyAI voice implementation
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const required = {
+            'apps/server/src/speech/CloudSpeech.ts': ['assemblyai', 'sync.assemblyai.com/v1/transcribe', 'word_boost'],
+            'apps/server/src/speech/CloudSpeech.test.ts': ['AssemblyAI', 'assemblyai'],
+            'packages/contracts/src/speech.ts': ['assemblyai'],
+            'apps/web/src/components/settings/CloudVoiceConfiguration.tsx': ['assemblyai'],
+            'packages/contracts/src/threadInbox.ts': ['matchesInboxView', 'agent-only'],
+            'apps/web/src/components/sidebar/SidebarInboxBar.tsx': ['All threads', 'Jeff', 'Kameron'],
+          };
+          for (const [file, needles] of Object.entries(required)) {
+            const source = readFileSync(file, 'utf8');
+            for (const needle of needles) {
+              if (!source.includes(needle)) throw new Error(file + ' missing ' + needle);
+            }
+          }
+          process.stdout.write('AssemblyAI voice + shared founder inbox source preserved\n');
+          NODE
+
+      - name: Typecheck contracts, runtime, provider and server
+        shell: bash
+        run: |
+          set -euo pipefail
+          vp run --filter @t3tools/contracts typecheck
+          vp run --filter @t3tools/client-runtime typecheck
+          vp run --filter @t3tools/provider-core typecheck
+          vp run --filter t3 typecheck
+
+      - name: Test AssemblyAI dictation and native inbox behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          vp test run \
+            apps/server/src/speech/CloudSpeech.test.ts \
+            packages/contracts/src/threadInbox.test.ts \
+            packages/contracts/src/threadMetadataMcp.test.ts \
+            apps/web/src/components/threadActionMenu.logic.test.ts \
+            apps/server/src/orchestration-v2/ThreadLaunchService.test.ts \
+            apps/server/src/orchestration-v2/SubagentProjection.test.ts
+
+      - name: Build native T3 server
+        shell: bash
+        run: vp run --filter t3 build:bundle
+
+      - name: Build founder inbox and voice settings web client
+        shell: bash
+        run: vp run --filter @t3tools/web build
+
+      - name: Verify compiled release outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f apps/server/dist/bin.mjs
+          test -d apps/web/dist
+          printf 'Exact T3 source %s, voice and inbox builds successful on %s\n' \
+            "$(git rev-parse HEAD)" "$RUNNER_NAME"
