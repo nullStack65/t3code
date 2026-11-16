@@ -3,14 +3,6 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./threadPlacement": {
-      "types": "./src/threadPlacement.ts",
-      "import": "./src/threadPlacement.ts"
-    },
-    "./loadBalancing": {
-      "types": "./src/loadBalancing.ts",
-      "import": "./src/loadBalancing.ts"
-    },
     "./pullRequestAnchor": {
       "types": "./src/pullRequestAnchor.ts",
       "import": "./src/pullRequestAnchor.ts"

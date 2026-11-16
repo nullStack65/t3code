@@ -2985,6 +2985,12 @@ const make = Effect.gen(function* () {
               yield* threadManagement
                 .dispatch({
                   type: "thread.create",
+                  inboxOrigin: { kind: "agent", id: parent.thread.id },
+                  ...(request.inboxRouting !== undefined
+                    ? { inboxRouting: request.inboxRouting }
+                    : parent.thread.inbox === undefined
+                      ? {}
+                      : { inboxRouting: parent.thread.inbox }),
                   createdBy: "agent",
                   creationSource: "mcp",
                   commandId,

@@ -5,6 +5,8 @@ import type {
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
+import { makeThreadInbox, routeThreadInbox } from "@t3tools/contracts";
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import {
   latestExecutedRun,
   latestRootProviderFailure,
@@ -22,7 +24,6 @@ import {
 } from "../sourceControl/threadPullRequests.ts";
 import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
-  FLEET_PLACEMENT_UNAVAILABLE,
   type ChatAttachment,
   CommandId,
   type GuestMessageId,
@@ -3621,13 +3622,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "thread.create" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
-    if (command.fleetPlacement !== undefined) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: FLEET_PLACEMENT_UNAVAILABLE,
-      });
-    }
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
       "orchestration_v2.command_type": command.type,
@@ -3652,6 +3646,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
+      ...(command.inboxOrigin === undefined &&
+      command.inboxRouting === undefined &&
+      command.createdBy !== "agent"
+        ? {}
+        : {
+            inbox: makeThreadInbox({
+              actor:
+                command.inboxOrigin ??
+                (command.createdBy === "agent" ? { kind: "agent", id: "agent" } : null),
+              ...(command.inboxRouting === undefined ? {} : { routing: command.inboxRouting }),
+              executorEnvironmentId: yield* Effect.serviceOption(ServerEnvironmentIdentity).pipe(
+                Effect.flatMap((identity) =>
+                  Option.isSome(identity) ? identity.value.getEnvironmentId : Effect.succeed(null),
+                ),
+              ),
+            }),
+          }),
       createdBy: command.createdBy,
       creationSource: command.creationSource,
       id: command.threadId,
@@ -4680,6 +4691,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
+            ...(command.inboxRouting === undefined
+              ? {}
+              : {
+                  inbox: routeThreadInbox(
+                    thread.inbox ?? makeThreadInbox({ actor: null }),
+                    command.inboxRouting,
+                  ),
+                }),
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&

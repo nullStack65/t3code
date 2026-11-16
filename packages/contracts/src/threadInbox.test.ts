@@ -1,85 +1,89 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "./baseSchemas.ts";
 import {
-  defaultFounderInboxView,
-  canReadInbox,
-  canRouteInbox,
-  compositeThreadKey,
+  makeThreadInbox,
+  routeThreadInbox,
+  matchesInboxView,
   founderInboxLane,
-  inboxIdentityFromSubject,
-  inboxIdentitySubject,
-  type InboxIdentity,
-  type ThreadInbox,
+  compositeThreadKey,
 } from "./threadInbox.ts";
-const human = (id: "kameron" | "jeff"): InboxIdentity => ({
-  actor: { kind: "human", id },
-  delegatesTo: [],
-  operational: false,
-});
-const inbox: ThreadInbox = {
-  requestedBy: { kind: "human", id: "kameron" },
-  actor: { kind: "human", id: "kameron" },
-  assignee: { kind: "human", id: "kameron" },
-  audience: "kameron",
-  attentionKind: "action",
-  executorEnvironmentId: EnvironmentId.make("crown"),
-};
-describe("founder inbox policy", () => {
-  it("keeps host collisions separate without ambiguous separators", () => {
+const kameron = { kind: "human", id: "kameron" } as const;
+const jeff = { kind: "human", id: "jeff" } as const;
+const bot = { kind: "agent", id: "lead" } as const;
+describe("shared fleet organizational inbox", () => {
+  it("keeps host collisions distinct", () => {
     expect(compositeThreadKey("crown", "same")).not.toBe(compositeThreadKey("air", "same"));
     expect(compositeThreadKey("a:b", "c")).not.toBe(compositeThreadKey("a", "b:c"));
   });
-  it("separates audience from assignment and attention", () => {
-    expect(canReadInbox(human("kameron"), inbox)).toBe(true);
-    expect(canReadInbox(human("jeff"), inbox)).toBe(false);
-    expect(canReadInbox(human("jeff"), { ...inbox, audience: "shared" })).toBe(true);
-    expect(founderInboxLane({ ...inbox, audience: "shared" }, "jeff")).toBe("hidden");
-    expect(founderInboxLane({ ...inbox, attentionKind: "FYI" }, "kameron")).toBe("FYI");
-    expect(founderInboxLane({ ...inbox, audience: "agent-only" }, "kameron")).toBe("hidden");
+  it("defaults founder-created work into that founder's inbox", () => {
+    const k = makeThreadInbox({ actor: kameron });
+    const j = makeThreadInbox({ actor: jeff });
+    expect(matchesInboxView(k, "kameron")).toBe(true);
+    expect(matchesInboxView(j, "kameron")).toBe(false);
+    expect(matchesInboxView(j, "jeff")).toBe(true);
+    expect(matchesInboxView(k, "jeff")).toBe(false);
+    expect(matchesInboxView(j, "all")).toBe(true);
+    expect(matchesInboxView(k, "all")).toBe(true);
   });
-  it("does not infer legacy provenance and confines operational visibility", () => {
-    expect(founderInboxLane(null, "kameron")).toBe("unknown");
-    expect(canReadInbox(human("kameron"), null)).toBe(false);
-    expect(canReadInbox({ ...human("kameron"), operational: true }, null)).toBe(true);
-    expect(canReadInbox(human("kameron"), { ...inbox, audience: "agent-only" })).toBe(false);
+  it("hides bot-only work by default while All and Agents retain it", () => {
+    const inbox = makeThreadInbox({ actor: bot });
+    expect(matchesInboxView(inbox, "kameron")).toBe(false);
+    expect(matchesInboxView(inbox, "jeff")).toBe(false);
+    expect(matchesInboxView(inbox, "all")).toBe(true);
+    expect(matchesInboxView(inbox, "agents")).toBe(true);
   });
-  it("requires explicit cross-founder delegation including shared audiences", () => {
-    const target = {
-      ...inbox,
-      assignee: { kind: "human" as const, id: "jeff" as const },
-      audience: "jeff" as const,
-    };
-    expect(canRouteInbox(human("kameron"), target)).toBe(false);
-    expect(canRouteInbox({ ...human("kameron"), delegatesTo: ["jeff"] }, target)).toBe(true);
-    expect(canRouteInbox(human("kameron"), { ...inbox, audience: "shared" })).toBe(false);
+  it("routes bot action and FYI assignments to either founder", () => {
+    for (const id of ["kameron", "jeff"] as const) {
+      const inbox = makeThreadInbox({ actor: bot, routing: { assignee: { kind: "human", id } } });
+      expect(matchesInboxView(inbox, id)).toBe(true);
+      expect(founderInboxLane(inbox, id)).toBe("action");
+      expect(founderInboxLane(routeThreadInbox(inbox, { attentionKind: "FYI" }), id)).toBe("FYI");
+      expect(matchesInboxView(inbox, "all")).toBe(true);
+    }
   });
-  it("round-trips signed-subject identity and fails closed for malformed reserved subjects", () => {
-    expect(inboxIdentityFromSubject(inboxIdentitySubject(human("jeff")))).toEqual(human("jeff"));
-    expect(inboxIdentityFromSubject("one-time-token")).toBeNull();
-    const malformed = inboxIdentityFromSubject("closura-inbox-v1:invalid");
-    expect(malformed).not.toBeNull();
-    expect(canReadInbox(malformed!, inbox)).toBe(false);
+  it("explicit reassignment wins over origin and retains provenance", () => {
+    const original = makeThreadInbox({
+      actor: jeff,
+      executorEnvironmentId: EnvironmentId.make("air"),
+    });
+    const assigned = routeThreadInbox(original, { assignee: kameron, owner: "kameron" });
+    expect(matchesInboxView(assigned, "kameron")).toBe(true);
+    expect(matchesInboxView(assigned, "jeff")).toBe(false);
+    expect(assigned.origin).toEqual(jeff);
+    expect(assigned.requestedBy).toEqual(jeff);
+    expect(assigned.executorEnvironmentId).toEqual(original.executorEnvironmentId);
   });
-  it("defaults to the signed founder and does not infer identity from a host credential", () => {
-    expect(defaultFounderInboxView([inboxIdentitySubject(human("jeff"))])).toBe("jeff");
-    expect(defaultFounderInboxView([inboxIdentitySubject(human("kameron"))])).toBe("kameron");
-    expect(defaultFounderInboxView(["Jeff Air", "one-time-token"])).toBe("operations");
-    expect(
-      defaultFounderInboxView([
-        inboxIdentitySubject(human("jeff")),
-        inboxIdentitySubject(human("kameron")),
-      ]),
-    ).toBe("operations");
+  it("inherits parent routing for child work without changing its requester", () => {
+    const parent = makeThreadInbox({ actor: jeff, routing: { attentionKind: "FYI" } });
+    const child = makeThreadInbox({
+      actor: bot,
+      parent,
+      executorEnvironmentId: EnvironmentId.make("r720"),
+    });
+    expect(child.owner).toBe("jeff");
+    expect(child.assignee).toEqual(jeff);
+    expect(child.requestedBy).toEqual(jeff);
+    expect(child.origin).toEqual(bot);
+    expect(founderInboxLane(child, "jeff")).toBe("FYI");
+    expect(child.executorEnvironmentId).toBe("r720");
   });
-  it("accepts a delegated agent assignment without confusing the human requester with its executor", () => {
-    const agent: InboxIdentity = {
-      actor: { kind: "agent", id: "lead" },
-      delegatesTo: ["kameron"],
-      operational: false,
-    };
-    const assigned = { ...inbox, assignee: agent.actor };
-    expect(canReadInbox(agent, assigned)).toBe(true);
-    expect(canReadInbox({ ...agent, delegatesTo: [] }, assigned)).toBe(false);
-    expect(canReadInbox({ ...agent, actor: { kind: "agent", id: "other" } }, assigned)).toBe(false);
+  it("supports shared views and routing to neither founder", () => {
+    const shared = makeThreadInbox({ actor: kameron, routing: { audience: "shared" } });
+    expect(matchesInboxView(shared, "shared")).toBe(true);
+    const neither = routeThreadInbox(shared, {
+      owner: null,
+      assignee: bot,
+      audience: "agent-only",
+      attentionKind: "background",
+    });
+    expect(matchesInboxView(neither, "kameron")).toBe(false);
+    expect(matchesInboxView(neither, "jeff")).toBe(false);
+    expect(matchesInboxView(neither, "all")).toBe(true);
+  });
+  it("keeps unclassified history visible in All without rewriting it", () => {
+    expect(matchesInboxView(undefined, "all")).toBe(true);
+    expect(matchesInboxView(undefined, "kameron")).toBe(false);
+    expect(matchesInboxView(undefined, "jeff")).toBe(false);
+    expect(founderInboxLane(undefined, "kameron")).toBe("unknown");
   });
 });

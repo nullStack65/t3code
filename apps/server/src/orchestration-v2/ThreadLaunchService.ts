@@ -4,8 +4,8 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
-  FLEET_PLACEMENT_UNAVAILABLE,
-  type FleetPlacementIntent,
+  type InboxActor,
+  type ThreadInboxRoutingPatch,
   type ChatAttachment,
   type MessageId,
   type ModelSelection,
@@ -85,7 +85,8 @@ export interface ThreadLaunchInitialMessage {
 
 export interface ThreadLaunchInput {
   readonly commandId: CommandId;
-  readonly fleetPlacement?: FleetPlacementIntent;
+  readonly inboxOrigin?: InboxActor;
+  readonly inboxRouting?: ThreadInboxRoutingPatch;
   readonly threadId?: ThreadId;
   readonly reuseExistingThread?: boolean;
   readonly projectId: ProjectId;
@@ -158,20 +159,6 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
     return `Thread launch ${this.commandId} failed during ${this.operation}.`;
   }
 }
-
-/** Reuse before attachment claims, workspace preflight and direct native launch. */
-export const requireQualifiedFleetPlacement = Effect.fn("requireQualifiedFleetPlacement")(
-  function* (request: Pick<ThreadLaunchInput, "commandId" | "projectId" | "fleetPlacement">) {
-    if (request.fleetPlacement !== undefined) {
-      return yield* new ThreadLaunchError({
-        operation: "resolve-project",
-        commandId: request.commandId,
-        projectId: request.projectId,
-        cause: FLEET_PLACEMENT_UNAVAILABLE,
-      });
-    }
-  },
-);
 
 export class ThreadLaunchBaseRefError extends Schema.TaggedError<ThreadLaunchBaseRefError>()(
   "ThreadLaunchBaseRefError",
@@ -1043,9 +1030,6 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (request) {
-      // Protocol 2 alone does not qualify remote admission. Keep intent explicit
-      // until the native destination adapter persists and reconciles acceptance.
-      yield* requireQualifiedFleetPlacement(request);
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
       const input: ThreadLaunchInput =
@@ -1162,6 +1146,8 @@ const make = Effect.gen(function* () {
                   : { delegatedFrom: input.delegatedFrom }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...(input.inboxOrigin === undefined ? {} : { inboxOrigin: input.inboxOrigin }),
+                ...(input.inboxRouting === undefined ? {} : { inboxRouting: input.inboxRouting }),
               });
         const claimed = yield* claimDispatch.pipe(
           Effect.mapError(

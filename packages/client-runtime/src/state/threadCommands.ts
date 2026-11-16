@@ -1,4 +1,4 @@
-import { CommandId, type ModelSelection, type ThreadId } from "@t3tools/contracts";
+import { CommandId, type ModelSelection, type ThreadId, type InboxActor } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -24,6 +24,8 @@ import { waitForTitleRegenerationOutcome } from "./threadTitleRegeneration.ts";
 import {
   type InterruptThreadTurnInput,
   type UpdateThreadMetadataInput,
+  type CreateThreadInput,
+  type StartThreadTurnInput,
   archiveThread,
   closeGuestShare,
   resolveGuestMessage,
@@ -77,7 +79,12 @@ export type LoadEarlierThreadHistoryInput = {
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | SecureRandom.SecureRandom | R, E>,
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
+  options: { readonly getInboxOrigin?: () => InboxActor | undefined } = {},
 ) {
+  const withInboxOrigin = <I extends { readonly inboxOrigin?: InboxActor }>(input: I) => {
+    const origin = input.inboxOrigin ?? options.getInboxOrigin?.();
+    return origin === undefined ? input : { ...input, inboxOrigin: origin };
+  };
   const scheduler = createAtomCommandScheduler();
   const concurrency = {
     mode: "serial" as const,
@@ -162,7 +169,7 @@ export function createThreadEnvironmentAtoms<R, E>(
 
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
-      execute: createThread,
+      execute: (input: CreateThreadInput) => createThread(withInboxOrigin(input)),
       scheduler,
       concurrency,
     }),
@@ -307,7 +314,7 @@ export function createThreadEnvironmentAtoms<R, E>(
     }),
     startTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:start-turn",
-      execute: startThreadTurn,
+      execute: (input: StartThreadTurnInput) => startThreadTurn(withInboxOrigin(input)),
       scheduler,
       concurrency,
     }),

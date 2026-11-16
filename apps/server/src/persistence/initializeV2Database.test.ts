@@ -24,7 +24,7 @@ import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 
 it.effect(
-  "explicit import utility preserves synthetic V1 and V2 transcripts across switches",
+  "snapshots V1, imports transcripts lazily, and preserves both databases across switches",
   () => {
     const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v1-v2-"));
     const sourcePath = NodePath.join(directory, "state.sqlite");
@@ -46,10 +46,10 @@ it.effect(
     return Effect.gen(function* () {
       yield* seed;
       const original = NodeFS.readFileSync(sourcePath);
-      // Exercise the upstream utility explicitly with synthetic state; this
-      // candidate's configured startup refuses implicit imports.
-      yield* initializeV2Database(destinationPath);
-      const layerDatabase = SqlitePersistence.layerFromPath(destinationPath);
+      const config = yield* ServerConfig.ServerConfig;
+      const layerDatabase = SqlitePersistence.layerConfig.pipe(
+        Layer.provide(ServerConfig.layer({ ...config, dbPath: destinationPath })),
+      );
       const layerStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
         Layer.provideMerge(layerDatabase),
       );

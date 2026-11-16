@@ -1,7 +1,12 @@
+import type { ThreadInboxRoutingPatch } from "@t3tools/contracts";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
 export type ThreadActionMenuId =
+  | "inbox"
+  | `inbox:${"kameron" | "jeff" | "shared" | "agents"}`
+  | "attention"
+  | `attention:${"action" | "FYI" | "background"}`
   | "find"
   | "new-thread-on-branch"
   | "filter-by-project"
@@ -84,6 +89,7 @@ export interface ThreadActionMenuState {
   /** Archive rejects attached providers, so disable it while running. */
   readonly isRunning: boolean;
   readonly supports: {
+    readonly inboxRouting?: boolean;
     readonly settlement: boolean;
     readonly autoSettleOptOut: boolean;
     readonly snooze: boolean;
@@ -117,6 +123,29 @@ export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
   const items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
+    ...(state.supports.inboxRouting
+      ? [
+          {
+            id: "inbox" as const,
+            label: "Route to inbox",
+            children: [
+              { id: "inbox:kameron" as const, label: "Kameron" },
+              { id: "inbox:jeff" as const, label: "Jeff" },
+              { id: "inbox:shared" as const, label: "Shared" },
+              { id: "inbox:agents" as const, label: "Agents / neither founder" },
+            ],
+          },
+          {
+            id: "attention" as const,
+            label: "Attention",
+            children: [
+              { id: "attention:action" as const, label: "Needs action" },
+              { id: "attention:FYI" as const, label: "FYI" },
+              { id: "attention:background" as const, label: "Background" },
+            ],
+          },
+        ]
+      : []),
     ...(state.canFind
       ? [{ id: "find" as const, label: "Find in thread", icon: "text-search" }]
       : []),
@@ -266,4 +295,24 @@ export function buildThreadActionMenuItems(
             }
           : item,
       );
+}
+
+export function threadRoutingUpdateFromMenuAction(action: string): ThreadInboxRoutingPatch | null {
+  if (action === "inbox:kameron" || action === "inbox:jeff") {
+    const founder = action === "inbox:kameron" ? "kameron" : "jeff";
+    return {
+      owner: founder,
+      assignee: { kind: "human", id: founder },
+      audience: founder,
+      attentionKind: "action",
+    };
+  }
+  if (action === "inbox:shared")
+    return { owner: null, assignee: null, audience: "shared", attentionKind: "FYI" };
+  if (action === "inbox:agents")
+    return { owner: null, assignee: null, audience: "agent-only", attentionKind: "background" };
+  if (action === "attention:action") return { attentionKind: "action" };
+  if (action === "attention:FYI") return { attentionKind: "FYI" };
+  if (action === "attention:background") return { attentionKind: "background" };
+  return null;
 }
