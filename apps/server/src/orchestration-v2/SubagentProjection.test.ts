@@ -1,5 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
+  makeThreadInbox,
+  matchesInboxView,
   CommandId,
   type ModelSelection,
   NodeId,
@@ -85,6 +87,7 @@ function makeParentThread(): OrchestrationV2AppThread {
 it("keeps a subagent child awake when its parent thread is snoozed", () => {
   const parentThread: OrchestrationV2AppThread = {
     ...makeParentThread(),
+    inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }),
     titleRegeneration: { requestId: CommandId.make("command:parent-title"), startedAt: snoozedAt },
   };
   const childProviderThreadId = ProviderThreadId.make("provider-thread:subagent-awake-child");
@@ -102,6 +105,12 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
     creationSource: "provider",
   });
 
+  assert.equal(childThread.inbox?.owner, "jeff");
+  assert.deepEqual(childThread.inbox?.requestedBy, parentThread.inbox?.requestedBy);
+  assert.isFalse(matchesInboxView(childThread.inbox, "jeff"));
+  assert.isFalse(matchesInboxView(childThread.inbox, "kameron"));
+  assert.isTrue(matchesInboxView(childThread.inbox, "agents"));
+  assert.isTrue(matchesInboxView(childThread.inbox, "all"));
   assert.isNull(childThread.snoozedUntil);
   assert.isNull(childThread.snoozedAt);
   assert.isNull(childThread.titleRegeneration);
