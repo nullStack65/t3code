@@ -2227,6 +2227,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const thread = { ...makeDefaultOrchestrationReadModel().threads[0]!, inbox };
         const shell = makeDefaultOrchestrationThreadShell({ inbox });
         let audience: "kameron" | "jeff" = "kameron";
+        let revokeOnDetailRead = false;
         yield* buildAppUnderTest({
           layers: {
             orchestrationEngine: { subscribeDomainEvents: Effect.succeed(Stream.empty) },
@@ -2262,9 +2263,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                     : Option.none(),
                 ),
               getThreadDetailSnapshot: (id) =>
-                Effect.succeed(
-                  id === thread.id ? Option.some({ snapshotSequence: 1, thread }) : Option.none(),
-                ),
+                Effect.sync(() => {
+                  if (revokeOnDetailRead) audience = "jeff";
+                  return id === thread.id
+                    ? Option.some({ snapshotSequence: 1, thread })
+                    : Option.none();
+                }),
             },
           },
         });
@@ -2309,6 +2313,29 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             return yield* fetchEffect(yield* getHttpServerUrl(path), { headers: { cookie } });
           });
         assert.equal((yield* read(`/api/orchestration/threads/${thread.id}`)).status, 200);
+        revokeOnDetailRead = true;
+        assert.equal((yield* read(`/api/orchestration/threads/${thread.id}`)).status, 404);
+        audience = "kameron";
+        const revokedWsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          cookie,
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(revokedWsUrl, (client) =>
+            Effect.gen(function* () {
+              const delivered: unknown[] = [];
+              const result = yield* Effect.result(
+                client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId: thread.id }).pipe(
+                  Stream.tap((item) => Effect.sync(() => delivered.push(item))),
+                  Stream.runDrain,
+                ),
+              );
+              assert.equal(result._tag, "Failure");
+              assert.deepEqual(delivered, []);
+            }),
+          ),
+        );
+        revokeOnDetailRead = false;
         assert.equal((yield* read("/api/orchestration/threads/guessed")).status, 404);
         audience = "jeff";
         assert.equal((yield* read(`/api/orchestration/threads/${thread.id}`)).status, 404);

@@ -98,6 +98,11 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           if (Option.isNone(snapshot)) {
             return yield* failEnvironmentNotFound("thread_not_found");
           }
+          // Loading a body can yield while routing changes. Recheck before
+          // delivery, just as the scoped WebSocket stream does before emitting.
+          yield* access
+            .requireThread(args.params.threadId)
+            .pipe(Effect.catch(() => failEnvironmentNotFound("thread_not_found")));
           return projectThreadDetailSnapshot(
             snapshot.value,
             args.payload.reasoningMessages === "true",
