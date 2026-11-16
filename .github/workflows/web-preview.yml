@@ -17,6 +17,7 @@ name: Web Preview
 
 on:
   pull_request:
+    branches: [main]
     types: [labeled, synchronize, reopened]
 
 permissions:
