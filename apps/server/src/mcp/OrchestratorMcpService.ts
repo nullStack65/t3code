@@ -877,6 +877,7 @@ function listItemFromShell(
   nowMs: number,
 ): OrchestratorMcpThreadListItem {
   return {
+    ...(shell.inbox === undefined ? {} : { inbox: shell.inbox }),
     threadId: shell.id,
     projectId: shell.projectId,
     title: shell.title,
@@ -913,6 +914,7 @@ function threadDetail(
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
   return {
+    ...(projection.thread.inbox === undefined ? {} : { inbox: projection.thread.inbox }),
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,

@@ -92,8 +92,7 @@ export const routeThreadInbox = (
 export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder: Founder) {
   if (!inbox) return "unknown";
   const assigned = inbox.assignee?.kind === "human" ? inbox.assignee.id : inbox.owner;
-  if (inbox.audience === "agent-only" && assigned === null)
-    return inbox.attentionKind === "action" ? "action" : "hidden";
+  if (inbox.audience === "agent-only" && inbox.assignee?.kind !== "human") return "hidden";
   if (assigned !== founder) return "hidden";
   return inbox.attentionKind;
 }

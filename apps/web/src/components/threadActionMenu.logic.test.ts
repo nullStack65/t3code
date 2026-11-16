@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./threadActionMenu.logic";
+import {
+  threadRoutingUpdateFromMenuAction,
+  buildThreadActionMenuItems,
+  type ThreadActionMenuState,
+} from "./threadActionMenu.logic";
 
 const baseState: ThreadActionMenuState = {
   canOperate: true,
@@ -74,4 +78,30 @@ describe("buildThreadActionMenuItems", () => {
     expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "turn-into-project")?.disabled).toBe(true);
   });
+});
+
+it("offers inbox routing only on capable environments and retains ordinary operate grants", () => {
+  expect(buildThreadActionMenuItems(baseState).some((item) => item.id === "inbox")).toBe(false);
+  const items = buildThreadActionMenuItems({
+    ...baseState,
+    canOperate: false,
+    supports: { ...baseState.supports, inboxRouting: true },
+  });
+  expect(
+    items.find((item) => item.id === "inbox")?.children?.every((child) => child.disabled),
+  ).toBe(true);
+  expect(threadRoutingUpdateFromMenuAction("inbox:jeff")).toEqual({
+    owner: "jeff",
+    assignee: { kind: "human", id: "jeff" },
+    audience: "jeff",
+    attentionKind: "action",
+  });
+  expect(threadRoutingUpdateFromMenuAction("inbox:agents")).toEqual({
+    owner: null,
+    assignee: null,
+    audience: "agent-only",
+    attentionKind: "background",
+  });
+  expect(threadRoutingUpdateFromMenuAction("attention:FYI")).toEqual({ attentionKind: "FYI" });
+  expect(threadRoutingUpdateFromMenuAction("rename")).toBeNull();
 });

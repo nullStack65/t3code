@@ -66,6 +66,11 @@ export function makeSubagentChildThread(input: {
     ...input.parentThread,
     inbox: makeThreadInbox({
       actor: { kind: "agent", id: input.childThreadId },
+      routing: {
+        audience: "agent-only",
+        assignee: { kind: "agent", id: input.childThreadId },
+        attentionKind: "background",
+      },
       ...(input.parentThread.inbox === undefined ? {} : { parent: input.parentThread.inbox }),
       executorEnvironmentId: input.parentThread.inbox?.executorEnvironmentId ?? null,
     }),

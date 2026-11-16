@@ -87,3 +87,34 @@ describe("shared fleet organizational inbox", () => {
     expect(founderInboxLane(undefined, "kameron")).toBe("unknown");
   });
 });
+
+it("keeps unassigned agent-only action out of both founder inboxes", () => {
+  const inbox = makeThreadInbox({
+    actor: bot,
+    routing: { owner: null, assignee: null, attentionKind: "action" },
+  });
+  expect(matchesInboxView(inbox, "kameron")).toBe(false);
+  expect(matchesInboxView(inbox, "jeff")).toBe(false);
+  expect(matchesInboxView(inbox, "agents")).toBe(true);
+  expect(matchesInboxView(inbox, "all")).toBe(true);
+  const assigned = routeThreadInbox(inbox, { owner: "jeff", assignee: jeff });
+  expect(matchesInboxView(assigned, "jeff")).toBe(true);
+  expect(matchesInboxView(assigned, "kameron")).toBe(false);
+});
+
+it("keeps founder-owned agent-only children out of founder inboxes", () => {
+  const parent = makeThreadInbox({ actor: jeff });
+  const child = makeThreadInbox({
+    actor: bot,
+    parent,
+    routing: { audience: "agent-only", assignee: bot, attentionKind: "action" },
+  });
+  expect(child.owner).toBe("jeff");
+  expect(matchesInboxView(child, "kameron")).toBe(false);
+  expect(matchesInboxView(child, "jeff")).toBe(false);
+  expect(matchesInboxView(child, "agents")).toBe(true);
+  expect(matchesInboxView(child, "all")).toBe(true);
+  const assigned = routeThreadInbox(child, { assignee: jeff });
+  expect(matchesInboxView(assigned, "jeff")).toBe(true);
+  expect(matchesInboxView(assigned, "kameron")).toBe(false);
+});
