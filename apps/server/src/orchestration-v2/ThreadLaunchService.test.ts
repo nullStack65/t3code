@@ -355,9 +355,14 @@ it.effect("refuses unqualified fleet intent before native launch effects", () =>
       const result = yield* Effect.exit(
         launches.launch({
           ...input,
-          fleetPlacement: mode === "auto"
-            ? { mode, clientRequestId: `fleet:${mode}` }
-            : { mode, clientRequestId: `fleet:${mode}`, environmentId: EnvironmentId.make("remote") },
+          fleetPlacement:
+            mode === "auto"
+              ? { mode, clientRequestId: `fleet:${mode}` }
+              : {
+                  mode,
+                  clientRequestId: `fleet:${mode}`,
+                  environmentId: EnvironmentId.make("remote"),
+                },
         }),
       );
       assert.isTrue(Exit.isFailure(result));

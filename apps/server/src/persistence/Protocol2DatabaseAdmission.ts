@@ -30,7 +30,8 @@ export const admitProtocol2Database = Effect.fn("admitProtocol2Database")(functi
     if (
       requireCurrentSchema &&
       NodeFS.existsSync(NodePath.join(NodePath.dirname(databasePath), "state.sqlite"))
-    ) return yield* refuse("legacy state requires a separately approved import");
+    )
+      return yield* refuse("legacy state requires a separately approved import");
     return;
   }
   const recorded = recordedMigrations(databasePath);
