@@ -2211,6 +2211,172 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "enforces founder inbox visibility on authenticated HTTP read list and write routes",
+    () =>
+      Effect.gen(function* () {
+        const actor = { kind: "human", id: "kameron" } as const;
+        const inbox = {
+          actor,
+          requestedBy: actor,
+          assignee: actor,
+          audience: "kameron",
+          attentionKind: "action",
+          executorEnvironmentId: testEnvironmentDescriptor.environmentId,
+        } as const;
+        const thread = { ...makeDefaultOrchestrationReadModel().threads[0]!, inbox };
+        const shell = makeDefaultOrchestrationThreadShell({ inbox });
+        let audience: "kameron" | "jeff" = "kameron";
+        yield* buildAppUnderTest({
+          layers: {
+            orchestrationEngine: { subscribeDomainEvents: Effect.succeed(Stream.empty) },
+            projectionSnapshotQuery: {
+              searchThreads: () =>
+                Effect.succeed({
+                  matches: [
+                    {
+                      threadId: thread.id,
+                      projectId: thread.projectId,
+                      source: "assistant",
+                      snippet: "Private match",
+                      messageCreatedAt: null,
+                    },
+                  ],
+                }),
+              getCommandReadModel: () =>
+                Effect.succeed({
+                  ...makeDefaultOrchestrationReadModel(),
+                  threads: [{ ...thread, inbox: { ...inbox, audience } }],
+                }),
+              getShellSnapshot: () =>
+                Effect.succeed({
+                  snapshotSequence: 1,
+                  projects: [],
+                  threads: [{ ...shell, inbox: { ...inbox, audience } }],
+                  updatedAt: thread.updatedAt,
+                }),
+              getThreadShellById: (id) =>
+                Effect.succeed(
+                  id === thread.id
+                    ? Option.some({ ...shell, inbox: { ...inbox, audience } })
+                    : Option.none(),
+                ),
+              getThreadDetailSnapshot: (id) =>
+                Effect.succeed(
+                  id === thread.id ? Option.some({ snapshotSequence: 1, thread }) : Option.none(),
+                ),
+            },
+          },
+        });
+        const owner = yield* getAuthenticatedSessionCookieHeader();
+        const issue = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: owner },
+          body: yield* HttpBody.json({
+            inboxIdentity: { actor, delegatesTo: [], operational: false },
+            scopes: ["orchestration:read", "orchestration:operate", "terminal:operate"],
+          }),
+        });
+        assert.equal(issue.status, 200);
+        const pairing = (yield* issue.json) as { credential: string };
+        const cookie = yield* getAuthenticatedSessionCookieHeader(pairing.credential);
+        const read = (path: string) =>
+          Effect.gen(function* () {
+            return yield* fetchEffect(yield* getHttpServerUrl(path), { headers: { cookie } });
+          });
+        assert.equal((yield* read(`/api/orchestration/threads/${thread.id}`)).status, 200);
+        assert.equal((yield* read("/api/orchestration/threads/guessed")).status, 404);
+        audience = "jeff";
+        assert.equal((yield* read(`/api/orchestration/threads/${thread.id}`)).status, 404);
+        for (const path of ["/api/orchestration/snapshot", "/api/orchestration/shell"]) {
+          const result = yield* read(path);
+          assert.equal(result.status, 200);
+          const body = yield* responseJsonEffect<{ threads: unknown[] }>(result);
+          assert.deepEqual(body.threads, []);
+        }
+        const denied = yield* HttpClient.post("/api/orchestration/dispatch", {
+          headers: { cookie },
+          body: yield* HttpBody.json({
+            type: "thread.meta.update",
+            commandId: CommandId.make("inbox-denied"),
+            threadId: thread.id,
+            title: "Unauthorized",
+          }),
+        });
+        assert.equal(denied.status, 400);
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          cookie,
+        );
+        for (let reconnect = 0; reconnect < 2; reconnect++) {
+          yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              Effect.gen(function* () {
+                const shellItems = yield* client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+                  Stream.take(1),
+                  Stream.runCollect,
+                );
+                assert.equal(shellItems[0]?.kind, "snapshot");
+                assert.deepEqual(
+                  shellItems[0]?.kind === "snapshot" ? shellItems[0].snapshot.threads : null,
+                  [],
+                );
+                const search = yield* client[ORCHESTRATION_WS_METHODS.searchThreads]({
+                  query: "Private",
+                });
+                assert.deepEqual(search.matches, []);
+                const guessed = yield* Effect.result(
+                  client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+                    threadId: ThreadId.make("guessed"),
+                  }).pipe(Stream.runCollect),
+                );
+                assert.equal(guessed._tag, "Failure");
+                const foreign = yield* Effect.result(
+                  client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId: thread.id }).pipe(
+                    Stream.runCollect,
+                  ),
+                );
+                assert.equal(foreign._tag, "Failure");
+                const asset = yield* Effect.result(
+                  client[WS_METHODS.assetsCreateUrl]({
+                    resource: { _tag: "workspace-file", threadId: thread.id, path: "state.sqlite" },
+                  }),
+                );
+                assert.equal(asset._tag, "Failure");
+                if (asset._tag === "Failure")
+                  assert.equal(asset.failure._tag, "EnvironmentAuthorizationError");
+                const file = yield* Effect.result(
+                  client[WS_METHODS.filesystemBrowse]({ partialPath: "/synthetic/state.sqlite" }),
+                );
+                assert.equal(file._tag, "Failure");
+                if (file._tag === "Failure")
+                  assert.equal(file.failure._tag, "EnvironmentAuthorizationError");
+                const terminal = yield* Effect.result(
+                  client[WS_METHODS.terminalOpen]({
+                    threadId: thread.id,
+                    terminalId: "term-test",
+                    cwd: "/synthetic",
+                  }),
+                );
+                assert.equal(terminal._tag, "Failure");
+                if (terminal._tag === "Failure")
+                  assert.equal(terminal.failure._tag, "EnvironmentAuthorizationError");
+
+                const write = yield* Effect.result(
+                  client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                    type: "thread.meta.update",
+                    commandId: CommandId.make(`denied-reconnect-${reconnect}`),
+                    threadId: thread.id,
+                    title: "Unauthorized",
+                  }),
+                );
+                assert.equal(write._tag, "Failure");
+              }),
+            ),
+          );
+        }
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("compresses large JSON responses through the composed routes", () =>
     Effect.gen(function* () {
       const descriptor = {

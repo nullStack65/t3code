@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi } from "@t3tools/contracts";
+import { inboxIdentitySubject, EnvironmentHttpApi } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -129,6 +129,47 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(restrictedCookies).toHaveLength(1);
           expect(restrictedCookies[0]).toMatch(/^t3_session_/);
           expect(restrictedCookies[0]).not.toContain("t3_dev_session_");
+          for (const founder of ["kameron", "jeff"] as const) {
+            const inboxIdentity = {
+              actor: { kind: "human" as const, id: founder },
+              delegatesTo: [],
+              operational: false,
+            };
+            const issued = await environmentA.handler(
+              postJson(
+                "/api/auth/pairing-token",
+                {
+                  inboxIdentity,
+                  scopes: ["orchestration:read", "access:write"],
+                },
+                { cookie: devCookieHeader },
+              ),
+              requestContext,
+            );
+            expect(issued.status).toBe(200);
+            const credential = (await issued.json()) as { credential: string };
+            const paired = await environmentA.handler(
+              postJson("/api/auth/browser-session", { credential: credential.credential }),
+              requestContext,
+            );
+            expect(paired.status).toBe(200);
+            const cookie = paired.headers.getSetCookie()[0]?.split(";", 1)[0] ?? "";
+            const session = await environmentA.handler(
+              new Request("http://127.0.0.1/api/auth/session", { headers: { cookie } }),
+              requestContext,
+            );
+            expect(session.status).toBe(200);
+            expect(await session.json()).toMatchObject({
+              authenticated: true,
+              subject: inboxIdentitySubject(inboxIdentity),
+            });
+            // Even an over-broad transport grant cannot mint another identity.
+            const mint = await environmentA.handler(
+              postJson("/api/auth/pairing-token", { scopes: ["orchestration:read"] }, { cookie }),
+              requestContext,
+            );
+            expect(mint.status).toBe(401);
+          }
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),

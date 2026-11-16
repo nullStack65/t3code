@@ -14,6 +14,23 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("requires explicit inbox capability under version and protocol skew", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadInbox).toBeUndefined();
+    for (const protocol of [1, 2]) {
+      expect(
+        decodeDescriptor({
+          ...descriptor,
+          orchestrationProtocolVersion: protocol,
+          capabilities: { ...descriptor.capabilities, threadInbox: true },
+        }).capabilities.threadInbox,
+      ).toBe(true);
+      expect(
+        decodeDescriptor({ ...descriptor, orchestrationProtocolVersion: protocol }).capabilities
+          .threadInbox,
+      ).toBeUndefined();
+    }
+  });
+
   it("requires an advertised required-worktree bootstrap capability", () => {
     expect(decodeDescriptor(descriptor).capabilities.requiredWorktreeBootstrap).toBeUndefined();
     expect(
