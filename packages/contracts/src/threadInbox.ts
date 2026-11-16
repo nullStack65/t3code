@@ -58,7 +58,11 @@ export function canReadInbox(identity: InboxIdentity, inbox: ThreadInbox | null 
       inbox.audience === "shared"
         ? identity.delegatesTo.includes("kameron") && identity.delegatesTo.includes("jeff")
         : identity.delegatesTo.includes(inbox.audience);
-    return audienceAllowed && inbox.actor.kind === "agent" && inbox.actor.id === identity.actor.id;
+    return (
+      audienceAllowed &&
+      ((inbox.actor.kind === "agent" && inbox.actor.id === identity.actor.id) ||
+        (inbox.assignee.kind === "agent" && inbox.assignee.id === identity.actor.id))
+    );
   }
   return (
     inbox.audience === "agent-only" &&

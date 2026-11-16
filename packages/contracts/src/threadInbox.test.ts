@@ -71,4 +71,15 @@ describe("founder inbox policy", () => {
       ]),
     ).toBe("operations");
   });
+  it("accepts a delegated agent assignment without confusing the human requester with its executor", () => {
+    const agent: InboxIdentity = {
+      actor: { kind: "agent", id: "lead" },
+      delegatesTo: ["kameron"],
+      operational: false,
+    };
+    const assigned = { ...inbox, assignee: agent.actor };
+    expect(canReadInbox(agent, assigned)).toBe(true);
+    expect(canReadInbox({ ...agent, delegatesTo: [] }, assigned)).toBe(false);
+    expect(canReadInbox({ ...agent, actor: { kind: "agent", id: "other" } }, assigned)).toBe(false);
+  });
 });
