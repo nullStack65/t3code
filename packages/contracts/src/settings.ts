@@ -1,4 +1,5 @@
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
+import { Founder, InboxView } from "./threadInbox.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthAccessWriteScope,
@@ -403,6 +404,8 @@ export const VoiceTranscriptionDestination = Schema.Union([
 export type VoiceTranscriptionDestination = typeof VoiceTranscriptionDestination.Type;
 
 export const ClientSettingsSchema = Schema.Struct({
+  founderInboxOwner: Founder.pipe(Schema.withDecodingDefault(Effect.succeed("kameron" as const))),
+  founderInboxView: InboxView.pipe(Schema.withDecodingDefault(Effect.succeed("kameron" as const))),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
@@ -2037,6 +2040,8 @@ export function requiredScopesForProjectMutation(
 }
 
 export const ClientSettingsPatch = Schema.Struct({
+  founderInboxOwner: Schema.optionalKey(Founder),
+  founderInboxView: Schema.optionalKey(InboxView),
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),

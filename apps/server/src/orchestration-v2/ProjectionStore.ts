@@ -1785,6 +1785,7 @@ export function threadShellFromProjection(
   });
   return {
     createdBy: projection.thread.createdBy,
+    ...(projection.thread.inbox === undefined ? {} : { inbox: projection.thread.inbox }),
     creationSource: projection.thread.creationSource,
     id: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -2124,6 +2125,7 @@ function shellFromState(input: {
     ...(input.state.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),
+    ...(input.state.thread.inbox === undefined ? {} : { inbox: input.state.thread.inbox }),
     ...(input.state.thread.linkOrigin === undefined
       ? {}
       : { linkOrigin: input.state.thread.linkOrigin }),

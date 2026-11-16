@@ -3,6 +3,7 @@ import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { ThreadInbox, ThreadInboxRoutingPatch, InboxActor } from "./threadInbox.ts";
 import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaGetter from "effect/SchemaGetter";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -465,6 +466,7 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
 
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
+  inbox: Schema.optionalKey(ThreadInbox),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -2193,6 +2195,7 @@ export type OrchestrationV2LatestVisibleMessageSummary =
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
+  inbox: Schema.optionalKey(ThreadInbox),
   id: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -3087,6 +3090,8 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
+    inboxOrigin: Schema.optionalKey(InboxActor),
+    inboxRouting: Schema.optionalKey(ThreadInboxRoutingPatch),
     commandId: CommandId,
     threadId: ThreadId,
     projectId: ProjectId,
@@ -3245,6 +3250,7 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.metadata.update"),
     commandId: CommandId,
     threadId: ThreadId,
+    inboxRouting: Schema.optionalKey(ThreadInboxRoutingPatch),
     title: Schema.optional(TrimmedNonEmptyString),
     regenerateTitle: Schema.optional(Schema.Boolean),
     branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -3889,6 +3895,8 @@ export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2Archive
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   commandId: CommandId,
+  inboxOrigin: Schema.optionalKey(InboxActor),
+  inboxRouting: Schema.optionalKey(ThreadInboxRoutingPatch),
   creationSource: Schema.optional(OrchestrationV2CreationSource),
   threadId: Schema.optional(ThreadId),
   reuseExistingThread: Schema.optional(Schema.Boolean),

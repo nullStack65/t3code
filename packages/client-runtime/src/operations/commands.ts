@@ -1,6 +1,8 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
+  type InboxActor,
+  type ThreadInboxRoutingPatch,
   CommandId,
   CheckpointId,
   CheckpointScopeId,
@@ -47,6 +49,8 @@ import {
 } from "../rpc/client.ts";
 
 interface CommandMetadata {
+  readonly inboxOrigin?: InboxActor;
+  readonly inboxRouting?: ThreadInboxRoutingPatch;
   readonly commandId?: CommandId;
   readonly createdAt?: string;
   readonly creationSource?: OrchestrationV2CreationSource;
@@ -471,6 +475,8 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
   return yield* dispatch({
     type: "thread.create",
     commandId: yield* allocateCommandId(input),
+    ...(input.inboxOrigin === undefined ? {} : { inboxOrigin: input.inboxOrigin }),
+    ...(input.inboxRouting === undefined ? {} : { inboxRouting: input.inboxRouting }),
     createdBy: "user",
     creationSource: input.creationSource ?? "web",
     threadId: input.threadId,
@@ -691,10 +697,12 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.worktreePath !== undefined ||
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
-      input.limitRecovery !== undefined
+      input.limitRecovery !== undefined ||
+      input.inboxRouting !== undefined
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
+        ...(input.inboxRouting === undefined ? {} : { inboxRouting: input.inboxRouting }),
         ...(input.limitRecovery === undefined ? {} : { limitRecovery: input.limitRecovery }),
         commandId,
         threadId: input.threadId,
@@ -786,6 +794,8 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
             };
     return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
       commandId,
+      ...(input.inboxOrigin === undefined ? {} : { inboxOrigin: input.inboxOrigin }),
+      ...(input.inboxRouting === undefined ? {} : { inboxRouting: input.inboxRouting }),
       creationSource: input.creationSource ?? "web",
       threadId: input.threadId,
       ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
