@@ -11,6 +11,7 @@ import {
   ThreadId,
   type ThreadPullRequestSnapshot,
   ThreadLinkedPullRequest,
+  ThreadInbox,
   TurnId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -4929,12 +4930,15 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-inbox-replay-")
           const rows = yield* sql<{
             inbox_json: string;
           }>`SELECT inbox_json FROM projection_threads WHERE thread_id = ${threadId}`;
-          assert.deepEqual(JSON.parse(rows[0]!.inbox_json), {
-            ...inbox,
-            assignee: { kind: "human", id: "jeff" },
-            audience: "shared",
-            attentionKind: "FYI",
-          });
+          assert.deepEqual(
+            Schema.decodeUnknownSync(Schema.fromJsonString(ThreadInbox))(rows[0]!.inbox_json),
+            {
+              ...inbox,
+              assignee: { kind: "human", id: "jeff" },
+              audience: "shared",
+              attentionKind: "FYI",
+            },
+          );
           yield* pipeline.bootstrap;
           const replayed = yield* sql<{
             inbox_json: string;
