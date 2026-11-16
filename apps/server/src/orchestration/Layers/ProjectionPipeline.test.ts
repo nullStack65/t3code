@@ -4931,7 +4931,9 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-inbox-replay-")
             inbox_json: string;
           }>`SELECT inbox_json FROM projection_threads WHERE thread_id = ${threadId}`;
           assert.deepEqual(
-            Schema.decodeUnknownSync(Schema.fromJsonString(ThreadInbox))(rows[0]!.inbox_json),
+            yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadInbox))(
+              rows[0]!.inbox_json,
+            ),
             {
               ...inbox,
               assignee: { kind: "human", id: "jeff" },

@@ -12,7 +12,7 @@ import { OrchestrationCommandInvariantError } from "./Errors.ts";
  */
 export const requireFleetPlacementSupport = (
   command: ClientOrchestrationCommand | OrchestrationCommand,
-) => {
+): Effect.Effect<void, OrchestrationCommandInvariantError> => {
   const intent =
     command.type === "thread.create"
       ? command.fleetPlacement
