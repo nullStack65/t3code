@@ -1,29 +1,31 @@
-name: T3 fork ARC CI
+name: T3 standalone ARC CI
 
-# Self-hosted, repository-scoped ARC only. No paid Blacksmith, hosted fallback,
-# macOS/Windows runners, new controller or deployment side effects.
+# Self-hosted, repository-scoped ARC only (label t3code-standalone-ci-arc) for
+# the private standalone copy of nullStack65/t3code. No paid Blacksmith, hosted
+# fallback, macOS/Windows runners, new controller or deployment side effects.
+# Every other inherited workflow is removed from the default branch.
 on:
   push:
-    branches: [feat/assemblyai-current]
+    branches: [standalone/main]
   pull_request:
-    branches: [feat/assemblyai-current]
+    branches: [standalone/main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: t3-fork-arc-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: t3-standalone-arc-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   voice-and-inbox:
-    # This is a public fork. Never run untrusted PR code on the private ARC LAN.
+    # Keep the public-fork guard: never run untrusted PR code on the private ARC LAN.
     # Same-repo PR + trusted human author/actor only; push and manual runs
     # require an authorized actor and the exact native release branch.
     if: >-
       ${{
-        github.repository == 'nullStack65/t3code' &&
+        github.repository == 'nullStack65/t3code-standalone' &&
         (
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
@@ -32,12 +34,12 @@ jobs:
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
           ||
           (github.event_name != 'pull_request' &&
-           github.ref == 'refs/heads/feat/assemblyai-current' &&
+           github.ref == 'refs/heads/standalone/main' &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor))
         )
       }}
     name: Voice + founder inbox (Linux ARC)
-    runs-on: t3code-ci-arc
+    runs-on: t3code-standalone-ci-arc
     timeout-minutes: 90
     env:
       CI: "true"
@@ -60,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = 'nullStack65/t3code'
+          test "$GITHUB_REPOSITORY" = 'nullStack65/t3code-standalone'
           test -n "${RUNNER_NAME:-}"
           test "$RUNNER_OS" = Linux
           printf 'T3 ARC: repo=%s runner=%s ref=%s source=%s\n' \
