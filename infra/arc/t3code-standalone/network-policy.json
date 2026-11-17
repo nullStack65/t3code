@@ -1,0 +1,116 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {
+    "labels": {
+      "closura.io/managed-by": "k3s-arc",
+      "closura.io/workstream": "clo866"
+    },
+    "name": "arc-t3code-standalone-runner-egress",
+    "namespace": "arc-runners"
+  },
+  "spec": {
+    "egress": [
+      {
+        "ports": [
+          {
+            "port": 53,
+            "protocol": "UDP"
+          },
+          {
+            "port": 53,
+            "protocol": "TCP"
+          }
+        ],
+        "to": [
+          {
+            "namespaceSelector": {
+              "matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"
+              }
+            },
+            "podSelector": {
+              "matchLabels": {
+                "k8s-app": "kube-dns"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "to": [
+          {
+            "ipBlock": {
+              "cidr": "0.0.0.0/0",
+              "except": [
+                "10.0.0.0/8",
+                "100.64.0.0/10",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "172.16.0.0/12",
+                "192.0.0.0/24",
+                "192.0.2.0/24",
+                "198.18.0.0/15",
+                "198.51.100.0/24",
+                "203.0.113.0/24",
+                "224.0.0.0/4",
+                "240.0.0.0/4",
+                "192.168.11.1/32",
+                "192.168.16.1/32",
+                "192.168.28.1/32",
+                "192.168.5.40/32"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "ports": [
+          {
+            "endPort": 6442,
+            "port": 1,
+            "protocol": "TCP"
+          },
+          {
+            "endPort": 65535,
+            "port": 6444,
+            "protocol": "TCP"
+          },
+          {
+            "protocol": "UDP"
+          }
+        ],
+        "to": [
+          {
+            "ipBlock": {
+              "cidr": "192.168.11.1/32"
+            }
+          },
+          {
+            "ipBlock": {
+              "cidr": "192.168.16.1/32"
+            }
+          },
+          {
+            "ipBlock": {
+              "cidr": "192.168.28.1/32"
+            }
+          },
+          {
+            "ipBlock": {
+              "cidr": "192.168.5.40/32"
+            }
+          }
+        ]
+      }
+    ],
+    "podSelector": {
+      "matchLabels": {
+        "closura.io/arc-t3code-standalone-runner-pod": "true"
+      }
+    },
+    "policyTypes": [
+      "Egress"
+    ]
+  }
+}

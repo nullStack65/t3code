@@ -1,0 +1,285 @@
+{
+  "controllerServiceAccount": {
+    "name": "arc-controller",
+    "namespace": "arc-systems"
+  },
+  "githubConfigSecret": "closura-ci-arc-github-app",
+  "githubConfigUrl": "https://github.com/nullStack65/t3code-standalone",
+  "listenerTemplate": {
+    "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "name": "listener",
+          "resources": {
+            "limits": {
+              "cpu": "250m",
+              "memory": "256Mi"
+            },
+            "requests": {
+              "cpu": "50m",
+              "memory": "64Mi"
+            }
+          },
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {
+              "drop": [
+                "ALL"
+              ]
+            },
+            "runAsNonRoot": true,
+            "runAsUser": 1000,
+            "seccompProfile": {
+              "type": "RuntimeDefault"
+            }
+          }
+        }
+      ],
+      "nodeSelector": {
+        "closura.io/arc-control-plane": "true"
+      },
+      "tolerations": [
+        {
+          "effect": "NoSchedule",
+          "key": "closura.io/control-plane-only",
+          "operator": "Equal",
+          "value": "true"
+        },
+        {
+          "effect": "NoExecute",
+          "key": "node.kubernetes.io/not-ready",
+          "operator": "Exists",
+          "tolerationSeconds": 30
+        },
+        {
+          "effect": "NoExecute",
+          "key": "node.kubernetes.io/unreachable",
+          "operator": "Exists",
+          "tolerationSeconds": 30
+        }
+      ],
+      "topologySpreadConstraints": [
+        {
+          "labelSelector": {
+            "matchLabels": {
+              "app.kubernetes.io/component": "runner-scale-set-listener"
+            }
+          },
+          "maxSkew": 1,
+          "nodeTaintsPolicy": "Honor",
+          "topologyKey": "closura.io/pve-host",
+          "whenUnsatisfiable": "ScheduleAnyway"
+        }
+      ]
+    }
+  },
+  "maxRunners": 1,
+  "minRunners": 0,
+  "runnerScaleSetName": "t3code-standalone-ci-arc",
+  "scaleSetLabels": [
+    "t3code-standalone-ci-arc"
+  ],
+  "template": {
+    "metadata": {
+      "labels": {
+        "closura.io/arc-t3code-standalone-runner-pod": "true"
+      }
+    },
+    "spec": {
+      "affinity": {
+        "nodeAffinity": {
+          "preferredDuringSchedulingIgnoredDuringExecution": [
+            {
+              "preference": {
+                "matchExpressions": [
+                  {
+                    "key": "kubernetes.io/hostname",
+                    "operator": "In",
+                    "values": [
+                      "arc-worker-r720-02"
+                    ]
+                  }
+                ]
+              },
+              "weight": 80
+            }
+          ],
+          "requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": [
+              {
+                "matchExpressions": [
+                  {
+                    "key": "kubernetes.io/hostname",
+                    "operator": "In",
+                    "values": [
+                      "arc-worker-r720-02",
+                      "arc-worker-asus-01",
+                      "arc-worker-desktop-01"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "command": [
+            "/home/runner/run.sh"
+          ],
+          "env": [
+            {
+              "name": "ARC_RUNNER_IMAGE",
+              "value": "ghcr.io/actions/actions-runner@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232"
+            },
+            {
+              "name": "KUBERNETES_NODE_NAME",
+              "valueFrom": {
+                "fieldRef": {
+                  "fieldPath": "spec.nodeName"
+                }
+              }
+            },
+            {
+              "name": "KUBERNETES_POD_UID",
+              "valueFrom": {
+                "fieldRef": {
+                  "fieldPath": "metadata.uid"
+                }
+              }
+            },
+            {
+              "name": "KUBERNETES_POD_NAME",
+              "valueFrom": {
+                "fieldRef": {
+                  "fieldPath": "metadata.name"
+                }
+              }
+            },
+            {
+              "name": "KUBERNETES_POD_NAMESPACE",
+              "valueFrom": {
+                "fieldRef": {
+                  "fieldPath": "metadata.namespace"
+                }
+              }
+            }
+          ],
+          "image": "ghcr.io/actions/actions-runner@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232",
+          "name": "runner",
+          "resources": {
+            "limits": {
+              "ephemeral-storage": "16Gi",
+              "memory": "8Gi"
+            },
+            "requests": {
+              "cpu": "1000m",
+              "ephemeral-storage": "4Gi",
+              "memory": "4Gi"
+            }
+          },
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {
+              "drop": [
+                "ALL"
+              ]
+            },
+            "runAsGroup": 1001,
+            "runAsNonRoot": true,
+            "runAsUser": 1001,
+            "seccompProfile": {
+              "type": "RuntimeDefault"
+            }
+          },
+          "volumeMounts": [
+            {
+              "mountPath": "/home/runner/_work",
+              "name": "work"
+            }
+          ]
+        }
+      ],
+      "initContainers": [
+        {
+          "args": [
+            "# Credential-free first init: no sidecar or runner may start before this passes.\nset -eu\n: \"${NODE_IP:?NODE_IP must come from status.hostIP}\"\n[[ \"$NODE_IP\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || exit 1\nfor tool in timeout getent bash sleep python3; do command -v \"$tool\" >/dev/null || exit 1; done\n# DNS deadlines, supervisor cleanup and CI sidecars require working signals.\n# Only this short-lived child is addressed; a denied kill expires naturally.\ncommand sleep 0.2 &\nsignal_probe_pid=$!\nif ! kill -KILL \"$signal_probe_pid\" 2>/dev/null; then\n  wait \"$signal_probe_pid\" 2>/dev/null || :\n  echo 'egress-gate: same-container signal contract failed; host must be qualified' >&2\n  exit 1\nfi\nwait \"$signal_probe_pid\" 2>/dev/null || :\ndeadline=$((SECONDS + 180))\ngate_pid=\nwatchdog_pid=\ncleanup() {\n  trap - EXIT HUP INT TERM\n  # Monitor mode gives each owned job its own group, never the caller's group.\n  if [[ -n \"$gate_pid\" ]]; then kill -KILL -- \"-$gate_pid\" 2>/dev/null || :; fi\n  if [[ -n \"$watchdog_pid\" ]]; then kill -KILL -- \"-$watchdog_pid\" 2>/dev/null || :; fi\n  wait 2>/dev/null || :\n}\ntrap cleanup EXIT\ntrap 'exit 1' HUP INT TERM\nrun_gate() {\n  # Children stay in the gate group so the supervisor can remove the whole tree.\n  set +m\n  clean=0\n  bounded() {\n    local remaining=$((deadline - SECONDS))\n    (( remaining > 0 )) || return 125\n    (( remaining <= 2 )) || remaining=2\n    # --foreground prevents timeout from escaping the supervisor's owned group.\n    timeout --foreground -s KILL \"$remaining\" \"$@\" >/dev/null 2>&1\n  }\n  tcp() {\n    # Socket-level connect timeout: a refused or unanswered connect returns 1\n    # without relying on signal delivery; bounded() remains the outer cap.\n    # shellcheck disable=SC2016 # Expanded by the probe's bash, not this shell.\n    bounded bash -c 'exec python3 - \"$1\" \"$2\" <<\"PY\"\nimport socket, sys\ntry:\n    socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=1.5).close()\nexcept OSError:\n    sys.exit(1)\nexcept Exception:\n    sys.exit(2)\nPY' gate-probe \"$1\" \"$2\"\n  }\n  while (( SECONDS < deadline )); do\n    round_clean=true\n    # Positive controls prevent disconnected pods or broken DNS passing negatives.\n    bounded getent ahostsv4 kubernetes.default.svc.cluster.local || round_clean=false\n    bounded getent ahostsv4 github.com || round_clean=false\n    tcp github.com 443 || round_clean=false\n    for endpoint in 10.43.0.1:443 169.254.169.254:80; do\n      if tcp \"${endpoint%:*}\" \"${endpoint##*:}\"; then\n        round_clean=false\n      else\n        result=$?\n        # GNU timeout -s KILL reports 137; setup/exec failures are not denials.\n        case \"$result\" in 1|137) ;; *) exit 1 ;; esac\n      fi\n    done\n    (( SECONDS < deadline )) || break\n    if \"$round_clean\"; then clean=$((clean + 1)); else clean=0; fi\n    if (( clean == 3 )); then\n      echo 'egress-gate: three clean rounds; public reachable; cluster API and metadata blocked'\n      exit 0\n    fi\n    sleep 1\n  done\n  echo 'egress-gate: convergence deadline exceeded' >&2\n  exit 1\n}\n# The watchdog does not depend on timeout delivering any signal.\nset -m\nrun_gate &\ngate_pid=$!\n(\n  set +m\n  sleep \"$((deadline - SECONDS))\" || :\n  echo 'egress-gate: convergence deadline exceeded' >&2\n  kill -KILL -- \"-$gate_pid\" 2>/dev/null || :\n) &\nwatchdog_pid=$!\nresult=0\nwait \"$gate_pid\" 2>/dev/null || result=$?\n(( result == 0 )) || exit 1"
+          ],
+          "command": [
+            "/bin/bash",
+            "-c"
+          ],
+          "env": [
+            {
+              "name": "NODE_IP",
+              "valueFrom": {
+                "fieldRef": {
+                  "apiVersion": "v1",
+                  "fieldPath": "status.hostIP"
+                }
+              }
+            }
+          ],
+          "image": "ghcr.io/actions/actions-runner@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232",
+          "name": "egress-gate",
+          "resources": {
+            "limits": {
+              "cpu": "100m",
+              "memory": "64Mi"
+            },
+            "requests": {
+              "cpu": "10m",
+              "memory": "16Mi"
+            }
+          },
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": {
+              "drop": [
+                "ALL"
+              ]
+            },
+            "runAsGroup": 1001,
+            "runAsNonRoot": true,
+            "runAsUser": 1001,
+            "seccompProfile": {
+              "type": "RuntimeDefault"
+            }
+          }
+        }
+      ],
+      "nodeSelector": {
+        "closura.io/arc-worker": "true"
+      },
+      "priorityClassName": "closura-arc-agent-config",
+      "securityContext": {
+        "fsGroup": 1001,
+        "fsGroupChangePolicy": "OnRootMismatch"
+      },
+      "topologySpreadConstraints": [
+        {
+          "labelSelector": {
+            "matchLabels": {
+              "closura.io/arc-t3code-standalone-runner-pod": "true"
+            }
+          },
+          "maxSkew": 1,
+          "nodeTaintsPolicy": "Honor",
+          "topologyKey": "closura.io/pve-host",
+          "whenUnsatisfiable": "ScheduleAnyway"
+        }
+      ],
+      "volumes": [
+        {
+          "emptyDir": {
+            "sizeLimit": "16Gi"
+          },
+          "name": "work"
+        }
+      ]
+    }
+  }
+}
