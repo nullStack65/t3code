@@ -66,6 +66,32 @@ jobs:
           printf 'T3 ARC: repo=%s runner=%s ref=%s source=%s\n' \
             "$GITHUB_REPOSITORY" "$RUNNER_NAME" "$GITHUB_REF" "$(git rev-parse HEAD)"
 
+      - name: Provide libatomic for official Node binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Official Node 26 linux-x64 binaries link libatomic.so.1. The pinned
+          # actions-runner image (dotnet runtime-deps:8.0-noble) lacks it, and
+          # the ARC pod cannot use sudo/apt (no privilege escalation). Without
+          # it, Vite+ self-setup fails with exit 127. Use Ubuntu noble's
+          # immutable release-pocket package, pinned by SHA-256.
+          lib_system=/usr/lib/x86_64-linux-gnu/libatomic.so.1
+          if test -e "$lib_system"; then
+            printf 'libatomic present at %s\n' "$lib_system"
+            exit 0
+          fi
+          test "$(uname -m)" = x86_64
+          deb_url='https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-14/libatomic1_14-20240412-0ubuntu1_amd64.deb'
+          deb_sha256='f496d80626e1512456273965d44f47b281edf53fa26d0d8bd0defc5be7e4601c'
+          dir="$RUNNER_TEMP/libatomic"
+          mkdir -p "$dir"
+          curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/libatomic1.deb" "$deb_url"
+          printf '%s  %s\n' "$deb_sha256" "$dir/libatomic1.deb" | sha256sum -c -
+          dpkg-deb -x "$dir/libatomic1.deb" "$dir/root"
+          lib_dir="$dir/root/usr/lib/x86_64-linux-gnu"
+          test -f "$lib_dir/libatomic.so.1"
+          printf 'LD_LIBRARY_PATH=%s\n' "$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
       - name: Set up pinned Node, pnpm and Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1.15.0
         env:
