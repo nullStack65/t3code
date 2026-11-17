@@ -11,7 +11,7 @@ controller, change the GitHub App, touch other pools or hold credentials.
 | --- | --- |
 | `values.json` | `gha-runner-scale-set` 0.14.2 values: repo `nullStack65/t3code-standalone`, scale set and label `t3code-standalone-ci-arc`, min 0 / max 1, nonroot runner and egress-gate init container, no service-account token, 4Gi memory request / 8Gi limit, 16Gi work storage, `closura.io/arc-worker` Linux nodes (R720 preferred) |
 | `network-policy.json` | `arc-t3code-standalone-runner-egress`: DNS plus public internet egress only; private, link-local and cluster ranges and the k3s API are blocked |
-| `values-token-auth.json` | Optional, temporary overlay. Changes only `githubConfigSecret` to `t3code-standalone-arc-github-token` (see [Temporary token auth](#temporary-token-auth)) |
+| `values-token-auth.json` | Optional, temporary overlay. Changes only `githubConfigSecret` to `t3code-standalone-ci-owner-auth` (see [Temporary token auth](#temporary-token-auth)) |
 
 Credentials are referenced by Secret **name only**. By default that is
 `closura-ci-arc-github-app`, the existing ARC App secret. No secret value
@@ -84,7 +84,7 @@ does not change the App, the controller or any other pool. This is the
 standard scale-set flow, not manual JIT runner registration.
 
 **Custody.** The token is stored only in Kubernetes Secret
-`t3code-standalone-arc-github-token` (key `github_token`) in `arc-runners`.
+`t3code-standalone-ci-owner-auth` (key `github_token`) in `arc-runners`.
 - The ARC controller reads it, and passes it to this pool's listener in
   `arc-systems` through the controller-managed listener config.
 - Runner pods do not mount it. Each job gets only a short-lived, per-runner
@@ -95,10 +95,10 @@ standard scale-set flow, not manual JIT runner registration.
 
 ```sh
 # On the controller only. TOKEN_FILE holds the credential, mode 0600, outside any repository.
-k3s kubectl -n arc-runners create secret generic t3code-standalone-arc-github-token \
+k3s kubectl -n arc-runners create secret generic t3code-standalone-ci-owner-auth \
   --from-file=github_token="$TOKEN_FILE"
 shred -u "$TOKEN_FILE"   # or rm, if shred is unavailable
-k3s kubectl -n arc-runners label secret t3code-standalone-arc-github-token \
+k3s kubectl -n arc-runners label secret t3code-standalone-ci-owner-auth \
   closura.io/workstream=clo866 closura.io/temporary=true
 ```
 
@@ -125,7 +125,7 @@ helm upgrade t3code-standalone-ci-arc "$CHART" --version 0.14.2 \
 k3s kubectl -n arc-runners get autoscalingrunnerset t3code-standalone-ci-arc \
   -o jsonpath='{.spec.githubConfigSecret}{"\n"}'   # expect closura-ci-arc-github-app
 k3s kubectl -n arc-systems get pods | grep t3code-standalone   # listener Running again
-k3s kubectl -n arc-runners delete secret t3code-standalone-arc-github-token
+k3s kubectl -n arc-runners delete secret t3code-standalone-ci-owner-auth
 ```
 
 Deleting the Secret ends ARC's custody of the credential. The credential
@@ -139,7 +139,7 @@ Removing the pool only stops this repository's CI; it affects no other pool.
 ```sh
 helm uninstall t3code-standalone-ci-arc --namespace arc-runners --wait
 k3s kubectl -n arc-runners delete networkpolicy arc-t3code-standalone-runner-egress --ignore-not-found
-k3s kubectl -n arc-runners delete secret t3code-standalone-arc-github-token --ignore-not-found  # only if token auth was used
+k3s kubectl -n arc-runners delete secret t3code-standalone-ci-owner-auth --ignore-not-found  # only if token auth was used
 ```
 
 Queued jobs stay queued until a pool with the label exists again, or until
