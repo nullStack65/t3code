@@ -11,6 +11,7 @@ name: Mobile EAS Preview (Fork)
 
 on:
   pull_request_target:
+    branches: [main]
     types: [labeled]
 
 permissions:

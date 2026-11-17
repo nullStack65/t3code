@@ -28,6 +28,7 @@ on:
       - pnpm-workspace.yaml
       - .github/workflows/mobile-dev-client.yml
   pull_request:
+    branches: [main]
     paths:
       - .github/workflows/mobile-dev-client.yml
       - scripts/mobile-native-client.ts

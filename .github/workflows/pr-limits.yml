@@ -9,6 +9,7 @@ name: PR Limits
 
 on:
   pull_request_target:
+    branches: [main]
     types: [opened, reopened]
   schedule:
     - cron: "23 5 * * *"

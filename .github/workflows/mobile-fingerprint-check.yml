@@ -14,6 +14,7 @@ name: Mobile Fingerprint Check
 # pnpm), so the comparison is self-consistent; no EXPO_TOKEN needed.
 on:
   pull_request:
+    branches: [main]
     # Run even when a rebase or base change removes every native input from the
     # diff, so the label can be cleared without installing Expo dependencies.
     types: [opened, synchronize, reopened, edited]
