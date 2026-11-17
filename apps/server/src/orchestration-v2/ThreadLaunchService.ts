@@ -4,6 +4,8 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  type InboxActor,
+  type ThreadInboxRoutingPatch,
   type ChatAttachment,
   type MessageId,
   type ModelSelection,
@@ -88,6 +90,8 @@ export interface ThreadLaunchInitialMessage {
 
 export interface ThreadLaunchInput {
   readonly commandId: CommandId;
+  readonly inboxOrigin?: InboxActor;
+  readonly inboxRouting?: ThreadInboxRoutingPatch;
   readonly threadId?: ThreadId;
   readonly reuseExistingThread?: boolean;
   readonly projectId: ProjectId;
@@ -1321,6 +1325,8 @@ const make = Effect.gen(function* () {
                 ...(initialMessage === undefined
                   ? {}
                   : { initialMessage: { ...initialMessage, workspaceStrategy } }),
+                ...(input.inboxOrigin === undefined ? {} : { inboxOrigin: input.inboxOrigin }),
+                ...(input.inboxRouting === undefined ? {} : { inboxRouting: input.inboxRouting }),
               });
         const claimed = yield* claimDispatch.pipe(
           Effect.mapError(

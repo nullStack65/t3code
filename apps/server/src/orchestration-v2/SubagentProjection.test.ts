@@ -1,5 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
+  makeThreadInbox,
+  matchesInboxView,
   CommandId,
   EnvironmentId,
   type ModelSelection,
@@ -89,6 +91,7 @@ function makeParentThread(): OrchestrationV2AppThread {
 it("resets a subagent child's snooze, title job and remote delegation but keeps its workspace", () => {
   const parentThread: OrchestrationV2AppThread = {
     ...makeParentThread(),
+    inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }),
     titleRegeneration: { requestId: CommandId.make("command:parent-title"), startedAt: snoozedAt },
     delegatedFrom: {
       environmentId: EnvironmentId.make("linked-environment"),
@@ -111,6 +114,12 @@ it("resets a subagent child's snooze, title job and remote delegation but keeps 
     creationSource: "provider",
   });
 
+  assert.equal(childThread.inbox?.owner, "jeff");
+  assert.deepEqual(childThread.inbox?.requestedBy, parentThread.inbox?.requestedBy);
+  assert.isFalse(matchesInboxView(childThread.inbox, "jeff"));
+  assert.isFalse(matchesInboxView(childThread.inbox, "kameron"));
+  assert.isTrue(matchesInboxView(childThread.inbox, "agents"));
+  assert.isTrue(matchesInboxView(childThread.inbox, "all"));
   assert.isNull(childThread.snoozedUntil);
   assert.isNull(childThread.snoozedAt);
   assert.isNull(childThread.titleRegeneration);

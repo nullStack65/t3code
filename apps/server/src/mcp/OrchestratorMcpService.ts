@@ -943,6 +943,7 @@ function listItemFromShell(
   nowMs: number,
 ): OrchestratorMcpThreadListItem {
   return {
+    ...(shell.inbox === undefined ? {} : { inbox: shell.inbox }),
     threadId: shell.id,
     projectId: shell.projectId,
     title: shell.title,
@@ -981,6 +982,7 @@ function threadDetail(
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
   return {
+    ...(projection.thread.inbox === undefined ? {} : { inbox: projection.thread.inbox }),
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
@@ -3094,6 +3096,12 @@ const make = Effect.gen(function* () {
               const created = yield* threadManagement
                 .dispatch({
                   type: "thread.create",
+                  inboxOrigin: { kind: "agent", id: parent.thread.id },
+                  ...(request.inboxRouting !== undefined
+                    ? { inboxRouting: request.inboxRouting }
+                    : parent.thread.inbox === undefined
+                      ? {}
+                      : { inboxRouting: parent.thread.inbox }),
                   createdBy: "agent",
                   creationSource: "mcp",
                   commandId,

@@ -3308,3 +3308,35 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+it.effect(
+  "persists founder routing in projections and shells and retains it on launch replay",
+  () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = {
+        ...launchInput({ command: "inbox-launch", thread: "inbox-thread" }),
+        inboxOrigin: { kind: "human" as const, id: "jeff" as const },
+      };
+      const launched = yield* launches.launch(input);
+      const original = (yield* threads.getThreadProjection(launched.threadId)).thread.inbox;
+      assert.equal(original?.owner, "jeff");
+      assert.deepEqual((yield* threads.getThreadShell(launched.threadId))?.inbox, original);
+      yield* threads.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("route-inbox"),
+        threadId: launched.threadId,
+        inboxRouting: { assignee: { kind: "human", id: "kameron" }, attentionKind: "FYI" },
+      });
+      yield* launches.launch(input);
+      const routed = (yield* threads.getThreadProjection(launched.threadId)).thread.inbox;
+      assert.equal(routed?.owner, "kameron");
+      assert.equal(routed?.attentionKind, "FYI");
+      assert.deepEqual(routed?.origin, original?.origin);
+      assert.deepEqual(routed?.requestedBy, original?.requestedBy);
+      assert.deepEqual((yield* threads.getThreadShell(launched.threadId))?.inbox, routed);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);

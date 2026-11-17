@@ -1,3 +1,4 @@
+import { matchesInboxView } from "@t3tools/contracts";
 import {
   type EnvironmentThreadShell,
   type PendingSubagentRequest,
@@ -112,7 +113,15 @@ export function startThreadNotifications(
     const live = registry.get(environmentThreadShells.anyEnvironmentHidingAtom)
       ? new Set(registry.get(environmentThreadShells.threadRefsAtom).map(threadKey))
       : null;
-    const shouldClose = (key: string) => hidden.has(key) || (live !== null && !live.has(key));
+    const outsideInbox = new Set<string>();
+    for (const [environmentId, state] of watched) {
+      for (const [threadId, entry] of state.previous) {
+        if (!matchesInboxView(entry.thread.source.inbox, getClientSettings().founderInboxView))
+          outsideInbox.add(threadKey({ environmentId, threadId }));
+      }
+    }
+    const shouldClose = (key: string) =>
+      outsideInbox.has(key) || hidden.has(key) || (live !== null && !live.has(key));
     closeToasts(shouldClose);
     const count = pending.size;
     for (const [tag, entry] of pending) {
@@ -134,6 +143,7 @@ export function startThreadNotifications(
     kind: ThreadNotificationKind,
   ) => {
     const { thread, status } = state;
+    if (!matchesInboxView(thread.source.inbox, getClientSettings().founderInboxView)) return;
     if (
       registry
         .get(environmentThreadShells.hiddenThreadKeysAtom)
@@ -419,6 +429,7 @@ export function startThreadNotifications(
   };
 
   const onSettings = () => {
+    closeHiddenPending();
     applyMode();
     syncEnvironments();
   };

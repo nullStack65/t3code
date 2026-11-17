@@ -28,6 +28,7 @@ import { removeSpeechFillerWords } from "./fillerWords.ts";
 import { decodeSpeechPcm, SpeechInvalidAudioError } from "./SpeechService.ts";
 
 const endpoints = {
+  assemblyai: { url: "https://sync.assemblyai.com/v1/transcribe" },
   openai: { url: "https://api.openai.com/v1/audio/transcriptions", model: "gpt-transcribe" },
   xai: { url: "https://api.x.ai/v1/stt", model: "grok-voice-transcribe-2.0" },
   openrouter: { url: "https://openrouter.ai/api/v1/audio/transcriptions" },
@@ -92,6 +93,19 @@ function audioBody(
   return HttpClientRequest.bodyFormData(form);
 }
 
+function assemblyAiBody(audio: ArrayBuffer, language: string, options: SpeechTranscriptionOptions) {
+  const form = new FormData();
+  form.set(
+    "config",
+    JSON.stringify({
+      ...(language !== "auto" ? { language_code: language } : {}),
+      word_boost: options.speechCustomWords.map(({ term }) => term),
+    }),
+  );
+  form.set("audio", new Blob([audio], { type: "audio/wav" }), "dictation.wav");
+  return HttpClientRequest.bodyFormData(form);
+}
+
 function openRouterBody(model: string, audio: ArrayBuffer, language: string) {
   return HttpClientRequest.bodyJsonUnsafe({
     model,
@@ -130,10 +144,11 @@ export const layer = Layer.effect(
       Effect.map((value) => value.cloudSpeechCredentials),
     );
     const configured = credentials.pipe(
-      Effect.map(({ openai, xai, openrouter }) => ({
+      Effect.map(({ openai, xai, openrouter, assemblyai }) => ({
         openai: Boolean(openai),
         xai: Boolean(xai),
         openrouter: Boolean(openrouter),
+        assemblyai: Boolean(assemblyai),
       })),
     );
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -197,6 +212,8 @@ export const layer = Layer.effect(
               message: "Invalid PCM audio.",
             }),
         });
+        if (provider === "assemblyai" && (samples.length < 1280 || samples.length > 1_920_000))
+          return yield* new CloudSpeechError({ provider, reason: "audio-duration" });
         const language = effectiveSpeechLanguage(cloudSpeechLanguages, options.speechLanguage);
         if (provider === "openrouter" && !(yield* models).some((entry) => entry.id === model))
           return yield* new CloudSpeechError({ provider, reason: "model-unavailable" });
@@ -209,10 +226,17 @@ export const layer = Layer.effect(
         if (!isApiKey(key)) return yield* unreadable();
         const audio = wave(samples);
         const request = HttpClientRequest.post(endpoints[provider].url).pipe(
-          HttpClientRequest.bearerToken(Redacted.make(key)),
+          provider === "assemblyai"
+            ? HttpClientRequest.setHeaders({
+                authorization: key,
+                "X-AAI-Model": "universal-3-5-pro",
+              })
+            : HttpClientRequest.bearerToken(Redacted.make(key)),
           provider === "openrouter"
             ? openRouterBody(model!, audio, language)
-            : audioBody(provider, audio, language, options),
+            : provider === "assemblyai"
+              ? assemblyAiBody(audio, language, options)
+              : audioBody(provider, audio, language, options),
         );
         const unavailable = () => new CloudSpeechError({ provider, reason: "unavailable" });
         // A catalog fetch or vault lookup may have outlived the credential it started with.

@@ -1,3 +1,6 @@
+import { matchesInboxView } from "@t3tools/contracts";
+import { SidebarInboxBar } from "./sidebar/SidebarInboxBar";
+import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
@@ -1100,10 +1103,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
   const threads = useQuietThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
+  const inboxView = useClientSettings((settings) => settings.founderInboxView);
+  const inboxThreads = threads.filter(
+    (thread) =>
+      threadSearchQuery.trim().length > 0 ||
+      matchesInboxView(thread.source.inbox, inboxView) ||
+      (inboxView === "agents" && thread.source.createdBy === "agent"),
+  );
   const listedThreads =
     promotingDraftThreadKeys.length === 0
-      ? threads
-      : threads.map((thread) =>
+      ? inboxThreads
+      : inboxThreads.map((thread) =>
           promotingDraftThreadKeys.includes(threadShellKey(thread))
             ? asLaunchingThread(thread)
             : thread,
@@ -2658,6 +2668,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
               supports: {
+                inboxRouting:
+                  serverConfigs.get(thread.environmentId)?.environment.capabilities.threadInbox ===
+                  true,
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: configLoaded,
@@ -2672,6 +2685,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        const inboxRouting = threadRoutingUpdateFromMenuAction(clicked.value);
+        if (inboxRouting) {
+          await updateThreadMetadata({
+            environmentId: thread.environmentId,
+            input: { threadId: thread.id, inboxRouting },
+          });
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -3196,6 +3217,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               activeSearchResultIndex={activeSearchResultIndex}
               onClearSearch={clearThreadSearch}
             />
+            <SidebarInboxBar />
           </SidebarGroup>
         }
       >

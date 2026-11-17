@@ -20,3 +20,16 @@ describe("ThreadMetadataMcpUpdateInput", () => {
     );
   });
 });
+
+it("accepts agent routing and rejects ambiguous metadata actions", () => {
+  assert.deepEqual(
+    decodeUpdate({
+      action: "route",
+      inboxRouting: { assignee: { kind: "human", id: "jeff" }, attentionKind: "FYI" },
+    }).inboxRouting,
+    { assignee: { kind: "human", id: "jeff" }, attentionKind: "FYI" },
+  );
+  assert.throws(() => decodeUpdate({ action: "route" }));
+  assert.throws(() => decodeUpdate({ action: "rename", title: "x", inboxRouting: {} }));
+  assert.throws(() => decodeUpdate({ action: "route", inboxRouting: { owner: "other" } }));
+});

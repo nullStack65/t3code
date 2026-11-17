@@ -1,0 +1,62 @@
+# Ubuntu 24.04 (noble) packages for a glibc-2.39 Linux desktop build. Generated 2026-11-17 from
+# InRelease-signature-verified noble, noble-updates and noble-security amd64 indexes.
+# Format: <group> <sha256> <pool path> <package>=<version>
+# sysroot: compiler + --sysroot (glibc 2.39, libstdc++, libsecret/glib headers).
+# compiler-runtime: cc1/cc1plus shared libraries, used only if the host lacks them.
+# build-tools: binutils, make, pkgconf for hosts without them (the stock ARC runner image).
+sysroot c7535331fbb183c802c3bf4b6b210872dcc12d0421b3212b3c4b940f2c59ed3a pool/main/g/gcc-13/cpp-13_13.3.0-6ubuntu2~24.04.1_amd64.deb cpp-13=13.3.0-6ubuntu2~24.04.1
+sysroot 2ca48bf0c2d6465bc39322899715a85d934b4d7442dd5586a7bebbe3ce0f806b pool/main/g/gcc-13/cpp-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb cpp-13-x86-64-linux-gnu=13.3.0-6ubuntu2~24.04.1
+sysroot 0f3ef964b8a91a9cd7bebfd126839a21941c55547cadcf4aa00204bc8cc43985 pool/main/g/gcc-13/g++-13_13.3.0-6ubuntu2~24.04.1_amd64.deb g++-13=13.3.0-6ubuntu2~24.04.1
+sysroot 0bd6af6164252d4ea9170d201ee4c10a3120fe0fc04985a00be3bc9076353844 pool/main/g/gcc-13/g++-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb g++-13-x86-64-linux-gnu=13.3.0-6ubuntu2~24.04.1
+sysroot 7438ff160b020a74970672189ecae25d0ca650de6d7f543f12a3134192cffbd9 pool/main/g/gcc-13/gcc-13_13.3.0-6ubuntu2~24.04.1_amd64.deb gcc-13=13.3.0-6ubuntu2~24.04.1
+sysroot e859aca26585bb91113a451f1e66bc0e5283cb08797d679aacc1d936ae6dff8e pool/main/g/gcc-13/gcc-13-base_13.3.0-6ubuntu2~24.04.1_amd64.deb gcc-13-base=13.3.0-6ubuntu2~24.04.1
+sysroot a134b0319a82d14581b3a14820d2832af4ec9778ed8b9b4ddaeecfb0555ec325 pool/main/g/gcc-13/gcc-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb gcc-13-x86-64-linux-gnu=13.3.0-6ubuntu2~24.04.1
+sysroot 49ef9eb8716c4d7ec8921b87328052e75efecf89ab5975b5e43360e8cb7aa27c pool/main/u/util-linux/libblkid-dev_2.39.3-9ubuntu6.6_amd64.deb libblkid-dev=2.39.3-9ubuntu6.6
+sysroot 3bcf169cd65e2539059b2287924090fc629f9bf90f595fc25465a7efe950ee82 pool/main/u/util-linux/libblkid1_2.39.3-9ubuntu6.6_amd64.deb libblkid1=2.39.3-9ubuntu6.6
+sysroot d821b41fc59cb4978ecd53bc83e5c964ac15d305c8d2ac4c8a35aebe55010fb9 pool/main/g/glibc/libc6_2.39-0ubuntu8.12_amd64.deb libc6=2.39-0ubuntu8.12
+sysroot d81dd6dc9d515762cc93f338efa6219252acf3e2e87b5b89dd7dc517741e6eed pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.12_amd64.deb libc6-dev=2.39-0ubuntu8.12
+sysroot 454456436ca767817a860557263d7cc2489f0a410f03efff4c0bb236d579ec09 pool/main/g/gcc-14/libcc1-0_14.2.0-4ubuntu2~24.04.1_amd64.deb libcc1-0=14.2.0-4ubuntu2~24.04.1
+sysroot 2edff420ef80b4a3f3751e65c33423ef30e563122a58b759e4854ea8d84ba1b1 pool/main/libx/libxcrypt/libcrypt-dev_4.4.36-4build1_amd64.deb libcrypt-dev=1:4.4.36-4build1
+sysroot 9474785cd6f398512bf8c305c3901dbb111569dccb6f5832002373c0a8ac5832 pool/main/libx/libxcrypt/libcrypt1_4.4.36-4build1_amd64.deb libcrypt1=1:4.4.36-4build1
+sysroot 7009959b8a3b77206325026917fb45150ac81bf6139468abc0841d5a29c8619d pool/main/libf/libffi/libffi-dev_3.4.6-1build1_amd64.deb libffi-dev=3.4.6-1build1
+sysroot 637e6a7744de08cd331a41f4efd0d24e6ea9064843dea9d1c6ca87bdb5f038a2 pool/main/libf/libffi/libffi8_3.4.6-1build1_amd64.deb libffi8=3.4.6-1build1
+sysroot cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb libgcc-13-dev=13.3.0-6ubuntu2~24.04.1
+sysroot aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb libgcc-s1=14.2.0-4ubuntu2~24.04.1
+sysroot 957b9eeaa83cf6f2d5d5d76dbb8aa31d3297e6781d8a02fa08dcc897ae650a0b pool/main/libg/libgcrypt20/libgcrypt20_1.10.3-2ubuntu0.2_amd64.deb libgcrypt20=1.10.3-2ubuntu0.2
+sysroot 06cecc29957bdf1a2731dc74e12c64af7d8ef67798c9225aeb211f3d5b9f7f7c pool/main/libg/libgcrypt20/libgcrypt20-dev_1.10.3-2ubuntu0.2_amd64.deb libgcrypt20-dev=1.10.3-2ubuntu0.2
+sysroot ff1b650f655b36dfe202fdbae6bb02b363c7257b6dd23e4f95ab61f716190df3 pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.10_amd64.deb libglib2.0-0t64=2.80.0-6ubuntu3.10
+sysroot 6d1d88d68192256603c0de05d084b8ef06ed9b16753215ec2c1ef9ef5fa15014 pool/main/g/glib2.0/libglib2.0-dev_2.80.0-6ubuntu3.10_amd64.deb libglib2.0-dev=2.80.0-6ubuntu3.10
+sysroot 54e6a40671bd698e260be85765429fe42111b2aac3357c89ee3e1d78a5379b7b pool/main/libg/libgpg-error/libgpg-error-dev_1.47-3build2.1_amd64.deb libgpg-error-dev=1.47-3build2.1
+sysroot 93654ee8180a73a0363f25c51dc673d67cbabcbecd164187b8a2deb54d007aef pool/main/libg/libgpg-error/libgpg-error0_1.47-3build2.1_amd64.deb libgpg-error0=1.47-3build2.1
+sysroot 87b7ed1fedfa79aedfb3772c539db2047857c4b0a3cf663161a657a752a3ca2e pool/main/u/util-linux/libmount-dev_2.39.3-9ubuntu6.6_amd64.deb libmount-dev=2.39.3-9ubuntu6.6
+sysroot 8f2c25589f187dacfdc5bb6be2af0aee6c2ba7b4d2edd1ca4b26753469f07aae pool/main/u/util-linux/libmount1_2.39.3-9ubuntu6.6_amd64.deb libmount1=2.39.3-9ubuntu6.6
+sysroot f41da7cb7e979d6b037ea92650c72ec8ec532ec3c93aa8d5b997207de56695ea pool/main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2.2_amd64.deb libpcre2-8-0=10.42-4ubuntu2.2
+sysroot 572714fe3fbe1b49ffb4c5a483223c663a51948e0d8590add1620917326f3d21 pool/main/p/pcre2/libpcre2-dev_10.42-4ubuntu2.2_amd64.deb libpcre2-dev=10.42-4ubuntu2.2
+sysroot 7d7263ffc92c33042328f99c93433a846e8d9e549876dab18ba18606e6541ecd pool/main/libs/libsecret/libsecret-1-0_0.21.4-1build3_amd64.deb libsecret-1-0=0.21.4-1build3
+sysroot 54d8d5bca0a94450723e4ca529e0fdfa98dacb5c5808336adcc724e07148e358 pool/universe/libs/libsecret/libsecret-1-dev_0.21.4-1build3_amd64.deb libsecret-1-dev=0.21.4-1build3
+sysroot 6abaa6c26f46ef17764c4a753e0e84de1cdadde5634fd2987621fdc617988d19 pool/main/libs/libselinux/libselinux1_3.5-2ubuntu2.1_amd64.deb libselinux1=3.5-2ubuntu2.1
+sysroot 2cc37cb9251f49a11f9c34bc8605c2aace8ded76f50b951ad28ded42d6ab3f68 pool/main/libs/libselinux/libselinux1-dev_3.5-2ubuntu2.1_amd64.deb libselinux1-dev=3.5-2ubuntu2.1
+sysroot 85e47c1d7bcccbc059ea99d4c379659236f63b1716af8d796072875d418402bf pool/main/libs/libsepol/libsepol-dev_3.5-2build1_amd64.deb libsepol-dev=3.5-2build1
+sysroot ee5633e863e19c3381ed97842ce35ed32ede96a3d1ae4e94c051d3036fe21347 pool/main/g/gcc-13/libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb libstdc++-13-dev=13.3.0-6ubuntu2~24.04.1
+sysroot a51f8de7829211db961a31f02158058ad1a95f92ac6d0a5dff6350e2821c54c0 pool/main/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb libstdc++6=14.2.0-4ubuntu2~24.04.1
+sysroot 62b040ead6d4522339b4e3d6534e678d5b82b827ffa4364e7dd7892d8d33fb9d pool/universe/s/sysprof/libsysprof-capture-4-dev_46.0-1build1_amd64.deb libsysprof-capture-4-dev=46.0-1build1
+sysroot e4b7b9c5023ba727908868661e1113d28ed9b68e47aed00e314723dad4b2b31d pool/main/l/linux/linux-libc-dev_6.8.0-149.149_amd64.deb linux-libc-dev=6.8.0-149.149
+sysroot 376249c8de139568221dbb242318cc8cb8f02299e3a62b7432948e1754fbddf9 pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.3_amd64.deb zlib1g=1:1.3.dfsg-3.1ubuntu2.3
+sysroot 419902a649e1078f24596cdf31ced9c839519828790f59888056fcdcd58e8a28 pool/main/z/zlib/zlib1g-dev_1.3.dfsg-3.1ubuntu2.3_amd64.deb zlib1g-dev=1:1.3.dfsg-3.1ubuntu2.3
+compiler-runtime 285f8a505dfa8e1b33f357a9d8d3477ad35bf18c0b34771a6df4c25923f3ae0d pool/main/g/gmp/libgmp10_6.3.0+dfsg-2ubuntu6.1_amd64.deb libgmp10=2:6.3.0+dfsg-2ubuntu6.1
+compiler-runtime 4e040926e50fb961fae9bf95660189d468336a4a17bc321872c434fc8f777e7f pool/main/i/isl/libisl23_0.26-3build1.1_amd64.deb libisl23=0.26-3build1.1
+compiler-runtime cebe6098bb3d66fdacac9dc6fe406a651216d9c00f27c3f9c159d15d96cdf864 pool/main/m/mpclib3/libmpc3_1.3.1-1build1.1_amd64.deb libmpc3=1.3.1-1build1.1
+compiler-runtime aebc1c8b69a1f98bb43dfc268daecd181116dbf40b13ee4e822eb4bdd52b493a pool/main/m/mpfr4/libmpfr6_4.2.1-1build1.1_amd64.deb libmpfr6=4.2.1-1build1.1
+compiler-runtime dfcf25061e07aad7efd3f4f880ba5ad4d4d09ebe7fc8cc77ab6b8a161d6d4727 pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb libzstd1=1.5.5+dfsg2-2build1.1
+build-tools b3b5a84181a38fd191820b2cdcc1a3eeb1cd6333ad472f2092f96e81047e9c74 pool/main/b/binutils/binutils_2.42-4ubuntu2.10_amd64.deb binutils=2.42-4ubuntu2.10
+build-tools d136073f5e2153f3df11c1d08d66727b9466b28ff483f50085f14bbe3464b5ee pool/main/b/binutils/binutils-common_2.42-4ubuntu2.10_amd64.deb binutils-common=2.42-4ubuntu2.10
+build-tools 1e510a15f30208d39edcd840e48f26a77bbca7c417805eeccb1e3f7de198ef29 pool/main/b/binutils/binutils-x86-64-linux-gnu_2.42-4ubuntu2.10_amd64.deb binutils-x86-64-linux-gnu=2.42-4ubuntu2.10
+build-tools 064dce00ce94e1fc2d33779cb0071088f4c8aac79e85345f2e78a020f7d14699 pool/main/b/binutils/libbinutils_2.42-4ubuntu2.10_amd64.deb libbinutils=2.42-4ubuntu2.10
+build-tools da352eb7fa6c4369d2a6c1e5e680f574eda2e38576563326b18d9e47e61c4078 pool/main/b/binutils/libctf-nobfd0_2.42-4ubuntu2.10_amd64.deb libctf-nobfd0=2.42-4ubuntu2.10
+build-tools 7ec86d697c3668503c85f308a6832f092075b5880ad002f22185264da0bd4645 pool/main/b/binutils/libctf0_2.42-4ubuntu2.10_amd64.deb libctf0=2.42-4ubuntu2.10
+build-tools 1b7e3c2fc162e8358ca6e5a3fffdb4d0d632f790630323215841bb36a63c0ab8 pool/main/b/binutils/libgprofng0_2.42-4ubuntu2.10_amd64.deb libgprofng0=2.42-4ubuntu2.10
+build-tools 0cf79113f5d193ce9af2be2ff4b2c3b30dd4e55a0b6c47f7d28f6c849ff3aa60 pool/main/j/jansson/libjansson4_2.14-2build2_amd64.deb libjansson4=2.14-2build2
+build-tools fc3a57e8f931ec06cb7c51acc56878f1fec247ff02a7adcab26905c2faeb2792 pool/main/p/pkgconf/libpkgconf3_1.8.1-2build1_amd64.deb libpkgconf3=1.8.1-2build1
+build-tools 72093fb456864db55f1352bfa5e952a94f7abaff64e71dff1fbf001db1984564 pool/main/b/binutils/libsframe1_2.42-4ubuntu2.10_amd64.deb libsframe1=2.42-4ubuntu2.10
+build-tools 1fe6a815b56c7b6e9ce4086a363f09444bbd0a0d30e230c453d0b78e44b57a99 pool/main/m/make-dfsg/make_4.3-4.1build2_amd64.deb make=4.3-4.1build2
+build-tools 7a812f05ee1610154b433e2ad54f6e4163fcbb306b9fb31afe959afb2e5e1545 pool/main/p/pkgconf/pkgconf-bin_1.8.1-2build1_amd64.deb pkgconf-bin=1.8.1-2build1

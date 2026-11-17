@@ -2166,6 +2166,12 @@ export const layerWsRpc = (
                       Effect.andThen(
                         ThreadMessageIntake.launchThread({
                           commandId: input.commandId,
+                          ...(input.inboxOrigin === undefined
+                            ? {}
+                            : { inboxOrigin: input.inboxOrigin }),
+                          ...(input.inboxRouting === undefined
+                            ? {}
+                            : { inboxRouting: input.inboxRouting }),
                           ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
                           ...(input.reuseExistingThread === undefined
                             ? {}
