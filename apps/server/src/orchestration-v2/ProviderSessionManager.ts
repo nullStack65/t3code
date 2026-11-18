@@ -2270,6 +2270,7 @@ export const layerWithOptions = (
           subscribers: Ref.Ref<
             ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
           >,
+          runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
         ): Effect.fn.Return<ProviderAdapter.ProviderAdapterV2EventSubscription> {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
           const subscriberId = yield* Ref.getAndUpdate(nextSubscriberId, (value) => value + 1);
@@ -2278,14 +2279,35 @@ export const layerWithOptions = (
             updated.set(subscriberId, queue);
             return updated;
           });
-          const close = Ref.modify(subscribers, (current) => {
+          const unregister = Ref.modify(subscribers, (current) => {
             if (!current.has(subscriberId)) {
               return [false, current] as const;
             }
             const updated = new Map(current);
             updated.delete(subscriberId);
             return [true, updated] as const;
-          }).pipe(
+          });
+          // Release signals its subscribers once; a run that subscribes after it would wait forever.
+          // Still registered here means release took the map first, so this queue is ours to end.
+          const live =
+            (yield* Ref.get(sessions)).get(sessionKey(runtime.providerSessionId))?.runtime ===
+            runtime;
+          if (!live && (yield* unregister)) {
+            yield* shutdownSignal.received
+              ? Queue.interrupt(queue)
+              : Queue.offer(queue, {
+                  type: "failure",
+                  cause: Cause.fail(
+                    new ProviderAdapter.ProviderAdapterEventStreamError({
+                      driver: runtime.driver,
+                      providerSessionId: runtime.providerSessionId,
+                      raisedByT3: true,
+                      cause: "The provider session was released before this subscription.",
+                    }),
+                  ),
+                });
+          }
+          const close = unregister.pipe(
             Effect.flatMap((removed) =>
               removed
                 ? Queue.clear(queue).pipe(Effect.andThen(Queue.end(queue)), Effect.asVoid)
@@ -2319,7 +2341,7 @@ export const layerWithOptions = (
         >,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
-        const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const subscribeEvents = makeEventSubscription(eventSubscribers, runtime);
         const turnMetrics = (operation: string, model?: string) =>
           withMetrics({
             counter: providerTurnsTotal,
