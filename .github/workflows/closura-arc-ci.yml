@@ -138,7 +138,7 @@ jobs:
           vp run --filter t3 typecheck
           vp run --filter @t3tools/mobile typecheck
 
-      - name: Test AssemblyAI dictation, native inbox and thread placement behavior
+      - name: Test AssemblyAI dictation, native inbox, thread placement and scheduled-task behavior
         shell: bash
         run: |
           set -euo pipefail
@@ -161,7 +161,18 @@ jobs:
             apps/web/src/components/chat/draftAttachmentUploads.test.ts \
             apps/web/src/components/chat/draftUploadReconcile.test.ts \
             apps/web/src/lib/attachmentUploadQueue.test.ts \
-            apps/server/src/ws.test.ts
+            apps/server/src/ws.test.ts \
+            packages/contracts/src/scheduledTask.test.ts \
+            apps/server/src/scheduledTasks/storedSchedule.test.ts \
+            apps/server/src/scheduledTasks/Schedule.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.interval.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.schedule.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.webhook.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.placement.test.ts \
+            apps/server/src/scheduledTasks/webhookRoute.test.ts \
+            apps/server/src/persistence/Migrations.test.ts \
+            apps/server/src/persistence/Migrations/097_ScheduledTaskOccurrences.test.ts
 
       - name: Test mobile new-task placement, outbox and uploads
         shell: bash
