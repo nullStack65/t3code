@@ -11,6 +11,10 @@ import {
   founderInboxLane,
   compositeThreadKey,
   agentLaunchInboxRouting,
+  agentLaunchInboxError,
+  agentInboxRoutingError,
+  projectThreadInbox,
+  type ThreadInboxRoutingPatch,
 } from "./threadInbox.ts";
 const kameron = { kind: "human", id: "kameron" } as const;
 const jeff = { kind: "human", id: "jeff" } as const;
@@ -67,26 +71,119 @@ describe("shared fleet organizational inbox", () => {
       false,
     ]);
   });
-  it("files agent launches in Agents unless the agent picks an inbox", () => {
+  it("files agent launches in Agents unless the agent picks an inbox with a reason", () => {
     // A launch from a thread in Kameron's inbox no longer copies that routing.
     const launched = (choice: Parameters<typeof agentLaunchInboxRouting>[0]) =>
       makeThreadInbox({ actor: bot, routing: agentLaunchInboxRouting(choice) });
     const views = ["kameron", "jeff", "shared", "agents"] as const;
     const visibleIn = (inbox: ReturnType<typeof launched>) =>
       views.filter((view) => matchesInboxView(inbox, view));
+    const because = { reason: "conversation" } as const;
     expect(visibleIn(launched({}))).toEqual(["agents"]);
-    expect(visibleIn(launched({ inbox: "kameron" }))).toEqual(["kameron", "agents"]);
-    expect(visibleIn(launched({ inbox: "jeff" }))).toEqual(["jeff", "agents"]);
-    expect(visibleIn(launched({ inbox: "shared" }))).toEqual(["shared", "agents"]);
+    expect(agentLaunchInboxError({})).toBeNull();
+    for (const inbox of ["kameron", "jeff", "shared"] as const) {
+      expect(agentLaunchInboxError({ inbox })).toContain("request_decision");
+      expect(agentLaunchInboxError({ inbox, inboxRouting: because })).toBeNull();
+    }
+    expect(visibleIn(launched({ inbox: "kameron", inboxRouting: because }))).toEqual([
+      "kameron",
+      "agents",
+    ]);
+    expect(visibleIn(launched({ inbox: "jeff", inboxRouting: because }))).toEqual([
+      "jeff",
+      "agents",
+    ]);
+    expect(visibleIn(launched({ inbox: "shared", inboxRouting: because }))).toEqual([
+      "shared",
+      "agents",
+    ]);
     expect(launched({ inbox: "kameron" }).origin).toEqual(bot);
     const explicit = launched({
       inbox: "kameron",
-      inboxRouting: { assignee: { kind: "human", id: "jeff" } },
+      inboxRouting: { assignee: { kind: "human", id: "jeff" }, reason: "review" },
     });
     expect(visibleIn(explicit)).toEqual(["jeff", "agents"]);
-    const quieter = launched({ inbox: "kameron", inboxRouting: { attentionKind: "FYI" } });
+    const quieter = launched({ inbox: "kameron", inboxRouting: { reason: "fyi" } });
     expect(visibleIn(quieter)).toEqual(["kameron", "agents"]);
-    expect(quieter.attentionKind).toBe("FYI");
+    expect(founderInboxLane(quieter, "kameron")).toBe("FYI");
+  });
+  it("never files reason-less agent work into a founder's lane", () => {
+    const people = [null, kameron, jeff] as const;
+    const patches: ThreadInboxRoutingPatch[] = [{}];
+    for (const owner of [null, "kameron", "jeff"] as const)
+      for (const assignee of [...people, bot])
+        for (const audience of ["kameron", "jeff", "shared", "agent-only"] as const)
+          for (const attentionKind of ["action", "FYI", "background"] as const)
+            patches.push({ owner, assignee, audience, attentionKind });
+    for (const routing of patches) {
+      for (const parent of [undefined, makeThreadInbox({ actor: kameron })]) {
+        const inbox = makeThreadInbox({ actor: bot, routing, ...(parent ? { parent } : {}) });
+        expect([founderInboxLane(inbox, "kameron"), founderInboxLane(inbox, "jeff")]).toEqual([
+          "hidden",
+          "hidden",
+        ]);
+        expect(agentInboxRoutingError(inbox, routing) === null).toBe(
+          inbox.audience === "agent-only" && inbox.assignee?.kind !== "human",
+        );
+      }
+    }
+  });
+  it("holds a thread in a founder's lane only while it waits on them", () => {
+    const work = makeThreadInbox({ actor: bot, routing: agentLaunchInboxRouting({}) });
+    const lanes = (inbox: typeof work) => [
+      founderInboxLane(inbox, "kameron"),
+      founderInboxLane(inbox, "jeff"),
+    ];
+    expect(lanes(work)).toEqual(["hidden", "hidden"]);
+    const asked = {
+      ...work,
+      decisionRequest: {
+        founder: "kameron",
+        kind: "approval",
+        question: "Send this draft?",
+        requestedAt: "2026-11-18T21:00:00.000Z",
+      },
+    } as const;
+    const project = (latestHumanMessageAt: string | null, pendingHumanRequest = false) =>
+      projectThreadInbox(asked, { latestHumanMessageAt, pendingHumanRequest });
+    expect(lanes(project(null))).toEqual(["action", "hidden"]);
+    expect(lanes(project("2026-11-18T20:59:00.000Z"))).toEqual(["action", "hidden"]);
+    const answered = project("2026-11-18T21:01:00.000Z");
+    expect(answered.decisionRequest).toBeUndefined();
+    expect(lanes(answered)).toEqual(["hidden", "hidden"]);
+    expect(matchesInboxView(answered, "agents")).toBe(true);
+    // A runtime request surfaces only to the thread's owner.
+    expect(lanes(project("2026-11-18T21:01:00.000Z", true))).toEqual(["hidden", "hidden"]);
+    const owned = makeThreadInbox({
+      actor: bot,
+      routing: {
+        owner: "jeff",
+        assignee: bot,
+        audience: "agent-only",
+        attentionKind: "background",
+      },
+    });
+    const waiting = projectThreadInbox(owned, {
+      latestHumanMessageAt: null,
+      pendingHumanRequest: true,
+    });
+    expect(lanes(owned)).toEqual(["hidden", "hidden"]);
+    expect(lanes(waiting)).toEqual(["hidden", "action"]);
+    expect(
+      lanes(
+        projectThreadInbox(waiting, { latestHumanMessageAt: null, pendingHumanRequest: false }),
+      ),
+    ).toEqual(["hidden", "hidden"]);
+    // A founder's own conversation stays in their lane while it waits on them.
+    const conversation = makeThreadInbox({ actor: kameron });
+    expect(
+      lanes(
+        projectThreadInbox(conversation, {
+          latestHumanMessageAt: null,
+          pendingHumanRequest: false,
+        }),
+      ),
+    ).toEqual(["action", "hidden"]);
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });
@@ -97,11 +194,26 @@ describe("shared fleet organizational inbox", () => {
   });
   it("routes bot action and FYI assignments to either founder", () => {
     for (const id of ["kameron", "jeff"] as const) {
-      const inbox = makeThreadInbox({ actor: bot, routing: { assignee: { kind: "human", id } } });
+      const routing = { assignee: { kind: "human", id }, reason: "review" } as const;
+      const inbox = makeThreadInbox({ actor: bot, routing });
       expect(matchesInboxView(inbox, id)).toBe(true);
       expect(founderInboxLane(inbox, id)).toBe("action");
-      expect(founderInboxLane(routeThreadInbox(inbox, { attentionKind: "FYI" }), id)).toBe("FYI");
+      expect(
+        founderInboxLane(routeThreadInbox(inbox, { attentionKind: "FYI", reason: "review" }), id),
+      ).toBe("FYI");
       expect(matchesInboxView(inbox, "all")).toBe(true);
+      // A person filing agent work into their inbox needs no reason; a route to Agents drops it.
+      const filed = routeThreadInbox(makeThreadInbox({ actor: bot }), {
+        assignee: { kind: "human", id },
+      });
+      expect([founderInboxLane(filed, id), filed.reason]).toEqual(["action", "conversation"]);
+      const returned = routeThreadInbox(filed, {
+        owner: null,
+        assignee: null,
+        audience: "agent-only",
+        attentionKind: "background",
+      });
+      expect([founderInboxLane(returned, id), returned.reason]).toEqual(["hidden", undefined]);
     }
   });
   it("explicit reassignment wins over origin and retains provenance", () => {
@@ -127,7 +239,8 @@ describe("shared fleet organizational inbox", () => {
     expect(child.assignee).toEqual(jeff);
     expect(child.requestedBy).toEqual(jeff);
     expect(child.origin).toEqual(bot);
-    expect(founderInboxLane(child, "jeff")).toBe("FYI");
+    // Child work an agent started reports in Agents, not the requester's inbox.
+    expect(founderInboxLane(child, "jeff")).toBe("hidden");
     expect(child.executorEnvironmentId).toBe("r720");
   });
   it("supports shared views and routing to neither founder", () => {

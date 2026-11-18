@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /** Organizational labels on the shared fleet. These never authorize access. */
 export const Founder = Schema.Literals(["kameron", "jeff"]);
@@ -16,15 +16,44 @@ export const ThreadInboxRouting = Schema.Struct({
   attentionKind: Schema.Literals(["action", "FYI", "background"]),
 });
 export type ThreadInboxRouting = typeof ThreadInboxRouting.Type;
+/** Why a founder or the shared inbox holds the thread. Agents must give one to file it there. */
+export const InboxReason = Schema.Literals([
+  "conversation",
+  "review",
+  "decision",
+  "approval",
+  "fyi",
+]).annotate({
+  description:
+    "Why a founder must see it ('conversation': they work through it with you). Agents need one to file outside Agents.",
+});
+export type InboxReason = typeof InboxReason.Type;
 export const ThreadInboxRoutingPatch = Schema.Struct({
   owner: Schema.optionalKey(ThreadInboxRouting.fields.owner),
   assignee: Schema.optionalKey(ThreadInboxRouting.fields.assignee),
   audience: Schema.optionalKey(ThreadInboxRouting.fields.audience),
   attentionKind: Schema.optionalKey(ThreadInboxRouting.fields.attentionKind),
+  reason: Schema.optionalKey(InboxReason),
 });
 export type ThreadInboxRoutingPatch = typeof ThreadInboxRoutingPatch.Type;
+export const ThreadDecisionAsk = Schema.Struct({
+  founder: Founder,
+  kind: Schema.Literals(["decision", "review", "approval"]),
+  question: TrimmedNonEmptyString.check(Schema.isMaxLength(2000)),
+});
+export type ThreadDecisionAsk = typeof ThreadDecisionAsk.Type;
+export const ThreadDecisionRequest = Schema.Struct({
+  ...ThreadDecisionAsk.fields,
+  requestedAt: IsoDateTime,
+});
+export type ThreadDecisionRequest = typeof ThreadDecisionRequest.Type;
 export const ThreadInbox = Schema.Struct({
   ...ThreadInboxRouting.fields,
+  reason: Schema.optionalKey(InboxReason),
+  /** Open until the founder writes on the thread after `requestedAt`, or it is resolved or settled. */
+  decisionRequest: Schema.optionalKey(ThreadDecisionRequest),
+  /** Set only on projected shells: the thread waits on an approval or user input. Never stored. */
+  pendingHumanRequest: Schema.optionalKey(Schema.Boolean),
   origin: Schema.NullOr(InboxActor),
   requestedBy: Schema.NullOr(InboxActor),
   actor: Schema.NullOr(InboxActor),
@@ -66,7 +95,7 @@ export const agentLaunchInboxRouting = (input: {
 
 export const InboxChoiceParameter = InboxChoice.annotate({
   description:
-    "Sidebar inbox for the new thread. Default 'agents'. Pick 'kameron' or 'jeff' only when that founder asked for it or must act on it (your thread's `inbox.owner` in t3_thread_read); 'shared' for both. `inboxRouting` adjusts fields of the chosen inbox.",
+    "Sidebar inbox for the new thread. Default 'agents': autonomous work reports one final result there. Pick 'kameron' or 'jeff' (your `inbox.owner` in t3_thread_read) or 'shared' only when they will converse in it, review, decide or approve, and set `inboxRouting.reason`.",
 });
 export const compositeThreadKey = (environmentId: string, threadId: string) =>
   JSON.stringify([environmentId, threadId]);
@@ -98,6 +127,7 @@ export function makeThreadInbox(input: {
     attentionKind:
       routing?.attentionKind ??
       (target ? "action" : (input.parent?.attentionKind ?? (owner ? "action" : "background"))),
+    ...(routing?.reason === undefined ? {} : { reason: routing.reason }),
     origin: actor,
     actor,
     requestedBy: input.requestedBy ?? input.parent?.requestedBy ?? actor,
@@ -105,30 +135,91 @@ export function makeThreadInbox(input: {
   };
 }
 
-/** Preserve immutable origin/requester/executor when routing an existing thread. */
+/** True when the thread can show in a founder's or the shared inbox, not only in Agents. */
+const inboxReachesFounders = (inbox: ThreadInboxRouting) =>
+  inbox.audience !== "agent-only" || inbox.assignee?.kind === "human";
+
+/**
+ * Preserve immutable origin/requester/executor when routing an existing thread. Agents must state
+ * a reason (see `agentInboxRoutingError`), so a reason-less route to a founder came from a person.
+ */
 export const routeThreadInbox = (
   inbox: ThreadInbox,
   routing: ThreadInboxRoutingPatch,
-): ThreadInbox => ({
-  ...inbox,
-  ...routing,
-  ...(routing.assignee?.kind === "human"
-    ? {
-        owner: routing.owner === undefined ? routing.assignee.id : routing.owner,
-        audience: routing.audience ?? routing.assignee.id,
-        attentionKind:
-          routing.attentionKind ??
-          (inbox.attentionKind === "background" ? "action" : inbox.attentionKind),
-      }
-    : {}),
-});
+): ThreadInbox => {
+  const { reason, ...fields } = routing;
+  const { reason: _previous, ...routed } = {
+    ...inbox,
+    ...fields,
+    ...(fields.assignee?.kind === "human"
+      ? {
+          owner: fields.owner === undefined ? fields.assignee.id : fields.owner,
+          audience: fields.audience ?? fields.assignee.id,
+          attentionKind:
+            fields.attentionKind ??
+            (inbox.attentionKind === "background" ? "action" : inbox.attentionKind),
+        }
+      : {}),
+  };
+  const kept = reason ?? (inboxReachesFounders(routed) ? "conversation" : undefined);
+  return kept === undefined ? routed : { ...routed, reason: kept };
+};
 
+/**
+ * Agent routing that would reach a founder's or the shared inbox must carry a reason. Returns the
+ * rejection for the agent, or null. People route from the UI without this check.
+ */
+export function agentInboxRoutingError(
+  result: ThreadInboxRouting,
+  routing: ThreadInboxRoutingPatch | undefined,
+): string | null {
+  if (routing?.reason !== undefined || !inboxReachesFounders(result)) return null;
+  return "Agent work files into the Agents inbox and reports one final result there. Put a thread in a founder's or the shared inbox only when they will converse in it, review, decide or approve: pass inboxRouting.reason ('conversation', 'review', 'decision', 'approval' or 'fyi'). To ask a founder something on a thread, use t3_thread_update action:'request_decision'.";
+}
+
+/** The rejection for an agent launch filed by `agentLaunchInboxRouting`, or null. */
+export const agentLaunchInboxError = (input: Parameters<typeof agentLaunchInboxRouting>[0]) => {
+  const routing = agentLaunchInboxRouting(input);
+  return agentInboxRoutingError(
+    makeThreadInbox({ actor: { kind: "agent", id: "agent" }, routing }),
+    routing,
+  );
+};
+
+/**
+ * The inbox clients read. A decision request closes once a person writes on the thread after it
+ * was asked; a pending approval or user-input request surfaces to the owner.
+ */
+export function projectThreadInbox(
+  inbox: ThreadInbox,
+  state: { readonly pendingHumanRequest: boolean; readonly latestHumanMessageAt: string | null },
+): ThreadInbox {
+  const { decisionRequest, pendingHumanRequest: _stored, ...rest } = inbox;
+  const open =
+    decisionRequest !== undefined &&
+    (state.latestHumanMessageAt === null ||
+      Date.parse(state.latestHumanMessageAt) <= Date.parse(decisionRequest.requestedAt));
+  return {
+    ...rest,
+    ...(open ? { decisionRequest } : {}),
+    ...(state.pendingHumanRequest ? { pendingHumanRequest: true } : {}),
+  };
+}
+
+/**
+ * A founder's lane holds only threads waiting on them: an open decision request for them, a
+ * pending runtime request on a thread they own, or a thread they own that a person filed or an
+ * agent filed with a reason. Other agent work stays in Agents.
+ */
 export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder: Founder) {
   if (!inbox) return "unknown";
+  if (inbox.decisionRequest?.founder === founder) return "action";
+  if (inbox.pendingHumanRequest === true && inbox.owner === founder) return "action";
   const assigned = inbox.assignee?.kind === "human" ? inbox.assignee.id : inbox.owner;
   if (inbox.audience === "agent-only" && inbox.assignee?.kind !== "human") return "hidden";
   if (assigned !== founder) return "hidden";
-  return inbox.attentionKind;
+  if (inbox.origin?.kind === "agent" && inbox.reason === undefined) return "hidden";
+  return inbox.reason === "fyi" && inbox.attentionKind === "action" ? "FYI" : inbox.attentionKind;
 }
 
 /** The chosen view, else the chosen founder's, else All so unclassified history stays visible. */

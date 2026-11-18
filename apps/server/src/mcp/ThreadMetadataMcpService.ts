@@ -1,5 +1,7 @@
 import {
+  agentInboxRoutingError,
   CommandId,
+  makeThreadInbox,
   OrchestratorMcpFailure,
   type OrchestrationV2AppThread,
   type OrchestrationV2Command,
@@ -7,6 +9,7 @@ import {
   type ThreadMetadataMcpUpdateInput,
   type ThreadMetadataMcpUpdateResult,
   ThreadId,
+  routeThreadInbox,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -86,6 +89,20 @@ function metadataCommand(input: {
         threadId: input.threadId,
         regenerateTitle: true,
       };
+    case "request_decision":
+      return {
+        type: "thread.metadata.update",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        decisionRequest: input.update.decision!,
+      };
+    case "resolve_decision":
+      return {
+        type: "thread.metadata.update",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        decisionRequest: null,
+      };
   }
 }
 
@@ -157,6 +174,14 @@ const make = Effect.gen(function* () {
         `Thread ${threadId} was not found.`,
       );
     }
+    const inboxError =
+      input.inboxRouting === undefined
+        ? null
+        : agentInboxRoutingError(
+            routeThreadInbox(shell.inbox ?? makeThreadInbox({ actor: null }), input.inboxRouting),
+            input.inboxRouting,
+          );
+    if (inboxError !== null) return yield* failure("invalid_request", inboxError);
     const requestKey =
       input.clientRequestId === undefined ? yield* random.uuidV4() : input.clientRequestId;
     const updateCommandId = commandId({

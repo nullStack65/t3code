@@ -32,4 +32,11 @@ it("accepts agent routing and rejects ambiguous metadata actions", () => {
   assert.throws(() => decodeUpdate({ action: "route" }));
   assert.throws(() => decodeUpdate({ action: "rename", title: "x", inboxRouting: {} }));
   assert.throws(() => decodeUpdate({ action: "route", inboxRouting: { owner: "other" } }));
+  assert.throws(() => decodeUpdate({ action: "request_decision" }));
+  assert.throws(() =>
+    decodeUpdate({
+      action: "resolve_decision",
+      decision: { founder: "kameron", kind: "decision", question: "Ship?" },
+    }),
+  );
 });

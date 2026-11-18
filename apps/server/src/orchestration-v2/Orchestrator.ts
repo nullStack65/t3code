@@ -6,7 +6,7 @@ import type {
   OrchestrationV2ThreadHistoryPage,
   ProjectId,
 } from "@t3tools/contracts";
-import { makeThreadInbox, routeThreadInbox } from "@t3tools/contracts";
+import { makeThreadInbox, routeThreadInbox, type ThreadInbox } from "@t3tools/contracts";
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import {
   latestExecutedRun,
@@ -795,6 +795,28 @@ function askedForLinkedMachine(
   const normalize = (text: string | undefined) => text?.trim().toLowerCase() ?? "";
   const hint = normalize(card.hint);
   return hint !== "" && hint === normalize(linked.hint) && hint === normalize(linked.linkedLabel);
+}
+
+function withoutDecisionRequest(inbox: ThreadInbox): ThreadInbox {
+  const { decisionRequest: _closed, ...rest } = inbox;
+  return rest;
+}
+
+function askedInbox(
+  inbox: ThreadInbox | undefined,
+  command: Extract<OrchestrationV2Command, { readonly type: "thread.metadata.update" }>,
+  now: DateTime.Utc,
+): ThreadInbox {
+  const base = inbox ?? makeThreadInbox({ actor: null });
+  const routed =
+    command.inboxRouting === undefined ? base : routeThreadInbox(base, command.inboxRouting);
+  if (command.decisionRequest === undefined) return routed;
+  return command.decisionRequest === null
+    ? withoutDecisionRequest(routed)
+    : {
+        ...routed,
+        decisionRequest: { ...command.decisionRequest, requestedAt: DateTime.formatIso(now) },
+      };
 }
 
 // A workspace change detaches the session, which can settle the calling run at once. Queuing its
@@ -4732,6 +4754,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             thread.settledOverride === "settled" && thread.settledAt !== null && !wasPinned;
           return {
             ...thread,
+            ...(thread.inbox?.decisionRequest === undefined
+              ? {}
+              : { inbox: withoutDecisionRequest(thread.inbox) }),
             settledOverride: "settled",
             settledAt: alreadySettled ? thread.settledAt : (command.settledAt ?? now),
             // Settled threads refuse recovery, so an armed resume would stay hidden until un-settled.
@@ -4880,14 +4905,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
-            ...(command.inboxRouting === undefined
+            ...(command.inboxRouting === undefined && command.decisionRequest === undefined
               ? {}
-              : {
-                  inbox: routeThreadInbox(
-                    thread.inbox ?? makeThreadInbox({ actor: null }),
-                    command.inboxRouting,
-                  ),
-                }),
+              : { inbox: askedInbox(thread.inbox, command, now) }),
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&

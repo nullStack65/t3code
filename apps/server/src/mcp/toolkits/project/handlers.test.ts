@@ -416,7 +416,7 @@ it.effect("a launch with a model its provider does not advertise creates no thre
   }),
 );
 
-it.effect("a launch is filed in Agents unless the agent picks an inbox", () =>
+it.effect("a launch is filed in Agents unless the agent picks an inbox with a reason", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const { projectId, dependencies } = clientLaunchHarness({
@@ -428,24 +428,40 @@ it.effect("a launch is filed in Agents unless the agent picks an inbox", () =>
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
       ),
     );
-    const launch = (inbox?: "kameron" | "shared") =>
+    const launch = (inbox?: "kameron" | "shared", reason?: "conversation") =>
       toolkit
         .handle("t3_thread_launch", {
           title: "Fix",
           projectId,
           ...(inbox === undefined ? {} : { inbox }),
+          ...(reason === undefined ? {} : { inboxRouting: { reason } }),
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.map((result) => result.at(-1)?.result),
+          Effect.provide(dependencies),
+        );
 
     yield* launch();
-    yield* launch("kameron");
-    yield* launch("shared");
+    for (const inbox of ["kameron", "shared"] as const) {
+      expect(yield* launch(inbox)).toMatchObject({
+        _tag: "OrchestratorMcpFailure",
+        code: "invalid_request",
+        message: expect.stringContaining("inboxRouting.reason"),
+      });
+    }
+    yield* launch("kameron", "conversation");
+    yield* launch("shared", "conversation");
     expect(launched.map((input) => input.inboxRouting?.audience)).toEqual([
       "agent-only",
       "kameron",
       "shared",
     ]);
-    expect(launched[1]?.inboxRouting?.assignee).toEqual({ kind: "human", id: "kameron" });
+    expect(launched[1]?.inboxRouting).toMatchObject({
+      assignee: { kind: "human", id: "kameron" },
+      reason: "conversation",
+    });
   }),
 );
 
