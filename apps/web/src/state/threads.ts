@@ -33,7 +33,12 @@ export const olderSettledThreads = createOlderSettledThreadAtoms(
 export const threadEnvironment = createThreadEnvironmentAtoms(
   connectionAtomRuntime,
   threadFamilies.snapshotAtom,
-  { getInboxOrigin: () => ({ kind: "human", id: getClientSettings().founderInboxOwner }) },
+  {
+    getInboxOrigin: () => ({
+      kind: "human",
+      id: getClientSettings().founderInboxOwner ?? "kameron",
+    }),
+  },
 );
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(

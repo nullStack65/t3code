@@ -1,4 +1,4 @@
-import { matchesInboxView } from "@t3tools/contracts";
+import { effectiveInboxView, matchesInboxView } from "@t3tools/contracts";
 import { SidebarInboxBar } from "./sidebar/SidebarInboxBar";
 import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
@@ -1103,7 +1103,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
   const threads = useQuietThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
-  const inboxView = useClientSettings((settings) => settings.founderInboxView);
+  const inboxView = useClientSettings(effectiveInboxView);
   const inboxThreads = threads.filter(
     (thread) =>
       threadSearchQuery.trim().length > 0 ||

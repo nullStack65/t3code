@@ -1,4 +1,4 @@
-import { matchesInboxView } from "@t3tools/contracts";
+import { effectiveInboxView, matchesInboxView } from "@t3tools/contracts";
 import {
   type EnvironmentThreadShell,
   type PendingSubagentRequest,
@@ -116,7 +116,7 @@ export function startThreadNotifications(
     const outsideInbox = new Set<string>();
     for (const [environmentId, state] of watched) {
       for (const [threadId, entry] of state.previous) {
-        if (!matchesInboxView(entry.thread.source.inbox, getClientSettings().founderInboxView))
+        if (!matchesInboxView(entry.thread.source.inbox, effectiveInboxView(getClientSettings())))
           outsideInbox.add(threadKey({ environmentId, threadId }));
       }
     }
@@ -143,7 +143,7 @@ export function startThreadNotifications(
     kind: ThreadNotificationKind,
   ) => {
     const { thread, status } = state;
-    if (!matchesInboxView(thread.source.inbox, getClientSettings().founderInboxView)) return;
+    if (!matchesInboxView(thread.source.inbox, effectiveInboxView(getClientSettings()))) return;
     if (
       registry
         .get(environmentThreadShells.hiddenThreadKeysAtom)

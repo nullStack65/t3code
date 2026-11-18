@@ -97,6 +97,12 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
   return inbox.attentionKind;
 }
 
+/** The chosen view, else the chosen founder's, else All so unclassified history stays visible. */
+export const effectiveInboxView = (settings: {
+  readonly founderInboxView?: InboxView | undefined;
+  readonly founderInboxOwner?: Founder | undefined;
+}): InboxView => settings.founderInboxView ?? settings.founderInboxOwner ?? "all";
+
 /** All deliberately includes every thread, including unclassified history. */
 export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: InboxView) {
   if (view === "all") return true;
