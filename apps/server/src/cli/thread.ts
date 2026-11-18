@@ -1,4 +1,6 @@
 import {
+  AuthSessionId,
+  EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -15,6 +17,9 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
+import * as Digest from "effect/crypto/Digest";
+import * as Hex from "effect/encoding/Hex";
+import * as Ref from "effect/Ref";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -28,6 +33,7 @@ import * as Stream from "effect/Stream";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
 import { expandHomePath } from "../os-jank.ts";
@@ -172,6 +178,8 @@ const ProjectListResult = Schema.Struct({
 
 const ThreadLaunchResult = Schema.Struct({
   threadId: ThreadId,
+  /** The linked environment the thread was placed in; absent when it runs on this server. */
+  environmentId: Schema.optional(EnvironmentId),
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
 });
@@ -211,13 +219,139 @@ const makeThreadTools = (session: McpToolSession, origin: string) => {
 };
 export type ThreadTools = ReturnType<typeof makeThreadTools>;
 
+/** The same tools, acting on a thread in the linked environment it was placed in. */
+const toolsIn = (tools: ThreadTools, environmentId: EnvironmentId | undefined): ThreadTools =>
+  environmentId === undefined
+    ? tools
+    : {
+        call: <S extends Schema.Decoder<unknown>>(
+          tool: string,
+          args: Readonly<Record<string, unknown>>,
+          schema: S,
+        ) => tools.call(tool, { ...args, environmentId }, schema),
+      };
+
+/** A `thread start --request-id` whose launch is not yet known: the session it is sent with. */
+const PendingLaunch = Schema.Struct({ sessionId: Schema.String, token: Schema.String });
+const LaunchIntentRecord = Schema.Union([
+  PendingLaunch,
+  Schema.Struct({ launched: ThreadLaunchResult }),
+]);
+const decodeLaunchIntent = Schema.decodeUnknownOption(Schema.fromJsonString(LaunchIntentRecord));
+const encodeLaunchIntent = Schema.encodeSync(Schema.fromJsonString(LaunchIntentRecord));
+
+/** What a durable `thread start` knows before it launches, and how it records the outcome. */
+export interface LaunchIntent {
+  /** The thread an earlier run with this request id already started. */
+  readonly recorded: Option.Option<typeof ThreadLaunchResult.Type>;
+  readonly record: (launched: typeof ThreadLaunchResult.Type) => Effect.Effect<void>;
+}
+
+const intentFailure = (detail: string) =>
+  new ThreadToolFailedError({ tool: "t3_thread_launch", detail });
+
+/**
+ * The server names a launch after the caller's session and key, and each run signs in
+ * afresh, so a request id keeps its launch's session in the server's secret store until
+ * the launch is known. A later run sends the same launch, which the server replays.
+ */
+const openLaunchIntent = Effect.fn("cli.thread.openLaunchIntent")(function* (
+  environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
+  requestId: string,
+) {
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const digest = yield* Digest.Digest.pipe(
+    Effect.flatMap((crypto) => crypto.digest(Digest.sha256, new TextEncoder().encode(requestId))),
+    Effect.orDie,
+  );
+  const name = `cli-thread-start-${Hex.encode(digest)}`;
+  const unreadable = () =>
+    intentFailure(
+      "This request id's earlier start could not be read, so nothing was started. Run it again with the same --request-id.",
+    );
+  const read = secrets.get(name).pipe(
+    Effect.mapError(unreadable),
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.succeedNone,
+        onSome: (bytes) =>
+          Option.match(decodeLaunchIntent(new TextDecoder().decode(bytes)), {
+            onNone: () => Effect.fail(unreadable()),
+            onSome: (record) => Effect.succeedSome(record),
+          }),
+      }),
+    ),
+  );
+  let stored = yield* read;
+  if (Option.isNone(stored)) {
+    const issued = yield* environmentAuth.issueMcpClientSession({
+      label: "t3 thread cli",
+      access: "full-access",
+      peerLink: false,
+      client: { deviceType: "bot" },
+    });
+    const pending = { sessionId: issued.sessionId, token: issued.token };
+    // The first run to store its session owns the request id; any other gives its own up.
+    const created = yield* secrets
+      .create(name, new TextEncoder().encode(encodeLaunchIntent(pending)))
+      .pipe(
+        Effect.as(true),
+        Effect.catchIf(ServerSecretStore.isSecretAlreadyExistsError, () => Effect.succeed(false)),
+        Effect.tapError(() =>
+          environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore({ log: true })),
+        ),
+        Effect.mapError(() =>
+          intentFailure(
+            "This request id could not be recorded, so nothing was started. Run it again with the same --request-id.",
+          ),
+        ),
+      );
+    if (created) stored = Option.some(pending);
+    else {
+      yield* environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore({ log: true }));
+      stored = yield* read;
+    }
+  }
+  if (Option.isNone(stored)) return yield* unreadable();
+  const record = stored.value;
+  const resolved = yield* Ref.make(false);
+  // A launch not yet known keeps its session for the next run; a known one gives it up.
+  if ("sessionId" in record) {
+    yield* Effect.addFinalizer(() =>
+      Ref.get(resolved).pipe(
+        Effect.flatMap((done) =>
+          done
+            ? environmentAuth
+                .revokeSession(AuthSessionId.make(record.sessionId))
+                .pipe(Effect.ignore({ log: true }))
+            : Effect.void,
+        ),
+      ),
+    );
+  }
+  return {
+    pending: "sessionId" in record ? record : undefined,
+    intent: {
+      recorded: "launched" in record ? Option.some(record.launched) : Option.none(),
+      record: (launched) =>
+        secrets.set(name, new TextEncoder().encode(encodeLaunchIntent({ launched }))).pipe(
+          Effect.andThen(Ref.set(resolved, true)),
+          // Unrecorded, the next run with this id sends the launch again and is answered the same.
+          Effect.ignore({ log: true }),
+        ),
+    } satisfies LaunchIntent,
+  };
+});
+
 /**
  * Signs in as a short-lived MCP client of the running server, the same way an
- * outside agent does, and revokes that session when the command ends.
+ * outside agent does, and revokes that session when the command ends. With a
+ * request id, a launch keeps its session until it is known; see `openLaunchIntent`.
  */
 const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
   flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
-  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+  run: (tools: ThreadTools, intent: LaunchIntent | undefined) => Effect.Effect<A, E, R>,
+  requestId?: string,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel, { quietLogs: flags.json });
@@ -229,29 +363,42 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
     }
     const origin = runtimeState.value.origin;
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const issued = yield* Effect.acquireRelease(
-      environmentAuth.issueMcpClientSession({
-        label: "t3 thread cli",
-        // The CLI runs as the machine's owner. New threads still start at
-        // the project's default mode, never at this ceiling by default.
-        access: "full-access",
-        peerLink: false,
-        client: { deviceType: "bot" },
-      }),
-      (session) =>
-        environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
-    );
+    const opened =
+      requestId === undefined ? undefined : yield* openLaunchIntent(environmentAuth, requestId);
+    const token =
+      opened?.pending?.token ??
+      (yield* Effect.acquireRelease(
+        environmentAuth.issueMcpClientSession({
+          label: "t3 thread cli",
+          // The CLI runs as the machine's owner. New threads still start at
+          // the project's default mode, never at this ceiling by default.
+          access: "full-access",
+          peerLink: false,
+          client: { deviceType: "bot" },
+        }),
+        (session) =>
+          environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
+      )).token;
     const session = yield* mcpToolSession({
       endpoint: new URL("/mcp", origin).href,
-      authorization: `Bearer ${issued.token}`,
+      authorization: `Bearer ${token}`,
       clientName: "t3-thread-cli",
-    }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-    return yield* run(makeThreadTools(session, origin));
+    }).pipe(
+      Effect.mapError((cause) =>
+        opened?.pending === undefined
+          ? new ThreadServerUnreachableError({ origin, cause })
+          : // Only that session can find its launch, so a new one is never tried in its place.
+            intentFailure(
+              `Could not reach the T3 Code server at ${origin} with this request id's earlier session: the server may be stopped, or the session expired or was revoked. t3 thread list shows whether that start happened; anything new is a new request.`,
+            ),
+      ),
+    );
+    return yield* run(makeThreadTools(session, origin), opened?.intent);
   }).pipe(
     Effect.scoped,
     Effect.provideService(References.MinimumLogLevel, minimumLogLevel),
     Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
+      Layer.merge(EnvironmentAuth.layerRuntime, ServerSecretStore.layer).pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),
@@ -803,6 +950,18 @@ const threadStartCommand = Command.make("start", {
     Flag.withDescription("Branch name for the new worktree."),
     Flag.optional,
   ),
+  requestId: Flag.String("request-id").pipe(
+    Flag.withDescription(
+      "Your id for this start. Running it again with the same id after a lost answer finds the thread it started instead of starting another.",
+    ),
+    Flag.optional,
+  ),
+  auto: Flag.Boolean("auto").pipe(
+    Flag.withDescription(
+      "Run it here or on a linked environment with spare capacity that has this repository and the exact --provider and --model. Needs --request-id.",
+    ),
+    Flag.withDefault(false),
+  ),
   wait: waitFlag,
   json: jsonFlag,
 }).pipe(
@@ -814,34 +973,47 @@ const threadStartCommand = Command.make("start", {
       if (Option.isSome(flags.provider) !== Option.isSome(flags.model)) {
         return yield* new ThreadUsageError({ detail: "--provider and --model go together." });
       }
+      if (flags.auto && (Option.isNone(flags.provider) || Option.isNone(flags.requestId))) {
+        return yield* new ThreadUsageError({
+          detail: "--auto needs --provider, --model and --request-id.",
+        });
+      }
       const title = yield* decodeTitle(
         Option.getOrElse(flags.title, () => titleFromMessage(message)),
       ).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "The title is empty." })));
+      const requestId = Option.getOrUndefined(flags.requestId);
       yield* withThreadTools(
         flags,
-        Effect.fn("cli.thread.start")(function* (tools) {
+        Effect.fn("cli.thread.start")(function* (tools, intent) {
           const project = yield* resolveProject(tools, flags.project);
-          const launched = yield* tools.call(
-            "t3_thread_launch",
-            {
-              projectId: project.id,
-              title,
-              message,
-              ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-              ...(Option.isSome(flags.provider) && Option.isSome(flags.model)
-                ? {
-                    modelSelection: {
-                      instanceId: flags.provider.value,
-                      model: flags.model.value,
-                    },
-                  }
-                : {}),
-            },
-            ThreadLaunchResult,
-          );
+          const launched =
+            intent !== undefined && Option.isSome(intent.recorded)
+              ? intent.recorded.value
+              : yield* tools.call(
+                  "t3_thread_launch",
+                  {
+                    projectId: project.id,
+                    title,
+                    message,
+                    ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
+                    ...(Option.isSome(flags.provider) && Option.isSome(flags.model)
+                      ? {
+                          modelSelection: {
+                            instanceId: flags.provider.value,
+                            model: flags.model.value,
+                          },
+                        }
+                      : {}),
+                    ...(requestId === undefined ? {} : { clientRequestId: requestId }),
+                    ...(flags.auto ? { placement: "auto" } : {}),
+                  },
+                  ThreadLaunchResult,
+                );
+          if (intent !== undefined) yield* intent.record(launched);
           if (flags.wait && launched.runId !== null) {
             if (!flags.json) yield* Console.error(`Thread ${launched.threadId}`);
-            return yield* finishRun(tools, {
+            // Placed elsewhere, the thread is only found there.
+            return yield* finishRun(toolsIn(tools, launched.environmentId), {
               threadId: launched.threadId,
               runId: launched.runId,
               json: flags.json,
@@ -850,6 +1022,7 @@ const threadStartCommand = Command.make("start", {
           }
           yield* flags.json ? printJson(launched) : Console.log(launched.threadId);
         }),
+        requestId,
       );
     }).pipe(reportThreadErrors),
   ),

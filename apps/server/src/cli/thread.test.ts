@@ -31,18 +31,28 @@ import {
   waitForRun,
 } from "./thread.ts";
 
+// Like the server, every sign-in is a new session; revocations are kept for assertions.
+const auth = vi.hoisted(() => ({ issued: 0, revoked: [] as Array<string> }));
+
 vi.mock("../auth/EnvironmentAuth.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../auth/EnvironmentAuth.ts")>();
   return {
     ...actual,
     layerRuntime: Layer.mock(actual.EnvironmentAuth)({
       issueMcpClientSession: () =>
-        Effect.map(DateTime.now, (expiresAt) => ({
-          sessionId: AuthSessionId.make("test-session"),
-          token: "synthetic-token",
-          expiresAt,
-        })),
-      revokeSession: () => Effect.succeed(true),
+        Effect.map(DateTime.now, (expiresAt) => {
+          auth.issued += 1;
+          return {
+            sessionId: AuthSessionId.make(`test-session-${auth.issued}`),
+            token: `synthetic-token-${auth.issued}`,
+            expiresAt,
+          };
+        }),
+      revokeSession: (sessionId) =>
+        Effect.sync(() => {
+          auth.revoked.push(sessionId);
+          return true;
+        }),
     }),
   };
 });
@@ -125,6 +135,273 @@ it.effect(
           identifier,
         );
       }
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          NetService.layer,
+          ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_PORT: "3773" } })),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "start --request-id finds the thread an earlier run started when its answer was lost",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs
+        .makeTempDirectoryScoped({ prefix: "t3-thread-request-id-" })
+        .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
+      const baseDir = path.join(root, "state");
+      yield* persistServerRuntimeState({
+        path: path.join(baseDir, "userdata", "server-runtime.json"),
+        state: yield* makePersistedServerRuntimeState({
+          config: { host: "127.0.0.1", devUrl: undefined },
+          port: 3_773,
+        }),
+      });
+      // The server names a launch after the caller's session and its key, and replays it.
+      const launches = new Map<string, ThreadId>();
+      let answerLost = true;
+      using _session = vi.spyOn(McpBridge, "mcpToolSession").mockImplementation((options) =>
+        Effect.succeed({
+          call: (tool, args) => {
+            switch (tool) {
+              case "t3_project_list":
+                return Effect.succeed({
+                  structuredContent: {
+                    projects: [
+                      { id: ProjectId.make("project-1"), title: "App", workspaceRoot: root },
+                    ],
+                    nextCursor: null,
+                  },
+                });
+              case "t3_thread_launch": {
+                const key = `${options.authorization} ${String(args.clientRequestId)}`;
+                const launched = launches.get(key) ?? ThreadId.make(`thread-${launches.size + 1}`);
+                launches.set(key, launched);
+                return answerLost
+                  ? Effect.fail(new McpBridge.AcpMcpBridgeError({ message: "connection lost" }))
+                  : Effect.succeed({
+                      structuredContent: {
+                        threadId: launched,
+                        projectId: args.projectId,
+                        runId: null,
+                      },
+                    });
+              }
+              default:
+                return Effect.die(`unexpected ${tool} call`);
+            }
+          },
+        }),
+      );
+      // Each run is a new process: its own sign-in and its own services.
+      const start = Command.runWith(threadCommand, { version: "0.0.0" })([
+        "start",
+        "project-1",
+        "Run the suite",
+        "--request-id",
+        "suite-1",
+        "--json",
+        "--base-dir",
+        baseDir,
+      ]);
+
+      // The server takes the launch, but the answer never reaches this run.
+      const revokedBefore = auth.revoked.length;
+      const keptSession = `test-session-${auth.issued + 1}`;
+      const lost = yield* Effect.exit(start);
+      assert.strictEqual(lost._tag, "Failure");
+      assert.strictEqual(launches.size, 1);
+      const revokedAfterLoss = auth.revoked.slice(revokedBefore);
+
+      // A new run with the same id sends the same launch, which the server answers with that thread.
+      answerLost = false;
+      yield* start;
+      assert.strictEqual(launches.size, 1);
+      // The lost run kept its session for this one instead of revoking it.
+      assert.deepStrictEqual(revokedAfterLoss, []);
+      assert.strictEqual(
+        (yield* TestConsole.logLines).at(-1),
+        JSON.stringify({ threadId: "thread-1", projectId: "project-1", runId: null }),
+      );
+      // Now that the thread is known, the kept session is given up.
+      assert.include(auth.revoked, keptSession);
+
+      // Running it once more prints the same thread without launching anything.
+      yield* start;
+      assert.strictEqual(launches.size, 1);
+      assert.strictEqual(
+        (yield* TestConsole.logLines).at(-1),
+        JSON.stringify({ threadId: "thread-1", projectId: "project-1", runId: null }),
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          NetService.layer,
+          ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_PORT: "3773" } })),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "start --auto --wait follows the thread where it was placed, also from its recorded result",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs
+        .makeTempDirectoryScoped({ prefix: "t3-thread-placed-wait-" })
+        .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
+      const baseDir = path.join(root, "state");
+      yield* persistServerRuntimeState({
+        path: path.join(baseDir, "userdata", "server-runtime.json"),
+        state: yield* makePersistedServerRuntimeState({
+          config: { host: "127.0.0.1", devUrl: undefined },
+          port: 3_773,
+        }),
+      });
+      const there = "environment-box";
+      const at = "2026-11-18T00:00:00.000Z";
+      const detail = {
+        threadId,
+        projectId: "project-1",
+        title: "Run the suite",
+        createdBy: "agent",
+        creationSource: "mcp",
+        status: "idle",
+        latestRunId: runId,
+        activeRunId: null,
+        providerInstanceId: "claude-box",
+        model: "claude-sonnet-4-6",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        linkedPullRequest: null,
+        titleRegeneration: null,
+        branch: null,
+        worktreePath: null,
+        parentThreadId: null,
+        relationshipToParent: null,
+        runCount: 1,
+        itemCount: 1,
+        pendingRequestCount: 0,
+        archived: false,
+        settled: false,
+        settledAt: null,
+        snoozed: false,
+        snoozedUntil: null,
+        createdAt: at,
+        updatedAt: at,
+      };
+      const reply = {
+        position: 0,
+        visibility: "local",
+        sourceThreadId: threadId,
+        itemId: "item-reply",
+        runId,
+        messageId: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+        type: "assistant_message",
+        status: "completed",
+        title: null,
+        text: "Done on the box.",
+        textTruncated: false,
+        updatedAt: at,
+      };
+      let launches = 0;
+      const elsewhere: Array<string> = [];
+      // The thread runs only on the box: a follow-up that does not name it finds nothing here.
+      using _session = vi.spyOn(McpBridge, "mcpToolSession").mockReturnValue(
+        Effect.succeed({
+          call: (tool, args) => {
+            if (tool === "t3_project_list")
+              return Effect.succeed({
+                structuredContent: {
+                  projects: [
+                    { id: ProjectId.make("project-1"), title: "App", workspaceRoot: root },
+                  ],
+                  nextCursor: null,
+                },
+              });
+            if (tool === "t3_thread_launch") {
+              launches += 1;
+              return Effect.succeed({
+                structuredContent: {
+                  threadId,
+                  projectId: "project-1",
+                  runId,
+                  environmentId: there,
+                },
+              });
+            }
+            if (args.environmentId !== there) {
+              elsewhere.push(tool);
+              return Effect.succeed({
+                isError: true,
+                content: [{ type: "text", text: `Thread ${threadId} was not found here.` }],
+              });
+            }
+            if (tool === "t3_thread_wait")
+              return Effect.succeed({
+                structuredContent: { threadId, runId, status: "completed", timedOut: false },
+              });
+            if (tool === "t3_thread_read")
+              return Effect.succeed({
+                structuredContent: {
+                  thread: detail,
+                  recentRuns: [],
+                  items: [reply],
+                  nextPosition: null,
+                  hasMore: false,
+                },
+              });
+            return Effect.die(`unexpected ${tool} call`);
+          },
+        }),
+      );
+      const start = Command.runWith(threadCommand, { version: "0.0.0" })([
+        "start",
+        "project-1",
+        "Run the suite",
+        "--auto",
+        "--provider",
+        "claude-box",
+        "--model",
+        "claude-sonnet-4-6",
+        "--request-id",
+        "placed-1",
+        "--wait",
+        "--json",
+        "--base-dir",
+        baseDir,
+      ]);
+      const result = JSON.stringify({
+        threadId,
+        runId,
+        status: "completed",
+        reply: "Done on the box.",
+        error: null,
+      });
+
+      yield* start;
+      assert.deepStrictEqual(elsewhere, []);
+      assert.strictEqual((yield* TestConsole.logLines).at(-1), result);
+      // A fresh run recovers the recorded result and follows it to the box again.
+      yield* start;
+      assert.deepStrictEqual(elsewhere, []);
+      assert.strictEqual(launches, 1);
+      assert.strictEqual((yield* TestConsole.logLines).at(-1), result);
     }).pipe(
       Effect.scoped,
       Effect.provide(

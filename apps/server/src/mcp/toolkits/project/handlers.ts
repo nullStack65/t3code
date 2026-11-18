@@ -1,10 +1,18 @@
 import {
   CommandId,
+  type EnvironmentId,
+  isProviderAvailable,
   MessageId,
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
+  type ProviderInteractionMode,
+  resolveProjectProviderInstanceEnabled,
+  type RuntimeMode,
 } from "@t3tools/contracts";
+import type * as Tool from "effect/ai/Tool";
+import * as RemoteDelegation from "../../../peer/RemoteDelegation.ts";
+import * as HostResources from "../../../resourceTelemetry/HostResources.ts";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -102,6 +110,122 @@ const launchCommandId = Effect.fn("mcp.launchCommandId")(function* (
   return CommandId.make(`mcp:launch:${Hex.encode(digest)}`);
 });
 
+type LaunchInput = Tool.Parameters<typeof ProjectToolkit.tools.t3_thread_launch>;
+
+/**
+ * Where a launch with a key runs: the environment the key was placed in, whatever
+ * this request asks, or for `placement: "auto"` work needing nothing of this
+ * checkout, the one chosen now and bound before anything starts. The launch there,
+ * or undefined to launch it here.
+ */
+const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
+  scope: McpInvocationContext.McpInvocationScope,
+  input: LaunchInput,
+  local: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+    /** The workspace with the project's defaults applied, as it would start here. */
+    readonly strategy: LaunchInput["workspaceStrategy"];
+    /** The mode it would start with here, project defaults included. */
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+  },
+) {
+  const key = input.clientRequestId;
+  if (key === undefined && input.placement !== "auto") return undefined;
+  // Work a link sent here was placed on its own side, and never uses this side's links.
+  if (scope.client?.linked === true) return undefined;
+  // Without linked environments there is nowhere else it can be or go.
+  const delegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
+  if (Option.isNone(delegation)) return undefined;
+  const sendThere = Effect.fn("mcp.launchPlacedThere.send")(function* (
+    environmentId: EnvironmentId,
+    placedKey: string,
+  ) {
+    const modelSelection = input.modelSelection;
+    if (modelSelection === undefined)
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "This clientRequestId runs in a linked environment it was placed in; pass the same modelSelection to reach it there.",
+      });
+    const {
+      environmentId: _here,
+      projectId: _project,
+      placement: _placement,
+      delegatedFrom: _delegatedFrom,
+      workspaceStrategy: _requested,
+      ...params
+    } = input;
+    const launched = yield* delegation.value.launch(scope, {
+      environmentId,
+      key: placedKey,
+      threadId: local.threadId,
+      projectId: local.projectId,
+      // The workspace and modes it was admitted with go explicitly, so nothing there changes them.
+      params: {
+        ...params,
+        modelSelection,
+        ...(local.strategy === undefined ? {} : { workspaceStrategy: local.strategy }),
+        runtimeMode: local.runtimeMode,
+        interactionMode: local.interactionMode,
+      },
+    });
+    return { ...launched, environmentId };
+  });
+  if (key !== undefined) {
+    const bound = yield* delegation.value.placed(scope, { operation: "thread-launch", key });
+    if (Option.isSome(bound))
+      return bound.value === scope.environmentId ? undefined : yield* sendThere(bound.value, key);
+  }
+  if (input.placement !== "auto") return undefined;
+  const strategy = local.strategy;
+  if (
+    (input.attachments?.length ?? 0) > 0 ||
+    input.scratch === true ||
+    strategy?.type === "existing_worktree" ||
+    (strategy?.type === "worktree" && strategy.startFromOrigin !== true)
+  )
+    return undefined;
+  const modelSelection = input.modelSelection;
+  if (key === undefined || modelSelection === undefined)
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message:
+        'With placement "auto", pass clientRequestId and modelSelection: a retry must reach the environment chosen, with the exact model.',
+    });
+  const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.flatMap((service) => service.getSettings),
+    Effect.mapError(unavailable),
+  );
+  const provider = providers.find(
+    (candidate) => candidate.instanceId === modelSelection.instanceId,
+  );
+  const hostResources = yield* Effect.serviceOption(HostResources.HostResources);
+  const environmentId = yield* delegation.value.place(scope, {
+    operation: "thread-launch",
+    key,
+    threadId: local.threadId,
+    projectId: local.projectId,
+    modelSelection,
+    runtimeMode: local.runtimeMode,
+    here: {
+      resources: Option.isSome(hostResources) ? yield* hostResources.value.read : null,
+      modelAvailable:
+        provider !== undefined &&
+        provider.enabled &&
+        isProviderAvailable(provider) &&
+        resolveProjectProviderInstanceEnabled(settings, local.projectId, provider.instanceId) &&
+        provider.models.some((model) => model.slug === modelSelection.model) &&
+        (provider.supportedRuntimeModes === undefined ||
+          provider.supportedRuntimeModes.length === 0 ||
+          provider.supportedRuntimeModes.includes(local.runtimeMode)),
+    },
+  });
+  return environmentId === scope.environmentId ? undefined : yield* sendThere(environmentId, key);
+});
+
 const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
@@ -179,15 +303,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 }),
               ),
             );
-        if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
-          yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
-        if (!replaying && input.modelSelection !== undefined) {
-          const { instanceId, model } = input.modelSelection;
-          const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
-          const provider = providers.find((candidate) => candidate.instanceId === instanceId);
-          if (provider !== undefined)
-            yield* OrchestrationMcp.requireAdvertisedModel(provider, model);
-        }
         const projectSettings =
           project === undefined
             ? undefined
@@ -209,6 +324,37 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 startFromOrigin: projectSettings.newWorktreesStartFromOrigin,
               }
             : input.workspaceStrategy;
+        // A caller outside a thread has nothing to inherit, so it starts with the
+        // project's effective defaults, as the composer does. Its mode stays
+        // within the ceiling it was approved with.
+        const projectDefaults = caller === undefined ? projectSettings : undefined;
+        const defaultRuntimeMode =
+          projectDefaults !== undefined && input.runtimeMode === undefined
+            ? yield* resolveRuntimeMode(runtimeMode, projectDefaults.defaultRuntimeMode).pipe(
+                Effect.orElseSucceed(() => runtimeMode),
+              )
+            : runtimeMode;
+        // A launch already made here replays here. Any other is placed, or reaches the
+        // environment its key was placed in, before anything only this checkout checks.
+        if (!replaying) {
+          const placedThere = yield* launchPlacedThere(scope, input, {
+            projectId,
+            threadId,
+            strategy,
+            runtimeMode: defaultRuntimeMode,
+            interactionMode,
+          });
+          if (placedThere !== undefined) return placedThere;
+        }
+        if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
+          yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
+        if (!replaying && input.modelSelection !== undefined) {
+          const { instanceId, model } = input.modelSelection;
+          const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+          const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+          if (provider !== undefined)
+            yield* OrchestrationMcp.requireAdvertisedModel(provider, model);
+        }
         // Reject unresolved base refs and blocked branch names before accepting a launch; worktree provisioning happens later.
         if (!replaying && strategy?.type === "worktree")
           yield* ThreadLaunch.ThreadLaunchService.pipe(
@@ -223,10 +369,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 }),
             ),
           );
-        // A caller outside a thread has nothing to inherit, so it starts with the
-        // project's effective defaults, as the composer does. Its mode stays
-        // within the ceiling it was approved with.
-        const projectDefaults = caller === undefined ? projectSettings : undefined;
         const modelSelection =
           input.modelSelection ??
           launchedModel ??
@@ -250,12 +392,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
-        let startedRuntimeMode =
-          projectDefaults !== undefined && input.runtimeMode === undefined
-            ? yield* resolveRuntimeMode(runtimeMode, projectDefaults.defaultRuntimeMode).pipe(
-                Effect.orElseSucceed(() => runtimeMode),
-              )
-            : runtimeMode;
+        let startedRuntimeMode = defaultRuntimeMode;
         if (!replaying) {
           const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
           startedRuntimeMode = yield* resolveRuntimeMode(startedRuntimeMode, input.runtimeMode, {

@@ -443,8 +443,17 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
     const here = handlers[name] as (
       params: object,
     ) => Effect.Effect<unknown, Tool.Failure<Tools[keyof Tools]>>;
-    handlers[name] = ({ environmentId, ...params }: { readonly environmentId?: EnvironmentId }) =>
+    handlers[name] = ({
+      environmentId,
+      ...requested
+    }: {
+      readonly environmentId?: EnvironmentId;
+      readonly placement?: unknown;
+    }) =>
       Effect.gen(function* () {
+        // A named environment wins over automatic placement, here and there alike.
+        const { placement: _placement, ...pinned } = requested;
+        const params = environmentId === undefined ? requested : pinned;
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const target = PeerForwarding.remoteTarget(scope, environmentId);
         if (target === undefined) return yield* here(params);

@@ -15,6 +15,7 @@ import {
   Project,
   ProjectCreatePayload,
   ProjectUpdatePayload,
+  EnvironmentId,
   ProjectId,
   OrchestratorMcpClientRequestId,
   OrchestratorMcpEnvironmentTarget,
@@ -158,12 +159,20 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+    placement: Schema.optional(
+      Schema.Literals(["auto"]).annotate({
+        description:
+          "'auto', without `environmentId`: here or on a linked environment with spare capacity, this repository's project and your exact `modelSelection`; there, in that project's checkout. Needs `modelSelection` and `clientRequestId`; a retry keeps the environment chosen. Attachments, scratch and worktrees not started from origin stay here.",
+      }),
+    ),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
+    /** The linked environment placement chose; its tools take it to reach the thread. */
+    environmentId: Schema.optional(EnvironmentId),
     projectId: ProjectId,
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),

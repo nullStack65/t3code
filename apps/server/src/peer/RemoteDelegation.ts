@@ -19,6 +19,7 @@ import {
   type ProjectId,
   type ProviderInstanceId,
   ProviderDriverKind,
+  type HostResourcesSnapshot,
   type RunId,
   type RuntimeMode,
   type ThreadId,
@@ -111,17 +112,52 @@ export class RemoteDelegation extends Context.Service<
      * answers, bound before anything starts. A retry never chooses again.
      */
     readonly place: (
-      scope: ThreadScope,
+      scope: McpInvocationContext.McpInvocationScope,
       input: {
+        /** What is placed: one caller's key binds one environment per operation. */
+        readonly operation: "delegate-task" | "thread-launch";
         readonly key: string;
+        /** The thread the binding is recorded against. */
+        readonly threadId: ThreadId;
         readonly projectId: ProjectId;
         readonly modelSelection: Pick<ModelSelection, "instanceId" | "model">;
-        /** The parent's effective mode or a narrower one asked for, sent explicitly. */
+        /** The effective mode, sent explicitly wherever the work runs. */
         readonly runtimeMode: RuntimeMode;
-        /** This environment's own `orchestrator_capabilities`, searched for the model. */
-        readonly here: OrchestratorMcpCapabilitiesResult;
+        /** This environment's own load, and whether it runs the exact model in that mode. */
+        readonly here: {
+          readonly resources: HostResourcesSnapshot | null;
+          readonly modelAvailable: boolean;
+        };
       },
     ) => Effect.Effect<EnvironmentId, OrchestratorMcpFailure>;
+    /** The environment a caller's key was placed in, if it was. */
+    readonly placed: (
+      scope: McpInvocationContext.McpInvocationScope,
+      input: { readonly operation: "delegate-task" | "thread-launch"; readonly key: string },
+    ) => Effect.Effect<Option.Option<EnvironmentId>, OrchestratorMcpFailure>;
+    /**
+     * A top-level `t3_thread_launch` there, sent only under the link session its
+     * key was first bound to: a retry after linking again never starts a second
+     * thread there, and refuses instead of guessing which one is its.
+     */
+    readonly launch: (
+      scope: McpInvocationContext.McpInvocationScope,
+      input: {
+        readonly environmentId: EnvironmentId;
+        readonly key: string;
+        /** The thread the bindings are recorded against. */
+        readonly threadId: ThreadId;
+        /** The project here; it runs in the project there with the same repository. */
+        readonly projectId: ProjectId;
+        readonly params: Omit<
+          Tool.Parameters<typeof ProjectToolkit.tools.t3_thread_launch>,
+          "projectId"
+        >;
+      },
+    ) => Effect.Effect<
+      Tool.Success<typeof ProjectToolkit.tools.t3_thread_launch>,
+      OrchestratorMcpFailure
+    >;
     /**
      * A `t3_thread_send` there that started or queued a run on the thread of
      * one of this thread's tasks that has its result: like a follow-up to a
@@ -164,7 +200,7 @@ export class RemoteDelegation extends Context.Service<
 >()("t3/peer/RemoteDelegation") {}
 
 /** The exact instance and model there can run a child task, in the mode asked for. */
-const runsModel = (
+export const runsModel = (
   capabilities: OrchestratorMcpCapabilitiesResult,
   requested: {
     readonly modelSelection: Pick<ModelSelection, "instanceId" | "model">;
@@ -221,7 +257,7 @@ const make = Effect.gen(function* () {
 
   /** The peer's project with this thread's repository, or the one the caller named. */
   const resolveRemoteProject = Effect.fn("RemoteDelegation.resolveRemoteProject")(function* (
-    scope: ThreadScope,
+    scope: McpInvocationContext.McpInvocationScope,
     environmentId: EnvironmentId,
     parentProjectId: ProjectId,
     requested: ProjectId | undefined,
@@ -308,7 +344,7 @@ const make = Effect.gen(function* () {
   /** A linked environment as a placement candidate, from what it answered just now. */
   const peerCandidate = Effect.fn("RemoteDelegation.peerCandidate")(
     function* (
-      scope: ThreadScope,
+      scope: McpInvocationContext.McpInvocationScope,
       link: PeerLinkSummary,
       input: Parameters<RemoteDelegation["Service"]["place"]>[1],
     ) {
@@ -353,21 +389,32 @@ const make = Effect.gen(function* () {
       ),
   );
 
+  const placementBinding = (
+    scope: McpInvocationContext.McpInvocationScope,
+    input: { readonly operation: string; readonly key: string },
+  ) =>
+    CommandId.make(
+      `command:mcp:${encodeURIComponent(scope.requestNamespace)}:placement:${input.operation}:${encodeURIComponent(input.key)}`,
+    );
+  const bindingFailure = () =>
+    new OrchestratorMcpFailure({
+      code: "orchestration_error",
+      message:
+        "Unable to record where this task runs, so nothing was started. Retry with the same clientRequestId.",
+    });
+
+  const placed: RemoteDelegation["Service"]["placed"] = (scope, input) =>
+    threads
+      .intentOf(placementBinding(scope, input))
+      .pipe(Effect.map(Option.map(EnvironmentId.make)), Effect.mapError(bindingFailure));
+
   const place: RemoteDelegation["Service"]["place"] = Effect.fn("RemoteDelegation.place")(
     function* (scope, input) {
-      const bindingId = CommandId.make(
-        `command:mcp:${encodeURIComponent(scope.requestNamespace)}:placement:delegate-task:${encodeURIComponent(input.key)}`,
-      );
-      const bindingFailure = () =>
-        new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message:
-            "Unable to record where this task runs, so nothing was started. Retry with the same clientRequestId.",
-        });
+      const bindingId = placementBinding(scope, input);
       // A bound intent keeps its environment, even one that has since filled up or
       // stopped answering: its first attempt may have started the task there.
-      const bound = yield* threads.intentOf(bindingId).pipe(Effect.mapError(bindingFailure));
-      if (Option.isSome(bound)) return EnvironmentId.make(bound.value);
+      const bound = yield* placed(scope, input);
+      if (Option.isSome(bound)) return bound.value;
 
       const linked = (yield* links.enabled)
         ? yield* links.list.pipe(Effect.orElseSucceed(() => []))
@@ -389,12 +436,12 @@ const make = Effect.gen(function* () {
         [
           {
             environmentId: hereId,
-            resources: input.here.hostResources ?? null,
+            resources: input.here.resources,
             receivedAt: now,
             weight: 1,
             operable: true,
             projectAvailable: true,
-            modelAvailable: runsModel(input.here, input),
+            modelAvailable: input.here.modelAvailable,
           },
           ...peers.flatMap((peer) => (Option.isSome(peer) ? [peer.value] : [])),
         ],
@@ -407,16 +454,122 @@ const make = Effect.gen(function* () {
       if (!decision.accepted) {
         return yield* new OrchestratorMcpFailure({
           code: "target_required",
-          message: `No environment can take this task now (${decision.reason}): none answered with spare capacity, this repository's project and ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Pass target.environmentId, or omit placement to run it here.`,
+          message: `No environment can take this task now (${decision.reason}): none answered with spare capacity, this repository's project and ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Name an environment, or omit placement to run it here.`,
         });
       }
       return yield* threads
         .bindIntent({
           commandId: bindingId,
-          threadId: scope.thread.threadId,
+          threadId: input.threadId,
           value: decision.environmentId,
         })
         .pipe(Effect.map(EnvironmentId.make), Effect.mapError(bindingFailure));
+    },
+  );
+
+  /**
+   * The other side names the thread from its link session and the key. The first launch's
+   * session and answered thread are bound here, and it is sent only under that session; a
+   * key bound under another one is never sent again, so a re-link never starts a second.
+   */
+  const launchThere = Effect.fn("RemoteDelegation.launchThere")(function* (
+    scope: McpInvocationContext.McpInvocationScope,
+    input: {
+      readonly environmentId: EnvironmentId;
+      readonly label: string;
+      readonly launchId: CommandId;
+      readonly childId: CommandId;
+      readonly threadId: ThreadId;
+      readonly params: Tool.Parameters<typeof ProjectToolkit.tools.t3_thread_launch>;
+    },
+  ) {
+    const { label } = input;
+    const linkSession = yield* links.session(input.environmentId).pipe(
+      Effect.map(Option.getOrUndefined),
+      Effect.mapError(
+        () =>
+          new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: `Unable to read the link to ${label}, so nothing was started. Retry with the same clientRequestId.`,
+          }),
+      ),
+    );
+    // A launch is only sent bound to the link session it goes out under; with no link
+    // there is none, and one appearing before the send must not carry it unbound.
+    if (linkSession === undefined) {
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `This environment is not linked to ${label}, so nothing was started. t3_environment_links lists the linked ones.`,
+      });
+    }
+    const session = `${input.environmentId}@${linkSession}`;
+    const launchedUnder = yield* threads
+      .bindIntent({ commandId: input.launchId, threadId: input.threadId, value: session })
+      .pipe(
+        Effect.mapError(
+          () =>
+            new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message:
+                "Unable to record the launch there, so nothing was started. Retry with the same clientRequestId.",
+            }),
+        ),
+      );
+    if (launchedUnder !== session) {
+      const childThreadId = yield* threads.intentOf(input.childId).pipe(
+        Effect.map(Option.getOrUndefined),
+        Effect.orElseSucceed(() => undefined),
+      );
+      return { _tag: "bound-elsewhere" as const, childThreadId };
+    }
+    const launched = yield* forwarding.call(
+      scope,
+      ProjectToolkit.tools.t3_thread_launch,
+      input.environmentId,
+      input.params,
+      // Sent only under the session bound above, never one linked since.
+      { expectedIncarnation: linkSession },
+    );
+    // Losing this only makes a retry after linking again refuse instead of finding the thread.
+    yield* threads
+      .bindIntent({ commandId: input.childId, threadId: input.threadId, value: launched.threadId })
+      .pipe(Effect.ignoreCause({ log: true }));
+    return { _tag: "launched" as const, launched };
+  });
+
+  const launch: RemoteDelegation["Service"]["launch"] = Effect.fn("RemoteDelegation.launch")(
+    function* (scope, input) {
+      const keyed = (operation: string) =>
+        CommandId.make(
+          `command:mcp:${encodeURIComponent(scope.requestNamespace)}:${operation}:${encodeURIComponent(input.key)}`,
+        );
+      const label = yield* links.get(input.environmentId).pipe(
+        Effect.map((link) => (Option.isSome(link) ? link.value.label : input.environmentId)),
+        Effect.orElseSucceed(() => input.environmentId),
+      );
+      const projectId = yield* resolveRemoteProject(
+        scope,
+        input.environmentId,
+        input.projectId,
+        undefined,
+      );
+      const sent = yield* launchThere(scope, {
+        environmentId: input.environmentId,
+        label,
+        launchId: keyed("thread-launch-there"),
+        childId: keyed("thread-launch-child"),
+        threadId: input.threadId,
+        params: { ...input.params, projectId },
+      });
+      if (sent._tag === "launched") return sent.launched;
+      return yield* new OrchestratorMcpFailure({
+        code: "orchestration_error",
+        message: `${label} was linked again after an earlier attempt with this clientRequestId launched the thread there, and the new link cannot find it. Nothing new was started. ${
+          sent.childThreadId === undefined
+            ? "t3_thread_list with this environmentId finds it."
+            : `Its thread there is ${sent.childThreadId}.`
+        } This clientRequestId stays bound to the earlier link. Check that thread there before deciding the work still needs doing.`,
+      });
     },
   );
 
@@ -510,50 +663,32 @@ const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => undefined),
       );
       const label = link?.label ?? target.environmentId;
-      // The other side names the thread from its link session and the key, so a
-      // retry after linking again would start a second one. The session that took
-      // the first launch and the thread it answered with are kept here.
-      const childId = keyed("remote-child");
-      const linkSession = yield* links.session(target.environmentId).pipe(
-        Effect.map(Option.getOrUndefined),
-        Effect.mapError(
-          () =>
-            new OrchestratorMcpFailure({
-              code: "orchestration_error",
-              message: `Unable to read the link to ${label}, so nothing was started. Retry with the same clientRequestId.`,
-            }),
-        ),
-      );
-      // A launch is only sent bound to the link session it goes out under; with no link
-      // there is none, and one appearing before the send must not carry it unbound.
-      if (linkSession === undefined) {
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message: `This environment is not linked to ${label}, so nothing was started. t3_environment_links lists the linked ones.`,
-        });
-      }
-      const session = `${target.environmentId}@${linkSession}`;
-      const launchedUnder = yield* threads
-        .bindIntent({
-          commandId: keyed("remote-launch"),
-          threadId: parent.thread.id,
-          value: session,
-        })
-        .pipe(
-          Effect.mapError(
-            () =>
-              new OrchestratorMcpFailure({
-                code: "orchestration_error",
-                message:
-                  "Unable to record the launch there, so nothing was started. Retry with the same clientRequestId.",
-              }),
-          ),
-        );
-      if (launchedUnder !== session) {
-        const childThere = yield* threads.intentOf(childId).pipe(
-          Effect.map(Option.getOrUndefined),
-          Effect.orElseSucceed(() => undefined),
-        );
+      const task = taskPrompt(input);
+      const title = input.title ?? parent.thread.title;
+      const sent = yield* launchThere(scope, {
+        environmentId: target.environmentId,
+        label,
+        launchId: keyed("remote-launch"),
+        childId: keyed("remote-child"),
+        threadId: parent.thread.id,
+        params: {
+          projectId,
+          title,
+          modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
+          ...(runtimeMode === undefined ? {} : { runtimeMode }),
+          ...(interactionMode === undefined ? {} : { interactionMode }),
+          message: task,
+          clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
+          // The thread there shows it is this thread's subagent, with a way back.
+          delegatedFrom: {
+            environmentId: hereId,
+            threadId: parent.thread.id,
+            title: parent.thread.title,
+          },
+        },
+      });
+      if (sent._tag === "bound-elsewhere") {
+        const childThere = sent.childThreadId;
         const recordedTask =
           childThere === undefined
             ? undefined
@@ -577,34 +712,7 @@ const make = Effect.gen(function* () {
           } This clientRequestId stays bound to the earlier link. Check that thread there before deciding the work still needs doing.`,
         });
       }
-      const task = taskPrompt(input);
-      const title = input.title ?? parent.thread.title;
-      const launched = yield* forwarding.call(
-        scope,
-        ProjectToolkit.tools.t3_thread_launch,
-        target.environmentId,
-        {
-          projectId,
-          title,
-          modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
-          ...(runtimeMode === undefined ? {} : { runtimeMode }),
-          ...(interactionMode === undefined ? {} : { interactionMode }),
-          message: task,
-          clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
-          // The thread there shows it is this thread's subagent, with a way back.
-          delegatedFrom: {
-            environmentId: hereId,
-            threadId: parent.thread.id,
-            title: parent.thread.title,
-          },
-        },
-        // Sent only under the session bound above, never one linked since.
-        { expectedIncarnation: linkSession },
-      );
-      // Losing this only makes a retry after linking again refuse instead of finding the task.
-      yield* threads
-        .bindIntent({ commandId: childId, threadId: parent.thread.id, value: launched.threadId })
-        .pipe(Effect.ignoreCause({ log: true }));
+      const launched = sent.launched;
       const remoteChild: OrchestrationV2RemoteTaskChild = {
         environmentId: target.environmentId,
         threadId: launched.threadId,
@@ -1268,7 +1376,16 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, place, followUp, cancel, runStatus, start });
+  return RemoteDelegation.of({
+    delegate,
+    place,
+    placed,
+    launch,
+    followUp,
+    cancel,
+    runStatus,
+    start,
+  });
 });
 
 /** A defect, logged, as a failure, so a retry covers it. */
