@@ -158,6 +158,8 @@ jobs:
             apps/web/src/components/chat/composerImagePersistence.test.ts \
             apps/web/src/components/chat/draftPlacement.test.ts \
             apps/web/src/components/chat/draftAttachmentUploads.test.ts \
+            apps/web/src/components/chat/draftUploadReconcile.test.ts \
+            apps/web/src/lib/attachmentUploadQueue.test.ts \
             apps/server/src/ws.test.ts
 
       - name: Build native T3 server

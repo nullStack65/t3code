@@ -30,6 +30,7 @@ import { assetEnvironment } from "../state/assets";
 import { attachmentEnvironment } from "../state/attachments";
 import { readEnvironmentScope, readPreparedConnection } from "../state/session";
 import type { AttachmentUploadState, ReadyAttachmentUpload } from "./attachmentUploadState";
+import { admittedLaunchOf, qualifyDraftUpload } from "./draftUploadQualification";
 
 const MAX_UPLOADS_PER_ENVIRONMENT = 3;
 const UPLOAD_TIMEOUT_MS = 5 * 60_000;
@@ -48,6 +49,8 @@ interface UploadJob {
   /** Original owner; completion resolves the current owner because uploads can outlive draft moves. */
   readonly draftTarget?: ComposerThreadTarget;
   readonly previous?: ReadyAttachmentUpload;
+  /** The admitted launch that owned this upload when queued; retries keep it, never drop to ordinary. */
+  readonly admittedCommandId?: string;
   /** Draft-owned; delete only through releasePersistedAttachmentUpload, never queue cancel/retry. */
   readonly persistedAttachmentId?: string;
   readonly settled: Promise<void>;
@@ -174,6 +177,21 @@ async function runUpload(job: UploadJob): Promise<void> {
       ...(job.previous ? { previous: job.previous } : {}),
     });
     return;
+  }
+  // Every attempt, first or retried on reconnect, is confirmed by an admitted draft's origin first.
+  const admittedCommandId = job.admittedCommandId ?? admittedLaunchOf(job);
+  if (admittedCommandId !== undefined) {
+    const qualification = await qualifyDraftUpload({ ...job, admittedCommandId });
+    if (job.cancelled) return;
+    if (!qualification.ok) {
+      setUploadState(job.image.id, {
+        status: "failed",
+        environmentId: job.environmentId,
+        reason: qualification.reason,
+        ...(job.previous ? { previous: job.previous } : {}),
+      });
+      return;
+    }
   }
   if (job.persistedAttachmentId) {
     const verification = await verifyPersistedAttachmentUpload({
@@ -397,6 +415,8 @@ export function startAttachmentUpload(input: {
   readonly image: ComposerImageAttachment | ComposerFileAttachment;
   readonly draftTarget?: ComposerThreadTarget;
   readonly force?: boolean;
+  /** Carried by a retry from the job it replaces. */
+  readonly admittedCommandId?: string;
 }): void {
   if (!readEnvironmentScope(input.environmentId, AuthOrchestrationOperateScope)) return;
   const existingJob = jobsByImageId.get(input.image.id);
@@ -437,6 +457,7 @@ export function startAttachmentUpload(input: {
     cancelAttachmentUpload(input.image.id);
   }
   const previous = existing?.status === "ready" ? existing : existing?.previous;
+  const admittedCommandId = input.admittedCommandId ?? admittedLaunchOf(input);
   let resolveSettled: () => void = () => {};
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
@@ -446,6 +467,7 @@ export function startAttachmentUpload(input: {
     environmentId: input.environmentId,
     ...(input.draftTarget !== undefined ? { draftTarget: input.draftTarget } : {}),
     ...(previous ? { previous } : {}),
+    ...(admittedCommandId !== undefined ? { admittedCommandId } : {}),
     ...(!input.force &&
     input.image.type === "file" &&
     input.image.uploadEnvironmentId === input.environmentId &&
@@ -560,6 +582,7 @@ export function retryAttachmentUpload(input: {
 }): void {
   if (!readEnvironmentScope(input.environmentId, AuthOrchestrationOperateScope)) return;
   const previous = readAttachmentUpload(input.image.id);
+  const admittedCommandId = jobsByImageId.get(input.image.id)?.admittedCommandId;
   cancelAttachmentUpload(input.image.id);
   if (previous?.status === "failed" && previous.attachmentId) {
     deletePendingUpload(previous.environmentId, previous.attachmentId);
@@ -569,7 +592,7 @@ export function retryAttachmentUpload(input: {
   } else {
     clearUploadState(input.image.id);
   }
-  startAttachmentUpload(input);
+  startAttachmentUpload(admittedCommandId !== undefined ? { ...input, admittedCommandId } : input);
 }
 
 /** Verifies uploads before stash restore; pending uploads expire after 24 hours. */
@@ -616,6 +639,22 @@ export async function refreshExpiredAttachmentUploads(input: {
             reason: "Uploaded attachment could not be verified. Attach the file again.",
           });
         }
+        return;
+      }
+      // Checking a stored upload there is a target effect too: its draft's origin confirms first.
+      const admittedCommandId = admittedLaunchOf(input);
+      const qualification =
+        admittedCommandId !== undefined
+          ? await qualifyDraftUpload({ ...input, image, admittedCommandId })
+          : ({ ok: true } as const);
+      if (readAttachmentUpload(image.id) !== upload) return;
+      if (!qualification.ok) {
+        setUploadState(image.id, {
+          status: "failed",
+          environmentId: input.environmentId,
+          previous: upload,
+          reason: qualification.reason,
+        });
         return;
       }
       const verification = await verifyStashedAttachmentUpload({

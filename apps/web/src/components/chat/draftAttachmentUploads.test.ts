@@ -11,7 +11,30 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { createMemoryStorage } from "../../lib/storage";
 
 // The network edges of an upload: the session may operate, and each upload cycle is recorded.
-const uploads = vi.hoisted(() => ({ to: [] as Array<{ environmentId: string; name: string }> }));
+const uploads = vi.hoisted(() => ({
+  to: [] as Array<{ environmentId: string; name: string }>,
+  /** Origin admissions asked by the queue and upload cycles, in the order they happened. */
+  sequence: [] as Array<string>,
+}));
+// The origin's own record of the launches it bound, which its admission handler answers again.
+const originServer = vi.hoisted(() => ({
+  bound: [] as Array<{
+    environmentId: string;
+    commandId: string;
+    threadId: string;
+    projectId: string;
+    destination: string;
+    destinationProjectId: string;
+  }>,
+  /** The queue's own admission requests, as the origin received them. */
+  queueAsked: [] as Array<{
+    environmentId: string;
+    commandId: string;
+    threadId: string;
+    projectId: string;
+    candidateEnvironmentIds: ReadonlyArray<string>;
+  }>,
+}));
 vi.mock("../../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/session")>()),
   readEnvironmentScope: () => true,
@@ -23,9 +46,96 @@ vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => (
     readonly upload: { readonly name: string };
   }) => {
     uploads.to.push({ environmentId: input.environmentId, name: input.upload.name });
+    uploads.sequence.push(`upload:${input.environmentId}`);
     return { status: "uploaded" as const, attachmentId: `upload-${uploads.to.length}` };
   },
 }));
+// Both machines connected, on their first established session, as the queue's checks read them.
+vi.mock("../../connection/catalog", async () => {
+  const { AsyncResult: Result, Atom: A } = await import("effect/reactivity");
+  const family = (initial: () => unknown) => {
+    const atoms = new Map<string, unknown>();
+    return (environmentId: string) => {
+      if (!atoms.has(environmentId)) atoms.set(environmentId, A.make(initial()));
+      return atoms.get(environmentId);
+    };
+  };
+  return {
+    environmentCatalog: {
+      stateAtom: family(() => Result.success({ phase: "connected" })),
+      sessionGenerationAtom: family(() => 1),
+    },
+  };
+});
+// The queue asks the origin itself, over its admission RPC: answered from what the origin bound.
+vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@t3tools/client-runtime/state/runtime")>();
+  const { AsyncResult: Result } = await import("effect/reactivity");
+  const CauseModule = await import("effect/Cause");
+  return {
+    ...real,
+    runAtomCommand: async (registry: never, command: never, target: never) => {
+      const { environmentId, input } = target as {
+        environmentId: string;
+        input?: {
+          commandId: string;
+          threadId: string;
+          projectId: string;
+          candidateEnvironmentIds?: ReadonlyArray<string>;
+        };
+      };
+      if (input?.candidateEnvironmentIds === undefined)
+        return real.runAtomCommand(registry, command, target);
+      const asked = {
+        environmentId,
+        commandId: input.commandId,
+        threadId: input.threadId,
+        projectId: input.projectId,
+        candidateEnvironmentIds: [...input.candidateEnvironmentIds],
+      };
+      originServer.queueAsked.push(asked);
+      uploads.sequence.push(`admit:${environmentId}`);
+      const bound = originServer.bound.find(
+        (launch) =>
+          launch.environmentId === asked.environmentId &&
+          launch.commandId === asked.commandId &&
+          launch.threadId === asked.threadId &&
+          launch.projectId === asked.projectId,
+      );
+      if (
+        !bound ||
+        asked.candidateEnvironmentIds.length !== 1 ||
+        asked.candidateEnvironmentIds[0] !== bound.destination
+      )
+        return Result.failure(CauseModule.die("not bound at this origin"));
+      return Result.success({
+        environmentId: bound.destination,
+        projectId: bound.destinationProjectId,
+        reason: "capacity",
+        resumed: true,
+      });
+    },
+  };
+});
+
+/** The origin records the launch it just bound, as its admission handler does. */
+function boundAtOrigin(
+  target: {
+    environmentId: string;
+    input: { commandId: string; threadId: string; projectId: string };
+  },
+  destination: EnvironmentId,
+  destinationProjectId: ProjectId,
+) {
+  originServer.bound.push({
+    environmentId: target.environmentId,
+    commandId: target.input.commandId,
+    threadId: target.input.threadId,
+    projectId: target.input.projectId,
+    destination,
+    destinationProjectId,
+  });
+}
 
 const origin = EnvironmentId.make("environment-laptop");
 const box = EnvironmentId.make("environment-box");
@@ -66,6 +176,9 @@ async function withStorage(run: () => Promise<void>) {
   vi.useFakeTimers();
   vi.resetModules();
   uploads.to.length = 0;
+  uploads.sequence.length = 0;
+  originServer.bound.length = 0;
+  originServer.queueAsked.length = 0;
   try {
     await run();
   } finally {
@@ -110,6 +223,11 @@ async function uploadEffect(tab: Tab, draftId: string) {
     }),
     start: tab.queue.startAttachmentUpload,
   });
+  await vi.advanceTimersByTimeAsync(0);
+  // Until the queue's own jobs for these attachments have finished, asked and uploaded or refused.
+  await tab.queue.awaitAttachmentUploads(
+    [...composer.images, ...composer.files].map((attachment) => attachment.id),
+  );
   await vi.advanceTimersByTimeAsync(0);
   return started;
 }
@@ -210,12 +328,12 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
       const reloaded = await openTab();
       expect(await uploadEffect(reloaded, id)).toBe(0);
       const asked: Array<string> = [];
-      const placed = await place(reloaded, id, (async ({
-        input,
-      }: {
-        input: { commandId: string };
+      const placed = await place(reloaded, id, (async (target: {
+        environmentId: string;
+        input: { commandId: string; threadId: string; projectId: string };
       }) => {
-        asked.push(input.commandId);
+        asked.push(target.input.commandId);
+        boundAtOrigin(target, box, projectThere);
         return AsyncResult.success({
           environmentId: box,
           projectId: projectThere,
@@ -233,9 +351,22 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
         environmentSelection: "auto",
         loadBalancedEnvironmentId: box,
       });
+      expect(originServer.queueAsked).toEqual([]);
       // The image uploads, to B; the file lost its bytes in the reload and needs attaching again.
       expect(await uploadEffect(reloaded, id)).toBe(1);
       expect(uploads.to).toEqual([{ environmentId: box, name: "shot.png" }]);
+      // Only after the queue asked the recorded origin again, for the same command and binding.
+      expect(reserved.admittedOn).toBe(origin);
+      expect(originServer.queueAsked).toEqual([
+        {
+          environmentId: origin,
+          commandId: reserved.commandId,
+          threadId: reloaded.store.useComposerDraftStore.getState().getDraftSession(id)!.threadId,
+          projectId: reserved.admittedProjectId,
+          candidateEnvironmentIds: [box],
+        },
+      ]);
+      expect(uploads.sequence).toEqual([`admit:${origin}`, `upload:${box}`]);
       // And the launch there goes out as the operation reserved before the reload.
       expect(
         reloaded.placement.heldLaunchFor({
@@ -294,13 +425,15 @@ describe("PR74-R1-F4: automatic work's uploads wait for its origin", () => {
     await withStorage(async () => {
       const tab = await openTab();
       const id = await composeAutoDraft(tab, "rebound");
-      const bindTo = (async () =>
-        AsyncResult.success({
+      const bindTo = (async (target: Parameters<typeof boundAtOrigin>[0]) => {
+        boundAtOrigin(target, box, projectThere);
+        return AsyncResult.success({
           environmentId: box,
           projectId: projectThere,
           reason: "capacity" as const,
           resumed: false,
-        })) as never;
+        });
+      }) as never;
       expect((await place(tab, id, bindTo)).type).toBe("placed");
       // The routing hook moves it to B; the renderer dies before the upload or the launch.
       tab.store.useComposerDraftStore.getState().setDraftThreadContext(id, {
@@ -312,6 +445,7 @@ describe("PR74-R1-F4: automatic work's uploads wait for its origin", () => {
       vi.clearAllTimers();
       vi.resetModules();
       uploads.to.length = 0;
+      uploads.sequence.length = 0;
       const reloaded = await openTab();
       const session = () => reloaded.store.useComposerDraftStore.getState().getDraftSession(id)!;
       expect(session().environmentId).toBe(box);
@@ -346,8 +480,9 @@ describe("PR74-R1-F4: automatic work's uploads wait for its origin", () => {
       expect(uploads.to).toEqual([]);
       // Its origin answers with the same binding for the same command: it uploads, only to B.
       const asked: Array<string> = [];
-      const resumed = (async ({ input }: { input: { commandId: string } }) => {
-        asked.push(input.commandId);
+      const resumed = (async (target: Parameters<typeof boundAtOrigin>[0]) => {
+        asked.push(target.input.commandId);
+        boundAtOrigin(target, box, projectThere);
         return AsyncResult.success({
           environmentId: box,
           projectId: projectThere,
@@ -361,8 +496,21 @@ describe("PR74-R1-F4: automatic work's uploads wait for its origin", () => {
         projectId: projectThere,
       });
       expect(asked).toEqual([reserved.commandId]);
+      expect(originServer.queueAsked).toEqual([]);
       expect(await uploadEffect(reloaded, id)).toBe(1);
       expect(uploads.to).toEqual([{ environmentId: box, name: "shot.png" }]);
+      // Only after the queue asked the recorded origin again, for the same command and binding.
+      expect(reserved.admittedOn).toBe(origin);
+      expect(originServer.queueAsked).toEqual([
+        {
+          environmentId: origin,
+          commandId: reserved.commandId,
+          threadId: session().threadId,
+          projectId: reserved.admittedProjectId,
+          candidateEnvironmentIds: [box],
+        },
+      ]);
+      expect(uploads.sequence).toEqual([`admit:${origin}`, `upload:${box}`]);
       expect(session().placementOperation).toEqual(reserved);
     });
   });
