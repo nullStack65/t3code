@@ -19,6 +19,8 @@ const harness = vi.hoisted(() => ({
   params: undefined as undefined | Record<string, unknown>,
   setParams: vi.fn(),
   detailReads: [] as Array<string>,
+  /** Calls into the sole speculative detail preloader, which mounts a thread's detail early. */
+  preloads: [] as Array<string>,
   queue: null as unknown as Atom.Writable<Record<string, ReadonlyArray<unknown>>>,
 }));
 vi.mock("@react-navigation/native", () => ({
@@ -35,6 +37,9 @@ vi.mock("../../state/threads", async () => {
     useEnvironmentThread: (environmentId: string | null, threadId: string | null) => {
       if (environmentId !== null) harness.detailReads.push(`${environmentId}:${threadId}`);
       return { data: Option.none() };
+    },
+    startOpeningEnvironmentThread: (environmentId: string, threadId: string) => {
+      harness.preloads.push(`${environmentId}:${threadId}`);
     },
   };
 });
@@ -63,6 +68,8 @@ import { buildPendingNewTasks } from "../../state/pending-new-tasks-model";
 import { pendingThreadCreationOutcomesAtom } from "../../state/pending-thread-creation";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { useFollowPendingRoute, useThreadSelection } from "../../state/use-thread-selection";
+import { threadSelectionDeferral } from "../layout/deferred-navigation";
+import { startOpeningDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 
 const laptop = EnvironmentId.make("laptop");
@@ -96,8 +103,25 @@ const keyed = (...messages: QueuedThreadMessage[]) =>
     messages.map((message) => [`${message.environmentId}:${message.threadId}`, [message]]),
   );
 
+type ThreadRoute = Record<string, unknown>;
+const recordRoute = (params: ThreadRoute) => {
+  harness.params = params;
+};
+/**
+ * The workspace layout's thread selection, in its own order: inside the real selection gate, the
+ * real shared preload boundary runs before navigation, which here records the route's params.
+ */
+const selectThroughWorkspace = (params: ThreadRoute) =>
+  threadSelectionDeferral.run(() => {
+    startOpeningDetail({ name: "Thread", params } as never);
+    recordRoute(params);
+  });
+
 /** Opens the task as the Home list does: the real list model and the real handler. */
-function openFromHome(message: QueuedThreadMessage) {
+function openFromHome(
+  message: QueuedThreadMessage,
+  select: (params: ThreadRoute) => void = recordRoute,
+) {
   const [pending] = buildPendingNewTasks({
     queuedMessages: [message],
     drafts: {},
@@ -111,9 +135,7 @@ function openFromHome(message: QueuedThreadMessage) {
   if (pending?.kind !== "pending") throw new Error("Home lists no pending task for this message");
   let open!: ReturnType<typeof usePendingTaskListActions>["openPendingTask"];
   function Handler() {
-    const actions = usePendingTaskListActions((params) => {
-      harness.params = params as Record<string, unknown>;
-    });
+    const actions = usePendingTaskListActions((params) => select(params as ThreadRoute));
     useLayoutEffect(() => {
       open = actions.openPendingTask;
     });
@@ -159,6 +181,7 @@ function reset() {
   harness.params = undefined;
   harness.setParams.mockReset();
   harness.detailReads.length = 0;
+  harness.preloads.length = 0;
   appAtomRegistry.set(harness.queue, {});
   appAtomRegistry.set(pendingThreadCreationOutcomesAtom, {});
 }
@@ -255,5 +278,81 @@ describe("PR75-R1-F1: a placed task reopened from Home", () => {
     appAtomRegistry.set(harness.queue, keyed(fixed));
     openFromHome(fixed);
     expect(harness.params).toEqual({ environmentId: "laptop", threadId: "thread-auto" });
+  });
+
+  it("never preloads the origin when a held selection is bound elsewhere before it runs", async () => {
+    reset();
+    const queued = task();
+    appAtomRegistry.set(harness.queue, keyed(queued));
+    // A branch checkout holds thread selection; the task is chosen from Home meanwhile.
+    const checkout = Promise.withResolvers<void>();
+    threadSelectionDeferral.waitFor(checkout.promise);
+    openFromHome(queued, selectThroughWorkspace);
+    expect(harness.params).toBeUndefined();
+    // Still held, its origin binds it to B: the same message, queued and undelivered there.
+    const bound = task({
+      environmentId: box,
+      placement: {
+        ...queued.placement!,
+        bound: { environmentId: box, projectId: ProjectId.make("project-b") },
+      },
+    });
+    appAtomRegistry.set(harness.queue, keyed(bound));
+    checkout.resolve();
+    await checkout.promise;
+    await Promise.resolve();
+    // Navigation goes ahead with its message id; nothing was preloaded, on A or on B.
+    expect(harness.params).toEqual({
+      environmentId: "laptop",
+      threadId: "thread-auto",
+      pendingMessageId: "message-auto",
+    });
+    expect(harness.preloads).toEqual([]);
+    // The repaired readers take it from there: B, behind its pending-creation barrier.
+    using readers = renderReaders();
+    expect(readers.seen.selection?.selectedThreadRef).toEqual({
+      environmentId: "box",
+      threadId: "thread-auto",
+    });
+    expect(harness.detailReads).toEqual([]);
+    harness.params = { ...harness.params, environmentId: "box" };
+    readers.render();
+    act(() => {
+      appAtomRegistry.set(harness.queue, {});
+      appAtomRegistry.set(pendingThreadCreationOutcomesAtom, {
+        "box:thread-auto": { kind: "delivered", message: bound },
+      });
+    });
+    act(() => appAtomRegistry.set(pendingThreadCreationOutcomesAtom, {}));
+    expect(readers.seen.selection?.selectedThreadRef).toEqual({
+      environmentId: "box",
+      threadId: "thread-auto",
+    });
+    expect(harness.detailReads.filter((read) => read.startsWith("laptop:"))).toEqual([]);
+    expect(harness.detailReads).toContain("box:thread-auto");
+    expect(harness.preloads).toEqual([]);
+  });
+
+  it("still preloads a held route that names no pending task", async () => {
+    reset();
+    const { placement: _placement, ...fixed } = task();
+    appAtomRegistry.set(harness.queue, keyed(fixed));
+    const checkout = Promise.withResolvers<void>();
+    threadSelectionDeferral.waitFor(checkout.promise);
+    openFromHome(fixed, selectThroughWorkspace);
+    selectThroughWorkspace({ environmentId: "box", threadId: "thread-existing" });
+    checkout.resolve();
+    await checkout.promise;
+    await Promise.resolve();
+    // The gate runs only the latest selection, preloaded as before, then navigated.
+    expect(harness.preloads).toEqual(["box:thread-existing"]);
+    expect(harness.params).toEqual({ environmentId: "box", threadId: "thread-existing" });
+    const plain = Promise.withResolvers<void>();
+    threadSelectionDeferral.waitFor(plain.promise);
+    openFromHome(fixed, selectThroughWorkspace);
+    plain.resolve();
+    await plain.promise;
+    await Promise.resolve();
+    expect(harness.preloads).toEqual(["box:thread-existing", "laptop:thread-auto"]);
   });
 });
