@@ -151,6 +151,29 @@ describe("chooseThreadPlacement", () => {
     }
   });
 
+  it("keeps work on the person's own machine when nothing else has room", () => {
+    const desk = host("here", 0.3, {
+      resources: {
+        ...host("here", 0.3).resources!,
+        placementRole: "interactive",
+        humanActive: true,
+      },
+    });
+    expect(chooseThreadPlacement(origin, [desk, host("r720", 0.97)], now)).toEqual({
+      accepted: true,
+      environmentId: "here",
+      reason: "capacity",
+    });
+    // A headless machine with room still wins, and a full origin is not kept.
+    expect(chooseThreadPlacement(origin, [desk, host("r720", 0.5)], now)).toMatchObject({
+      environmentId: "r720",
+    });
+    expect(chooseThreadPlacement(origin, [host("here", 0.97), host("r720", 0.97)], now)).toEqual({
+      accepted: false,
+      reason: "no-eligible-environment",
+    });
+  });
+
   it("refuses evidence that names one environment twice", () => {
     expect(chooseThreadPlacement(origin, [host("a", 0.1), host("a", 0.2)], now)).toEqual({
       accepted: false,

@@ -164,7 +164,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     placement: Schema.optional(
       Schema.Literals(["auto", "here"]).annotate({
         description:
-          "'auto', without `environmentId`: here or on a linked environment with spare capacity, this repository's project and your exact `modelSelection`; there, in that project's checkout. Needs `modelSelection` and `clientRequestId`; a retry keeps the environment chosen. Attachments, scratch and worktrees not started from origin stay here. Omitted: a worktree started from origin is placed the same way, with your model, when this machine places by default. 'here' keeps it here.",
+          "'auto', without `environmentId`: here or on a linked environment with spare capacity, this repository's project and your exact `modelSelection`; there, in that project's checkout. Needs `modelSelection` and `clientRequestId`; a retry keeps the environment chosen. Attachments, scratch and worktrees not started from origin stay here. Omitted with a `clientRequestId`: a worktree started from origin is placed the same way, with your model, when this machine places by default. 'here' keeps it here.",
       }),
     ),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */

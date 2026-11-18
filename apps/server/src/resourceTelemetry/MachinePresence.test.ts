@@ -18,6 +18,8 @@ const linux = (input: {
   readonly display: string;
   readonly session?: string;
   readonly calls?: Array<string>;
+  /** logind refusing `show-user`, with this stderr. */
+  readonly userError?: string;
 }) =>
   MachinePresenceLive.layer.pipe(
     Layer.provide(
@@ -29,10 +31,11 @@ const linux = (input: {
             run: ({ args }) =>
               Effect.sync(() => {
                 input.calls?.push(args[0] ?? "");
+                const refused = args[0] === "show-user" && input.userError !== undefined;
                 return {
                   stdout: args[0] === "show-user" ? input.display : (input.session ?? ""),
-                  stderr: "",
-                  code: ChildProcessSpawner.ExitCode(0),
+                  stderr: refused ? (input.userError ?? "") : "",
+                  code: ChildProcessSpawner.ExitCode(refused ? 1 : 0),
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
@@ -67,6 +70,21 @@ describe("MachinePresence", () => {
         );
         assert.deepStrictEqual(shown, { placementRole: "headless" });
       }
+    }),
+  );
+
+  it.effect("counts a machine logind cannot describe as someone's, in use", () =>
+    Effect.gen(function* () {
+      const unknown = yield* read.pipe(
+        Effect.provide(linux({ role: "auto", display: "", userError: "Failed to connect to bus" })),
+      );
+      assert.deepStrictEqual(unknown, { placementRole: "interactive", humanActive: true });
+      const loggedOut = yield* read.pipe(
+        Effect.provide(
+          linux({ role: "auto", display: "", userError: "User 1000 is not logged in." }),
+        ),
+      );
+      assert.deepStrictEqual(loggedOut, { placementRole: "headless" });
     }),
   );
 

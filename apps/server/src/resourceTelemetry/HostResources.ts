@@ -100,8 +100,9 @@ const make = Effect.fn("makeHostResources")(function* () {
       cgroupPath === undefined ? undefined : /^(.*\/user@\d+\.service)\//.exec(cgroupPath)?.[1];
     if (manager === undefined) return undefined;
     const root = `/sys/fs/cgroup${manager}/${AGENTS_SLICE_PATH}`;
+    // No agents slice means agent scopes are off here, so neither the count nor caps exist.
     const slices = yield* fs.readDirectory(root).pipe(Effect.orElseSucceed(() => null));
-    if (slices === null) return 0;
+    if (slices === null) return undefined;
     let running = 0;
     for (const slice of slices.filter((name) => name.endsWith(".slice"))) {
       const scopes = yield* fs

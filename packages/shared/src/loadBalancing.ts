@@ -15,7 +15,8 @@ function headroom(resources: HostResourcesSnapshot, tier: keyof typeof LIMITS): 
   const limits = LIMITS[tier];
   const { cpuUtilization, cpuCount, totalMemoryBytes, availableMemoryBytes } = resources;
   if (cpuUtilization === null || totalMemoryBytes <= 0 || cpuCount <= 0) return null;
-  // An older server sends no load or agent count; only a headless one is trusted without them.
+  // A headless machine that cannot report load (Windows) or agents (no systemd) is judged
+  // without them; someone's computer never is.
   const loadPerCpu = resources.loadPerCpu ?? (tier === "headless" ? 0 : null);
   const agents = resources.runningAgents ?? (tier === "headless" ? 0 : null);
   if (loadPerCpu === null || agents === null) return null;
@@ -36,7 +37,12 @@ function headroom(resources: HostResourcesSnapshot, tier: keyof typeof LIMITS): 
 /**
  * Callers supply only connected machines hosting the project and selected provider. Headless
  * machines take work first; an interactive machine is chosen only when no headless one has room,
- * its person is not using it, and it stays well clear of its limits.
+ * its person is not using it, and it stays well clear of its limits. A machine that does not
+ * report its role, such as one on an older release, counts as someone's computer in use.
+ *
+ * `originEnvironmentId` is where the work starts. When nothing has room it keeps the work if it
+ * has room by headless limits, as before placement could pick: work started on someone's
+ * computer is theirs to run there.
  */
 export function chooseLoadBalancedEnvironment(
   candidates: ReadonlyArray<{
@@ -47,11 +53,13 @@ export function chooseLoadBalancedEnvironment(
     weight: number;
   }>,
   now: number,
+  originEnvironmentId?: string,
 ): string | null {
   const best = {
     headless: { id: null as string | null, score: 0 },
     interactive: { id: null as string | null, score: 0 },
   };
+  let origin: string | null = null;
   for (const { environmentId, resources, receivedAt, weight } of candidates) {
     const sampledAt = receivedAt ?? resources?.sampledAt ?? 0;
     if (
@@ -63,6 +71,8 @@ export function chooseLoadBalancedEnvironment(
     ) {
       continue;
     }
+    if (environmentId === originEnvironmentId && headroom(resources, "headless") !== null)
+      origin = environmentId;
     // A machine that does not say is someone's until it says otherwise, and in use if unsure.
     const tier = resources.placementRole === "headless" ? "headless" : "interactive";
     if (tier === "interactive" && resources.humanActive !== false) continue;
@@ -71,5 +81,5 @@ export function chooseLoadBalancedEnvironment(
     const score = weight * room;
     if (score > best[tier].score) best[tier] = { id: environmentId, score };
   }
-  return best.headless.id ?? best.interactive.id;
+  return best.headless.id ?? best.interactive.id ?? origin;
 }

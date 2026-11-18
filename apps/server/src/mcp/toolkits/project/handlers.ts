@@ -134,9 +134,11 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
   },
 ) {
   // A fresh worktree from origin needs nothing of this checkout, so the fleet places it
-  // by default; anything else, or an explicit 'here', stays unless it asks.
+  // by default; anything else, or an explicit 'here', stays unless it asks. Only with the
+  // caller's key: a retry after a lost answer must reach the machine first chosen.
   const byDefault =
     input.placement === undefined &&
+    input.clientRequestId !== undefined &&
     input.environmentId === undefined &&
     local.strategy?.type === "worktree" &&
     local.strategy.startFromOrigin === true &&
@@ -151,7 +153,6 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
     input = {
       ...input,
       placement: "auto",
-      clientRequestId: input.clientRequestId ?? local.threadId,
       modelSelection: input.modelSelection ?? local.callerModelSelection,
     };
   }

@@ -11,9 +11,6 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { MachinePresence } from "./HostResources.ts";
 
-/** A person who has not touched a Mac's keyboard or pointer for this long is away. */
-const DARWIN_IDLE_NANOS = 10 * 60 * 1e9;
-
 function parseKeyValues(text: string): Map<string, string> {
   const values = new Map<string, string>();
   for (const line of text.split("\n")) {
@@ -40,11 +37,14 @@ export function isLocalGraphicalSession(shown: string): boolean {
   return (type === "x11" || type === "wayland" || type === "mir") && values.get("Remote") !== "yes";
 }
 
-/** HIDIdleTime from `ioreg -c IOHIDSystem`; undefined when it cannot be read. */
-export function darwinIdleNanos(output: string): number | undefined {
-  const value = /"HIDIdleTime"\s*=\s*(\d+)/.exec(output)?.[1];
-  return value === undefined ? undefined : Number(value);
-}
+/**
+ * What logind says about this user's local graphical login: none, one (with its state), or
+ * unknown when logind could not be asked. Unknown never means nobody is there.
+ */
+type GraphicalLogin =
+  | { readonly kind: "none" }
+  | { readonly kind: "session"; readonly shown: string }
+  | { readonly kind: "unknown" };
 
 export const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
@@ -52,72 +52,57 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const { mode } = yield* ServerConfig.ServerConfig;
 
-  const run = (command: string, args: ReadonlyArray<string>) =>
-    runner.run({ command, args, timeout: "2 seconds" }).pipe(
-      Effect.map((result) => (result.code === 0 ? result.stdout : undefined)),
-      Effect.orElseSucceed(() => undefined),
-    );
+  const run = (args: ReadonlyArray<string>) =>
+    runner.run({ command: "loginctl", args, timeout: "2 seconds" }).pipe(Effect.option);
 
-  // The logind state of this user's local graphical login, or undefined when there is none.
   // Display can name a remote or text session, such as an SSH login, which nobody sits at.
-  const graphicalSession = Effect.gen(function* () {
+  const graphicalLogin: Effect.Effect<GraphicalLogin> = Effect.gen(function* () {
     const uid = NodeProcess.getuid?.();
-    if (uid === undefined) return undefined;
-    const display = (yield* run("loginctl", [
-      "show-user",
-      String(uid),
-      "-p",
-      "Display",
-      "--value",
-    ]))?.trim();
-    if (display === undefined || display.length === 0) return undefined;
-    const shown = yield* run("loginctl", [
+    if (uid === undefined) return { kind: "unknown" } as const;
+    const user = yield* run(["show-user", String(uid), "-p", "Display", "--value"]);
+    if (user._tag === "None") return { kind: "unknown" } as const;
+    if (user.value.code !== 0)
+      // Without a session or lingering manager logind knows no such user: nobody is logged in.
+      return /not logged in/i.test(user.value.stderr)
+        ? ({ kind: "none" } as const)
+        : ({ kind: "unknown" } as const);
+    const display = user.value.stdout.trim();
+    if (display.length === 0) return { kind: "none" } as const;
+    const session = yield* run([
       "show-session",
       display,
       ...["Type", "Remote", "Active", "LockedHint", "IdleHint"].flatMap((key) => ["-p", key]),
     ]);
-    // A session logind names but cannot describe is treated as someone's.
-    if (shown === undefined) return "";
-    return isLocalGraphicalSession(shown) ? shown : undefined;
-  });
-
-  const resolveRole = Effect.fn("MachinePresence.resolveRole")(function* (
-    setting: MachinePlacementRole,
-  ) {
-    if (setting !== "auto") return setting;
-    if (mode === "desktop" || platform !== "linux") return "interactive" as const;
-    return (yield* graphicalSession) === undefined
-      ? ("headless" as const)
-      : ("interactive" as const);
-  });
-
-  const humanActive = Effect.gen(function* () {
-    if (platform === "darwin") {
-      const idle = darwinIdleNanos(
-        (yield* run("/usr/sbin/ioreg", ["-c", "IOHIDSystem", "-d", "4", "-k", "HIDIdleTime"])) ??
-          "",
-      );
-      return idle === undefined || idle < DARWIN_IDLE_NANOS;
-    }
-    if (platform !== "linux") return true;
-    const session = yield* graphicalSession;
-    return session !== undefined && linuxSessionInUse(session);
+    if (session._tag === "None" || session.value.code !== 0) return { kind: "unknown" } as const;
+    return isLocalGraphicalSession(session.value.stdout)
+      ? ({ kind: "session", shown: session.value.stdout } as const)
+      : ({ kind: "none" } as const);
   });
 
   const role = Effect.gen(function* () {
     const settings = yield* settingsService.getSettings.pipe(Effect.option);
-    return yield* resolveRole(
-      settings._tag === "Some" ? settings.value.machinePlacementRole : "auto",
-    );
+    const setting: MachinePlacementRole =
+      settings._tag === "Some" ? settings.value.machinePlacementRole : "auto";
+    if (setting !== "auto") return setting;
+    if (mode === "desktop" || platform !== "linux") return "interactive" as const;
+    return (yield* graphicalLogin).kind === "none"
+      ? ("headless" as const)
+      : ("interactive" as const);
   });
 
   return MachinePresence.of({
     role,
     read: Effect.gen(function* () {
       const placementRole = yield* role;
-      return placementRole === "headless"
-        ? { placementRole }
-        : { placementRole, humanActive: yield* humanActive };
+      if (placementRole === "headless") return { placementRole };
+      // Only Linux can tell, and only Linux caps agents there; elsewhere assume someone is.
+      if (platform !== "linux") return { placementRole, humanActive: true };
+      const login = yield* graphicalLogin;
+      return {
+        placementRole,
+        humanActive:
+          login.kind === "unknown" || (login.kind === "session" && linuxSessionInUse(login.shown)),
+      };
     }),
   });
 });

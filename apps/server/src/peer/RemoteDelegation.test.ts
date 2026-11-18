@@ -1658,17 +1658,27 @@ it.effect("a fresh worktree from origin is placed without asking, unless kept he
       });
       yield* linkTo(a.links, b, "full-access");
       const fresh = { type: "worktree", baseRef: "main", startFromOrigin: true };
-      const placed = yield* launchUnplaced(a, { workspaceStrategy: fresh });
+      // Without a key nothing could find the machine again after a lost answer: it stays here.
+      yield* launchUnplaced(a, { workspaceStrategy: fresh });
+      expect(yield* Ref.get(localLaunches)).toBe(1);
+      const placed = yield* launchUnplaced(a, {
+        clientRequestId: "fresh",
+        workspaceStrategy: fresh,
+      });
       expect(placed.isError, JSON.stringify(placed.content)).toBe(false);
       expect(placed.structuredContent).toMatchObject({ environmentId: box.environmentId });
-      expect(yield* Ref.get(localLaunches)).toBe(0);
+      expect(yield* Ref.get(localLaunches)).toBe(1);
 
       // 'here', or the fleet default turned off, keeps it on this machine.
-      yield* launchPlaced(a, { placement: "here", workspaceStrategy: fresh });
-      expect(yield* Ref.get(localLaunches)).toBe(1);
-      yield* a.settings.updateSettings({ automaticPlacementByDefault: false });
-      yield* launchUnplaced(a, { workspaceStrategy: fresh });
+      yield* launchPlaced(a, {
+        placement: "here",
+        clientRequestId: "kept",
+        workspaceStrategy: fresh,
+      });
       expect(yield* Ref.get(localLaunches)).toBe(2);
+      yield* a.settings.updateSettings({ automaticPlacementByDefault: false });
+      yield* launchUnplaced(a, { clientRequestId: "off", workspaceStrategy: fresh });
+      expect(yield* Ref.get(localLaunches)).toBe(3);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
@@ -1689,7 +1699,7 @@ it.effect("placement nobody asked for runs here when no machine has room", () =>
       });
       yield* linkTo(a.links, b, "full-access");
       const fresh = { type: "worktree", baseRef: "main", startFromOrigin: true };
-      yield* launchUnplaced(a, { workspaceStrategy: fresh });
+      yield* launchUnplaced(a, { clientRequestId: "room", workspaceStrategy: fresh });
       expect(yield* Ref.get(localLaunches)).toBe(1);
       expect(yield* Ref.get(thread.launched)).toBeNull();
       // Asked for, it still fails loudly instead.
