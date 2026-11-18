@@ -15,10 +15,10 @@ BUNDLE_ID="com.t3tools.t3code"
 APP_NAME="T3 Code (Beta)"
 # Linux reference build of the same app source; upstream's official 0.1.10 Linux and macOS
 # apps carry byte-identical bundled server and web trees.
-REFERENCE_COMMIT="26e726e21ec8ef926dda2cdf12ecc2fe177d2e62"
-REFERENCE_SERVER_TREE="966504d0251100b1fe5b54b0d05499e86455cac6c7b79228ea60b860d405f94c"
-REFERENCE_SERVER_BIN="b68a6c924866292f51ffabfa21ac4f53fc6e711a7d81fc14dca25bc476b80b9a"
-REFERENCE_WEB_TREE="264d54225a9eb4dd5772bb23b231d4a32e2ac3d92ad500ae023b1b44b93dd6ac"
+REFERENCE_COMMIT="09531d17b2e11ba84defa47b326b149321e573af"
+REFERENCE_SERVER_TREE="b7e326c1a66c308ff47db2cb27d8bd4fa7822dc19fd0fa9cc425c9ede02d7f74"
+REFERENCE_SERVER_BIN="a3e0ee70898c631ee73f827c8cedaf3e2a0e14bb75160710b5a9527e4ca7791f"
+REFERENCE_WEB_TREE="9f66fd68570234545f25336a2cf280d1ef584d64ae5b1a29794f595b3fb3f73e"
 
 work="" out="" version="" target="zip" preflight_only=0
 while [ $# -gt 0 ]; do
