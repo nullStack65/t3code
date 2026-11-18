@@ -84,6 +84,9 @@ describe("shared fleet organizational inbox", () => {
       inboxRouting: { assignee: { kind: "human", id: "jeff" } },
     });
     expect(visibleIn(explicit)).toEqual(["jeff", "agents"]);
+    const quieter = launched({ inbox: "kameron", inboxRouting: { attentionKind: "FYI" } });
+    expect(visibleIn(quieter)).toEqual(["kameron", "agents"]);
+    expect(quieter.attentionKind).toBe("FYI");
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });

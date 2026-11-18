@@ -53,17 +53,20 @@ export function inboxRoutingFor(inbox: InboxChoice): ThreadInboxRouting {
 }
 
 /**
- * Where an agent-launched top-level thread is filed. Explicit routing wins, then the
- * chosen inbox; otherwise Agents, so agent work never lands in a founder's inbox by default.
+ * Where an agent-launched top-level thread is filed: the chosen inbox, else Agents, so agent
+ * work never lands in a founder's inbox by default. `inboxRouting` adjusts the chosen inbox.
  */
 export const agentLaunchInboxRouting = (input: {
   readonly inbox?: InboxChoice | undefined;
   readonly inboxRouting?: ThreadInboxRoutingPatch | undefined;
-}): ThreadInboxRoutingPatch => input.inboxRouting ?? inboxRoutingFor(input.inbox ?? "agents");
+}): ThreadInboxRoutingPatch =>
+  input.inbox === undefined
+    ? (input.inboxRouting ?? inboxRoutingFor("agents"))
+    : { ...inboxRoutingFor(input.inbox), ...input.inboxRouting };
 
 export const InboxChoiceParameter = InboxChoice.annotate({
   description:
-    "Sidebar inbox for the new thread. Default 'agents'. Pick 'kameron' or 'jeff' only when that founder asked for it or must act on it; 'shared' for both. `inboxRouting` overrides it.",
+    "Sidebar inbox for the new thread. Default 'agents'. Pick 'kameron' or 'jeff' only when that founder asked for it or must act on it (your thread's `inbox.owner` in t3_thread_read); 'shared' for both. `inboxRouting` adjusts fields of the chosen inbox.",
 });
 export const compositeThreadKey = (environmentId: string, threadId: string) =>
   JSON.stringify([environmentId, threadId]);
