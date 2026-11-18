@@ -1,5 +1,5 @@
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
-import { Founder, InboxView } from "./threadInbox.ts";
+import { Founder, InboxChoice } from "./threadInbox.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthAccessWriteScope,
@@ -406,7 +406,8 @@ export type VoiceTranscriptionDestination = typeof VoiceTranscriptionDestination
 export const ClientSettingsSchema = Schema.Struct({
   // Absent until chosen; whole-snapshot saves must not record a default as a choice.
   founderInboxOwner: Schema.optionalKey(Founder),
-  founderInboxView: Schema.optionalKey(InboxView),
+  founderInboxFilter: Schema.optionalKey(Schema.Array(InboxChoice)),
+  sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
@@ -2054,7 +2055,8 @@ export function requiredScopesForProjectMutation(
 
 export const ClientSettingsPatch = Schema.Struct({
   founderInboxOwner: Schema.optionalKey(Founder),
-  founderInboxView: Schema.optionalKey(InboxView),
+  founderInboxFilter: Schema.optionalKey(Schema.Array(InboxChoice)),
+  sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),

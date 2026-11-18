@@ -821,6 +821,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["new worktrees start remote origin latest fetched branch local"],
   },
   {
+    id: "new-thread-inbox",
+    title: "New threads belong to",
+    to: "/settings/threads",
+    searchTerms: ["inbox owner founder kameron jeff attribute filed"],
+  },
+  {
     id: "add-project-starts-in",
     title: "Add project starts in",
     to: "/settings/threads",

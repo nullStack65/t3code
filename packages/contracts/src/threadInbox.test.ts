@@ -6,7 +6,8 @@ import {
   makeThreadInbox,
   routeThreadInbox,
   matchesInboxView,
-  effectiveInboxView,
+  matchesInboxFilter,
+  effectiveInboxFilter,
   inboxOriginFor,
   founderInboxLane,
   compositeThreadKey,
@@ -14,6 +15,8 @@ import {
   agentLaunchInboxError,
   agentInboxRoutingError,
   projectThreadInbox,
+  inboxRoutingFor,
+  primaryInbox,
   type ThreadInboxRoutingPatch,
 } from "./threadInbox.ts";
 const kameron = { kind: "human", id: "kameron" } as const;
@@ -34,27 +37,59 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxView(j, "all")).toBe(true);
     expect(matchesInboxView(k, "all")).toBe(true);
   });
-  it("keeps All until a founder is chosen, then defaults to that founder's view", () => {
+  it("keeps All until a founder is chosen, then defaults to that founder plus Agents", () => {
     const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
     const encode = Schema.encodeSync(ClientSettingsSchema);
-    const upgraded = decode({ notificationMode: "off" });
+    // Settings saved by the single-choice selector still decode; that choice is not carried over.
+    const upgraded = decode({ notificationMode: "off", founderInboxView: "all" });
     // Any later settings write saves the whole snapshot; it must not record an unmade choice.
     const resaved = encode(decode(encode(upgraded)));
-    expect(["founderInboxView", "founderInboxOwner"].filter((key) => key in resaved)).toEqual([]);
-    expect(effectiveInboxView(upgraded)).toBe("all");
-    expect(matchesInboxView(undefined, effectiveInboxView(upgraded))).toBe(true);
+    expect(
+      ["founderInboxView", "founderInboxFilter", "founderInboxOwner"].filter(
+        (key) => key in resaved,
+      ),
+    ).toEqual([]);
+    expect(matchesInboxFilter(undefined, effectiveInboxFilter(upgraded))).toBe(true);
     const jeffClient = decode(encode({ ...upgraded, founderInboxOwner: "jeff" }));
-    const view = effectiveInboxView(jeffClient);
-    expect(view).toBe("jeff");
-    expect(matchesInboxView(makeThreadInbox({ actor: jeff }), view)).toBe(true);
-    expect(matchesInboxView(makeThreadInbox({ actor: kameron }), view)).toBe(false);
-    expect(matchesInboxView(makeThreadInbox({ actor: bot }), view)).toBe(false);
-    expect(matchesInboxView(makeThreadInbox({ actor: bot }), "agents")).toBe(true);
-    expect(matchesInboxView(undefined, "all")).toBe(true);
-    for (const picked of ["jeff", "kameron", "shared", "agents", "all"] as const) {
-      const saved = decode(encode({ ...jeffClient, founderInboxView: picked }));
-      expect([effectiveInboxView(saved), saved.founderInboxOwner]).toEqual([picked, "jeff"]);
-    }
+    const filter = effectiveInboxFilter(jeffClient);
+    expect(filter).toEqual(["jeff", "agents"]);
+    expect(matchesInboxFilter(makeThreadInbox({ actor: jeff }), filter)).toBe(true);
+    expect(matchesInboxFilter(makeThreadInbox({ actor: bot }), filter)).toBe(true);
+    expect(matchesInboxFilter(makeThreadInbox({ actor: kameron }), filter)).toBe(false);
+    expect(matchesInboxFilter(undefined, filter)).toBe(false);
+    const picked = decode(encode({ ...jeffClient, founderInboxFilter: ["kameron", "shared"] }));
+    expect([effectiveInboxFilter(picked), picked.founderInboxOwner]).toEqual([
+      ["kameron", "shared"],
+      "jeff",
+    ]);
+    // Agent work filed to another founder or Shared stays out of "Kameron + Agents".
+    const mineAndAgents = ["kameron", "agents"] as const;
+    // An agent files work to a founder only with a reason; without one it stays in Agents.
+    const filedToJeff = makeThreadInbox({
+      actor: bot,
+      routing: { ...inboxRoutingFor("jeff"), reason: "decision" },
+    });
+    const unreasoned = makeThreadInbox({ actor: bot, routing: inboxRoutingFor("jeff") });
+    expect(primaryInbox(unreasoned)).toBe("agents");
+    const sharedByKameron = makeThreadInbox({ actor: kameron, routing: { audience: "shared" } });
+    expect(matchesInboxFilter(filedToJeff, mineAndAgents)).toBe(false);
+    expect(matchesInboxFilter(filedToJeff, ["jeff"])).toBe(true);
+    expect(matchesInboxFilter(sharedByKameron, mineAndAgents)).toBe(false);
+    expect(matchesInboxFilter(sharedByKameron, ["shared"])).toBe(true);
+    const filedToKameron = makeThreadInbox({
+      actor: bot,
+      routing: { ...inboxRoutingFor("kameron"), reason: "review" },
+    });
+    expect(matchesInboxFilter(filedToKameron, ["kameron"])).toBe(true);
+    expect(matchesInboxFilter(filedToKameron, ["agents"])).toBe(false);
+    expect(effectiveInboxFilter({ founderInboxOwner: "jeff", founderInboxFilter: [] })).toEqual([
+      "jeff",
+      "agents",
+    ]);
+    // Every inbox is All, which keeps unclassified history.
+    const every = ["shared", "jeff", "agents", "kameron"] as const;
+    expect(matchesInboxFilter(undefined, every)).toBe(true);
+    expect(matchesInboxFilter(undefined, every.slice(1))).toBe(false);
   });
   it("attributes new work only to a chosen founder and leaves unchosen work in All", () => {
     expect(inboxOriginFor({})).toBeUndefined();
@@ -62,7 +97,7 @@ describe("shared fleet organizational inbox", () => {
     for (const view of ["kameron", "jeff", "agents", "shared"] as const) {
       expect(matchesInboxView(undefined, view)).toBe(false);
     }
-    expect(matchesInboxView(undefined, effectiveInboxView({}))).toBe(true);
+    expect(matchesInboxFilter(undefined, effectiveInboxFilter({}))).toBe(true);
     const origin = inboxOriginFor({ founderInboxOwner: "jeff" });
     expect(origin).toEqual(jeff);
     const inbox = makeThreadInbox({ actor: origin ?? null });
