@@ -404,9 +404,9 @@ export const VoiceTranscriptionDestination = Schema.Union([
 export type VoiceTranscriptionDestination = typeof VoiceTranscriptionDestination.Type;
 
 export const ClientSettingsSchema = Schema.Struct({
-  founderInboxOwner: Founder.pipe(Schema.withDecodingDefault(Effect.succeed("kameron" as const))),
-  // Upgraded devices have no saved view; a founder view would hide all unclassified history.
-  founderInboxView: InboxView.pipe(Schema.withDecodingDefault(Effect.succeed("all" as const))),
+  // Absent until chosen; whole-snapshot saves must not record a default as a choice.
+  founderInboxOwner: Schema.optionalKey(Founder),
+  founderInboxView: Schema.optionalKey(InboxView),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),

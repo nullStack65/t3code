@@ -6,6 +6,7 @@ import {
   makeThreadInbox,
   routeThreadInbox,
   matchesInboxView,
+  effectiveInboxView,
   founderInboxLane,
   compositeThreadKey,
 } from "./threadInbox.ts";
@@ -27,21 +28,26 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxView(j, "all")).toBe(true);
     expect(matchesInboxView(k, "all")).toBe(true);
   });
-  it("shows unclassified history on upgraded devices and persists the picked view", () => {
+  it("keeps All until a founder is chosen, then defaults to that founder's view", () => {
     const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
     const encode = Schema.encodeSync(ClientSettingsSchema);
     const upgraded = decode({ notificationMode: "off" });
-    expect(upgraded.founderInboxView).toBe("all");
-    expect(upgraded.founderInboxOwner).toBe("kameron");
-    for (const unclassified of [undefined, null]) {
-      expect(matchesInboxView(unclassified, upgraded.founderInboxView)).toBe(true);
-      expect(matchesInboxView(unclassified, "jeff")).toBe(false);
-    }
-    for (const view of ["jeff", "kameron", "shared", "agents", "all"] as const) {
-      const saved = decode(
-        encode({ ...upgraded, founderInboxView: view, founderInboxOwner: "jeff" }),
-      );
-      expect([saved.founderInboxView, saved.founderInboxOwner]).toEqual([view, "jeff"]);
+    // Any later settings write saves the whole snapshot; it must not record an unmade choice.
+    const resaved = encode(decode(encode(upgraded)));
+    expect(["founderInboxView", "founderInboxOwner"].filter((key) => key in resaved)).toEqual([]);
+    expect(effectiveInboxView(upgraded)).toBe("all");
+    expect(matchesInboxView(undefined, effectiveInboxView(upgraded))).toBe(true);
+    const jeffClient = decode(encode({ ...upgraded, founderInboxOwner: "jeff" }));
+    const view = effectiveInboxView(jeffClient);
+    expect(view).toBe("jeff");
+    expect(matchesInboxView(makeThreadInbox({ actor: jeff }), view)).toBe(true);
+    expect(matchesInboxView(makeThreadInbox({ actor: kameron }), view)).toBe(false);
+    expect(matchesInboxView(makeThreadInbox({ actor: bot }), view)).toBe(false);
+    expect(matchesInboxView(makeThreadInbox({ actor: bot }), "agents")).toBe(true);
+    expect(matchesInboxView(undefined, "all")).toBe(true);
+    for (const picked of ["jeff", "kameron", "shared", "agents", "all"] as const) {
+      const saved = decode(encode({ ...jeffClient, founderInboxView: picked }));
+      expect([effectiveInboxView(saved), saved.founderInboxOwner]).toEqual([picked, "jeff"]);
     }
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
