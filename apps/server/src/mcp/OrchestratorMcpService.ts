@@ -136,6 +136,7 @@ import {
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 
 // Return recoverable handles before common MCP client timeouts expire.
@@ -1260,6 +1261,7 @@ function timelineItemsWithinBudget(
 
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
+  const hostResources = yield* Effect.serviceOption(HostResources.HostResources);
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
@@ -2562,7 +2564,9 @@ const make = Effect.gen(function* () {
       );
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/).filter(Boolean) ?? [];
+      const resources = Option.isSome(hostResources) ? yield* hostResources.value.read : undefined;
       return {
+        ...(resources === undefined ? {} : { hostResources: resources }),
         parentThreadId: parent?.thread.id ?? null,
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
         inheritedModel: inherited?.model ?? null,

@@ -195,6 +195,14 @@
       "types": "./src/remote.ts",
       "import": "./src/remote.ts"
     },
+    "./loadBalancing": {
+      "types": "./src/loadBalancing.ts",
+      "import": "./src/loadBalancing.ts"
+    },
+    "./threadPlacement": {
+      "types": "./src/threadPlacement.ts",
+      "import": "./src/threadPlacement.ts"
+    },
     "./relaySigning": {
       "types": "./src/relaySigning.ts",
       "import": "./src/relaySigning.ts"
