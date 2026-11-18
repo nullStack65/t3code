@@ -14,6 +14,9 @@ const first = (value: string | readonly string[] | undefined) =>
 /** Starts loading a selected thread before navigation commits; see `startOpeningEnvironmentThread`. */
 export function startOpeningDetail(detail: WorkspaceDetail) {
   if (detail.name !== "Thread") return;
+  // A pending task runs where its origin binds it, which this route may not name yet: its own
+  // readers load that thread behind its creation barrier, so nothing is preloaded here.
+  if (first(detail.params?.pendingMessageId)) return;
   const environmentId = first(detail.params?.environmentId);
   const threadId = first(detail.params?.threadId);
   if (environmentId && threadId) {

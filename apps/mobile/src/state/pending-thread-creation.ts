@@ -52,6 +52,44 @@ export function selectThreadCreationDetail<Ref>(input: {
   return { pendingCreation, detailRef };
 }
 
+/**
+ * The thread a route that names a pending task's message shows: wherever that message is queued
+ * or its outcome recorded now. Resolved before any scoped key or detail read, so a task its origin
+ * placed on another machine is never read, or found missing, on the machine it was sent from.
+ */
+export function resolvePendingRouteThreadRef<
+  Ref extends { readonly environmentId: string },
+>(input: {
+  readonly routeRef: Ref | null;
+  readonly pendingMessageId: string | null;
+  readonly queuedMessagesByThreadKey: Readonly<
+    Record<string, ReadonlyArray<QueuedThreadMessage> | undefined>
+  >;
+  readonly outcomes: Readonly<Record<string, PendingThreadCreationOutcome | undefined>>;
+}):
+  | {
+      readonly environmentId: QueuedThreadMessage["environmentId"];
+      readonly threadId: QueuedThreadMessage["threadId"];
+    }
+  | Ref
+  | null {
+  if (input.pendingMessageId === null) return input.routeRef;
+  const owned = (message: QueuedThreadMessage) => message.messageId === input.pendingMessageId;
+  const message =
+    Object.values(input.queuedMessagesByThreadKey)
+      .flatMap((queue) => queue ?? [])
+      .find(owned) ??
+    Object.values(input.outcomes)
+      .map((outcome) => outcome?.message)
+      .find(
+        (candidate): candidate is QueuedThreadMessage =>
+          candidate !== undefined && owned(candidate),
+      );
+  return message === undefined
+    ? input.routeRef
+    : { environmentId: message.environmentId, threadId: message.threadId };
+}
+
 export function resolvePendingThreadCreation(input: {
   readonly threadKey: string | null;
   readonly pending: PendingThreadCreation | null;

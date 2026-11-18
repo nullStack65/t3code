@@ -1,4 +1,5 @@
 import * as NodeModule from "node:module";
+import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   draftRouteIdentity,
@@ -31,7 +32,13 @@ describe("draft thread handoff", () => {
     expect(isDraftThreadRoute(draft.routes.at(-1))).toBe(true);
     const submitted = router.getStateForAction(
       draft,
-      CommonActions.setParams(submittedThreadParams("environment", "thread")),
+      CommonActions.setParams(
+        submittedThreadParams({
+          environmentId: EnvironmentId.make("environment"),
+          threadId: ThreadId.make("thread"),
+          messageId: MessageId.make("message"),
+        }),
+      ),
       options,
     )!;
     expect(submitted.routes.map((route) => route.key)).toEqual(

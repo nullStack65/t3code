@@ -6,6 +6,7 @@ import {
   AuthFilesystemReadScope,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  ProviderInstanceId,
   ProjectId,
   type VcsListRefsResult,
 } from "@t3tools/contracts";
@@ -16,7 +17,7 @@ import * as Stream from "effect/Stream";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { ComposerDraft } from "../../state/use-composer-drafts";
 
 const mocks = vi.hoisted(() => ({
@@ -36,6 +37,9 @@ const mocks = vi.hoisted(() => ({
   serverConfig: vi.fn(),
   openScratch: vi.fn(),
   prepareTriage: vi.fn(),
+  /** Machines the client has saved and is connected to; empty unless a case sets them. */
+  savedConnections: {} as Record<string, { environmentLabel: string }>,
+  connected: [] as Array<{ environmentId: string; connectionState: string }>,
 }));
 vi.mock("../../state/atom-registry", () => ({
   appAtomRegistry: {
@@ -58,6 +62,7 @@ vi.mock("../../state/projects", () => ({
 }));
 vi.mock("../../state/session", () => ({
   environmentSession: { sessionStateAtom: mocks.session },
+  readEnvironmentScope: () => true,
 }));
 vi.mock("../../state/presentation", () => ({
   useEnvironmentPresentation: mocks.presentation,
@@ -73,8 +78,8 @@ vi.mock("../../components/ui/Dialog", () => ({ alert: vi.fn() }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => mocks.openScratch }));
 vi.mock("../triage/usePrepareTriage", () => ({ usePrepareTriage: () => mocks.prepareTriage }));
 vi.mock("../../state/use-remote-environment-registry", () => ({
-  useSavedRemoteConnections: () => ({ savedConnectionsById: {} }),
-  useRemoteConnectionStatus: () => ({ connectedEnvironments: [] }),
+  useSavedRemoteConnections: () => ({ savedConnectionsById: mocks.savedConnections }),
+  useRemoteConnectionStatus: () => ({ connectedEnvironments: mocks.connected }),
   setPendingConnectionError: vi.fn(),
 }));
 vi.mock("../../state/use-model-option-memory", () => ({
@@ -112,6 +117,11 @@ vi.mock("../../state/shell", () => ({ useEnvironmentShellReadiness: () => ({}) }
 vi.mock("../../lib/clock", () => ({ useNowMinuteMs: () => 0 }));
 
 import { NewTaskFlowProvider, useNewTaskFlow } from "./new-task-flow-provider";
+import {
+  explicitDraftRouteEntry,
+  threadBranchDraftParams,
+  threadEnvironmentDraftParams,
+} from "./thread-route-state";
 
 function project(environment: string, id: string): EnvironmentProject {
   return {
@@ -132,6 +142,8 @@ function setup() {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   vi.clearAllMocks();
+  mocks.savedConnections = {};
+  mocks.connected = [];
   const registry = AtomRegistry.make();
   mocks.registry.mockReturnValue(registry);
   const projects = [project("one", "a"), project("one", "b"), project("two", "b")];
@@ -202,9 +214,10 @@ function setup() {
     return (key === null ? undefined : all[key]) ?? empty;
   });
   mocks.snapshot.mockImplementation(snapshot);
-  mocks.createDraft.mockImplementation((target) => {
+  // As createNewTaskDraft: the seeded machine intent is stored with the new draft.
+  mocks.createDraft.mockImplementation((target, environmentSelection) => {
     const key = `new-task:${Object.keys(registry.get(drafts)).length}`;
-    write(key, { project: target });
+    write(key, { project: target, ...(environmentSelection ? { environmentSelection } : {}) });
     return key;
   });
   mocks.retargetDraft.mockImplementation((key, target) =>
@@ -245,11 +258,22 @@ function setup() {
     get current() {
       return current;
     },
-    async render(active: boolean) {
+    async render(
+      active: boolean,
+      route: {
+        readonly routeEntry?: { readonly environmentId: string; readonly projectId: string };
+        readonly routeDraftId?: string;
+      } = {},
+    ) {
       await act(async () =>
         root.render(
           <RegistryContext.Provider value={registry}>
-            <NewTaskFlowProvider active={active} flowKey="test-flow">
+            <NewTaskFlowProvider
+              active={active}
+              flowKey="test-flow"
+              routeEntry={route.routeEntry}
+              routeDraftId={route.routeDraftId}
+            >
               <Probe />
             </NewTaskFlowProvider>
           </RegistryContext.Provider>,
@@ -442,3 +466,220 @@ it.each([
     expect(screen.current.selectedProject).toEqual(screen.projects[expectedProject]);
   },
 );
+
+describe("a new task's machine choice", () => {
+  const twoMachines = () => {
+    // Earlier cases leave a provider-less config behind; these cases load none.
+    mocks.serverConfig.mockReturnValue(null);
+    mocks.projects.mockReturnValue([project("one", "b"), project("two", "b")]);
+    mocks.savedConnections = { one: { environmentLabel: "One" }, two: { environmentLabel: "Two" } };
+    mocks.connected = [
+      { environmentId: "one", connectionState: "connected" },
+      { environmentId: "two", connectionState: "connected" },
+    ];
+  };
+
+  it("starts a genuinely new draft as Auto when more than one connected machine hosts it", async () => {
+    using screen = setup();
+    twoMachines();
+    await screen.render(true);
+    expect(mocks.createDraft).toHaveBeenCalledWith(
+      { environmentId: "one", projectId: "b" },
+      "auto",
+    );
+    expect(screen.current.environmentSelection).toBe("auto");
+    expect(screen.current.routesAutomatically).toBe(true);
+    expect(screen.current.canPlaceAutomatically).toBe(true);
+  });
+
+  it("queues an Auto draft as a placed creation from its origin, without the origin's paths", async () => {
+    using screen = setup();
+    twoMachines();
+    await screen.render(true);
+    const key = screen.current.draftKey!;
+    act(() => {
+      mocks.writeText(key, "Fix the build");
+      mocks.writeSettings(key, {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        workspaceSelection: { mode: "worktree", branch: "main", worktreePath: null },
+      });
+    });
+    const metadata = {
+      threadId: "thread-1",
+      messageId: "message-1",
+      commandId: "command-1",
+      createdAt: "2026-11-18T16:00:00.000Z",
+    };
+    const auto = screen.current.buildPendingTaskMessage(metadata as never);
+    expect(auto).toMatchObject({
+      environmentId: "one",
+      commandId: "command-1",
+      messageId: "message-1",
+      placement: {
+        originEnvironmentId: "one",
+        originProjectId: "b",
+        candidateEnvironmentIds: ["one", "two"],
+      },
+      creation: { projectId: "b", workspaceMode: "worktree", branch: "main", worktreePath: null },
+    });
+    // Pinned, the same draft queues fixed work there, as before.
+    act(() => mocks.writeSettings(key, { environmentSelection: "manual" }));
+    expect(screen.current.buildPendingTaskMessage(metadata as never)?.placement).toBeUndefined();
+  });
+
+  const metadata = {
+    threadId: "thread-1",
+    messageId: "message-1",
+    commandId: "command-1",
+    createdAt: "2026-11-18T16:00:00.000Z",
+  };
+  const readyToSend = (screen: ReturnType<typeof setup>, key: string) =>
+    act(() => {
+      mocks.writeText(key, "Fix the build");
+      mocks.writeSettings(key, {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        workspaceSelection: { mode: "worktree", branch: "main", worktreePath: null },
+      });
+    });
+
+  it("pins a fresh draft from an explicit machine entry, and queues fixed work there", async () => {
+    using screen = setup();
+    twoMachines();
+    // The unavailable-thread redirect's own params, read back as Stack reads them.
+    const entry = explicitDraftRouteEntry(
+      threadEnvironmentDraftParams(project("one", "b"), "request-1"),
+    );
+    expect(entry).toEqual({ environmentId: "one", projectId: "b" });
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).toHaveBeenCalledTimes(1);
+    expect(mocks.createDraft).toHaveBeenCalledWith(
+      { environmentId: "one", projectId: "b" },
+      "manual",
+    );
+    const key = screen.current.draftKey!;
+    expect(screen.current.routesAutomatically).toBe(false);
+    readyToSend(screen, key);
+    const queued = screen.current.buildPendingTaskMessage(metadata as never);
+    expect(queued).toMatchObject({ environmentId: "one", creation: { projectId: "b" } });
+    expect(queued?.placement).toBeUndefined();
+  });
+
+  it("waits for an explicit entry's own machine instead of seeding the default one first", async () => {
+    using screen = setup();
+    twoMachines();
+    // A thread-branch entry on machine two, while the flow still shows machine one.
+    const entry = explicitDraftRouteEntry(
+      threadBranchDraftParams(
+        { environmentId: "two", projectId: "b", branch: null, worktreePath: null },
+        "request-2",
+      ),
+    );
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    // The route's effect applies its project: the draft is created there, pinned, once.
+    await act(async () => screen.current.setProject(project("two", "b")));
+    expect(mocks.createDraft.mock.calls).toEqual([
+      [{ environmentId: "two", projectId: "b" }, "manual"],
+    ]);
+    expect(screen.current.environmentSelection).toBe("manual");
+  });
+
+  it("creates no draft for an explicit entry until its own machine's project is there", async () => {
+    using screen = setup();
+    twoMachines();
+    // Only B is loaded: the flow would fall back to it, but the entry names A.
+    mocks.projects.mockReturnValue([project("two", "b")]);
+    const entry = explicitDraftRouteEntry(
+      threadEnvironmentDraftParams(project("one", "b"), "request-3"),
+    );
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    expect(screen.current.draftKey).toBeNull();
+    // Nothing to queue or upload from a fallback draft.
+    expect(screen.current.buildPendingTaskMessage(metadata as never)).toBeNull();
+    // A arrives behind B; the route's project selection (the provider's setProject, as the
+    // draft route's effect applies it) creates the first and only draft: A, pinned.
+    mocks.projects.mockReturnValue([project("two", "b"), project("one", "b")]);
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    await act(async () => screen.current.setProject(project("one", "b")));
+    expect(mocks.createDraft.mock.calls).toEqual([
+      [{ environmentId: "one", projectId: "b" }, "manual"],
+    ]);
+    expect(screen.current.environmentSelection).toBe("manual");
+  });
+
+  it("keeps a later deliberate Auto choice when the route is applied again", async () => {
+    using screen = setup();
+    twoMachines();
+    const entry = { environmentId: "one", projectId: "b" };
+    await screen.render(true, { routeEntry: entry });
+    act(() => screen.current.setEnvironmentSelection("auto"));
+    await screen.render(true, { routeEntry: { ...entry } });
+    await act(async () => screen.current.setProject(project("one", "b")));
+    expect(screen.current.environmentSelection).toBe("auto");
+    expect(mocks.createDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores a pinned draft as pinned, and a generic project entry still starts as Auto", async () => {
+    using screen = setup();
+    twoMachines();
+    act(() => {
+      mocks.writeSettings("new-task:restored", {
+        project: { environmentId: "one", projectId: "b" },
+        environmentSelection: "manual",
+      });
+    });
+    await screen.render(true, { routeDraftId: "new-task:restored" });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    expect(screen.current.environmentSelection).toBe("manual");
+    // A generic project entry names no machine intent: it is not an explicit entry.
+    expect(
+      explicitDraftRouteEntry({ requestId: "r", environmentId: "one", projectId: "b" }),
+    ).toBeUndefined();
+  });
+
+  it("leaves a new draft on its machine when only one machine could take it", async () => {
+    using screen = setup();
+    mocks.projects.mockReturnValue([project("one", "b")]);
+    mocks.savedConnections = { one: { environmentLabel: "One" } };
+    mocks.connected = [{ environmentId: "one", connectionState: "connected" }];
+    await screen.render(true);
+    expect(mocks.createDraft).toHaveBeenCalledWith(
+      { environmentId: "one", projectId: "b" },
+      undefined,
+    );
+    expect(screen.current.routesAutomatically).toBe(false);
+  });
+
+  it("pins the draft when a machine is picked, and keeps stored Auto when machines go away", async () => {
+    using screen = setup();
+    twoMachines();
+    await screen.render(true);
+    const key = screen.current.draftKey!;
+    // Fewer machines later: the stored intent stays Auto, never silently fixed.
+    mocks.connected = [];
+    await screen.render(true);
+    expect(screen.current.environmentSelection).toBe("auto");
+    expect(screen.current.routesAutomatically).toBe(true);
+    await act(async () => {
+      await screen.current.switchEnvironment(EnvironmentId.make("one"));
+    });
+    expect(screen.snapshot(key).environmentSelection).toBe("manual");
+    expect(screen.current.routesAutomatically).toBe(false);
+  });
+
+  it("keeps a real locality choice pinned while Auto is selected", async () => {
+    using screen = setup();
+    twoMachines();
+    await screen.render(true);
+    const key = screen.current.draftKey!;
+    act(() => {
+      mocks.writeSettings(key, {
+        workspaceSelection: { mode: "local", branch: "main", worktreePath: null },
+      });
+    });
+    expect(screen.snapshot(key).environmentSelection).toBe("auto");
+    expect(screen.current.routesAutomatically).toBe(false);
+  });
+});

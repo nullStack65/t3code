@@ -213,6 +213,7 @@ import {
   insertComposerDraftContext,
   insertComposerDraftText,
   rememberComposerDraftSelection,
+  schedulePersistComposerState,
   setComposerDraftAttachmentUpload,
   waitForComposerDraftsLoaded,
   setStickyComposerModelSelection,
@@ -2804,5 +2805,75 @@ describe("mobile composer drafts", () => {
       },
     });
     expect(composerAttachmentCleanupMocks.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe("placement state in the drafts document", () => {
+  const placedTask = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-placed"),
+    messageId: MessageId.make("message-placed"),
+    commandId: CommandId.make("command-placed"),
+    text: "Fix it",
+    attachments: [],
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    creation: {
+      projectId: ProjectId.make("project-1"),
+      workspaceMode: "worktree" as const,
+      branch: "main",
+      worktreePath: null,
+    },
+    placement: {
+      originEnvironmentId: EnvironmentId.make("environment-1"),
+      originProjectId: ProjectId.make("project-1"),
+      candidateEnvironmentIds: [
+        EnvironmentId.make("environment-1"),
+        EnvironmentId.make("environment-2"),
+      ],
+    },
+    createdAt: "2026-11-18T16:00:00.000Z",
+  };
+
+  it("writes the version older readers refuse only while an Auto draft is held", async () => {
+    await waitForComposerDraftsLoaded();
+    const key = createNewTaskDraft(
+      {
+        environmentId: EnvironmentId.make("environment-1"),
+        projectId: ProjectId.make("project-1"),
+      },
+      "auto",
+    );
+    setComposerDraftText(key, "Auto work");
+    await flushComposerDrafts();
+    const written = JSON.parse(composerDraftFileMocks.getDocument());
+    expect(written.schemaVersion).toBe(2);
+    expect(written.drafts[key].environmentSelection).toBe("auto");
+    // Read back by this reader, the intent is kept: it is never an unmarked fixed draft.
+    expect(decodePersistedComposerState(written).drafts[key]?.environmentSelection).toBe("auto");
+
+    // Pinned to its machine, nothing an older reader could misread remains.
+    updateComposerDraftSettings(key, { environmentSelection: "manual" });
+    await flushComposerDrafts();
+    expect(JSON.parse(composerDraftFileMocks.getDocument()).schemaVersion).toBe(1);
+  });
+
+  it("keeps a signed-out placed task as its envelope, under the version older readers refuse", async () => {
+    await waitForComposerDraftsLoaded();
+    appAtomRegistry.set(composerCloudDraftsAtom, {
+      accountId: "account-1",
+      signedOut: { "account-1": { drafts: {}, queuedMessages: [placedTask] } },
+    });
+    schedulePersistComposerState();
+    await flushComposerDrafts();
+    const written = JSON.parse(composerDraftFileMocks.getDocument());
+    expect(written.schemaVersion).toBe(2);
+    expect(written.signedOutDrafts["account-1"].queuedMessages[0]).toMatchObject({
+      kind: "placed-creation",
+      placement: { originEnvironmentId: "environment-1" },
+      message: { messageId: "message-placed", commandId: "command-placed" },
+    });
+    expect(
+      decodePersistedComposerState(written).cloudDrafts.signedOut["account-1"]?.queuedMessages,
+    ).toEqual([placedTask]);
   });
 });

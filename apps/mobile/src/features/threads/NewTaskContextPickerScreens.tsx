@@ -193,6 +193,20 @@ export function NewTaskEnvironmentPickerRouteScreen() {
           }}
           showsVerticalScrollIndicator={false}
         >
+          {flow.canPlaceAutomatically ? (
+            <View className="mb-4">
+              <PickerSurface>
+                <ToggleRow
+                  title="Choose automatically"
+                  value={flow.environmentSelection === "auto"}
+                  onValueChange={(value) => {
+                    void Haptics.selectionAsync();
+                    flow.setEnvironmentSelection(value ? "auto" : "manual");
+                  }}
+                />
+              </PickerSurface>
+            </View>
+          ) : null}
           <PickerSurface>
             {flow.environments.map((environment, index) => (
               <EnvironmentPickerRow
@@ -206,7 +220,10 @@ export function NewTaskEnvironmentPickerRouteScreen() {
                     if (switched) navigation.goBack();
                   });
                 }}
-                selected={flow.selectedEnvironmentId === environment.environmentId}
+                selected={
+                  flow.environmentSelection !== "auto" &&
+                  flow.selectedEnvironmentId === environment.environmentId
+                }
                 title={environment.environmentLabel}
               />
             ))}

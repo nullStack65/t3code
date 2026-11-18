@@ -69,7 +69,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
-import { useThreadSelection } from "../../state/use-thread-selection";
+import { useFollowPendingRoute, useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
 import {
   buildTerminalMenuSessions,
@@ -82,7 +82,7 @@ import {
 } from "../terminal/terminalLaunchContext";
 import type { ThreadDetailScreenProps } from "./ThreadDetailScreen";
 import { ThreadScreenBinding, ThreadScreenFallback, ThreadScreenHost } from "./ThreadScreenHost";
-import { draftRouteIdentity } from "./thread-route-state";
+import { draftRouteIdentity, threadEnvironmentDraftParams } from "./thread-route-state";
 import { NewTaskDraftRouteScreen, type NewTaskDraftRouteParams } from "./NewTaskDraftRouteScreen";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -166,6 +166,8 @@ function OpeningThreadLoadingScreen() {
 type ThreadRouteScreenRouteProps = StaticScreenProps<{
   readonly environmentId?: string;
   readonly threadId?: string;
+  /** A sent task placed by its origin: the route follows that message's binding. */
+  readonly pendingMessageId?: string;
   readonly draft?: NewTaskDraftRouteParams;
   readonly inspector?: ThreadInspectorTarget;
   readonly prompt?: string | string[];
@@ -212,13 +214,7 @@ function UnavailableThreadDraftRedirect(props: { readonly environmentId: Environ
     const project = projects.find((candidate) => candidate.environmentId === props.environmentId);
     navigation.dispatch(
       StackActions.replace("Thread", {
-        draft: project
-          ? {
-              requestId: uuidv4(),
-              environmentId: String(project.environmentId),
-              projectId: String(project.id),
-            }
-          : { requestId: uuidv4() },
+        draft: threadEnvironmentDraftParams(project, uuidv4()),
       }),
     );
   });
@@ -250,8 +246,12 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
   const { connectionState } = useRemoteConnectionStatus();
   const { selectedThread } = useThreadSelection();
   const params = props.route.params ?? {};
-  const environmentIdRaw = firstRouteParam(params.environmentId);
-  const threadIdRaw = firstRouteParam(params.threadId);
+  // Resolved through the pending task's binding before any scoped key or detail read.
+  const {
+    environmentId: environmentIdRaw,
+    threadId: threadIdRaw,
+    routeFollowsBinding,
+  } = useFollowPendingRoute(params);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeEnvironmentShellState = useEnvironmentShellReadiness(environmentId);
@@ -289,7 +289,7 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
       content
     );
 
-  if (environmentId === null || threadIdRaw === null) {
+  if (environmentId === null || threadIdRaw === null || !routeFollowsBinding) {
     return withInspectorHeader(<OpeningThreadLoadingScreen />);
   }
 

@@ -20,6 +20,7 @@ import { appAtomRegistry } from "./atom-registry";
 import { composerAttachmentUploadsAtom } from "./composer-attachment-upload-states";
 import { environmentServerConfigsAtom } from "./server";
 import {
+  awaitsPlacement,
   flattenQueuedThreadMessages,
   threadOutboxManager,
   threadOutboxRevision,
@@ -27,6 +28,7 @@ import {
   type QueuedThreadMessage,
 } from "./thread-outbox";
 import { editingQueuedMessageIdsAtom } from "./use-thread-outbox";
+import { qualifyPlacedUpload, type PlacedUploadOwner } from "./thread-placement";
 import {
   ComposerDraftPersistenceError,
   type ComposerDraft,
@@ -69,10 +71,23 @@ export function retryComposerAttachmentUpload(environmentId: EnvironmentId, atta
 type ComposerAttachmentUploadRequest = {
   readonly environmentId: EnvironmentId;
   readonly attachment: DraftComposerAttachment;
+  readonly owner?: PlacedUploadOwner;
 };
 
+/** A placed task uploads only once bound, and then only as its own operation. */
+const placedOwner = (
+  message: QueuedThreadMessage | undefined,
+): { readonly held: boolean; readonly owner?: PlacedUploadOwner } =>
+  message?.placement === undefined
+    ? { held: false }
+    : awaitsPlacement(message)
+      ? { held: true }
+      : { held: false, owner: { messageId: message.messageId, commandId: message.commandId } };
+
 export function composerAttachmentUploadRequests(input: {
-  readonly drafts: Readonly<Record<string, Pick<ComposerDraft, "attachments" | "project">>>;
+  readonly drafts: Readonly<
+    Record<string, Pick<ComposerDraft, "attachments" | "project" | "environmentSelection">>
+  >;
   readonly queuedMessagesByThreadKey: Parameters<typeof flattenQueuedThreadMessages>[0];
   /** An edited message's attachments upload through its editor draft. */
   readonly editingQueuedMessageIds: Readonly<Record<string, true>>;
@@ -86,9 +101,13 @@ export function composerAttachmentUploadRequests(input: {
   >;
 }): ReadonlyArray<ComposerAttachmentUploadRequest> {
   const queued = flattenQueuedThreadMessages(input.queuedMessagesByThreadKey);
+  const queuedById = new Map(
+    queued.map((message) => [`pending-task:${message.messageId}`, message]),
+  );
   const uploadable = (
     environmentId: EnvironmentId | null,
     attachments: ReadonlyArray<DraftComposerAttachment>,
+    owner?: PlacedUploadOwner,
   ): ReadonlyArray<ComposerAttachmentUploadRequest> =>
     environmentId === null ||
     !input.connectedEnvironmentIds.has(environmentId) ||
@@ -98,26 +117,35 @@ export function composerAttachmentUploadRequests(input: {
           .filter((attachment) =>
             canUploadComposerAttachment(attachment, input.serverConfigs.get(environmentId)),
           )
-          .map((attachment) => ({ environmentId, attachment }));
+          .map((attachment) =>
+            owner ? { environmentId, attachment, owner } : { environmentId, attachment },
+          );
   return [
-    ...Object.entries(input.drafts).flatMap(([key, draft]) =>
-      uploadable(
+    ...Object.entries(input.drafts).flatMap(([key, draft]) => {
+      // An Auto draft's bytes stay here until its origin places it: they never pin it.
+      if (draft.environmentSelection === "auto") return [];
+      const placed = placedOwner(queuedById.get(key));
+      if (placed.held) return [];
+      return uploadable(
         composerDraftEnvironmentId(key, input.knownEnvironmentIds, queued, draft),
         draft.attachments,
-      ),
-    ),
+        placed.owner,
+      );
+    }),
     // Sending mid-upload hands the attachment to the outbox; requesting it here keeps that
     // upload running instead of aborting it for the outbox to start over.
-    ...queued.flatMap((message) =>
-      input.editingQueuedMessageIds[message.messageId]
+    ...queued.flatMap((message) => {
+      const placed = placedOwner(message);
+      return input.editingQueuedMessageIds[message.messageId] || placed.held
         ? []
         : uploadable(
             message.environmentId,
             message.attachments.filter(
               (attachment) => attachment.uploadedAttachmentId === undefined,
             ),
-          ),
-    ),
+            placed.owner,
+          );
+    }),
   ];
 }
 
@@ -205,7 +233,13 @@ export function createComposerAttachmentUploadWorker(
   ensureComposerDraftsLoaded();
   const queue = createComposerAttachmentUploadQueue({
     onChange: (states) => appAtomRegistry.set(composerAttachmentUploadsAtom, states),
-    upload: async ({ environmentId, attachment }, signal, onProgress) => {
+    upload: async ({ environmentId, attachment, owner }, signal, onProgress) => {
+      // Qualified at this callback, not when requested: the owner may have changed since.
+      if (owner !== undefined) {
+        const qualification = await qualifyPlacedUpload({ owner, environmentId, attachment });
+        // Not a failed upload: the task's own delivery asks again before anything goes to B.
+        if (!qualification.ok || signal.aborted) return false;
+      }
       const release = isFileBackedComposerAttachment(attachment)
         ? retainComposerAttachmentFileForPreview(attachment)
         : undefined;
