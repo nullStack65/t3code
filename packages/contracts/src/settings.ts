@@ -947,8 +947,16 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
+/**
+ * A read-only quota source: a CLIProxyAPI hub (management API) or a Magpie
+ * gateway (`/v1/magpie/quotas`). A Magpie gateway on loopback answers without
+ * a key; `managementKey` then holds its gateway key when it needs one.
+ */
+export const UsageLimitSourceKind = Schema.Literals(["cliproxy", "magpie"]);
+export type UsageLimitSourceKind = typeof UsageLimitSourceKind.Type;
+
 export const UsageLimitSourceConfig = Schema.Struct({
-  kind: Schema.Literal("cliproxy"),
+  kind: UsageLimitSourceKind,
   label: Schema.optional(TrimmedNonEmptyString),
   url: TrimmedNonEmptyString,
   managementKey: SettingsSecretValue.pipe(
@@ -1622,6 +1630,14 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
 
+  /**
+   * Who each subscription account belongs to, keyed by its email, so the
+   * Limits view can group accounts by owner. Unlisted accounts are Unassigned.
+   */
+  usageAccountOwners: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+
   /** Sent by the Usage tab with each summary request to this environment; edit in settings.json. Invalid values are ignored. */
   usageModelFilter: ForwardCompatibleOptional(UsageModelFilter),
 });
@@ -2009,6 +2025,10 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
 
   usageModelAliases: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
+  ),
+  /** Per-email owner; `null` returns the account to Unassigned. */
+  usageAccountOwners: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
   ),
 });

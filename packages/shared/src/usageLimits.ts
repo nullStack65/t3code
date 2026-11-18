@@ -178,6 +178,9 @@ export type LimitPresentations = ReadonlyMap<
     readonly serverConfig: {
       readonly providers: readonly ServerProvider[];
       readonly usageLimitSources?: UsageLimitSourceSnapshots | undefined;
+      readonly settings?:
+        | { readonly usageAccountOwners?: Readonly<Record<string, string>> | undefined }
+        | undefined;
     } | null;
   }
 >;
@@ -444,9 +447,109 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
       } else if (source.accounts.length === 0) {
         notices.add(`${label(environmentLabel, source.label)}: No accounts reported.`);
       }
+      for (const account of source.accounts) {
+        if (account.usageLimits.unavailable?.reason !== "probeFailed") continue;
+        const subject = `${source.label} · ${sourceAccountName(account)}`;
+        notices.add(
+          `${label(environmentLabel, subject)}: ${limitsNotice(account.usageLimits) ?? ""}`,
+        );
+      }
     }
   }
   return [...notices];
+}
+
+/** A hub account by its email, else its id without the `provider:` prefix sources add. */
+function sourceAccountName(account: { readonly id: string; readonly email?: string | undefined }) {
+  return account.email ?? account.id.replace(/^[\w-]+:/, "");
+}
+
+/**
+ * Usage that cannot be read on its current setup (a key with no subscription,
+ * an instance whose gateway reports for it), so a missing bar reads as "not
+ * applicable". Only entries that say why are listed.
+ */
+export function collectNotApplicable(
+  presentations: LimitPresentations,
+): ReadonlyArray<{ readonly subject: string; readonly reason: string }> {
+  const label = (environmentLabel: string, subject: string) =>
+    presentations.size > 1 ? `${environmentLabel} · ${subject}` : subject;
+  const entries = new Map<string, string>();
+  for (const presentation of presentations.values()) {
+    const environmentLabel = presentation.entry.target.label;
+    for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
+      const unavailable = provider.usageLimits?.unavailable;
+      if (unavailable?.reason !== "unsupported" || !unavailable.message) continue;
+      const name = provider.displayName?.trim() || String(provider.driver);
+      entries.set(label(environmentLabel, name), unavailable.message);
+    }
+    for (const source of presentation.serverConfig?.usageLimitSources ?? []) {
+      for (const account of source.accounts) {
+        const unavailable = account.usageLimits.unavailable;
+        if (unavailable?.reason !== "unsupported") continue;
+        entries.set(
+          label(environmentLabel, `${source.label} · ${sourceAccountName(account)}`),
+          unavailable.message ?? "This account has no subscription limits.",
+        );
+      }
+    }
+  }
+  return [...entries].map(([subject, reason]) => ({ subject, reason }));
+}
+
+export const UNASSIGNED_OWNER = "Unassigned";
+
+/** `owner@example.com · Team` and `Owner@Example.com` look up the same owner. */
+function ownerLookupKey(email: string): string {
+  return email.split(" · ")[0]!.trim().toLowerCase();
+}
+
+/** The email → owner map from every connected environment; the first to name an email wins. */
+export function collectAccountOwners(
+  presentations: LimitPresentations,
+): ReadonlyMap<string, string> {
+  const owners = new Map<string, string>();
+  for (const presentation of presentations.values()) {
+    const map = presentation.serverConfig?.settings?.usageAccountOwners ?? {};
+    for (const [email, owner] of Object.entries(map)) {
+      const key = ownerLookupKey(email);
+      if (key && owner.trim() && !owners.has(key)) owners.set(key, owner.trim());
+    }
+  }
+  return owners;
+}
+
+function accountOwner(
+  account: Pick<LimitAccount, "email">,
+  owners: ReadonlyMap<string, string>,
+): string {
+  return (account.email && owners.get(ownerLookupKey(account.email))) || UNASSIGNED_OWNER;
+}
+
+/**
+ * Accounts split by owner, each owner's accounts pooled per provider as
+ * {@link collectLimitPools} does. Owners keep the order the map names them;
+ * Unassigned comes last. With no owner map there is one group, so the view
+ * reads as it did before owners existed.
+ */
+export function collectLimitOwnerGroups(
+  accounts: readonly LimitAccount[],
+  owners: ReadonlyMap<string, string>,
+  now: number,
+): ReadonlyArray<{ readonly owner: string; readonly pools: readonly LimitPool[] }> {
+  const order = [...new Set(owners.values())];
+  const byOwner = new Map<string, LimitAccount[]>();
+  for (const account of accounts) {
+    const owner = accountOwner(account, owners);
+    const list = byOwner.get(owner);
+    if (list) list.push(account);
+    else byOwner.set(owner, [account]);
+  }
+  const rank = (owner: string) =>
+    owner === UNASSIGNED_OWNER ? Number.POSITIVE_INFINITY : order.indexOf(owner);
+  return [...byOwner]
+    .sort(([left], [right]) => rank(left) - rank(right))
+    .map(([owner, members]) => ({ owner, pools: collectLimitPools(members, now) }));
 }
 
 export interface LimitPoolMember {

@@ -17,7 +17,10 @@ import {
   withUsageLimitsCommands,
   collectLimitAccounts,
   collectExternalUsageLinks,
+  collectAccountOwners,
   collectLimitNotices,
+  collectLimitOwnerGroups,
+  collectNotApplicable,
   collectLimitPools,
   elapsedShare,
   exhaustedUsageWindow,
@@ -1835,5 +1838,109 @@ describe("ChatGPT sharing presentation", () => {
         auth: { status: "unauthenticated", subscriptionSharing: true },
       }),
     ).toBe(false);
+  });
+});
+
+describe("owners and not-applicable usage", () => {
+  const checkedAt = "2026-09-03T11:00:00.000Z";
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const codex = ProviderDriverKind.make("codex");
+  const opencode = ProviderDriverKind.make("opencode");
+  const limits = { checkedAt, windows: [window] };
+  const magpie = {
+    id: UsageLimitSourceId.make("magpie:127.0.0.1:3425"),
+    kind: "magpie" as const,
+    label: "Magpie",
+    checkedAt,
+    accounts: [
+      { id: "claude:a", driver: claude, email: "Owner.A@example.com", usageLimits: limits },
+      { id: "claude:b", driver: claude, email: "second.a@example.com", usageLimits: limits },
+      { id: "codex:c", driver: codex, email: "b@example.com", usageLimits: limits },
+      { id: "codex:d", driver: codex, email: "nobody@example.com", usageLimits: limits },
+      {
+        id: "codex:team",
+        driver: codex,
+        email: "owner.a@example.com · Team",
+        usageLimits: {
+          checkedAt,
+          windows: [],
+          unavailable: { reason: "unsupported" as const, message: "Payment Required." },
+        },
+      },
+      {
+        id: "magpie-go:k",
+        driver: opencode,
+        usageLimits: {
+          checkedAt,
+          windows: [],
+          unavailable: { reason: "probeFailed" as const, message: "Upstream timed out." },
+        },
+      },
+    ],
+  };
+  const routed = provider({
+    instanceId: ProviderInstanceId.make("magpie-codex"),
+    displayName: "Magpie Codex",
+    usageLimits: {
+      checkedAt,
+      windows: [],
+      unavailable: { reason: "unsupported", message: "Not applicable: gateway reports it." },
+    },
+  });
+  const presentations = (owners?: Record<string, string>) =>
+    new Map([
+      [
+        EnvironmentId.make("env-a"),
+        {
+          entry: { target: { label: "Crown" } },
+          serverConfig: {
+            providers: [routed],
+            usageLimitSources: [magpie],
+            ...(owners ? { settings: { usageAccountOwners: owners } } : {}),
+          },
+        },
+      ],
+    ]);
+
+  it("groups accounts by the configured owner, case-insensitively, Unassigned last", () => {
+    const view = presentations({
+      "owner.a@example.com": "Kameron",
+      "second.a@example.com": "Kameron",
+      "b@example.com": "Jeff",
+    });
+    const groups = collectLimitOwnerGroups(
+      collectLimitAccounts(view),
+      collectAccountOwners(view),
+      now,
+    );
+    expect(
+      groups.map((group) => [
+        group.owner,
+        group.pools.map((pool) => [pool.driver, pool.accounts.map((account) => account.key)]),
+      ]),
+    ).toEqual([
+      ["Kameron", [[claude, [`env-a:${magpie.id}:claude:a`, `env-a:${magpie.id}:claude:b`]]]],
+      ["Jeff", [[codex, [`env-a:${magpie.id}:codex:c`]]]],
+      ["Unassigned", [[codex, [`env-a:${magpie.id}:codex:d`]]]],
+    ]);
+  });
+
+  it("puts everything in one Unassigned group without an owner map", () => {
+    const view = presentations();
+    const groups = collectLimitOwnerGroups(
+      collectLimitAccounts(view),
+      collectAccountOwners(view),
+      now,
+    );
+    expect(groups.map((group) => group.owner)).toEqual(["Unassigned"]);
+  });
+
+  it("lists not-applicable usage apart from failures", () => {
+    const view = presentations();
+    expect(collectNotApplicable(view)).toEqual([
+      { subject: "Magpie Codex", reason: "Not applicable: gateway reports it." },
+      { subject: "Magpie · owner.a@example.com · Team", reason: "Payment Required." },
+    ]);
+    expect(collectLimitNotices(view)).toEqual(["Magpie · k: Upstream timed out."]);
   });
 });
