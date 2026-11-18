@@ -4,6 +4,11 @@ import {
   type Founder,
   type InboxChoice,
 } from "@t3tools/contracts";
+import {
+  THREAD_ATTRIBUTION_LABELS,
+  THREAD_ATTRIBUTIONS,
+} from "@t3tools/client-runtime/state/thread-attribution";
+import type { ThreadAttribution } from "@t3tools/contracts/settings";
 import { SlidersHorizontalIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -38,15 +43,17 @@ const INBOX_LABELS: Record<InboxChoice, string> = {
   shared: "Shared",
 };
 
-type CountedThreads = Parameters<typeof threadListFilterCounts>[0];
+type CountedThread = Parameters<typeof threadListFilterCounts>[0][number];
 const LAST_OPTION_NOTE = ", the last one shown, so it stays checked";
 
 /** Chooses which inboxes and environments the thread list shows. Search still finds every thread. */
-export function SidebarThreadFilterMenu({
+export function SidebarThreadFilterMenu<T extends CountedThread>({
   countedThreads,
+  attributionOf,
 }: {
   /** Called only while the menu is open. */
-  countedThreads: () => CountedThreads;
+  countedThreads: () => ReadonlyArray<T>;
+  attributionOf: (thread: T) => ThreadAttribution;
 }) {
   const filter = useClientSettings(threadListFilterOf);
   const owner = useClientSettings((settings) => settings.founderInboxOwner);
@@ -61,11 +68,16 @@ export function SidebarThreadFilterMenu({
     changed.environments
       ? `${hiddenCount} environment${hiddenCount === 1 ? "" : "s"} hidden`
       : null,
+    changed.from
+      ? `from ${THREAD_ATTRIBUTIONS.filter((from) => !filter.hiddenAttributions.includes(from))
+          .map((from) => THREAD_ATTRIBUTION_LABELS[from])
+          .join(", ")}`
+      : null,
   ].filter((part) => part !== null);
   const label =
     summary.length === 0
-      ? "Filter threads by inbox and environment"
-      : `Filter threads by inbox and environment (${summary.join("; ")})`;
+      ? "Filter threads by inbox, sender and environment"
+      : `Filter threads by inbox, sender and environment (${summary.join("; ")})`;
   return (
     <Menu>
       <MenuTrigger render={<SidebarHeaderIconButton label={label} />}>
@@ -80,6 +92,7 @@ export function SidebarThreadFilterMenu({
       <MenuPopup align="end" className="w-[min(16rem,var(--available-width))]">
         <SidebarThreadFilterOptions
           countedThreads={countedThreads}
+          attributionOf={attributionOf}
           filter={filter}
           owner={owner}
           environments={environments}
@@ -91,21 +104,26 @@ export function SidebarThreadFilterMenu({
 }
 
 // Mounted only while the menu is open, so counting never runs on streaming ticks.
-function SidebarThreadFilterOptions({
+function SidebarThreadFilterOptions<T extends CountedThread>({
   countedThreads,
+  attributionOf,
   filter,
   owner,
   environments,
   isChanged,
 }: {
-  countedThreads: () => CountedThreads;
+  countedThreads: () => ReadonlyArray<T>;
+  attributionOf: (thread: T) => ThreadAttribution;
   filter: ThreadListFilter;
   owner: Founder | undefined;
   environments: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly label: string }>;
   isChanged: boolean;
 }) {
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
-  const counts = threadListFilterCounts(countedThreads(), filter);
+  const counts = threadListFilterCounts(countedThreads(), filter, attributionOf);
+  const shownAttributions = THREAD_ATTRIBUTIONS.filter(
+    (from) => !filter.hiddenAttributions.includes(from),
+  );
   const inboxOrder = inboxMenuOrder(owner);
   const environmentIds = environments.map((environment) => environment.environmentId);
   const shownEnvironmentIds = environmentIds.filter(
@@ -132,6 +150,33 @@ function SidebarThreadFilterOptions({
               }
             >
               <FilterOptionRow label={INBOX_LABELS[inbox]} count={count} />
+            </MenuCheckboxItem>
+          );
+        })}
+      </MenuGroup>
+      <MenuSeparator />
+      <MenuGroup>
+        <MenuGroupLabel>From</MenuGroupLabel>
+        {THREAD_ATTRIBUTIONS.map((from) => {
+          const checked = shownAttributions.includes(from);
+          const isLast = checked && shownAttributions.length === 1;
+          const count = counts.from.get(from) ?? 0;
+          return (
+            <MenuCheckboxItem
+              key={from}
+              checked={checked}
+              disabled={isLast}
+              aria-label={`From ${THREAD_ATTRIBUTION_LABELS[from]}, ${count} active${isLast ? LAST_OPTION_NOTE : ""}`}
+              onCheckedChange={() => {
+                const shown = toggleFilterOption(shownAttributions, from, THREAD_ATTRIBUTIONS);
+                void updateClientSettings({
+                  sidebarHiddenThreadAttributions: THREAD_ATTRIBUTIONS.filter(
+                    (candidate) => !shown.includes(candidate),
+                  ),
+                });
+              }}
+            >
+              <FilterOptionRow label={THREAD_ATTRIBUTION_LABELS[from]} count={count} />
             </MenuCheckboxItem>
           );
         })}
@@ -189,6 +234,7 @@ function SidebarThreadFilterOptions({
               void updateClientSettings({
                 founderInboxFilter: effectiveInboxFilter({ founderInboxOwner: owner }),
                 sidebarHiddenEnvironmentIds: [],
+                sidebarHiddenThreadAttributions: [],
               })
             }
           >

@@ -1,5 +1,9 @@
 import { SidebarThreadFilterMenu } from "./sidebar/SidebarThreadFilterMenu";
 import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
+import {
+  resolveThreadAttributions,
+  threadAttributionKey,
+} from "@t3tools/client-runtime/state/thread-attribution";
 import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
@@ -333,6 +337,7 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
+const NO_MACHINE_OWNERS = {};
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -1104,11 +1109,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const threads = useQuietThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const threadListFilter = useClientSettings(threadListFilterOf);
-  // Search always looks across every inbox and environment.
+  const founderByEnvironmentId = useClientSettings((settings) => settings.founderByEnvironmentId);
+  const threadAttributions = resolveThreadAttributions(
+    threads,
+    founderByEnvironmentId ?? NO_MACHINE_OWNERS,
+  );
+  const attributionOf = (thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) =>
+    threadAttributions.get(threadAttributionKey(thread)) ?? "unknown";
+  // Search always looks across every inbox, sender and environment.
   const inboxThreads =
     threadSearchQuery.trim().length > 0
       ? threads
-      : threads.filter((thread) => matchesThreadListFilter(thread, threadListFilter));
+      : threads.filter((thread) =>
+          matchesThreadListFilter(thread, threadListFilter, attributionOf(thread)),
+        );
   const listedThreads =
     promotingDraftThreadKeys.length === 0
       ? inboxThreads
@@ -2993,6 +3007,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               hasProjects={projectGroups.length > 0}
               threadFilter={
                 <SidebarThreadFilterMenu
+                  attributionOf={attributionOf}
                   countedThreads={() =>
                     filterSidebarV2VisibleThreads(
                       threads,
@@ -3465,6 +3480,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               showJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
                             }
                             currentEnvironmentId={primaryEnvironmentId}
+                            attribution={attributionOf(thread)}
                             environmentLabel={
                               environmentLabelById.get(thread.environmentId) ?? null
                             }
