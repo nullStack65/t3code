@@ -34,6 +34,37 @@ export type ThreadInbox = typeof ThreadInbox.Type;
 export const INBOX_CAPABILITY = "closura-founder-inbox-v2" as const;
 export const InboxView = Schema.Literals(["kameron", "jeff", "shared", "agents", "all"]);
 export type InboxView = typeof InboxView.Type;
+/** An inbox a thread can be filed into: every view except All. */
+export const InboxChoice = Schema.Literals(["kameron", "jeff", "shared", "agents"]);
+export type InboxChoice = typeof InboxChoice.Type;
+
+/** The routing that files a thread into one inbox, shared by the thread menu and agent launches. */
+export function inboxRoutingFor(inbox: InboxChoice): ThreadInboxRouting {
+  if (inbox === "shared")
+    return { owner: null, assignee: null, audience: "shared", attentionKind: "FYI" };
+  if (inbox === "agents")
+    return { owner: null, assignee: null, audience: "agent-only", attentionKind: "background" };
+  return {
+    owner: inbox,
+    assignee: { kind: "human", id: inbox },
+    audience: inbox,
+    attentionKind: "action",
+  };
+}
+
+/**
+ * Where an agent-launched top-level thread is filed. Explicit routing wins, then the
+ * chosen inbox; otherwise Agents, so agent work never lands in a founder's inbox by default.
+ */
+export const agentLaunchInboxRouting = (input: {
+  readonly inbox?: InboxChoice | undefined;
+  readonly inboxRouting?: ThreadInboxRoutingPatch | undefined;
+}): ThreadInboxRoutingPatch => input.inboxRouting ?? inboxRoutingFor(input.inbox ?? "agents");
+
+export const InboxChoiceParameter = InboxChoice.annotate({
+  description:
+    "Sidebar inbox for the new thread. Default 'agents'. Pick 'kameron' or 'jeff' only when that founder asked for it or must act on it; 'shared' for both. `inboxRouting` overrides it.",
+});
 export const compositeThreadKey = (environmentId: string, threadId: string) =>
   JSON.stringify([environmentId, threadId]);
 export const InboxThreadRef = Schema.Struct({ environmentId: EnvironmentId, threadId: ThreadId });

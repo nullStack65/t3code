@@ -1,6 +1,7 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
   clampedPositiveInt,
+  InboxChoiceParameter,
   ThreadInboxRoutingPatch,
   NonNegativeInt,
   ModelSelection,
@@ -141,6 +142,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
           "No project: a new Scratch folder. Not with `projectId` or `workspaceStrategy`.",
       }),
     ),
+    inbox: Schema.optional(InboxChoiceParameter),
     inboxRouting: Schema.optional(ThreadInboxRoutingPatch),
     title: TrimmedNonEmptyString,
     modelSelection: Schema.optional(ModelSelection),

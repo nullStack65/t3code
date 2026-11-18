@@ -416,6 +416,39 @@ it.effect("a launch with a model its provider does not advertise creates no thre
   }),
 );
 
+it.effect("a launch is filed in Agents unless the agent picks an inbox", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const launch = (inbox?: "kameron" | "shared") =>
+      toolkit
+        .handle("t3_thread_launch", {
+          title: "Fix",
+          projectId,
+          ...(inbox === undefined ? {} : { inbox }),
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    yield* launch();
+    yield* launch("kameron");
+    yield* launch("shared");
+    expect(launched.map((input) => input.inboxRouting?.audience)).toEqual([
+      "agent-only",
+      "kameron",
+      "shared",
+    ]);
+    expect(launched[1]?.inboxRouting?.assignee).toEqual({ kind: "human", id: "kameron" });
+  }),
+);
+
 it.effect("a launch retried with the same clientRequestId replays the first one", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];

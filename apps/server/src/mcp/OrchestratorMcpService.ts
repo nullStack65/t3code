@@ -66,6 +66,7 @@ import {
   latestProviderTurnForAttempt,
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
+  agentLaunchInboxRouting,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -3216,11 +3217,7 @@ const make = Effect.gen(function* () {
                 .dispatch({
                   type: "thread.create",
                   inboxOrigin: { kind: "agent", id: parent.thread.id },
-                  ...(request.inboxRouting !== undefined
-                    ? { inboxRouting: request.inboxRouting }
-                    : parent.thread.inbox === undefined
-                      ? {}
-                      : { inboxRouting: parent.thread.inbox }),
+                  inboxRouting: agentLaunchInboxRouting(request),
                   createdBy: "agent",
                   creationSource: "mcp",
                   commandId,
