@@ -1,5 +1,7 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "./baseSchemas.ts";
+import { ClientSettingsSchema } from "./settings.ts";
 import {
   makeThreadInbox,
   routeThreadInbox,
@@ -24,6 +26,23 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxView(k, "jeff")).toBe(false);
     expect(matchesInboxView(j, "all")).toBe(true);
     expect(matchesInboxView(k, "all")).toBe(true);
+  });
+  it("shows unclassified history on upgraded devices and persists the picked view", () => {
+    const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
+    const encode = Schema.encodeSync(ClientSettingsSchema);
+    const upgraded = decode({ notificationMode: "off" });
+    expect(upgraded.founderInboxView).toBe("all");
+    expect(upgraded.founderInboxOwner).toBe("kameron");
+    for (const unclassified of [undefined, null]) {
+      expect(matchesInboxView(unclassified, upgraded.founderInboxView)).toBe(true);
+      expect(matchesInboxView(unclassified, "jeff")).toBe(false);
+    }
+    for (const view of ["jeff", "kameron", "shared", "agents", "all"] as const) {
+      const saved = decode(
+        encode({ ...upgraded, founderInboxView: view, founderInboxOwner: "jeff" }),
+      );
+      expect([saved.founderInboxView, saved.founderInboxOwner]).toEqual([view, "jeff"]);
+    }
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });

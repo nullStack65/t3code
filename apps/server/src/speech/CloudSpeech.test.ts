@@ -1,5 +1,9 @@
 import { it } from "@effect/vitest";
-import { DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS, SecretProviderId } from "@t3tools/contracts";
+import {
+  DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
+  SecretProviderId,
+  type SpeechTranscriptionOptions,
+} from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -219,12 +223,21 @@ it.effect(
         ),
       );
       yield* service.setKey("assemblyai", Redacted.make("assembly-fixture"));
-      const transcribe = (samples: number) =>
+      const samples = (count: number) => {
+        const audio = new Float32Array(count);
+        audio.set([0.5, -0.5]);
+        return new Uint8Array(audio.buffer);
+      };
+      const transcribe = (count: number, options: Partial<SpeechTranscriptionOptions> = {}) =>
         service
-          .transcribe("assemblyai", new Uint8Array(new Float32Array(samples).buffer), {
+          .transcribe("assemblyai", samples(count), {
             ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
             speechLanguage: "en",
-            speechCustomWords: [{ term: "Closura", aliases: [] }],
+            speechCustomWords: [
+              { term: "Closura", aliases: ["closer a"] },
+              { term: "T3 Code", aliases: [] },
+            ],
+            ...options,
           })
           .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream));
       expect(yield* transcribe(1600)).toBe("hello T3");
@@ -235,16 +248,55 @@ it.effect(
       expect(headers.get("authorization")).toBe("assembly-fixture");
       expect(headers.get("X-AAI-Model")).toBe("universal-3-5-pro");
       const form = init?.body as FormData;
+      expect([...form.keys()]).toEqual(["config", "audio"]);
       expect(JSON.parse(String(form.get("config")))).toEqual({
         language_code: "en",
-        word_boost: ["Closura"],
+        word_boost: ["Closura", "T3 Code"],
       });
-      expect((form.get("audio") as Blob).type).toBe("audio/wav");
+      const audio = form.get("audio") as File;
+      expect([audio.type, audio.name]).toEqual(["audio/wav", "dictation.wav"]);
+      const wav = new DataView(yield* Effect.promise(() => audio.arrayBuffer()));
+      // RIFF/WAVE, PCM, mono, 16 kHz, 32000 B/s, 2-byte frames, 16-bit, 3200 data bytes.
+      expect([
+        new TextDecoder().decode(wav.buffer.slice(0, 4)),
+        new TextDecoder().decode(wav.buffer.slice(8, 12)),
+        wav.getUint16(20, true),
+        wav.getUint16(22, true),
+        wav.getUint32(24, true),
+        wav.getUint32(28, true),
+        wav.getUint16(32, true),
+        wav.getUint16(34, true),
+        wav.getUint32(40, true),
+        wav.getInt16(44, true),
+        wav.getInt16(46, true),
+      ]).toEqual(["RIFF", "WAVE", 1, 1, 16_000, 32_000, 2, 16, 3200, 16384, -16384]);
+      upstream.mockResolvedValueOnce(Response.json({ text: "uh ship it" }));
+      expect(yield* transcribe(1600, { speechLanguage: "auto" })).toBe("ship it");
+      const autoForm = upstream.mock.calls[1]![1]!.body as FormData;
+      expect(JSON.parse(String(autoForm.get("config")))).toEqual({
+        word_boost: ["Closura", "T3 Code"],
+      });
+      upstream.mockResolvedValueOnce(Response.json({ text: "Um, ship closer a today" }));
+      expect(yield* transcribe(1600)).toBe("ship Closura today");
+      upstream.mockResolvedValueOnce(Response.json({ text: "Um, ship closer a today" }));
+      expect(yield* transcribe(1600, { speechRemoveFillerWords: false })).toBe(
+        "Um, ship Closura today",
+      );
       expect(yield* Effect.flip(transcribe(1_920_001))).toMatchObject({ reason: "audio-duration" });
       expect(yield* Effect.flip(transcribe(100))).toMatchObject({ reason: "audio-duration" });
-      expect(upstream).toHaveBeenCalledTimes(1);
-      upstream.mockResolvedValueOnce(new Response("private diagnostic", { status: 401 }));
-      expect(yield* Effect.flip(transcribe(1600))).toMatchObject({ reason: "rejected-key" });
+      expect(upstream).toHaveBeenCalledTimes(4);
+      for (const [status, reason] of [
+        [401, "rejected-key"],
+        [402, "rejected-key"],
+        [403, "rejected-key"],
+        [429, "rate-limit"],
+        [500, "unavailable"],
+      ] as const) {
+        upstream.mockResolvedValueOnce(new Response("private diagnostic", { status }));
+        const error = yield* Effect.flip(transcribe(1600));
+        expect(error).toMatchObject({ provider: "assemblyai", reason });
+        expect(`${error.message} ${JSON.stringify(error)}`).not.toContain("private diagnostic");
+      }
       yield* service.setKey("assemblyai", null);
       expect((yield* service.configured).assemblyai).toBe(false);
       expect(yield* Effect.flip(transcribe(1600))).toMatchObject({ reason: "missing-key" });
