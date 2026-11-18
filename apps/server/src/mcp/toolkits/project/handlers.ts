@@ -1,4 +1,5 @@
 import {
+  agentLaunchInboxRouting,
   CommandId,
   type EnvironmentId,
   isProviderAvailable,
@@ -155,6 +156,7 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
       placement: _placement,
       delegatedFrom: _delegatedFrom,
       workspaceStrategy: _requested,
+      inbox: _inbox,
       ...params
     } = input;
     const launched = yield* delegation.value.launch(scope, {
@@ -165,6 +167,8 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
       // The workspace and modes it was admitted with go explicitly, so nothing there changes them.
       params: {
         ...params,
+        // Resolved here: a linked environment on an older release knows only inboxRouting.
+        inboxRouting: agentLaunchInboxRouting(input),
         modelSelection,
         ...(local.strategy === undefined ? {} : { workspaceStrategy: local.strategy }),
         runtimeMode: local.runtimeMode,
@@ -404,11 +408,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         const result = yield* ThreadMessageIntake.launchThread({
           inboxOrigin: { kind: "agent", id: caller?.id ?? "agent" },
-          ...(input.inboxRouting !== undefined
-            ? { inboxRouting: input.inboxRouting }
-            : caller?.inbox === undefined
-              ? {}
-              : { inboxRouting: caller.inbox }),
+          inboxRouting: agentLaunchInboxRouting(input),
           commandId,
           threadId,
           projectId,

@@ -10,6 +10,7 @@ import {
   inboxOriginFor,
   founderInboxLane,
   compositeThreadKey,
+  agentLaunchInboxRouting,
 } from "./threadInbox.ts";
 const kameron = { kind: "human", id: "kameron" } as const;
 const jeff = { kind: "human", id: "jeff" } as const;
@@ -65,6 +66,27 @@ describe("shared fleet organizational inbox", () => {
       true,
       false,
     ]);
+  });
+  it("files agent launches in Agents unless the agent picks an inbox", () => {
+    // A launch from a thread in Kameron's inbox no longer copies that routing.
+    const launched = (choice: Parameters<typeof agentLaunchInboxRouting>[0]) =>
+      makeThreadInbox({ actor: bot, routing: agentLaunchInboxRouting(choice) });
+    const views = ["kameron", "jeff", "shared", "agents"] as const;
+    const visibleIn = (inbox: ReturnType<typeof launched>) =>
+      views.filter((view) => matchesInboxView(inbox, view));
+    expect(visibleIn(launched({}))).toEqual(["agents"]);
+    expect(visibleIn(launched({ inbox: "kameron" }))).toEqual(["kameron", "agents"]);
+    expect(visibleIn(launched({ inbox: "jeff" }))).toEqual(["jeff", "agents"]);
+    expect(visibleIn(launched({ inbox: "shared" }))).toEqual(["shared", "agents"]);
+    expect(launched({ inbox: "kameron" }).origin).toEqual(bot);
+    const explicit = launched({
+      inbox: "kameron",
+      inboxRouting: { assignee: { kind: "human", id: "jeff" } },
+    });
+    expect(visibleIn(explicit)).toEqual(["jeff", "agents"]);
+    const quieter = launched({ inbox: "kameron", inboxRouting: { attentionKind: "FYI" } });
+    expect(visibleIn(quieter)).toEqual(["kameron", "agents"]);
+    expect(quieter.attentionKind).toBe("FYI");
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });

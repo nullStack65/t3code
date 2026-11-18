@@ -279,9 +279,10 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 });
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
-import { ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
+import { InboxChoiceParameter, ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
+  inbox: Schema.optional(InboxChoiceParameter),
   inboxRouting: Schema.optional(ThreadInboxRoutingPatch),
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
