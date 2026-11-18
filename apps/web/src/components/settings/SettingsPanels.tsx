@@ -64,7 +64,7 @@ import { scopedIdleCompaction } from "./scopedSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { ThreadTitleInstructionsSettings } from "./ThreadTitleInstructionsSettings";
 import { SnoozePresetsRow } from "./SnoozePresetsSettings";
-import { NewThreadInboxRow } from "./NewThreadInboxSettings";
+import { MachineOwnersRow, NewThreadInboxRow } from "./NewThreadInboxSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { managedTelemetryOffMessage, usePrimaryManagedPolicy } from "../../state/managedPolicy";
 import {
@@ -1844,6 +1844,7 @@ export function ThreadsSettingsPanel() {
       {!isProjectScope ? (
         <SettingsSection id="inbox" title="Inbox">
           <NewThreadInboxRow />
+          <MachineOwnersRow />
         </SettingsSection>
       ) : null}
 

@@ -149,6 +149,7 @@ jobs:
             packages/contracts/src/threadMetadataMcp.test.ts \
             apps/web/src/components/threadActionMenu.logic.test.ts \
             apps/web/src/components/sidebar/threadListFilter.logic.test.ts \
+            packages/client-runtime/src/state/threadAttribution.test.ts \
             apps/server/src/orchestration-v2/ThreadLaunchService.test.ts \
             apps/server/src/orchestration-v2/SubagentProjection.test.ts \
             packages/shared/src/threadPlacement.test.ts \

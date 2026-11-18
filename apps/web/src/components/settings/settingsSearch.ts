@@ -827,6 +827,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["inbox owner founder kameron jeff attribute filed"],
   },
   {
+    id: "machine-owners",
+    title: "Machine owners",
+    to: "/settings/threads",
+    searchTerms: ["environment founder kameron jeff attribution from sender badge"],
+  },
+  {
     id: "add-project-starts-in",
     title: "Add project starts in",
     to: "/settings/threads",
