@@ -5,6 +5,7 @@ import { managedCapabilityDenial } from "@t3tools/contracts";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -22,6 +23,7 @@ export function LabsSettingsPanel() {
         {/* Clerk is only mounted when this build has T3 Connect. */}
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
+        <PlacementRow />
         <PromptSuggestionsRow />
         <SimlockHostsRow />
         <FastWorktreeCheckoutRow />
@@ -164,6 +166,64 @@ function LinkedEnvironmentsRow() {
         />
       }
     />
+  );
+}
+
+const MACHINE_ROLE_LABELS = {
+  auto: "Detect",
+  headless: "Headless",
+  interactive: "Someone's computer",
+} as const;
+
+function PlacementRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("machine-placement-role")}
+      settingKeys={["machinePlacementRole"]}
+      description="Agents spread new work across linked machines by load. Headless machines fill first. Someone's computer gets work only when every headless machine is full and nobody is using it, and agents there are capped so it stays responsive. Detect treats a desktop app, a Mac, Windows or a Linux graphical login as someone's computer."
+      control={
+        <div className="w-full sm:w-48">
+          <Select
+            value={settings.machinePlacementRole}
+            onValueChange={(value) => {
+              if (value === "auto" || value === "headless" || value === "interactive")
+                updateSettings({ machinePlacementRole: value });
+            }}
+          >
+            <SelectTrigger size="sm" className="w-full min-w-0" aria-label="This machine is">
+              <SelectValue>{MACHINE_ROLE_LABELS[settings.machinePlacementRole]}</SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              <SelectItem value="auto">Detect (default)</SelectItem>
+              <SelectItem value="headless">Headless</SelectItem>
+              <SelectItem value="interactive">Someone's computer</SelectItem>
+            </SelectPopup>
+          </Select>
+        </div>
+      }
+    >
+      <div className="mt-2 mb-2 border-l-2 border-border/60 ps-3">
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("automatic-placement-default")}
+          settingKeys={["automaticPlacementByDefault"]}
+          description="Place an agent's new worktree from origin on the machine with the most room unless it names one. Off keeps it here unless it asks."
+          control={
+            <ScopedSwitch
+              settingKeys={["automaticPlacementByDefault"]}
+              checked={settings.automaticPlacementByDefault}
+              onCheckedChange={(checked) =>
+                updateSettings({ automaticPlacementByDefault: Boolean(checked) })
+              }
+              aria-label="Place new agent threads automatically"
+            />
+          }
+        />
+      </div>
+    </SettingsRow>
   );
 }
 

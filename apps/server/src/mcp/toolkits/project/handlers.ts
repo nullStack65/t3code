@@ -3,6 +3,7 @@ import {
   CommandId,
   type EnvironmentId,
   MessageId,
+  type ModelSelection,
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
@@ -128,8 +129,33 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
     /** The mode it would start with here, project defaults included. */
     readonly runtimeMode: RuntimeMode;
     readonly interactionMode: ProviderInteractionMode;
+    /** The calling thread's model, which a placed-by-default launch keeps. */
+    readonly callerModelSelection: ModelSelection | undefined;
   },
 ) {
+  // A fresh worktree from origin needs nothing of this checkout, so the fleet places it
+  // by default; anything else, or an explicit 'here', stays unless it asks. Only with the
+  // caller's key: a retry after a lost answer must reach the machine first chosen.
+  const byDefault =
+    input.placement === undefined &&
+    input.clientRequestId !== undefined &&
+    input.environmentId === undefined &&
+    local.strategy?.type === "worktree" &&
+    local.strategy.startFromOrigin === true &&
+    (input.attachments?.length ?? 0) === 0 &&
+    (input.modelSelection ?? local.callerModelSelection) !== undefined &&
+    (yield* ServerSettings.ServerSettingsService.pipe(
+      Effect.flatMap((settings) => settings.getSettings),
+      Effect.map((settings) => settings.automaticPlacementByDefault),
+      Effect.orElseSucceed(() => false),
+    ));
+  if (byDefault) {
+    input = {
+      ...input,
+      placement: "auto",
+      modelSelection: input.modelSelection ?? local.callerModelSelection,
+    };
+  }
   const key = input.clientRequestId;
   if (key === undefined && input.placement !== "auto") return undefined;
   // Work a link sent here was placed on its own side, and never uses this side's links.
@@ -201,7 +227,7 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
     modelSelection,
     runtimeMode: local.runtimeMode,
   }).pipe(Effect.mapError(unavailable));
-  const environmentId = yield* delegation.value.place(scope, {
+  const placing = delegation.value.place(scope, {
     operation: "thread-launch",
     key,
     threadId: local.threadId,
@@ -210,6 +236,15 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
     runtimeMode: local.runtimeMode,
     here,
   });
+  // Placement nobody asked for falls back to here, as before, when no machine has room.
+  const environmentId = byDefault
+    ? yield* placing.pipe(
+        Effect.catchIf(
+          (error) => error.code === "target_required",
+          () => Effect.succeed(scope.environmentId),
+        ),
+      )
+    : yield* placing;
   return environmentId === scope.environmentId ? undefined : yield* sendThere(environmentId, key);
 });
 
@@ -330,6 +365,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             strategy,
             runtimeMode: defaultRuntimeMode,
             interactionMode,
+            callerModelSelection: caller?.modelSelection,
           });
           if (placedThere !== undefined) return placedThere;
         }

@@ -51,6 +51,13 @@ export function SettingsLabsRouteScreen() {
           description="Let agents on a machine work on your other machines, and theirs on it. Turn it on for each machine. While off, nothing new starts over a link; running tasks finish."
         />
         <MachineBetaSection
+          title="Automatic placement"
+          icon="server.rack"
+          capability="peerLinks"
+          setting="automaticPlacementByDefault"
+          description="Place an agent's new worktree from origin on the linked machine with the most room unless it names one. Headless machines fill first; someone's computer only when it is idle and every headless one is full. Set which machines are someone's computer in each machine's Labs settings."
+        />
+        <MachineBetaSection
           title="Fast worktree checkout"
           icon="bolt.circle"
           capability="fastWorktreeCheckout"
@@ -238,7 +245,10 @@ export function NewThreadSettingsSection() {
   );
 }
 
-type MachineBetaSetting = "linkedEnvironmentsEnabled" | "fastWorktreeCheckout";
+type MachineBetaSetting =
+  | "linkedEnvironmentsEnabled"
+  | "automaticPlacementByDefault"
+  | "fastWorktreeCheckout";
 
 /** One switch per connected machine that offers the beta, since each machine's own setting decides. */
 function MachineBetaSection({
@@ -284,10 +294,7 @@ function MachineBetaSection({
                 void updateSettings({
                   environmentId: environment.environmentId,
                   input: {
-                    patch:
-                      setting === "linkedEnvironmentsEnabled"
-                        ? { linkedEnvironmentsEnabled: value }
-                        : { fastWorktreeCheckout: value },
+                    patch: { [setting]: value },
                   },
                 })
               }

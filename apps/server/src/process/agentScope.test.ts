@@ -12,12 +12,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import { vi } from "vite-plus/test";
+import { afterEach, vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import { makeCodexAppServerSpawnCommand } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProviderProcesses from "./providerProcesses.ts";
+import { MachinePresence } from "../resourceTelemetry/HostResources.ts";
 import { classifyScope, make, ownedAgentSlice, type ScopeState } from "./agentScope.ts";
 
 const GiB = 1024 ** 3;
@@ -67,11 +68,13 @@ const withFakeSystemd = <A, E>(
     stopFails = false,
     leftovers = false,
     liveOwner = false,
+    role,
   }: {
     readonly oomPolicy?: boolean;
     readonly stopFails?: boolean;
     readonly leftovers?: boolean;
     readonly liveOwner?: boolean;
+    readonly role?: { current: "headless" | "interactive" };
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -125,7 +128,17 @@ const withFakeSystemd = <A, E>(
     if (leftovers) {
       units.set(ownedAgentSlice(stateDir), { activeState: "active", result: "success" });
     }
+    const presence =
+      role === undefined
+        ? undefined
+        : MachinePresence.of({
+            role: Effect.sync(() => role.current),
+            read: Effect.sync(() => ({ placementRole: role.current })),
+          });
     const scope = yield* make.pipe(
+      presence === undefined
+        ? (effect) => effect
+        : Effect.provideService(MachinePresence, presence),
       Effect.provideService(ProviderProcesses.ProviderProcesses, { hasOtherLiveOwner: liveOwner }),
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
       Effect.provideService(HostProcess.Platform, "linux"),
@@ -195,6 +208,9 @@ const launchCodex = (scope: Effect.Success<typeof make>, threadId: string) =>
   );
 
 describe("AgentScope service", () => {
+  afterEach(() => {
+    memory.total = 16 * GiB;
+  });
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
       Effect.gen(function* () {
@@ -325,11 +341,45 @@ describe("AgentScope service", () => {
             "CPUWeight=10",
             "IOWeight=10",
             "TasksMax=25%",
+            "CPUQuota=",
           ],
         ]);
       }),
     ),
   );
+
+  it.effect("keeps a person's computer responsive and follows a role change", () => {
+    memory.total = 8 * GiB;
+    const role = { current: "interactive" as "headless" | "interactive" };
+    return withFakeSystemd(
+      ({ scope, calls }) =>
+        Effect.gen(function* () {
+          const limits = () =>
+            calls.filter(([, verb]) => verb === "set-property").map((args) => args.slice(3));
+          yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+          const cores = NodeOS.cpus().length;
+          // 8 GB keeps 4 GB for the person before agents slow and 3 GB before a kill.
+          expect(limits()).toEqual([
+            ["app-t3code-agents.slice", `MemoryHigh=${4 * GiB}`, `MemoryMax=${5 * GiB}`],
+            [
+              "app-t3code.slice",
+              "CPUWeight=1",
+              "IOWeight=1",
+              "TasksMax=25%",
+              `CPUQuota=${Math.max(100, Math.floor(cores * 50))}%`,
+            ],
+          ]);
+
+          role.current = "headless";
+          yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "b" });
+          expect(limits().slice(2)).toEqual([
+            ["app-t3code-agents.slice", `MemoryHigh=${4 * GiB}`, `MemoryMax=${6 * GiB}`],
+            ["app-t3code.slice", "CPUWeight=10", "IOWeight=10", "TasksMax=25%", "CPUQuota="],
+          ]);
+        }),
+      { role },
+    );
+  });
 
   it.effect("follows a live memory change at the next launch", () => {
     memory.total = 16 * GiB;

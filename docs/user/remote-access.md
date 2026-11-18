@@ -399,6 +399,29 @@ ends, as for any delegated task. It keeps following the task across restarts.
 If the other machine revokes the link, or the link is removed here, the task
 fails with that reason.
 
+### Spread agent work across linked machines
+
+Agents can let T3 Code pick the machine for independent work: a task with
+`placement: "auto"`, or a new thread in a worktree started from origin. In
+Closura builds the second needs no request when the agent passes a
+`clientRequestId`. Turn **Place new agent threads
+automatically** off in **Settings → Labs** to keep those threads on this machine.
+
+T3 Code picks the machine with the most room, judged by CPU use, load per core,
+free memory and how many agents already run there. Headless machines are used
+first. A Linux machine marked as someone's computer gets work only when every
+headless machine is full and nobody is using it. Agents there are capped at half
+its cores and get low CPU and disk priority, and more of its memory is kept free,
+so it stays responsive. A Mac or Windows machine, or one on an older release,
+never takes placed work from another machine. If no machine has room, work that
+started here stays here.
+
+Each machine decides its own role in **Settings → Labs → Load balancing**. The
+**Detect** setting treats the desktop app, a Mac, Windows, or a Linux graphical
+login as someone's computer. Set a headless machine that also runs a desktop,
+such as a computer-use host, to **Headless** by hand. A linked machine is used
+only if its link allows launching threads, not with read-only access.
+
 ## Manage or revoke access
 
 On the host, **Settings → Sharing & access** lets authorized administrators create

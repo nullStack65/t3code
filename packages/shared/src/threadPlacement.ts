@@ -62,7 +62,7 @@ export function chooseThreadPlacement(
     .sort((a, b) =>
       a.environmentId < b.environmentId ? -1 : a.environmentId > b.environmentId ? 1 : 0,
     );
-  const environmentId = chooseLoadBalancedEnvironment(eligible, now);
+  const environmentId = chooseLoadBalancedEnvironment(eligible, now, request.originEnvironmentId);
   return environmentId === null
     ? { accepted: false, reason: "no-eligible-environment" }
     : { accepted: true, environmentId, reason: "capacity" };

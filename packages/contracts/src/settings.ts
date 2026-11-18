@@ -1383,6 +1383,9 @@ export const CloudSpeechCredentials = Schema.Struct({
   assemblyai: CloudSpeechCredential,
 });
 
+export const MachinePlacementRole = Schema.Literals(["auto", "headless", "interactive"]);
+export type MachinePlacementRole = typeof MachinePlacementRole.Type;
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1514,6 +1517,22 @@ export const ServerSettings = Schema.Struct({
    */
   automaticPlacementExcludedEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /**
+   * Whether this machine belongs to a person at its keyboard. Automatic placement fills headless
+   * machines first, uses an interactive one only while its person is idle and every headless one
+   * is full, and runs agents there under tighter limits. Auto: a desktop app, macOS, Windows or a
+   * Linux graphical login is interactive; anything else is headless.
+   */
+  machinePlacementRole: MachinePlacementRole.pipe(
+    Schema.withDecodingDefault(Effect.succeed("auto" as const)),
+  ),
+  /**
+   * Closura: agent-launched threads that need nothing of the caller's checkout are placed
+   * automatically unless they name an environment. Off launches them here unless they ask.
+   */
+  automaticPlacementByDefault: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   /** Beta: Claude and Codex predict the next prompt after completed turns. Codex follows a change at once; open Claude threads after they restart. */
   promptSuggestionsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1956,6 +1975,8 @@ export const ServerSettingsPatch = Schema.Struct({
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   automaticPlacementExcludedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
+  machinePlacementRole: Schema.optionalKey(MachinePlacementRole),
+  automaticPlacementByDefault: Schema.optionalKey(Schema.Boolean),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
