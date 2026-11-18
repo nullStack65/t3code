@@ -21,6 +21,7 @@ import {
   defaultInstanceIdForDriver,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+  ChatAttachmentId,
   EnvironmentId,
   ProjectId,
   ProviderDriverKind,
@@ -88,6 +89,7 @@ import {
   markPromotedDraftThreadByRef,
   resolveDraftPromotionNavigationTarget,
   restoreFailedDraftThread,
+  markRestoredLaunchCopy,
   subscribeDraftThreadPromotion,
   type ComposerFileAttachment,
   type ComposerImageAttachment,
@@ -1316,6 +1318,239 @@ describe("composerDraftStore project draft thread mapping", () => {
       vi.unstubAllGlobals();
       vi.resetModules();
     }
+  });
+
+  it("retries an unconfirmed launch as its original operation and recovers the accepted result, across a reload", async () => {
+    let storageFails = false;
+    let storageDrops = false;
+    const memory = createMemoryStorage();
+    const sharedStorage = {
+      getItem: (name: string) => memory.getItem(name),
+      removeItem: (name: string) => memory.removeItem(name),
+      setItem: (name: string, value: string) => {
+        if (storageFails) throw new Error("QuotaExceededError");
+        if (storageDrops) return;
+        memory.setItem(name, value);
+      },
+    };
+    vi.stubGlobal("localStorage", sharedStorage);
+    vi.stubGlobal("window", new EventTarget());
+    vi.useFakeTimers();
+    vi.resetModules();
+    try {
+      // The host keeps launch receipts by command id: the same command replays its result, and
+      // a different one for a thread that exists is refused.
+      const accepted = new Map<string, { threadId: ThreadId; messageId: string; runId: string }>();
+      // After accepting, the host can still fail the call (a read after its commit), so the
+      // client gets a launch error for a launch that exists.
+      let failsAfterAccepting = false;
+      // Every launch's attachment references, as sent.
+      const sends: Array<{ commandId: string; attachmentIds: ReadonlyArray<string> }> = [];
+      const launchThere = (
+        operation: { commandId: string; messageId: string },
+        sent: ThreadId,
+        attachments: ReadonlyArray<{ id: string }>,
+      ) => {
+        sends.push({
+          commandId: operation.commandId,
+          attachmentIds: attachments.map((attachment) => attachment.id),
+        });
+        const replayed = accepted.get(operation.commandId);
+        if (replayed) return replayed;
+        if ([...accepted.values()].some((launch) => launch.threadId === sent))
+          return { refused: `Thread ${sent} already exists.` };
+        const launched = {
+          threadId: sent,
+          messageId: operation.messageId,
+          runId: `run-${accepted.size + 1}`,
+        };
+        accepted.set(operation.commandId, launched);
+        return failsAfterAccepting ? { error: "Failed to launch thread" } : launched;
+      };
+      let allocated = 0;
+      let uploads = 0;
+      let storageFailsBeforePayload = false;
+      let storageDropsBeforePayload = false;
+      // Preparing attachments uploads them again: a fresh reference each time.
+      const prepare = () => [
+        {
+          type: "image" as const,
+          id: ChatAttachmentId.make(`pending-upload-${++uploads}`),
+          name: "shot.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        },
+      ];
+      // The composer's send: the draft's own pending operation, or new ids; committed, then launched.
+      const send = (
+        tab: typeof import("./composerDraftStore"),
+        draftKey: DraftId,
+        text: string,
+      ) => {
+        const store = tab.useComposerDraftStore.getState();
+        const draft = store.getDraftSession(draftKey)!;
+        const request = JSON.stringify({
+          text,
+          model: "claude-sonnet-4-6",
+          runtimeMode: "full-access",
+        });
+        const pending = draft.pendingLaunch;
+        if (pending && pending.request !== request) return { changed: true } as const;
+        allocated += 1;
+        const operation = pending ?? {
+          commandId: `command-${allocated}`,
+          messageId: `message-${allocated}`,
+          createdAt: "2026-11-18T00:00:00.000Z",
+          request,
+        };
+        const sentRef = scopeThreadRef(draft.environmentId, draft.threadId);
+        if (tab.markPromotedDraftThreadByRef(sentRef, operation) === false)
+          return { unbound: true } as const;
+        // A retry sends the references its launch committed; a first send commits them first.
+        const attachments = operation.attachments?.map(({ attachment }) => attachment) ?? prepare();
+        if (storageFailsBeforePayload) storageFails = true;
+        if (storageDropsBeforePayload) storageDrops = true;
+        if (
+          operation.attachments === undefined &&
+          !tab.commitPendingLaunchPayload(
+            sentRef,
+            operation.commandId,
+            attachments.map((attachment) => ({ attachment, inline: false })),
+          )
+        )
+          return { unbound: true } as const;
+        store.clearComposerContent(draftKey);
+        const answer = launchThere(operation, draft.threadId, attachments);
+        if ("runId" in answer) {
+          tab.finalizePromotedDraftThreadByRef(sentRef);
+          return { launched: answer, operation } as const;
+        }
+        tab.restoreFailedDraftThread(draftKey, draft, draft.threadId, operation);
+        tab.useComposerDraftStore.getState().setPrompt(draftKey, text);
+        tab.markRestoredLaunchCopy(draftKey);
+        return { failed: answer, operation } as const;
+      };
+
+      const before = await import("./composerDraftStore");
+      before.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(projectRef, draftId, { threadId });
+      before.useComposerDraftStore.getState().setPrompt(draftId, "Run the suite");
+      await vi.advanceTimersByTimeAsync(300);
+      // The host takes the launch, then fails the call; the thread's shell has not arrived.
+      failsAfterAccepting = true;
+      const first = send(before, draftId, "Run the suite");
+      expect(first).toMatchObject({ failed: { error: "Failed to launch thread" } });
+      expect(accepted.size).toBe(1);
+
+      // The renderer dies; the reload reads only what was committed.
+      vi.clearAllTimers();
+      vi.resetModules();
+      failsAfterAccepting = false;
+      const after = await import("./composerDraftStore");
+      // A retry whose operation cannot be committed sends nothing and keeps that operation.
+      storageFails = true;
+      expect(send(after, draftId, "Run the suite")).toEqual({ unbound: true });
+      expect(
+        after.useComposerDraftStore.getState().getDraftSession(draftId)?.pendingLaunch,
+      ).toMatchObject({ commandId: "command-1", messageId: "message-1" });
+      storageFails = false;
+      // A changed request is not sent while the first one's outcome is unknown.
+      expect(send(after, draftId, "Run only the unit tests")).toEqual({ changed: true });
+      expect(accepted.size).toBe(1);
+      // The unchanged retry is the same operation, and recovers what the host accepted.
+      const retried = send(after, draftId, "Run the suite");
+      expect(retried).toMatchObject({
+        launched: accepted.get("command-1"),
+        operation: { commandId: "command-1", messageId: "message-1" },
+      });
+      expect(accepted.size).toBe(1);
+      // Both sends of that operation carried the same upload, though a new one was available.
+      expect(sends.filter((sent) => sent.commandId === "command-1")).toEqual([
+        { commandId: "command-1", attachmentIds: ["pending-upload-1"] },
+        { commandId: "command-1", attachmentIds: ["pending-upload-1"] },
+      ]);
+      // Settled into its thread, the accepted message is not left to be sent again.
+      expect(after.useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
+      expect(
+        after.useComposerDraftStore.getState().draftsByThreadKey[
+          scopedThreadKey(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId))
+        ]?.prompt ?? "",
+      ).toBe("");
+
+      // When storage cannot commit the operation, nothing launches.
+      after.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(projectRef, otherDraftId, { threadId: otherThreadId });
+      await vi.advanceTimersByTimeAsync(300);
+      storageFails = true;
+      expect(send(after, otherDraftId, "Another task")).toEqual({ unbound: true });
+      expect(accepted.size).toBe(1);
+      // Nor when the references it would send cannot be committed after its binding was.
+      storageFails = false;
+      storageFailsBeforePayload = true;
+      const sendsBefore = sends.length;
+      expect(send(after, otherDraftId, "Another task")).toEqual({ unbound: true });
+      expect(sends.length).toBe(sendsBefore);
+      expect(accepted.size).toBe(1);
+      // Nor when storage drops that write without saying so: only the stored bytes count.
+      storageFails = false;
+      storageFailsBeforePayload = false;
+      storageDropsBeforePayload = true;
+      expect(send(after, otherDraftId, "Another task")).toEqual({ unbound: true });
+      expect(sends.length).toBe(sendsBefore);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
+  it("drops the restored copy of a launch the host accepted when its thread arrives", () => {
+    const store = useComposerDraftStore.getState();
+    const sentRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    const operation = {
+      commandId: "command-arrives",
+      messageId: "message-arrives",
+      createdAt: "2026-11-18T00:00:00.000Z",
+      request: "{}",
+    };
+    const sentDraft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    markPromotedDraftThreadByRef(sentRef, operation);
+    // Its answer was lost, so the composer gives the text back for a retry.
+    restoreFailedDraftThread(draftId, sentDraft, threadId, operation);
+    store.setPrompt(draftId, "Run the suite");
+    markRestoredLaunchCopy(draftId);
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.pendingLaunch).toMatchObject({
+      commandId: "command-arrives",
+    });
+    // The shell arrives late: the host had accepted it, so that text is not sent again.
+    finalizePromotedDraftThreadByRef(sentRef);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt ?? "").toBe("");
+  });
+
+  it("keeps what the user added to a restored launch when its thread arrives", () => {
+    const store = useComposerDraftStore.getState();
+    const sentRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    const operation = {
+      commandId: "command-edited",
+      messageId: "message-edited",
+      createdAt: "2026-11-18T00:00:00.000Z",
+      request: "{}",
+    };
+    const sentDraft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    markPromotedDraftThreadByRef(sentRef, operation);
+    restoreFailedDraftThread(draftId, sentDraft, threadId, operation);
+    store.setPrompt(draftId, "Run the suite");
+    markRestoredLaunchCopy(draftId);
+    // The same text, now with a screenshot the user attached after the failure.
+    store.addImages(draftId, [makeImage({ id: "added-later", previewUrl: "blob:added-later" })]);
+    finalizePromotedDraftThreadByRef(sentRef);
+    const kept = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(kept?.prompt).toBe("Run the suite");
+    expect(kept?.images.map((image) => image.id)).toEqual(["added-later"]);
   });
 
   it("restores a failed draft without changing the fresh draft", () => {

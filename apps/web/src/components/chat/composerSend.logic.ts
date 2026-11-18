@@ -1,4 +1,10 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type {
+  ChatAttachment,
+  EnvironmentId,
+  ThreadContextRecord,
+  UploadChatAttachment,
+} from "@t3tools/contracts";
+import type { PendingDraftLaunch, SentLaunchAttachment } from "../../composerDraftStore";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 
@@ -101,4 +107,102 @@ export function approvalRedirectNotice(input: {
     return "Another approval arrived, so your message wasn't sent.";
   }
   return null;
+}
+
+/**
+ * What identifies an attachment's content: the SHA-256 of its bytes, or the upload that holds
+ * them when the composer kept only that. Name, type and size do not: two files can share them.
+ */
+export async function attachmentContentIdentity(attachment: {
+  readonly file: File | null;
+  readonly uploadedAttachmentId?: string;
+}): Promise<string> {
+  if (attachment.file !== null) {
+    const digest = await crypto.subtle.digest("SHA-256", await attachment.file.arrayBuffer());
+    return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+  // Neither bytes nor an upload: nothing can show a retry carries the same content.
+  if (attachment.uploadedAttachmentId === undefined)
+    throw new Error("An attachment needs to be attached again before sending.");
+  return `upload:${attachment.uploadedAttachmentId}`;
+}
+
+/** The attachments as the launch sends them, without an inline image's bytes. */
+export function sentLaunchAttachments(
+  sent: ReadonlyArray<ChatAttachment | UploadChatAttachment>,
+): SentLaunchAttachment[] {
+  return sent.map((attachment) => {
+    if (!("dataUrl" in attachment)) return { attachment, inline: false };
+    const { dataUrl: _bytes, ...reference } = attachment;
+    return { attachment: reference as ChatAttachment, inline: true };
+  });
+}
+
+/**
+ * Exactly what a launch sent, again: the same references and ids. An inline image's bytes come
+ * from the restored file, which the request's content identity already proved unchanged.
+ */
+export function replayLaunchAttachments(
+  sent: ReadonlyArray<SentLaunchAttachment>,
+  current: ReadonlyArray<{ readonly file: File | null }>,
+  readDataUrl: (file: File) => Promise<string>,
+): Promise<Array<ChatAttachment | UploadChatAttachment>> {
+  return Promise.all(
+    sent.map(async ({ attachment, inline }, index) => {
+      if (!inline) return attachment;
+      const file = current[index]?.file;
+      if (!file) throw new Error(`Attachment '${attachment.name}' is no longer here to resend.`);
+      return { ...attachment, dataUrl: await readDataUrl(file) } as UploadChatAttachment;
+    }),
+  );
+}
+
+/**
+ * What a new thread's launch asks for. Attachments compare by content identity, not id: a
+ * restored draft clones them under new ids and is still the same request.
+ */
+export function draftLaunchRequest(input: {
+  readonly text: string;
+  readonly attachments: ReadonlyArray<{
+    readonly name: string;
+    readonly mimeType: string;
+    readonly sizeBytes: number;
+    /** From `attachmentContentIdentity`. */
+    readonly content: string;
+  }>;
+  readonly modelSelection: unknown;
+  readonly runtimeMode: string;
+  readonly interactionMode: string;
+  readonly projectId: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  readonly baseBranch: string | null;
+  readonly startFromOrigin: boolean;
+}): string {
+  return JSON.stringify({
+    ...input,
+    attachments: input.attachments.map(({ name, mimeType, sizeBytes, content }) => ({
+      name,
+      mimeType,
+      sizeBytes,
+      content,
+    })),
+  });
+}
+
+/**
+ * A launch whose outcome is unknown is resent as itself; a different request waits until it
+ * settles, since the host may already be running the first one.
+ */
+export function resolveDraftLaunch(
+  pending: PendingDraftLaunch | null | undefined,
+  request: string,
+):
+  | { readonly type: "new" }
+  | { readonly type: "retry"; readonly launch: PendingDraftLaunch }
+  | {
+      readonly type: "changed";
+    } {
+  if (!pending) return { type: "new" };
+  return pending.request === request ? { type: "retry", launch: pending } : { type: "changed" };
 }
