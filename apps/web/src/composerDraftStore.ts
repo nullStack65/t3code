@@ -4,8 +4,8 @@ import {
   rememberComposerImageBytes,
 } from "./components/chat/composerAttachmentFiles";
 import { elementContextToPreviewAnnotation } from "./lib/elementContext";
+import type { StartThreadTurnInput } from "@t3tools/client-runtime/operations";
 import {
-  ChatAttachment,
   ResponseContextRecord,
   ElementContextDetails,
   DEFAULT_MODEL,
@@ -404,11 +404,11 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
 
-const SentLaunchAttachmentSchema = Schema.Struct({
-  attachment: ChatAttachment,
-  inline: Schema.Boolean,
+const PendingLaunchTurnSchema = Schema.Struct({
+  environmentId: Schema.String,
+  input: Schema.Unknown,
 });
-const isSentLaunchAttachments = Schema.is(Schema.Array(SentLaunchAttachmentSchema));
+const isPersistedComposerThreadDraft = Schema.is(PersistedComposerThreadDraftState);
 
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
@@ -450,7 +450,8 @@ const PersistedDraftThreadState = Schema.Struct({
         messageId: Schema.String,
         createdAt: Schema.String,
         request: Schema.String,
-        attachments: Schema.optionalKey(Schema.Array(SentLaunchAttachmentSchema)),
+        composer: Schema.optionalKey(PersistedComposerThreadDraftState),
+        turn: Schema.optionalKey(PendingLaunchTurnSchema),
         restoredCopy: Schema.optionalKey(Schema.String),
       }),
     ),
@@ -559,20 +560,21 @@ export interface PendingDraftLaunch {
   readonly createdAt: string;
   /** What was asked for; a different request is a different operation. */
   readonly request: string;
+  /** The composer as it was sent, in its stored form, so a reload can put it back. */
+  readonly composer?: DeepMutable<PersistedComposerThreadDraftState>;
   /**
-   * The attachment references the launch sent, committed before it went out, so a retry sends
-   * exactly them. Absent until the launch's attachments are prepared; nothing was sent before.
+   * Exactly what the launch sends, committed before it goes out, so a retry resends it as is.
+   * Absent until the launch's attachments are prepared; nothing was sent before.
    */
-  readonly attachments?: SentLaunchAttachment[];
+  readonly turn?: PendingLaunchTurn;
   /** The composer content put back for a retry, which a settled launch must not leave behind. */
   readonly restoredCopy?: string;
 }
 
-/** An attachment as a launch sent it; an inline image's bytes are re-read, never stored. */
-export interface SentLaunchAttachment {
-  readonly attachment: ChatAttachment;
-  /** Sent as a data URL with this id; the restored file supplies the same bytes again. */
-  readonly inline: boolean;
+/** A launch's destination and full input: text, context, attachment references and bytes, ids. */
+export interface PendingLaunchTurn {
+  readonly environmentId: EnvironmentId;
+  readonly input: StartThreadTurnInput;
 }
 
 export type DraftThreadState = DraftSessionState;
@@ -1835,29 +1837,42 @@ function checkoutPullRequestsEqual(
 function hydratedPendingLaunch(
   stored: NonNullable<PersistedDraftThreadState["pendingLaunch"]>,
 ): PendingDraftLaunch {
-  const { attachments, ...launch } = stored;
-  return { ...launch, ...(attachments === undefined ? {} : { attachments: [...attachments] }) };
+  // A record whose turn or composer no longer validates keeps only its identity: never resent.
+  const { composer: _composer, turn: _turn, ...identity } = stored;
+  return storedPendingLaunch(stored) ?? identity;
+}
+
+function isPendingLaunchTurn(candidate: unknown): candidate is PendingLaunchTurn {
+  if (!candidate || typeof candidate !== "object") return false;
+  const { environmentId, input } = candidate as Record<string, unknown>;
+  if (typeof environmentId !== "string" || !input || typeof input !== "object") return false;
+  const { threadId, message } = input as Record<string, unknown>;
+  return typeof threadId === "string" && !!message && typeof message === "object";
 }
 
 function storedPendingLaunch(candidate: unknown): PendingDraftLaunch | null {
   const record =
     candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>) : null;
   if (!record) return null;
-  const { commandId, messageId, createdAt, request, attachments, restoredCopy } = record;
+  const { commandId, messageId, createdAt, request, composer, turn, restoredCopy } = record;
   return typeof commandId === "string" &&
     commandId.length > 0 &&
     typeof messageId === "string" &&
     messageId.length > 0 &&
     typeof createdAt === "string" &&
     typeof request === "string" &&
-    (attachments === undefined || isSentLaunchAttachments(attachments)) &&
+    (composer === undefined || isPersistedComposerThreadDraft(composer)) &&
+    (turn === undefined || isPendingLaunchTurn(turn)) &&
     (restoredCopy === undefined || typeof restoredCopy === "string")
     ? {
         commandId,
         messageId,
         createdAt,
         request,
-        ...(attachments === undefined ? {} : { attachments: [...attachments] }),
+        ...(composer === undefined
+          ? {}
+          : { composer: composer as DeepMutable<PersistedComposerThreadDraftState> }),
+        ...(turn === undefined ? {} : { turn }),
         ...(restoredCopy === undefined ? {} : { restoredCopy }),
       }
     : null;
@@ -1873,7 +1888,8 @@ function pendingLaunchesEqual(
     left.messageId === right.messageId &&
     left.createdAt === right.createdAt &&
     left.request === right.request &&
-    JSON.stringify(left.attachments) === JSON.stringify(right.attachments) &&
+    JSON.stringify(left.composer) === JSON.stringify(right.composer) &&
+    JSON.stringify(left.turn) === JSON.stringify(right.turn) &&
     left.restoredCopy === right.restoredCopy
   );
 }
@@ -2457,6 +2473,79 @@ function migratePersistedComposerDraftStoreState(
   };
 }
 
+/** One composer draft in its stored form; a stored launch keeps its composer this way too. */
+function toPersistedThreadDraft(
+  draft: ComposerThreadDraftState,
+): DeepMutable<PersistedComposerThreadDraftState> {
+  const hasModelData =
+    Object.keys(draft.modelSelectionByProvider).length > 0 || draft.activeProvider !== null;
+  return {
+    prompt: draft.prompt,
+    attachments: draft.persistedAttachments,
+    ...(draft.files.length > 0
+      ? {
+          files: draft.files.map((file) => ({
+            id: file.id,
+            name: file.name,
+            mimeType: file.mimeType,
+            sizeBytes: file.sizeBytes,
+            ...(file.source ? { source: file.source } : {}),
+            ...(file.uploadedAttachmentId && file.uploadEnvironmentId
+              ? {
+                  attachmentId: file.uploadedAttachmentId,
+                  environmentId: file.uploadEnvironmentId,
+                }
+              : {}),
+          })),
+        }
+      : {}),
+    ...(draft.terminalContexts.length > 0
+      ? {
+          terminalContexts: draft.terminalContexts.map((context) => ({
+            id: context.id,
+            threadId: context.threadId,
+            createdAt: context.createdAt,
+            terminalId: context.terminalId,
+            terminalLabel: context.terminalLabel,
+            lineStart: context.lineStart,
+            lineEnd: context.lineEnd,
+            text: context.text,
+          })),
+        }
+      : {}),
+    ...(draft.previewAnnotations.length > 0
+      ? {
+          previewAnnotations: draft.previewAnnotations.map(
+            (annotation) => ({ ...annotation }) as DeepMutable<PreviewAnnotationPayload>,
+          ),
+        }
+      : {}),
+    ...(draft.reviewComments.length > 0
+      ? {
+          reviewComments: draft.reviewComments.map((comment) => ({ ...comment })),
+        }
+      : {}),
+    ...(draft.threadContexts.length > 0
+      ? { threadContexts: draft.threadContexts.map((record) => ({ ...record })) }
+      : {}),
+    ...(draft.environmentContexts.length > 0
+      ? { environmentContexts: draft.environmentContexts.map((record) => ({ ...record })) }
+      : {}),
+    ...(draft.replyTo
+      ? { replyTo: { ...draft.replyTo } as DeepMutable<ResponseContextRecord> }
+      : {}),
+    ...(hasModelData
+      ? {
+          modelSelectionByProvider: compactModelSelectionByProvider(draft.modelSelectionByProvider),
+          activeProvider: draft.activeProvider,
+          ...(draft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
+        }
+      : {}),
+    ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
+    ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+  };
+}
+
 export function partializeComposerDraftStoreState(
   state: ComposerDraftStoreState,
 ): PersistedComposerDraftStoreState {
@@ -2502,74 +2591,7 @@ export function partializeComposerDraftStoreState(
     ) {
       continue;
     }
-    const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
-      prompt: draft.prompt,
-      attachments: draft.persistedAttachments,
-      ...(draft.files.length > 0
-        ? {
-            files: draft.files.map((file) => ({
-              id: file.id,
-              name: file.name,
-              mimeType: file.mimeType,
-              sizeBytes: file.sizeBytes,
-              ...(file.source ? { source: file.source } : {}),
-              ...(file.uploadedAttachmentId && file.uploadEnvironmentId
-                ? {
-                    attachmentId: file.uploadedAttachmentId,
-                    environmentId: file.uploadEnvironmentId,
-                  }
-                : {}),
-            })),
-          }
-        : {}),
-      ...(draft.terminalContexts.length > 0
-        ? {
-            terminalContexts: draft.terminalContexts.map((context) => ({
-              id: context.id,
-              threadId: context.threadId,
-              createdAt: context.createdAt,
-              terminalId: context.terminalId,
-              terminalLabel: context.terminalLabel,
-              lineStart: context.lineStart,
-              lineEnd: context.lineEnd,
-              text: context.text,
-            })),
-          }
-        : {}),
-      ...(draft.previewAnnotations.length > 0
-        ? {
-            previewAnnotations: draft.previewAnnotations.map(
-              (annotation) => ({ ...annotation }) as DeepMutable<PreviewAnnotationPayload>,
-            ),
-          }
-        : {}),
-      ...(draft.reviewComments.length > 0
-        ? {
-            reviewComments: draft.reviewComments.map((comment) => ({ ...comment })),
-          }
-        : {}),
-      ...(draft.threadContexts.length > 0
-        ? { threadContexts: draft.threadContexts.map((record) => ({ ...record })) }
-        : {}),
-      ...(draft.environmentContexts.length > 0
-        ? { environmentContexts: draft.environmentContexts.map((record) => ({ ...record })) }
-        : {}),
-      ...(draft.replyTo
-        ? { replyTo: { ...draft.replyTo } as DeepMutable<ResponseContextRecord> }
-        : {}),
-      ...(hasModelData
-        ? {
-            modelSelectionByProvider: compactModelSelectionByProvider(
-              draft.modelSelectionByProvider,
-            ),
-            activeProvider: draft.activeProvider,
-            ...(draft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
-          }
-        : {}),
-      ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
-      ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
-    };
-    persistedDraftsByThreadKey[threadKey] = persistedDraft;
+    persistedDraftsByThreadKey[threadKey] = toPersistedThreadDraft(draft);
   }
   const persistedDraftThreadsByThreadKey: DeepMutable<
     PersistedComposerDraftStoreState["draftThreadsByThreadKey"]
@@ -4625,6 +4647,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
 );
 
 composerDraftLoadedState = partializeComposerDraftStoreState(composerDraftStore.getState());
+recoverUnconfirmedDraftLaunches();
 
 export const useComposerDraftStore = composerDraftStore;
 
@@ -4861,7 +4884,17 @@ export function markPromotedDraftThreadByRef(
         ]),
       ),
     }));
-  if (launch) update(() => ({ pendingLaunch: launch }));
+  // A first send keeps the composer it sends from, before the composer is cleared.
+  if (launch)
+    update((draftId) => {
+      const composer = useComposerDraftStore.getState().draftsByThreadKey[draftId];
+      return {
+        pendingLaunch:
+          launch.composer !== undefined || composer === undefined
+            ? launch
+            : { ...launch, composer: toPersistedThreadDraft(composer) },
+      };
+    });
   for (const draftId of promoted.keys()) {
     draftStore.markDraftThreadPromoting(DraftId.make(draftId), threadRef);
   }
@@ -4869,7 +4902,7 @@ export function markPromotedDraftThreadByRef(
   if (
     draftIds.length === 0 ||
     (commitsDraftThreadBinding(draftIds, "promotedTo", threadRef) &&
-      (!launch || commitsPendingLaunch(draftIds, launch)))
+      (!launch || commitsPendingLaunch(draftIds)))
   )
     return true;
   // Each draft keeps what it had, which an earlier send may have committed.
@@ -4878,16 +4911,17 @@ export function markPromotedDraftThreadByRef(
 }
 
 /**
- * The stored bytes hold all of `launch` for each draft, references included; read after the
- * flush that committed it. A matching command id alone is not the operation about to go out.
+ * The stored bytes hold each draft's whole pending launch, composer and turn included; read after
+ * the flush that committed it. A matching command id alone is not the operation about to go out.
  */
-function commitsPendingLaunch(draftIds: ReadonlyArray<string>, launch: PendingDraftLaunch) {
+function commitsPendingLaunch(draftIds: ReadonlyArray<string>) {
   try {
     const stored = readStoredComposerDraftState();
+    const current = useComposerDraftStore.getState().draftThreadsByThreadKey;
     return draftIds.every((draftId) =>
       pendingLaunchesEqual(
         storedPendingLaunch(stored?.draftThreadsByThreadKey[draftId]?.pendingLaunch),
-        launch,
+        current[draftId]?.pendingLaunch,
       ),
     );
   } catch {
@@ -4996,13 +5030,13 @@ export function markRestoredLaunchCopy(draftId: DraftId): void {
 }
 
 /**
- * Records the attachment references a launch is about to send and commits them to storage, so a
- * retry resends exactly them. False when storage did not take them: the launch must not go out.
+ * Records exactly what a launch is about to send and commits it to storage, so a retry resends it
+ * as is. False when storage did not take it: the launch must not go out.
  */
 export function commitPendingLaunchPayload(
   threadRef: ScopedThreadRef,
   commandId: string,
-  attachments: ReadonlyArray<SentLaunchAttachment>,
+  turn: PendingLaunchTurn,
 ): boolean {
   const draftIds = Object.entries(useComposerDraftStore.getState().draftThreadsByThreadKey)
     .filter(
@@ -5016,50 +5050,84 @@ export function commitPendingLaunchPayload(
   const prior = new Map(
     draftIds.map((draftId) => [
       draftId,
-      useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.pendingLaunch?.attachments,
+      useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.pendingLaunch?.turn,
     ]),
   );
-  const setAttachments = (pick: (draftId: string) => SentLaunchAttachment[] | undefined) =>
+  const setTurn = (pick: (draftId: string) => PendingLaunchTurn | undefined) =>
     useComposerDraftStore.setState((state) => ({
       draftThreadsByThreadKey: Object.fromEntries(
         Object.entries(state.draftThreadsByThreadKey).map(([draftId, draftThread]) => {
           if (!draftIds.includes(draftId) || !draftThread.pendingLaunch)
             return [draftId, draftThread];
-          const { attachments: _replaced, ...launch } = draftThread.pendingLaunch;
+          const { turn: _replaced, ...launch } = draftThread.pendingLaunch;
           const next = pick(draftId);
           return [
             draftId,
             {
               ...draftThread,
-              pendingLaunch: next === undefined ? launch : { ...launch, attachments: next },
+              pendingLaunch: next === undefined ? launch : { ...launch, turn: next },
             },
           ];
         }),
       ),
     }));
-  setAttachments(() => [...attachments]);
-  // Uncommitted references never stay behind to pass as sent: each draft keeps what it had.
-  const committed = commitsLaunchAttachments(draftIds, attachments);
-  if (!committed) setAttachments((draftId) => prior.get(draftId));
-  return committed;
-}
-
-function commitsLaunchAttachments(
-  draftIds: ReadonlyArray<string>,
-  attachments: ReadonlyArray<SentLaunchAttachment>,
-): boolean {
+  setTurn(() => turn);
+  // An uncommitted turn never stays behind to pass as sent: each draft keeps what it had.
+  let committed = false;
   try {
     composerDebouncedStorage.flush();
     const stored = readStoredComposerDraftState();
-    const expected = JSON.stringify(attachments);
-    return draftIds.every(
+    const expected = JSON.stringify(turn);
+    committed = draftIds.every(
       (draftId) =>
-        JSON.stringify(stored?.draftThreadsByThreadKey[draftId]?.pendingLaunch?.attachments) ===
-        expected,
+        JSON.stringify(stored?.draftThreadsByThreadKey[draftId]?.pendingLaunch?.turn) === expected,
     );
   } catch {
-    return false;
+    committed = false;
   }
+  if (!committed) setTurn((draftId) => prior.get(draftId));
+  return committed;
+}
+
+/**
+ * A reload finds the sends whose outcome is unknown, such as one interrupted by a crash, and
+ * makes each its draft's unconfirmed send again: kept on its machine, with its composer back
+ * if that was cleared. Sending it unchanged then resends the stored turn.
+ */
+function recoverUnconfirmedDraftLaunches(): void {
+  composerDraftStore.setState((state) => {
+    const draftThreadsByThreadKey = { ...state.draftThreadsByThreadKey };
+    const draftsByThreadKey = { ...state.draftsByThreadKey };
+    let recovered = false;
+    for (const [draftId, draftThread] of Object.entries(state.draftThreadsByThreadKey)) {
+      const launch = draftThread.pendingLaunch;
+      if (!launch) continue;
+      const composer = draftsByThreadKey[draftId];
+      let restoredCopy = launch.restoredCopy;
+      if (!composerDraftHasUserContent(composer) && launch.composer) {
+        const restored = toHydratedThreadDraft(launch.composer);
+        draftsByThreadKey[draftId] = restored;
+        restoredCopy = composerDraftCopySignature(restored);
+      } else if (
+        restoredCopy === undefined &&
+        composer !== undefined &&
+        launch.composer !== undefined &&
+        JSON.stringify(toPersistedThreadDraft(composer)) === JSON.stringify(launch.composer)
+      ) {
+        // The crash came before the composer's clear was stored: it still is the sent copy.
+        restoredCopy = composerDraftCopySignature(composer);
+      }
+      if (!draftThread.promotedTo && restoredCopy === launch.restoredCopy) continue;
+      recovered = true;
+      draftThreadsByThreadKey[draftId] = {
+        ...draftThread,
+        promotedTo: null,
+        sentTo: draftThread.sentTo ?? draftThread.promotedTo ?? null,
+        pendingLaunch: { ...launch, ...(restoredCopy === undefined ? {} : { restoredCopy }) },
+      };
+    }
+    return recovered ? { draftThreadsByThreadKey, draftsByThreadKey } : state;
+  });
 }
 
 export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {

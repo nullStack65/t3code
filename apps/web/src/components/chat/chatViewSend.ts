@@ -28,10 +28,12 @@ import { newThreadId } from "~/lib/utils";
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type ComposerThreadTarget,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
+import { composerDraftContentChanged } from "./composerSend.logic";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import { createModelSelection } from "@t3tools/shared/model";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -256,6 +258,21 @@ export async function rewindToMessage(input: {
   } catch (error) {
     return { error: error instanceof Error ? error.message : "Failed to revert thread state." };
   }
+}
+
+/**
+ * Clears what a send took from the composer, unless the user changed it after `before` was read:
+ * that edit is theirs, not the send's, so it stays. True when cleared.
+ */
+export function clearSentComposerContent(
+  draftTarget: ComposerThreadTarget,
+  before: ComposerThreadDraftState | null,
+): boolean {
+  const store = useComposerDraftStore.getState();
+  if (composerDraftContentChanged(before, store.getComposerDraft(draftTarget) ?? null))
+    return false;
+  store.clearComposerContent(draftTarget);
+  return true;
 }
 
 /**
