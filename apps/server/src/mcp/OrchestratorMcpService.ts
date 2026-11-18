@@ -2281,12 +2281,21 @@ const make = Effect.gen(function* () {
       parent.thread.interactionMode,
       input.interactionMode,
     );
+    const here = yield* service.capabilities(callerScope, { search: model });
     const environmentId = yield* remoteDelegation.place(scope, {
+      operation: "delegate-task",
       key,
+      threadId: scope.thread.threadId,
       projectId: parent.thread.projectId,
       modelSelection: { instanceId, model },
       runtimeMode,
-      here: yield* service.capabilities(callerScope, { search: model }),
+      here: {
+        resources: here.hostResources ?? null,
+        modelAvailable: RemoteDelegation.runsModel(here, {
+          modelSelection: { instanceId, model },
+          runtimeMode,
+        }),
+      },
     });
     return { environmentId, runtimeMode, interactionMode };
   });

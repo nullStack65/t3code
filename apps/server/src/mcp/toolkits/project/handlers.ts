@@ -1,10 +1,17 @@
 import {
   CommandId,
+  isProviderAvailable,
   MessageId,
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
+  type ProviderInteractionMode,
+  resolveProjectProviderInstanceEnabled,
+  type RuntimeMode,
 } from "@t3tools/contracts";
+import type * as Tool from "effect/ai/Tool";
+import * as RemoteDelegation from "../../../peer/RemoteDelegation.ts";
+import * as HostResources from "../../../resourceTelemetry/HostResources.ts";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -102,6 +109,89 @@ const launchCommandId = Effect.fn("mcp.launchCommandId")(function* (
   return CommandId.make(`mcp:launch:${Hex.encode(digest)}`);
 });
 
+type LaunchInput = Tool.Parameters<typeof ProjectToolkit.tools.t3_thread_launch>;
+
+/**
+ * An auto-placed launch that needs nothing of this checkout, bound to an environment
+ * before anything starts: the launch there, or undefined to launch it here.
+ * Attachments, Scratch and a worktree not started from origin are this checkout's.
+ */
+const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
+  scope: McpInvocationContext.McpInvocationScope,
+  input: LaunchInput,
+  local: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+  },
+) {
+  const strategy = input.workspaceStrategy;
+  if (
+    (input.attachments?.length ?? 0) > 0 ||
+    input.scratch === true ||
+    strategy?.type === "existing_worktree" ||
+    (strategy?.type === "worktree" && strategy.startFromOrigin !== true)
+  )
+    return undefined;
+  const key = input.clientRequestId;
+  const modelSelection = input.modelSelection;
+  if (key === undefined || modelSelection === undefined)
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message:
+        'With placement "auto", pass clientRequestId and modelSelection: a retry must reach the environment chosen, with the exact model.',
+    });
+  // Without linked environments there is nowhere else to place it.
+  const delegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
+  if (Option.isNone(delegation)) return undefined;
+  const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.flatMap((service) => service.getSettings),
+    Effect.mapError(unavailable),
+  );
+  const provider = providers.find(
+    (candidate) => candidate.instanceId === modelSelection.instanceId,
+  );
+  const hostResources = yield* Effect.serviceOption(HostResources.HostResources);
+  const environmentId = yield* delegation.value.place(scope, {
+    operation: "thread-launch",
+    key,
+    threadId: local.threadId,
+    projectId: local.projectId,
+    modelSelection,
+    runtimeMode: local.runtimeMode,
+    here: {
+      resources: Option.isSome(hostResources) ? yield* hostResources.value.read : null,
+      modelAvailable:
+        provider !== undefined &&
+        provider.enabled &&
+        isProviderAvailable(provider) &&
+        resolveProjectProviderInstanceEnabled(settings, local.projectId, provider.instanceId) &&
+        provider.models.some((model) => model.slug === modelSelection.model) &&
+        (provider.supportedRuntimeModes === undefined ||
+          provider.supportedRuntimeModes.length === 0 ||
+          provider.supportedRuntimeModes.includes(local.runtimeMode)),
+    },
+  });
+  if (environmentId === scope.environmentId) return undefined;
+  const {
+    environmentId: _here,
+    projectId: _project,
+    placement: _placement,
+    delegatedFrom: _delegatedFrom,
+    ...params
+  } = input;
+  return yield* delegation.value.launch(scope, {
+    environmentId,
+    key,
+    threadId: local.threadId,
+    projectId: local.projectId,
+    // The modes it was admitted with go explicitly, so no link or default there narrows them.
+    params: { ...params, runtimeMode: local.runtimeMode, interactionMode: local.interactionMode },
+  });
+});
+
 const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
@@ -151,6 +241,16 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
+        const placedThere =
+          input.placement === "auto"
+            ? yield* launchPlacedThere(scope, input, {
+                projectId,
+                threadId,
+                runtimeMode,
+                interactionMode,
+              })
+            : undefined;
+        if (placedThere !== undefined) return placedThere;
         // A retry of an accepted launch replays it: it keeps the model it started
         // with and skips the checks only a new launch needs, which the project
         // may no longer pass, such as a base branch deleted since.

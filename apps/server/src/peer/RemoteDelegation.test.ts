@@ -697,7 +697,11 @@ const makeLaptop = (
       Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
       Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
     );
-    const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
+    // Its project tools too, so an outside client here can launch top-level threads.
+    const layerHere = Layer.merge(
+      McpHttpServer.layerOrchestratorToolkit,
+      McpHttpServer.layerProjectRegistration,
+    ).pipe(
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(
         RemoteDelegation.layer.pipe(
@@ -777,6 +781,18 @@ const makeLaptop = (
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
       Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      Layer.provide(
+        Layer.merge(
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
+          Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
+        ),
+      ),
+      Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-remote-delegation-laptop-" }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
       Layer.fresh,
     );
     const here = yield* Layer.build(layerHere);
@@ -814,6 +830,39 @@ const parentScope: McpInvocationContext.McpInvocationScope = {
   capabilities: new Set(["orchestration"]),
   issuedAt: 1,
 };
+
+/** An outside client of the laptop, such as the t3 CLI or another agent, in no thread. */
+const outsideScope: McpInvocationContext.McpInvocationScope = {
+  environmentId: laptop.environmentId,
+  requestNamespace: "client:outside-session",
+  thread: undefined,
+  client: {
+    sessionId: "outside-session",
+    label: "t3 thread cli",
+    access: "full-access",
+    linked: false,
+  },
+  capabilities: new Set(["orchestration", "worktree", "pull-requests"]),
+  issuedAt: 1,
+};
+
+/** A top-level thread placed by capacity, for the box's Claude model. */
+const launchPlaced = (
+  laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
+  args: Record<string, unknown>,
+) =>
+  laptopEnv.call(
+    "t3_thread_launch",
+    {
+      projectId: "project:laptop",
+      title: "Suite",
+      message: "Run the suite wherever there is room.",
+      modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+      placement: "auto",
+      ...args,
+    },
+    outsideScope,
+  );
 
 /** The laptop's parent thread, mid-turn when its agent delegates. */
 const seedParent = (
@@ -1459,6 +1508,68 @@ it.effect("an auto-placed task keeps its environment after a lost answer and a r
       ).toHaveLength(1);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "an auto-placed top-level launch keeps its environment after a lost answer and a restart",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        // Its link outlives the restart, so the box knows it as the same link session.
+        const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
+        // The box starts the thread with room to spare, but its answer never arrives.
+        yield* Ref.set(thread.afterLaunch, Effect.die("connection lost"));
+        const lost = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const before = yield* makeLaptop(database, offers, linking);
+            yield* linkTo(before.links, b, "full-access");
+            return yield* launchPlaced(before, { clientRequestId: "top-level" });
+          }),
+        );
+        expect(lost.isError).toBe(true);
+        const lostThere = yield* Ref.get(thread.launched);
+        expect(lostThere).not.toBeNull();
+
+        // The box fills up while this side restarts: choosing afresh finds nowhere.
+        yield* Ref.set(thread.resources, loadOf(0.99));
+        yield* Ref.set(thread.afterLaunch, Effect.void);
+        const after = yield* makeLaptop(database, offers, linking);
+        const fresh = yield* launchPlaced(after, { clientRequestId: "another" });
+        expect(fresh.isError).toBe(true);
+        expect(JSON.stringify(fresh.content)).toContain("no-eligible-environment");
+        // Without a key there is nothing a retry could find again, so nothing is placed.
+        const keyless = yield* launchPlaced(after, {});
+        expect(keyless.isError).toBe(true);
+        expect(JSON.stringify(keyless.content)).toContain("clientRequestId");
+        expect(yield* Ref.get(thread.launched)).toBe(lostThere);
+
+        // The retry keeps the binding: the same thread there, with the exact model and modes.
+        const retried = yield* launchPlaced(after, { clientRequestId: "top-level" });
+        expect(retried.isError, JSON.stringify(retried.content)).toBe(false);
+        expect((retried.structuredContent as { threadId: ThreadId }).threadId).toBe(lostThere);
+        expect(yield* Ref.get(thread.launchedWith)).toEqual({
+          modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        });
+
+        // A named environment wins over placement: it launches there although the box is full,
+        // in the project named with that environment's ids.
+        const pinned = yield* launchPlaced(after, {
+          environmentId: box.environmentId,
+          projectId: boxProject,
+          clientRequestId: "pinned",
+        });
+        expect(pinned.isError, JSON.stringify(pinned.content)).toBe(false);
+        expect((pinned.structuredContent as { threadId: ThreadId }).threadId).not.toBe(lostThere);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("a launch whose answer was lost is never started again under a new link", () =>
