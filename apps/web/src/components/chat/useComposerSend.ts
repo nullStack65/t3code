@@ -1223,7 +1223,8 @@ export function useComposerSend(input: ComposerSendInput) {
       ? scopeThreadRef(environmentId, threadIdForSend)
       : null;
     // Keep new-thread flows from reusing this draft while attachments and worktree setup settle.
-    if (sentDraftThreadRef) markPromotedDraftThreadByRef(sentDraftThreadRef);
+    // Its machine is committed to storage before anything launches; if that fails, nothing does.
+    const sendBound = sentDraftThreadRef ? markPromotedDraftThreadByRef(sentDraftThreadRef) : true;
     clearComposerDraftContent(composerDraftTarget);
     // The prompt ref and cursor belong to the thread on screen, which may no longer be this one.
     if (currentRouteThreadKeyRef.current === routeThreadKey) {
@@ -1243,6 +1244,14 @@ export function useComposerSend(input: ComposerSendInput) {
     );
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
+    if (!sendBound) {
+      const unbound = await settlePromise(async () => {
+        throw new Error(
+          "This draft could not be saved before sending, so nothing was started. Free up browser storage, then send again.",
+        );
+      });
+      if (unbound._tag === "Failure") failure = unbound;
+    }
 
     if (failure === null && isServerThread) {
       const settingsResult = await persistThreadSettingsForNextTurn({

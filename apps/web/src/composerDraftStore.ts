@@ -1805,7 +1805,8 @@ function staysOnSentMachine(
   existing: DraftThreadState | undefined,
   next: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId },
 ): boolean {
-  const sentTo = existing?.sentTo;
+  // A promotion is committed before its launch, so it binds the id too.
+  const sentTo = existing?.sentTo ?? existing?.promotedTo;
   return (
     !!sentTo && sentTo.threadId === next.threadId && sentTo.environmentId !== next.environmentId
   );
@@ -4727,15 +4728,53 @@ export function usePromotingDraftThreadKeys(): ReadonlyArray<string> {
   );
 }
 
-export function markPromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {
+/**
+ * Marks the drafts sending as `threadRef` and commits that to storage at once, so a crash
+ * after the launch cannot reload them unbound: the launch may then have started there.
+ * False when storage did not take it; the caller must not launch, and nothing stays marked.
+ */
+export function markPromotedDraftThreadByRef(threadRef: ScopedThreadRef): boolean {
   const draftStore = useComposerDraftStore.getState();
+  const promoted: Array<string> = [];
   for (const [draftId, draftThread] of Object.entries(draftStore.draftThreadsByThreadKey)) {
     if (
       draftThread.environmentId === threadRef.environmentId &&
       draftThread.threadId === threadRef.threadId
     ) {
       draftStore.markDraftThreadPromoting(DraftId.make(draftId), threadRef);
+      promoted.push(draftId);
     }
+  }
+  if (promoted.length === 0 || commitsDraftThreadBinding(promoted, "promotedTo", threadRef))
+    return true;
+  useComposerDraftStore.setState((state) => ({
+    draftThreadsByThreadKey: Object.fromEntries(
+      Object.entries(state.draftThreadsByThreadKey).map(([draftId, draftThread]) => [
+        draftId,
+        promoted.includes(draftId) ? { ...draftThread, promotedTo: null } : draftThread,
+      ]),
+    ),
+  }));
+  return false;
+}
+
+/** Writes pending draft state now and checks the stored bytes hold `field` for each draft. */
+function commitsDraftThreadBinding(
+  draftIds: ReadonlyArray<string>,
+  field: "promotedTo" | "sentTo",
+  threadRef: ScopedThreadRef,
+): boolean {
+  try {
+    composerDebouncedStorage.flush();
+    const stored = readStoredComposerDraftState();
+    return draftIds.every((draftId) => {
+      const bound = stored?.draftThreadsByThreadKey[draftId]?.[field];
+      return (
+        bound?.environmentId === threadRef.environmentId && bound.threadId === threadRef.threadId
+      );
+    });
+  } catch {
+    return false;
   }
 }
 
@@ -4748,11 +4787,7 @@ export function restoreFailedDraftThread(
     const current = state.draftThreadsByThreadKey[draftId] ?? draftThread;
     // The send recorded its machine before it went out; the same id stays bound there.
     const sentTo =
-      threadId === draftThread.threadId
-        ? (current.promotedTo ??
-          current.sentTo ??
-          scopeThreadRef(draftThread.environmentId, draftThread.threadId))
-        : null;
+      threadId === draftThread.threadId ? (current.promotedTo ?? current.sentTo ?? null) : null;
     return {
       draftThreadsByThreadKey: {
         ...state.draftThreadsByThreadKey,
@@ -4766,6 +4801,9 @@ export function restoreFailedDraftThread(
       },
     };
   });
+  // Best effort: until this lands, the committed promotion still binds the id there.
+  const sentTo = useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.sentTo;
+  if (sentTo) commitsDraftThreadBinding([draftId], "sentTo", sentTo);
 }
 
 export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {

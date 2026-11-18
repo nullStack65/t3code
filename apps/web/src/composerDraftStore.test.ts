@@ -1179,6 +1179,108 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(sentTo()?.environmentId).toBe(OTHER_TEST_ENVIRONMENT_ID);
   });
 
+  it("commits a send's machine to storage before its launch, and launches nothing when it cannot", async () => {
+    let storageFails = false;
+    let storageDrops = false;
+    const memory = createMemoryStorage();
+    const sharedStorage = {
+      getItem: (name: string) => memory.getItem(name),
+      removeItem: (name: string) => memory.removeItem(name),
+      setItem: (name: string, value: string) => {
+        if (storageFails) throw new Error("QuotaExceededError");
+        if (storageDrops) return;
+        memory.setItem(name, value);
+      },
+    };
+    vi.stubGlobal("localStorage", sharedStorage);
+    vi.stubGlobal("window", new EventTarget());
+    vi.useFakeTimers();
+    vi.resetModules();
+    try {
+      const remoteProjectRef = scopeProjectRef(OTHER_TEST_ENVIRONMENT_ID, projectRef.projectId);
+      const sentRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+      const committedDraft = () =>
+        JSON.parse(sharedStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) as string).state
+          .draftThreadsByThreadKey[draftId];
+      let launches = 0;
+      // The composer launches only once the send's machine is committed.
+      const send = (tab: typeof import("./composerDraftStore")) => {
+        if (tab.markPromotedDraftThreadByRef(sentRef) === false) return;
+        launches += 1;
+      };
+      const before = await import("./composerDraftStore");
+      before.useComposerDraftStore.getState().setProjectDraftThreadId(projectRef, draftId, {
+        threadId,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: TEST_ENVIRONMENT_ID,
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(committedDraft()?.promotedTo ?? null).toBeNull();
+
+      // At the launch, with the deferred write still pending, storage already holds the machine.
+      send(before);
+      expect(launches).toBe(1);
+      expect(committedDraft()?.promotedTo).toEqual(sentRef);
+
+      // The renderer dies with its pending writes; the reload reads only what was committed.
+      vi.clearAllTimers();
+      vi.resetModules();
+      const after = await import("./composerDraftStore");
+      const store = after.useComposerDraftStore.getState();
+      store.setDraftThreadContext(draftId, {
+        projectRef: remoteProjectRef,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+      });
+      store.setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+      expect(after.useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+        environmentId: TEST_ENVIRONMENT_ID,
+        threadId,
+      });
+
+      // An unconfirmed outcome keeps that binding through the next reload too.
+      const sentDraft = after.useComposerDraftStore.getState().getDraftSession(draftId)!;
+      after.restoreFailedDraftThread(draftId, sentDraft, threadId);
+      vi.clearAllTimers();
+      vi.resetModules();
+      const reloaded = await import("./composerDraftStore");
+      reloaded.useComposerDraftStore
+        .getState()
+        .setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+      expect(
+        reloaded.useComposerDraftStore.getState().getDraftSession(draftId)?.environmentId,
+      ).toBe(TEST_ENVIRONMENT_ID);
+
+      // When storage cannot commit the machine, nothing launches.
+      reloaded.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(projectRef, otherDraftId, { threadId: otherThreadId });
+      await vi.advanceTimersByTimeAsync(300);
+      storageFails = true;
+      const failedLaunches = launches;
+      if (
+        reloaded.markPromotedDraftThreadByRef(
+          scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId),
+        ) !== false
+      )
+        launches += 1;
+      expect(launches).toBe(failedLaunches);
+      // Nor when storage drops the write without saying so: only the stored bytes count.
+      storageFails = false;
+      storageDrops = true;
+      expect(
+        reloaded.markPromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId)),
+      ).toBe(false);
+      expect(
+        reloaded.useComposerDraftStore.getState().getDraftSession(otherDraftId)?.promotedTo,
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
   it("restores a failed draft without changing the fresh draft", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
