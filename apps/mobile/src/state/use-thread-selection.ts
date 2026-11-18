@@ -23,6 +23,7 @@ import { scopedThreadKey } from "../lib/scopedEntities";
 import { useProject, useQuietThreadShell } from "./entities";
 import { useEnvironmentThread } from "./threads";
 import {
+  resolvePendingRouteThreadRef,
   resolvePendingThreadCreation,
   pendingThreadCreationOutcomesAtom,
   pendingThreadCreationShell,
@@ -37,6 +38,7 @@ import { useThreadOutboxMessages } from "./use-thread-outbox";
 type ThreadSelectionRouteParams = {
   readonly environmentId?: string | string[];
   readonly threadId?: string | string[];
+  readonly pendingMessageId?: string | string[];
 };
 
 function firstRouteParam(value: string | string[] | undefined): string | null {
@@ -112,10 +114,28 @@ function threadDetailToShell(
   });
 }
 
-function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefined) {
+/** The route's thread, through its pending task's current binding when it names one. */
+export function usePendingRouteThread(params: ThreadSelectionRouteParams | undefined) {
   const routeParams = params ?? {};
-  const routeEnvironmentId = firstRouteParam(routeParams.environmentId);
-  const routeThreadId = firstRouteParam(routeParams.threadId);
+  const environmentId = firstRouteParam(routeParams.environmentId);
+  const threadId = firstRouteParam(routeParams.threadId);
+  const queuedMessagesByThreadKey = useThreadOutboxMessages();
+  const outcomes = useAtomValue(pendingThreadCreationOutcomesAtom);
+  const resolved = resolvePendingRouteThreadRef({
+    routeRef: environmentId !== null && threadId !== null ? { environmentId, threadId } : null,
+    pendingMessageId: firstRouteParam(routeParams.pendingMessageId),
+    queuedMessagesByThreadKey,
+    outcomes,
+  });
+  return {
+    environmentId: resolved === null ? null : String(resolved.environmentId),
+    threadId: resolved === null ? null : String(resolved.threadId),
+  };
+}
+
+function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefined) {
+  const { environmentId: routeEnvironmentId, threadId: routeThreadId } =
+    usePendingRouteThread(params);
   // Retain the last complete thread ref while closing routes drop params.
   const [lastRouteThreadRef, setLastRouteThreadRef] = useState<ScopedThreadRef | null>(null);
   if (

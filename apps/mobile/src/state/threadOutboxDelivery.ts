@@ -62,7 +62,9 @@ import {
   updateThreadOutboxMessage,
 } from "./thread-outbox";
 import { removeThreadOutboxMessage } from "./thread-outbox-removal";
+import { admitPlacedCreation, qualifyPlacedTarget } from "./thread-placement";
 import {
+  awaitsPlacement,
   isQueuedThreadCreationSendable,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
@@ -546,12 +548,15 @@ function stampRecoveryDraftProject(queuedMessage: QueuedThreadMessage, draftKey:
   if (!queuedMessage.creation) {
     return;
   }
+  const placement = queuedMessage.placement;
+  // A placed task comes back where it was sent from, still placed by its origin.
   updateComposerDraftSettings(draftKey, {
     project: {
-      environmentId: queuedMessage.environmentId,
-      projectId: queuedMessage.creation.projectId,
+      environmentId: placement?.originEnvironmentId ?? queuedMessage.environmentId,
+      projectId: placement?.originProjectId ?? queuedMessage.creation.projectId,
       createdAt: queuedMessage.createdAt,
     },
+    ...(placement !== undefined ? { environmentSelection: "auto" as const } : {}),
   });
 }
 
@@ -1035,6 +1040,29 @@ export function createThreadOutboxDelivery(): {
     if (runtimeModeDenial !== undefined) {
       return restoreQueuedMessage(queuedMessage, runtimeModeDenial);
     }
+    // A placed task's origin confirms its binding before anything is uploaded or prepared at B.
+    const placedTargetQualified = async (
+      message: QueuedThreadMessage,
+      revision: number,
+    ): Promise<boolean | null> => {
+      if (message.placement === undefined) return null;
+      const qualification = await qualifyPlacedTarget({
+        messageId: message.messageId,
+        commandId: message.commandId,
+        environmentId: message.environmentId,
+        stillOwned: () =>
+          isQueuedMessagePayloadCurrent(message, revision) &&
+          !appAtomRegistry.get(editingQueuedMessageIdsAtom)[message.messageId],
+      });
+      if (qualification.ok) return null;
+      // Held with the same origin and IDs; a newer owner decides on its own pass.
+      return !isQueuedMessagePayloadCurrent(message, revision);
+    };
+    const heldBeforeUpload = await placedTargetQualified(
+      queuedMessage,
+      threadOutboxRevision(queuedMessage.messageId),
+    );
+    if (heldBeforeUpload !== null) return heldBeforeUpload;
     let prepared: PreparedTurnAttachments;
     let persistedMessage: QueuedThreadMessage;
     let deliveryRevision: number;
@@ -1116,6 +1144,8 @@ export function createThreadOutboxDelivery(): {
         startFromOrigin: false,
       };
     }
+    const heldBeforeLaunch = await placedTargetQualified(persistedMessage, deliveryRevision);
+    if (heldBeforeLaunch !== null) return heldBeforeLaunch;
     launchedCreations.set(persistedMessage.messageId, { revision: deliveryRevision, workspace });
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
@@ -1285,6 +1315,30 @@ export function createThreadOutboxDelivery(): {
       if (retryNotBefore(messageId) > Date.now()) {
         continue;
       }
+      if (awaitsPlacement(nextQueuedMessage)) {
+        // Admission comes before every destination gate: the uploads wait for it, and the origin's
+        // project and shell say nothing about the machine it binds.
+        const origin = nextQueuedMessage.placement!.originEnvironmentId;
+        if (
+          !isQueuedThreadCreationSendable(nextQueuedMessage) ||
+          !ready.has(origin) ||
+          !operableEnvironments.has(origin)
+        ) {
+          continue;
+        }
+        beginDispatchingQueuedMessage(messageId);
+        settle(
+          messageId,
+          admitPlacedCreation(nextQueuedMessage).then((result) =>
+            result.step === "hold"
+              ? false
+              : result.step === "restore"
+                ? restoreQueuedMessage(nextQueuedMessage, result.reason)
+                : true,
+          ),
+        );
+        return;
+      }
       if (
         queuedAttachmentsStillUploading({
           environmentId: nextQueuedMessage.environmentId,
@@ -1410,7 +1464,11 @@ export function createThreadOutboxDelivery(): {
         if (!isQueuedThreadCreationSendable(nextQueuedMessage)) {
           continue;
         }
-        if (creationProjectCwd === null && shellStatus !== "live") {
+        // A placed task's project is B's own; it is never dropped for a list that lags its binding.
+        if (
+          creationProjectCwd === null &&
+          (shellStatus !== "live" || nextQueuedMessage.placement !== undefined)
+        ) {
           continue;
         }
       }

@@ -23,8 +23,13 @@ export function isDraftThreadRoute(
   );
 }
 
-export function submittedThreadParams(environmentId: string, threadId: string) {
-  return { draft: undefined, environmentId, threadId };
+/** A placed task also names its message: its machine is the one its origin binds. */
+export function submittedThreadParams(
+  environmentId: string,
+  threadId: string,
+  pendingMessageId?: string,
+) {
+  return { draft: undefined, environmentId, threadId, pendingMessageId };
 }
 
 export function draftRouteIdentity(draft: NewTaskDraftRouteParams): string {

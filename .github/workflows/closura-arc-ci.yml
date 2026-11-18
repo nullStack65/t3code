@@ -136,6 +136,7 @@ jobs:
           vp run --filter @t3tools/client-runtime typecheck
           vp run --filter @t3tools/provider-core typecheck
           vp run --filter t3 typecheck
+          vp run --filter @t3tools/mobile typecheck
 
       - name: Test AssemblyAI dictation, native inbox and thread placement behavior
         shell: bash
@@ -161,6 +162,27 @@ jobs:
             apps/web/src/components/chat/draftUploadReconcile.test.ts \
             apps/web/src/lib/attachmentUploadQueue.test.ts \
             apps/server/src/ws.test.ts
+
+      - name: Test mobile new-task placement, outbox and uploads
+        shell: bash
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          vp test run \
+            src/state/thread-placement.model.test.ts \
+            src/state/threadOutboxDelivery.placement.test.ts \
+            src/state/composer-attachment-uploads.test.ts \
+            src/lib/composerAttachmentUploadQueue.test.ts \
+            src/lib/attachmentUpload.test.ts \
+            src/state/use-composer-drafts.test.ts \
+            src/state/thread-outbox.test.ts \
+            src/state/threadOutboxDelivery.permissions.test.ts \
+            src/state/threadOutboxDelivery.test.ts \
+            src/state/pending-thread-creation.test.ts \
+            src/lib/projectThreadStartTurn.test.ts \
+            src/features/threads/thread-route-state.test.ts \
+            src/features/threads/new-task-flow-provider.test.tsx \
+            src/features/threads/NewTaskDraftRouteScreen.test.tsx
 
       - name: Build native T3 server
         shell: bash

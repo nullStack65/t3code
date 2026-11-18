@@ -67,6 +67,7 @@ import {
 import {
   decodeQueuedThreadMessage,
   encodeQueuedThreadMessage,
+  PlacedQueuedThreadMessageSchema,
   QueuedThreadMessageSchema,
   type QueuedThreadMessage,
 } from "./thread-outbox-model";
@@ -74,6 +75,12 @@ import { flushThreadOutbox, threadOutboxManager } from "./thread-outbox";
 import { composerDraftEnvironmentId } from "../lib/composerAttachmentUploadQueue";
 
 const COMPOSER_DRAFTS_SCHEMA_VERSION = 1;
+/**
+ * Written only while the document holds state an older reader would misread: an Auto draft (read
+ * as a fixed draft, its bytes would upload before admission) or a placed queued task. An older
+ * reader fails to decode it, and its writes wait on a successful load, so it never overwrites it.
+ */
+const COMPOSER_DRAFTS_PLACEMENT_SCHEMA_VERSION = 2;
 const COMPOSER_DRAFTS_DIRECTORY = "composer-drafts";
 const COMPOSER_DRAFTS_FILE = "drafts.json";
 const PERSIST_DEBOUNCE_MS = 200;
@@ -448,6 +455,11 @@ export interface ComposerDraft {
   /** `/clear` armed this draft: its next message starts a fresh provider session. */
   readonly freshContext?: boolean;
   readonly workspaceSelection?: ComposerDraftWorkspaceSelection;
+  /**
+   * A new task's machine: `auto` is placed by its origin, `manual` is the machine picked. Absent on
+   * drafts from before this choice, which keep running on their own machine.
+   */
+  readonly environmentSelection?: "auto" | "manual";
   readonly project?: ComposerDraftProject;
 }
 
@@ -485,6 +497,7 @@ export type ComposerDraftSettingsUpdate = Pick<
   | "interactionMode"
   | "freshContext"
   | "workspaceSelection"
+  | "environmentSelection"
   | "project"
 >;
 
@@ -519,11 +532,15 @@ const ComposerDraftSchema = Schema.Struct({
   interactionMode: Schema.optional(ProviderInteractionModeSchema),
   freshContext: Schema.optional(Schema.Boolean),
   workspaceSelection: Schema.optional(ComposerDraftWorkspaceSelectionSchema),
+  environmentSelection: Schema.optional(Schema.Literals(["auto", "manual"])),
   project: Schema.optional(ComposerDraftProjectSchema),
 });
 
 const PersistedComposerDraftsSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(COMPOSER_DRAFTS_SCHEMA_VERSION),
+  schemaVersion: Schema.Literals([
+    COMPOSER_DRAFTS_SCHEMA_VERSION,
+    COMPOSER_DRAFTS_PLACEMENT_SCHEMA_VERSION,
+  ]),
   drafts: Schema.Record(Schema.String, ComposerDraftSchema),
   stickyModelSelection: Schema.optional(ModelSelectionSchema),
   modelOptionMemory: Schema.optional(
@@ -538,7 +555,9 @@ const PersistedComposerDraftsSchema = Schema.Struct({
       Schema.String,
       Schema.Struct({
         drafts: Schema.Record(Schema.String, ComposerDraftSchema),
-        queuedMessages: Schema.Array(QueuedThreadMessageSchema),
+        queuedMessages: Schema.Array(
+          Schema.Union([PlacedQueuedThreadMessageSchema, QueuedThreadMessageSchema]),
+        ),
       }),
     ),
   ),
@@ -698,7 +717,8 @@ function isEmptyDraft(draft: ComposerDraft): boolean {
     draft.runtimeMode === undefined &&
     draft.interactionMode === undefined &&
     draft.freshContext !== true &&
-    draft.workspaceSelection === undefined
+    draft.workspaceSelection === undefined &&
+    draft.environmentSelection === undefined
   );
 }
 
@@ -843,8 +863,19 @@ async function writePersistedComposerState(
     const nonEmptyDrafts = Object.fromEntries(
       Object.entries(drafts).filter(([, draft]) => !isEmptyDraft(draft)),
     );
+    const signedOut = Object.values(cloudDrafts.signedOut);
+    const holdsPlacementState =
+      [
+        ...Object.values(nonEmptyDrafts),
+        ...signedOut.flatMap((saved) => Object.values(saved.drafts)),
+      ].some((draft) => draft.environmentSelection === "auto") ||
+      signedOut.some((saved) =>
+        saved.queuedMessages.some((message) => message.placement !== undefined),
+      );
     const document = {
-      schemaVersion: COMPOSER_DRAFTS_SCHEMA_VERSION,
+      schemaVersion: holdsPlacementState
+        ? COMPOSER_DRAFTS_PLACEMENT_SCHEMA_VERSION
+        : COMPOSER_DRAFTS_SCHEMA_VERSION,
       drafts: nonEmptyDrafts,
       ...(stickyModelSelection ? { stickyModelSelection } : {}),
       ...(Object.keys(appAtomRegistry.get(modelOptionMemoryAtom)).length > 0
@@ -1254,12 +1285,14 @@ export async function removeDeliveredCloudQueuedMessage(
         archived.runtimeMode,
         archived.interactionMode,
         archived.creation,
+        archived.placement,
       ]) !==
       JSON.stringify([
         message.modelSelection,
         message.runtimeMode,
         message.interactionMode,
         message.creation,
+        message.placement,
       ])
     )
       continue;
@@ -1876,7 +1909,8 @@ export function sameComposerDraftState(a: ComposerDraft, b: ComposerDraft): bool
     a.runtimeMode === b.runtimeMode &&
     a.interactionMode === b.interactionMode &&
     a.freshContext === b.freshContext &&
-    a.workspaceSelection === b.workspaceSelection
+    a.workspaceSelection === b.workspaceSelection &&
+    a.environmentSelection === b.environmentSelection
   );
 }
 
@@ -2007,10 +2041,14 @@ export function removeComposerDraftsForEnvironment(
   );
 }
 
-export function createNewTaskDraft(project: {
-  readonly environmentId: EnvironmentId;
-  readonly projectId: ProjectId;
-}): string {
+export function createNewTaskDraft(
+  project: {
+    readonly environmentId: EnvironmentId;
+    readonly projectId: ProjectId;
+  },
+  /** Seeded once, for a new draft only: it is the draft's intent from then on. */
+  environmentSelection?: "auto",
+): string {
   const draftKey = newTaskDraftKey(newDraftId());
   const stamp: ComposerDraftProject = {
     environmentId: project.environmentId,
@@ -2019,7 +2057,11 @@ export function createNewTaskDraft(project: {
   };
   updateComposerDrafts((current) => ({
     ...current,
-    [draftKey]: { ...EMPTY_DRAFT, project: stamp },
+    [draftKey]: {
+      ...EMPTY_DRAFT,
+      project: stamp,
+      ...(environmentSelection ? { environmentSelection } : {}),
+    },
   }));
   return draftKey;
 }
@@ -2154,13 +2196,21 @@ export const newTaskComposerDraftsAtom = Atom.make((get): ComposerDraftsByKey =>
   return matching.length === 0 ? EMPTY_DRAFTS : Object.fromEntries(matching);
 }).pipe(Atom.withEquality(sameDrafts));
 
-type ComposerDraftUploadSource = Pick<ComposerDraft, "attachments" | "project">;
+// Routing decides whether a draft's bytes may upload at all, so it is part of the source.
+type ComposerDraftUploadSource = Pick<
+  ComposerDraft,
+  "attachments" | "project" | "environmentSelection"
+>;
 type ComposerDraftUploadSources = Readonly<Record<string, ComposerDraftUploadSource>>;
 export const composerDraftUploadSourcesAtom = Atom.make((get): ComposerDraftUploadSources =>
   Object.fromEntries(
     Object.entries(get(composerDraftsAtom)).map(([key, draft]) => [
       key,
-      { attachments: draft.attachments, project: draft.project },
+      {
+        attachments: draft.attachments,
+        project: draft.project,
+        environmentSelection: draft.environmentSelection,
+      },
     ]),
   ),
 ).pipe(
@@ -2169,7 +2219,10 @@ export const composerDraftUploadSourcesAtom = Atom.make((get): ComposerDraftUplo
     return (
       keys.length === Object.keys(b).length &&
       keys.every(
-        (key) => a[key]?.attachments === b[key]?.attachments && a[key]?.project === b[key]?.project,
+        (key) =>
+          a[key]?.attachments === b[key]?.attachments &&
+          a[key]?.project === b[key]?.project &&
+          a[key]?.environmentSelection === b[key]?.environmentSelection,
       )
     );
   }),

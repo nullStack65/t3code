@@ -69,6 +69,27 @@ export const QueuedThreadMessageSchema = Schema.Struct({
 const decodeStoredQueuedThreadMessage = Schema.decodeUnknownSync(QueuedThreadMessageSchema);
 const encodeStoredQueuedThreadMessage = Schema.encodeUnknownSync(QueuedThreadMessageSchema);
 
+const QueuedThreadPlacementSchema = Schema.Struct({
+  originEnvironmentId: EnvironmentId,
+  originProjectId: ProjectId,
+  candidateEnvironmentIds: Schema.Array(EnvironmentId),
+  bound: Schema.optional(Schema.Struct({ environmentId: EnvironmentId, projectId: ProjectId })),
+});
+
+/**
+ * A new task whose machine its origin chooses. Its own envelope, not a flat record with one more
+ * field: a reader without it must keep the file unread rather than send it as fixed work there.
+ */
+export const PlacedQueuedThreadMessageSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(THREAD_OUTBOX_SCHEMA_VERSION),
+  kind: Schema.Literal("placed-creation"),
+  placement: QueuedThreadPlacementSchema,
+  message: QueuedThreadMessageSchema,
+});
+
+const decodePlacedQueuedThreadMessage = Schema.decodeUnknownSync(PlacedQueuedThreadMessageSchema);
+const encodePlacedQueuedThreadMessage = Schema.encodeUnknownSync(PlacedQueuedThreadMessageSchema);
+
 export interface QueuedThreadCreation {
   readonly projectId: ProjectIdType;
   readonly projectTitle?: string;
@@ -78,6 +99,17 @@ export interface QueuedThreadCreation {
   readonly worktreePath: string | null;
   readonly startFromOrigin?: boolean;
   readonly pullRequestReference?: string;
+}
+
+/** Where a new task's origin admits it; delivery fields follow `bound` once the origin answers. */
+export interface QueuedThreadPlacement {
+  /** The machine and project the task was sent from, which admits it each time; never changes. */
+  readonly originEnvironmentId: EnvironmentId;
+  readonly originProjectId: ProjectIdType;
+  /** Machines hosting the project when it was sent; admission offers the operable ones. */
+  readonly candidateEnvironmentIds: ReadonlyArray<EnvironmentId>;
+  /** The machine and project the origin bound the launch to. */
+  readonly bound?: { readonly environmentId: EnvironmentId; readonly projectId: ProjectIdType };
 }
 
 export interface QueuedThreadMessage {
@@ -98,6 +130,8 @@ export interface QueuedThreadMessage {
   /** Starts a new provider session (`/clear`). */
   readonly freshContext?: boolean;
   readonly creation?: QueuedThreadCreation;
+  /** Set on new tasks placed automatically; their creation is admitted at the origin first. */
+  readonly placement?: QueuedThreadPlacement;
   readonly createdAt: string;
 }
 
@@ -152,16 +186,39 @@ export function modelSelectionsEqual(left: ModelSelectionType, right: ModelSelec
 }
 
 export function encodeQueuedThreadMessage(message: QueuedThreadMessage): unknown {
-  return encodeStoredQueuedThreadMessage({
+  const { placement, ...flat } = message;
+  const stored = { schemaVersion: THREAD_OUTBOX_SCHEMA_VERSION, ...flat } as const;
+  if (placement === undefined) return encodeStoredQueuedThreadMessage(stored);
+  if (message.creation === undefined) {
+    throw new Error("Only a new task's creation can be placed by its origin.");
+  }
+  return encodePlacedQueuedThreadMessage({
     schemaVersion: THREAD_OUTBOX_SCHEMA_VERSION,
-    ...message,
+    kind: "placed-creation",
+    placement,
+    message: stored,
   });
 }
 
+const isPlacedEnvelope = (value: unknown): boolean =>
+  typeof value === "object" && value !== null && "kind" in value;
+
 export function decodeQueuedThreadMessage(value: unknown): QueuedThreadMessage {
+  if (isPlacedEnvelope(value)) {
+    const { placement, message: stored } = decodePlacedQueuedThreadMessage(value);
+    const { schemaVersion: _, ...message } = stored;
+    if (message.creation === undefined) {
+      throw new Error("A placed record must hold a new task's creation.");
+    }
+    return { ...message, placement };
+  }
   const { schemaVersion: _, ...message } = decodeStoredQueuedThreadMessage(value);
   return message;
 }
+
+/** Whether this placed task still waits for its origin to bind it to a machine. */
+export const awaitsPlacement = (message: QueuedThreadMessage): boolean =>
+  message.placement !== undefined && message.placement.bound === undefined;
 
 export function groupQueuedThreadMessages(
   messages: ReadonlyArray<QueuedThreadMessage>,

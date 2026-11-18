@@ -12,6 +12,7 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import {
+  AuthOrchestrationOperateScope,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
@@ -66,6 +67,11 @@ import {
 import { useBranches, usePaginatedBranches } from "../../state/queries";
 import { vcsEnvironment } from "../../state/vcs";
 import { type QueuedThreadMessage } from "../../state/thread-outbox";
+import { readEnvironmentScope } from "../../state/session";
+import {
+  draftRoutesAutomatically,
+  seedsAutomaticPlacement,
+} from "../../state/thread-placement-rule";
 import {
   setPendingConnectionError,
   useRemoteConnectionStatus,
@@ -181,6 +187,13 @@ type NewTaskFlowContextValue = {
     readonly draftId: string;
     readonly kind: "missing" | "pickProject";
   } | null;
+  /** The draft's stored machine intent; absent on drafts from before the choice existed. */
+  readonly environmentSelection: "auto" | "manual" | undefined;
+  /** Whether Send hands the task to its origin to place, rather than running it here. */
+  readonly routesAutomatically: boolean;
+  /** Whether Auto is offered: more than one machine hosts this project. */
+  readonly canPlaceAutomatically: boolean;
+  readonly setEnvironmentSelection: (selection: "auto" | "manual") => void;
   readonly selectEnvironment: (environmentId: EnvironmentId) => void;
   readonly switchEnvironment: (environmentId: EnvironmentId) => Promise<boolean>;
   readonly switchingToEnvironmentId: EnvironmentId | null;
@@ -333,6 +346,67 @@ export function NewTaskFlowProvider(
   const serverConfigs = useServerConfigs();
   const { connectedEnvironments } = useRemoteConnectionStatus();
   const selectedProjectDraftKey = selectedProject ? activeDraftKey : null;
+  const scratchEnvironments = connectedEnvironments.filter(
+    (environment) =>
+      availableScratchWorkspaceRoot(
+        environment.connectionState,
+        serverConfigs.get(environment.environmentId),
+      ) !== null,
+  );
+
+  const selectedRepositoryKey = selectedProject?.repositoryIdentity
+    ? repositoryGroupingKeyOf(selectedProject.repositoryIdentity)
+    : null;
+  // Use || null: placeholder workspaceRoot can be empty, and an empty basename rejects real hosts.
+  const selectedWorkspaceBasename = selectedProject?.workspaceRoot.split("/").at(-1) || null;
+  const selectedProjectTitle = selectedProject?.title ?? null;
+  const environments = (() => {
+    if (isScratchDraft) {
+      return scratchEnvironments.map((environment) => ({
+        environmentId: environment.environmentId,
+        environmentLabel: environment.environmentLabel,
+      }));
+    }
+    const seen = new Set<EnvironmentId>();
+    const result: Array<{
+      readonly environmentId: EnvironmentId;
+      readonly environmentLabel: string;
+    }> = [];
+    const hostsSelectedRepository = (project: EnvironmentProject) => {
+      if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
+        return true;
+      }
+      const projectKey = project.repositoryIdentity
+        ? repositoryGroupingKeyOf(project.repositoryIdentity)
+        : null;
+      if (selectedRepositoryKey !== null && projectKey !== null) {
+        return projectKey === selectedRepositoryKey;
+      }
+      return (
+        project.workspaceRoot.split("/").at(-1) === selectedWorkspaceBasename ||
+        (selectedProjectTitle !== null && project.title === selectedProjectTitle)
+      );
+    };
+    for (const project of projects) {
+      if (!hostsSelectedRepository(project)) {
+        continue;
+      }
+      if (seen.has(project.environmentId)) {
+        continue;
+      }
+      const environment = savedConnectionsById[project.environmentId];
+      if (!environment) {
+        continue;
+      }
+      seen.add(project.environmentId);
+      result.push({
+        environmentId: project.environmentId,
+        environmentLabel: environment.environmentLabel,
+      });
+    }
+    return result;
+  })();
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- creates the persistent draft in the new-task flow store once a project is selected, before the composer mounts
   useEffect(() => {
     // A route that names a draft binds that draft, or returns to the picker.
@@ -345,13 +419,35 @@ export function NewTaskFlowProvider(
       return;
     }
     // Creates the persistent draft once the project selection is ready; the key must exist before the composer mounts.
+    // A genuinely new draft starts as Auto when more than one machine could take it now; from
+    // then on that is its stored intent, whatever the connections do.
+    const candidateCount = environments.filter(
+      ({ environmentId }) =>
+        connectedEnvironments.some(
+          (environment) =>
+            environment.environmentId === environmentId &&
+            environment.connectionState === "connected",
+        ) && readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),
+    ).length;
     updateNewTaskFlowState(flowKey, {
-      draftKey: createNewTaskDraft({
-        environmentId: selectedProject.environmentId,
-        projectId: selectedProject.id,
-      }),
+      draftKey: createNewTaskDraft(
+        {
+          environmentId: selectedProject.environmentId,
+          projectId: selectedProject.id,
+        },
+        seedsAutomaticPlacement({ isScratch: isScratchDraft, candidateCount }) ? "auto" : undefined,
+      ),
     });
-  }, [activeDraftKey, flowKey, selectedProject, props.active, props.routeDraftId]);
+  }, [
+    activeDraftKey,
+    flowKey,
+    selectedProject,
+    props.active,
+    props.routeDraftId,
+    environments,
+    connectedEnvironments,
+    isScratchDraft,
+  ]);
   const activePendingKey =
     props.active === false
       ? null
@@ -604,14 +700,22 @@ export function NewTaskFlowProvider(
     null,
   );
   const latestSwitchRef = useRef<object | null>(null);
+  // Picking a machine is an explicit pin for the draft that moves there.
+  const pinDraftToMachine = () => {
+    const draftKey = readFlow().draftKey;
+    if (draftKey !== null)
+      updateComposerDraftSettings(draftKey, { environmentSelection: "manual" });
+  };
   const switchEnvironment = async (environmentId: EnvironmentId): Promise<boolean> => {
     if (environmentId === selectedEnvironmentId) {
       latestSwitchRef.current = null;
       setSwitchingToEnvironmentId(null);
+      pinDraftToMachine();
       return true;
     }
     if (!isScratchDraft) {
       selectEnvironment(environmentId);
+      pinDraftToMachine();
       return true;
     }
     const request = {};
@@ -760,6 +864,8 @@ export function NewTaskFlowProvider(
     }
     const workspaceSelection = resolveWorkspaceSelection(draft.workspaceSelection);
     const mode = workspaceSelection.mode;
+    // Placed by its origin: nothing local to this machine (its checkout or paths) goes along.
+    const placed = draftRoutesAutomatically({ draft, isScratch: isScratchDraft });
     return {
       environmentId: selectedProject.environmentId,
       threadId: ThreadId.make(metadata.threadId),
@@ -786,78 +892,27 @@ export function NewTaskFlowProvider(
         // Queued local tasks use drain-time checkout; snapshot branches only for immediate sends or explicit choices.
         branch: resolveProjectThreadCreationBranch({
           workspaceMode: mode,
-          selectedBranch: workspaceSelection?.branch ?? null,
-          currentCheckoutBranch: options?.currentCheckoutBranch ?? null,
+          selectedBranch: placed && mode === "local" ? null : (workspaceSelection?.branch ?? null),
+          currentCheckoutBranch: placed ? null : (options?.currentCheckoutBranch ?? null),
         }),
-        worktreePath: mode === "worktree" ? null : (workspaceSelection?.worktreePath ?? null),
+        worktreePath:
+          mode === "worktree" || placed ? null : (workspaceSelection?.worktreePath ?? null),
         ...((workspaceSelection?.startFromOrigin ?? startFromOrigin)
           ? { startFromOrigin: true }
           : {}),
       },
+      ...(placed
+        ? {
+            placement: {
+              originEnvironmentId: selectedProject.environmentId,
+              originProjectId: selectedProject.id,
+              candidateEnvironmentIds: environments.map((environment) => environment.environmentId),
+            },
+          }
+        : {}),
       createdAt: metadata.createdAt,
     };
   };
-
-  const scratchEnvironments = connectedEnvironments.filter(
-    (environment) =>
-      availableScratchWorkspaceRoot(
-        environment.connectionState,
-        serverConfigs.get(environment.environmentId),
-      ) !== null,
-  );
-
-  const selectedRepositoryKey = selectedProject?.repositoryIdentity
-    ? repositoryGroupingKeyOf(selectedProject.repositoryIdentity)
-    : null;
-  // Use || null: placeholder workspaceRoot can be empty, and an empty basename rejects real hosts.
-  const selectedWorkspaceBasename = selectedProject?.workspaceRoot.split("/").at(-1) || null;
-  const selectedProjectTitle = selectedProject?.title ?? null;
-  const environments = (() => {
-    if (isScratchDraft) {
-      return scratchEnvironments.map((environment) => ({
-        environmentId: environment.environmentId,
-        environmentLabel: environment.environmentLabel,
-      }));
-    }
-    const seen = new Set<EnvironmentId>();
-    const result: Array<{
-      readonly environmentId: EnvironmentId;
-      readonly environmentLabel: string;
-    }> = [];
-    const hostsSelectedRepository = (project: EnvironmentProject) => {
-      if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
-        return true;
-      }
-      const projectKey = project.repositoryIdentity
-        ? repositoryGroupingKeyOf(project.repositoryIdentity)
-        : null;
-      if (selectedRepositoryKey !== null && projectKey !== null) {
-        return projectKey === selectedRepositoryKey;
-      }
-      return (
-        project.workspaceRoot.split("/").at(-1) === selectedWorkspaceBasename ||
-        (selectedProjectTitle !== null && project.title === selectedProjectTitle)
-      );
-    };
-    for (const project of projects) {
-      if (!hostsSelectedRepository(project)) {
-        continue;
-      }
-      if (seen.has(project.environmentId)) {
-        continue;
-      }
-      const environment = savedConnectionsById[project.environmentId];
-      if (!environment) {
-        continue;
-      }
-      seen.add(project.environmentId);
-      result.push({
-        environmentId: project.environmentId,
-        environmentLabel: environment.environmentLabel,
-      });
-    }
-    return result;
-  })();
 
   const value = {
     activeNewTask,
@@ -900,6 +955,20 @@ export function NewTaskFlowProvider(
       (routeDraftResolution.kind === "missing" || routeDraftResolution.kind === "pickProject")
         ? { draftId: props.routeDraftId, kind: routeDraftResolution.kind }
         : null,
+    environmentSelection: selectedProjectDraft.environmentSelection,
+    // Stored Auto stays Auto with fewer machines: its origin may still bind it, even to itself.
+    routesAutomatically: draftRoutesAutomatically({
+      draft: selectedProjectDraft,
+      isScratch: isScratchDraft,
+    }),
+    canPlaceAutomatically:
+      !isScratchDraft &&
+      (environments.length > 1 || selectedProjectDraft.environmentSelection === "auto"),
+    setEnvironmentSelection: (selection: "auto" | "manual") => {
+      if (selectedProjectDraftKey) {
+        updateComposerDraftSettings(selectedProjectDraftKey, { environmentSelection: selection });
+      }
+    },
     selectEnvironment,
     switchEnvironment,
     switchingToEnvironmentId,

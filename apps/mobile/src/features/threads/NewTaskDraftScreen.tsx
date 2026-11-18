@@ -257,7 +257,9 @@ export function NewTaskDraftScreen(props: {
         states: uploadStates,
       })
     : null;
+  // An Auto draft's uploads wait for its placement; that wait is not an upload in progress here.
   const attachmentsUploading =
+    flow.environmentSelection !== "auto" &&
     environmentConnected &&
     selectedProject !== null &&
     composerAttachmentsStillUploading({
@@ -526,10 +528,12 @@ export function NewTaskDraftScreen(props: {
     loadBranches();
   }, [loadBranches, selectedProject]);
 
-  const selectedEnvironmentLabel =
+  const machineLabel =
     flow.environments.find(
       (environment) => environment.environmentId === flow.selectedEnvironmentId,
     )?.environmentLabel ?? "Environment";
+  // Auto names the choice the origin makes at Send; a pinned draft names its machine.
+  const selectedEnvironmentLabel = flow.routesAutomatically ? "Auto" : machineLabel;
   const availableCurrentBranchName =
     flow.availableBranches.find((branch) => branch.current)?.name ??
     flow.availableBranches.find((branch) => branch.isDefault)?.name ??
@@ -675,7 +679,11 @@ export function NewTaskDraftScreen(props: {
     promptInputRef.current?.blur();
     navigation.dispatch(
       CommonActions.setParams(
-        submittedThreadParams(String(message.environmentId), String(message.threadId)),
+        submittedThreadParams(
+          String(message.environmentId),
+          String(message.threadId),
+          message.placement ? String(message.messageId) : undefined,
+        ),
       ),
     );
     // The composer has moved to the submitted thread; a pick still converting

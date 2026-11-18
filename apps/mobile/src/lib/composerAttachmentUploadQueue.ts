@@ -1,4 +1,9 @@
-import { EnvironmentId, type ServerConfig } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type CommandId,
+  type MessageId,
+  type ServerConfig,
+} from "@t3tools/contracts";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 
 import { parseLegacyNewTaskDraftKey } from "../state/new-task-draft-key";
@@ -7,6 +12,11 @@ import type { DraftComposerAttachment } from "./composerImages";
 export interface ComposerAttachmentUploadRequest {
   readonly environmentId: EnvironmentId;
   readonly attachment: DraftComposerAttachment;
+  /** A placed task's operation, which every attempt and retry of this upload is asked for. */
+  readonly owner?: {
+    readonly messageId: MessageId;
+    readonly commandId: CommandId;
+  };
 }
 
 export type ComposerAttachmentUploadState =

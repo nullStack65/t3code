@@ -1,5 +1,12 @@
-import { CommandId, EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import {
+  CommandId,
+  EnvironmentId,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 type UploadOptions = {
   signal: AbortSignal;
@@ -17,6 +24,13 @@ const native = vi.hoisted(() => ({
   nextUuid: 0,
   mint: Symbol("mint"),
   remove: Symbol("remove"),
+  /** A placed task's origin, answering the queue's own admission request. */
+  admit: Symbol("admit"),
+  admissions: [] as Array<{ environmentId: string; commandId: string; candidates: string[] }>,
+  admitAnswer: "bound" as "bound" | "excluded",
+  admitHold: null as null | Promise<void>,
+  onAdmit: null as null | (() => void),
+  connection: new Map<string, unknown>(),
   transfer:
     vi.fn<(uri: string, url: string, options: UploadOptions) => Promise<{ status: number }>>(),
 }));
@@ -128,6 +142,26 @@ vi.mock("./session", async () => {
     },
   };
 });
+vi.mock("./orchestration", () => ({
+  orchestrationEnvironment: { admitThreadPlacement: native.admit },
+}));
+vi.mock("../connection/catalog", async () => {
+  const { Atom: A, AsyncResult: R } = await import("effect/reactivity");
+  const generations = new Map<string, unknown>();
+  return {
+    environmentCatalog: {
+      stateAtom: (id: string) => {
+        if (!native.connection.has(id))
+          native.connection.set(id, A.make(R.success({ phase: "connected" })).pipe(A.keepAlive));
+        return native.connection.get(id);
+      },
+      sessionGenerationAtom: (id: string) => {
+        if (!generations.has(id)) generations.set(id, A.make(1).pipe(A.keepAlive));
+        return generations.get(id);
+      },
+    },
+  };
+});
 vi.mock("./attachments", () => ({
   attachmentEnvironment: { createUploadUrl: native.mint, remove: native.remove },
 }));
@@ -155,6 +189,39 @@ vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
         value: { attachmentId: id, relativeUrl: `/upload/${id}`, expiresAt: 1 },
       };
     }
+    if (command === native.admit) {
+      const { environmentId: origin, input } = target as unknown as {
+        environmentId: string;
+        input: { commandId: string; candidateEnvironmentIds: string[] };
+      };
+      native.admissions.push({
+        environmentId: origin,
+        commandId: input.commandId,
+        candidates: [...input.candidateEnvironmentIds],
+      });
+      native.onAdmit?.();
+      if (native.admitHold) await native.admitHold;
+      const { AsyncResult: R } = await import("effect/reactivity");
+      const CauseModule = await import("effect/Cause");
+      const { OrchestrationV2ThreadPlacementAdmitError: Refusal } =
+        await import("@t3tools/contracts");
+      return native.admitAnswer === "bound"
+        ? R.success({
+            environmentId: "environment-1",
+            projectId: "project-b",
+            reason: "capacity",
+            resumed: true,
+          })
+        : R.failure(
+            CauseModule.fail(
+              new Refusal({
+                commandId: input.commandId as never,
+                reason: "excluded",
+                detail: "refused: excluded",
+              }),
+            ),
+          );
+    }
     if (command === native.remove && target.input.attachmentId) {
       native.deleted.push(target.input.attachmentId);
       native.server.delete(target.input.attachmentId);
@@ -181,7 +248,7 @@ import {
   composerAttachmentUploadKey,
 } from "../lib/composerAttachmentUploadQueue";
 import type { DraftComposerAttachment } from "../lib/composerImages";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { appAtomRegistry } from "./atom-registry";
 import {
   composerAttachmentUploadRequests,
@@ -262,6 +329,16 @@ beforeEach(async () => {
   native.canOperate = true;
   native.nextId = 0;
   native.nextUuid = 0;
+  native.admissions.length = 0;
+  native.admitAnswer = "bound";
+  native.admitHold = null;
+  native.onAdmit = null;
+  for (const atom of native.connection.values()) {
+    appAtomRegistry.set(
+      atom as Atom.Writable<unknown>,
+      AsyncResult.success({ phase: "connected" }),
+    );
+  }
   native.files.set(draftsUri, Buffer.from('{"schemaVersion":1,"drafts":{}}'));
   drafts.resetComposerDraftsLoadState();
   appAtomRegistry.set(drafts.composerDraftsAtom, {
@@ -406,4 +483,118 @@ it("does not upload a disconnected colon environment's draft to its connected pr
     serverConfigs: new Map([[connected, config]]),
   });
   expect(requests).toEqual([]);
+});
+
+describe("a placed task's uploads", () => {
+  const origin = EnvironmentId.make("environment-origin");
+  /** A new task placed by `origin` on environment-1, bound already unless `unbound`. */
+  function placedTask(options: { readonly unbound?: boolean; readonly commandId?: string } = {}) {
+    return {
+      ...queuedMessage(),
+      attachments: [image],
+      commandId: CommandId.make(options.commandId ?? "command-placed"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      creation: {
+        projectId: ProjectId.make("project-b"),
+        workspaceMode: "worktree" as const,
+        branch: "main",
+        worktreePath: null,
+      },
+      placement: {
+        originEnvironmentId: origin,
+        originProjectId: ProjectId.make("project-a"),
+        candidateEnvironmentIds: [origin, environmentId],
+        ...(options.unbound
+          ? {}
+          : { bound: { environmentId, projectId: ProjectId.make("project-b") } }),
+      },
+    } satisfies QueuedThreadMessage;
+  }
+
+  it("holds an Auto draft's bytes, while the same draft pinned to its machine uploads", async () => {
+    const autoKey = drafts.createNewTaskDraft(
+      { environmentId, projectId: ProjectId.make("project-a") },
+      "auto",
+    );
+    appAtomRegistry.set(drafts.composerDraftsAtom, {
+      [autoKey]: { ...drafts.getComposerDraftSnapshot(autoKey), attachments: [image] },
+    });
+    await worker().settled();
+    expect(native.nextId).toBe(0);
+    expect(uploadState()).toBeUndefined();
+    disposeWorker?.();
+    drafts.updateComposerDraftSettings(autoKey, { environmentSelection: "manual" });
+    await worker().settled();
+    expect(native.nextId).toBe(1);
+  });
+
+  it("mints nothing for a placed task its origin has not bound", async () => {
+    appAtomRegistry.set(drafts.composerDraftsAtom, {});
+    await enqueueThreadOutboxMessage(placedTask({ unbound: true }));
+    await worker().settled();
+    expect(native.admissions).toEqual([]);
+    expect(native.nextId).toBe(0);
+  });
+
+  it("uploads a bound task's bytes only after its origin answers with the same binding", async () => {
+    appAtomRegistry.set(drafts.composerDraftsAtom, {});
+    await enqueueThreadOutboxMessage(placedTask());
+    await worker().settled();
+    expect(native.admissions).toEqual([
+      { environmentId: origin, commandId: "command-placed", candidates: [environmentId] },
+    ]);
+    expect(native.nextId).toBe(1);
+    expect(native.transfer).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a queued upload whose owner was replaced before its callback ran", async () => {
+    appAtomRegistry.set(drafts.composerDraftsAtom, {});
+    await enqueueThreadOutboxMessage(placedTask());
+    const queue = worker();
+    // The same message under another operation, before the queue's callback runs.
+    void enqueueThreadOutboxMessage(placedTask({ commandId: "command-replacement" }));
+    await queue.settled();
+    // The replaced job never asks for, or uploads as, the operation it was queued for.
+    expect(native.admissions.every(({ commandId }) => commandId === "command-replacement")).toBe(
+      true,
+    );
+    expect(native.nextId).toBeLessThanOrEqual(native.admissions.length);
+  });
+
+  it.each([
+    "the origin refuses",
+    "the origin's connection drops",
+    "the same bytes are attached again",
+    "the task is removed",
+  ] as const)("mints and transfers nothing when %s while its origin is asked", async (change) => {
+    appAtomRegistry.set(drafts.composerDraftsAtom, {});
+    const message = placedTask();
+    await enqueueThreadOutboxMessage(message);
+    let release!: () => void;
+    native.admitHold = new Promise<void>((done) => {
+      release = done;
+    });
+    const reached = Promise.withResolvers<void>();
+    native.onAdmit = reached.resolve;
+    const queue = worker();
+    await reached.promise;
+    if (change === "the origin refuses") native.admitAnswer = "excluded";
+    if (change === "the origin's connection drops")
+      appAtomRegistry.set(
+        native.connection.get(origin) as Atom.Writable<unknown>,
+        AsyncResult.success({ phase: "disconnected" }),
+      );
+    if (change === "the same bytes are attached again")
+      await threadOutboxManager.update(
+        { ...message, attachments: [{ ...image }] },
+        threadOutboxManager.revisionOf(message.messageId),
+      );
+    if (change === "the task is removed") await threadOutboxManager.remove(message);
+    release();
+    await queue.settled();
+    expect(native.nextId).toBe(0);
+    expect(native.transfer).not.toHaveBeenCalled();
+    // Held for the task's own delivery, which asks again: not shown as a failed upload.
+    expect(uploadState()?.status).not.toBe("failed");
+  });
 });

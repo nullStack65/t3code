@@ -69,7 +69,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
-import { useThreadSelection } from "../../state/use-thread-selection";
+import { usePendingRouteThread, useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
 import {
   buildTerminalMenuSessions,
@@ -166,6 +166,8 @@ function OpeningThreadLoadingScreen() {
 type ThreadRouteScreenRouteProps = StaticScreenProps<{
   readonly environmentId?: string;
   readonly threadId?: string;
+  /** A sent task placed by its origin: the route follows that message's binding. */
+  readonly pendingMessageId?: string;
   readonly draft?: NewTaskDraftRouteParams;
   readonly inspector?: ThreadInspectorTarget;
   readonly prompt?: string | string[];
@@ -250,9 +252,33 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
   const { connectionState } = useRemoteConnectionStatus();
   const { selectedThread } = useThreadSelection();
   const params = props.route.params ?? {};
-  const environmentIdRaw = firstRouteParam(params.environmentId);
-  const threadIdRaw = firstRouteParam(params.threadId);
+  // Resolved through the pending task's binding before any scoped key or detail read.
+  const pendingRoute = usePendingRouteThread(params);
+  const environmentIdRaw = pendingRoute.environmentId;
+  const threadIdRaw = pendingRoute.threadId;
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
+  const pendingMessageId = firstRouteParam(params.pendingMessageId);
+  const routeFollowsBinding =
+    pendingMessageId === null ||
+    (firstRouteParam(params.environmentId) === environmentIdRaw &&
+      firstRouteParam(params.threadId) === threadIdRaw);
+  const navigationForBinding = useNavigation();
+  const followBinding = useEffectEvent(() => {
+    const current = props.route.params ?? {};
+    // Only this route, and only while it still names the same pending task: a background
+    // completion never moves another screen.
+    if (
+      environmentIdRaw === null ||
+      threadIdRaw === null ||
+      firstRouteParam(current.pendingMessageId) !== pendingMessageId
+    )
+      return;
+    navigationForBinding.setParams({ environmentId: environmentIdRaw, threadId: threadIdRaw });
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves this route's params to the machine its pending task was bound to, so every later reader uses that thread
+  useEffect(() => {
+    if (!routeFollowsBinding) followBinding();
+  }, [routeFollowsBinding]);
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeEnvironmentShellState = useEnvironmentShellReadiness(environmentId);
   const { onReconnectEnvironment } = useRemoteConnections();
@@ -289,7 +315,7 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
       content
     );
 
-  if (environmentId === null || threadIdRaw === null) {
+  if (environmentId === null || threadIdRaw === null || !routeFollowsBinding) {
     return withInspectorHeader(<OpeningThreadLoadingScreen />);
   }
 
