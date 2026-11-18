@@ -46,6 +46,7 @@ import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import {
+  dismissLinkedEnvironment,
   forgetLinkOnConnect,
   hostsLinking,
   peerLinkEnvironment,
@@ -691,6 +692,8 @@ function ConnectionsSettingsContent({
     setSavedBackendError(null);
     // Read before removing: the lists are this app's, and removal changes what it reports.
     const linkingHosts = hostsLinking(peerLinkHosts, environmentId);
+    // A host still linking it would add it straight back. Recorded first, so it never does.
+    if (linkingHosts.length > 0) void dismissLinkedEnvironment(environmentId);
     const result = await removeEnvironment(environmentId);
     setRemovingSavedEnvironmentId(null);
     if (result._tag === "Failure") {

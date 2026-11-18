@@ -12,6 +12,7 @@ import {
   type ServerConfig,
 } from "@t3tools/contracts";
 import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import type { EnvironmentPresentation } from "./connection/presentation.ts";
@@ -249,6 +250,69 @@ export function knownEnvironmentRows(
       action,
     };
   });
+}
+
+/** Names one automatic add: `environmentId` added from `hostId`'s links. */
+export const autoAddKey = (hostId: EnvironmentId, environmentId: EnvironmentId): string =>
+  JSON.stringify([hostId, environmentId]);
+
+/**
+ * What must change before a failed automatic add runs again: the link's status, addresses or
+ * session. Each try spends a single-use code on the peer, so a down peer is not retried.
+ */
+export const autoAddLinkState = (
+  link: Pick<PeerLinkSummary, "status" | "urls" | "linkedAt">,
+): string => JSON.stringify([link.status, link.urls, DateTime.toEpochMillis(link.linkedAt)]);
+
+/** A linked environment this client adds on its own, with what a failure is remembered by. */
+export interface LinkedEnvironmentAutoAdd {
+  readonly row: KnownEnvironmentRow;
+  readonly key: string;
+  readonly linkState: string;
+}
+
+/**
+ * What to add to this app now from `hostId`'s rows: each it offers "Add to this app" for, unless
+ * held, dismissed, in flight from any host, or failed at this same link state. `forget` names
+ * failures whose link state moved, so a peer back up is retried. The caller checks write access.
+ */
+export function linkedEnvironmentsToAutoAdd(input: {
+  readonly hostId: EnvironmentId;
+  readonly rows: ReadonlyArray<KnownEnvironmentRow>;
+  readonly catalog: ReadonlySet<EnvironmentId>;
+  readonly dismissed: ReadonlySet<EnvironmentId>;
+  /** Linked environments being added now, from any host, so two hosts never add one twice. */
+  readonly adding: ReadonlySet<EnvironmentId>;
+  /** The link state each `autoAddKey` last failed at. */
+  readonly failed: ReadonlyMap<string, string>;
+}): {
+  readonly add: ReadonlyArray<LinkedEnvironmentAutoAdd>;
+  readonly forget: ReadonlyArray<string>;
+} {
+  const add: Array<LinkedEnvironmentAutoAdd> = [];
+  const forget: Array<string> = [];
+  for (const row of input.rows) {
+    const { link } = row;
+    if (link === null) continue;
+    const key = autoAddKey(input.hostId, row.environmentId);
+    const linkState = autoAddLinkState(link);
+    const failedAt = input.failed.get(key);
+    if (failedAt !== undefined && failedAt !== linkState) forget.push(key);
+    if (
+      failedAt === linkState ||
+      link.status !== "reachable" ||
+      row.action !== "add-to-app" ||
+      row.appAddress === null ||
+      row.environmentId === input.hostId ||
+      input.catalog.has(row.environmentId) ||
+      input.dismissed.has(row.environmentId) ||
+      input.adding.has(row.environmentId)
+    ) {
+      continue;
+    }
+    add.push({ row, key, linkState });
+  }
+  return { add, forget };
 }
 
 /**

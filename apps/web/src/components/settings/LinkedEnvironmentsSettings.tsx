@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   ANOTHER_ADDRESS,
-  appPairingAddresses,
   type KnownEnvironmentRow,
   linkRequestFailureMessage,
 } from "@t3tools/client-runtime/link-request";
@@ -25,9 +24,15 @@ import { useId, useRef, useState } from "react";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { mintPairingCodeOn } from "~/state/peerPairingCode";
 import { environmentCatalog } from "~/connection/catalog";
-import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
 import { useKnownEnvironments } from "~/state/knownEnvironments";
-import { forgetLinkOnConnect, peerLinkEnvironment, useLinkableMachines } from "~/state/peerLinks";
+import {
+  addLinkedEnvironmentToApp,
+  dismissLinkedEnvironment,
+  forgetLinkOnConnect,
+  peerLinkEnvironment,
+  undismissLinkedEnvironment,
+  useLinkableMachines,
+} from "~/state/peerLinks";
 import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { accessConfig } from "../auth/ConnectAgentSurface";
@@ -176,9 +181,7 @@ function LinkedEnvironmentRow({
   const health = peerLinkHealth(link, DateTime.makeUnsafe(nowMinute));
   const unlink = useAtomCommand(peerLinkEnvironment.unlink, { label: "unlink environment" });
   const canUnlink = useAtomValue(peerLinkEnvironment.unlink.permissionAtom(environmentId));
-  const addToApp = useAtomCommand(peerLinkEnvironment.addToApp, { reportFailure: false });
   const canAddToApp = useAtomValue(peerLinkEnvironment.addToApp.permissionAtom(environmentId));
-  const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
   const removeFromApp = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const [busy, setBusy] = useState(false);
   const forget = async () => {
@@ -203,55 +206,34 @@ function LinkedEnvironmentRow({
       { variant: "destructive" },
     ) ?? Promise.resolve(false));
     if (!alsoRemove) return;
+    // Another host may still link it. Recorded first, so it is never added back on its own.
+    void dismissLinkedEnvironment(link.environmentId);
     const removed = await removeFromApp(link.environmentId);
     if (removed._tag === "Success") forgetLinkOnConnect(link.environmentId);
     else if (!isAtomCommandInterrupted(removed)) {
       failureToast(`Could not remove ${row.label}`, String(squashAtomCommandFailure(removed)));
     }
   };
-  const connectAt = async (hosts: ReadonlyArray<string>, pairingCode: string) => {
-    // A host that does not answer as this machine never receives the code, so the next can.
-    let result: Awaited<ReturnType<typeof connectPairing>> | undefined;
-    for (const host of hosts) {
-      result = await connectPairing({
-        host,
-        pairingCode,
-        expectedEnvironmentId: link.environmentId,
-      });
-      if (result._tag === "Success" || isAtomCommandInterrupted(result)) return result;
-    }
-    return result;
-  };
   const add = async () => {
     if (row.appAddress === null) return;
     setBusy(true);
-    const issued = await addToApp({ environmentId, input: { environmentId: link.environmentId } });
-    // Where the peer just answered first, then its other addresses this client reaches.
-    const hosts =
-      issued._tag === "Success" ? appPairingAddresses(issued.value.urls, row.onHostMachine) : [];
-    const added =
-      issued._tag === "Success" ? await connectAt(hosts, issued.value.credential) : issued;
+    const added = await addLinkedEnvironmentToApp(environmentId, {
+      environmentId: link.environmentId,
+      label: link.label,
+      onHostMachine: row.onHostMachine,
+    });
     setBusy(false);
-    if (added === undefined) {
-      failureToast(
-        `Could not add ${link.label} to this app`,
-        `${link.label} answers only at addresses this device cannot open.`,
-      );
+    if (added._tag === "Interrupted") return;
+    if (added._tag === "Failed") {
+      failureToast(`Could not add ${link.label} to this app`, added.message);
       return;
     }
-    if (added._tag === "Failure") {
-      if (!isAtomCommandInterrupted(added)) {
-        failureToast(
-          `Could not add ${link.label} to this app`,
-          String(squashAtomCommandFailure(added)),
-        );
-      }
-      return;
-    }
+    // Choosing it again is the way back from removing it, so a later removal starts fresh.
+    void undismissLinkedEnvironment(link.environmentId);
     toastManager.add({
       type: "success",
       title: `Added ${link.label} to this app`,
-      ...(issued._tag === "Success" && issued.value.access === "read-only"
+      ...(added.access === "read-only"
         ? {
             description:
               "Read-only: the link allows no more. Link it with full access to act there.",

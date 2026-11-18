@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   appConnectionReports,
+  appPairingAddresses,
   linkableMachines,
   linkedEnvironmentNames,
   linkRequestFailureMessage,
@@ -12,12 +13,23 @@ import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
   type EnvironmentId,
+  type PeerLinkAppAccess,
 } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useEffect, useEffectEvent } from "react";
 
+import { connectPairing } from "../connection/onboarding";
 import { connectionAtomRuntime } from "../connection/runtime";
+import {
+  ensureClientSettingsHydrated,
+  getClientSettings,
+  isClientSettingsHydrated,
+  persistClientSettingsPatch,
+} from "../hooks/useSettings";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { mintPairingCodeOn } from "./peerPairingCode";
@@ -180,6 +192,79 @@ export async function linkFromThisApp(
     },
   });
   return linked._tag === "Success" ? null : String(squashAtomCommandFailure(linked));
+}
+
+export type AddToAppOutcome =
+  | { readonly _tag: "Added"; readonly access: PeerLinkAppAccess }
+  | { readonly _tag: "Failed"; readonly message: string }
+  | { readonly _tag: "Interrupted" };
+
+/**
+ * Adds a machine `hostId` links to this app: the peer mints a single-use code over the link,
+ * capped at the link's access, and this client pairs with it at the addresses it reaches.
+ * "Add to this app" and the automatic add both run this.
+ */
+export async function addLinkedEnvironmentToApp(
+  hostId: EnvironmentId,
+  machine: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly onHostMachine: boolean;
+  },
+): Promise<AddToAppOutcome> {
+  const issued = await peerLinkEnvironment.addToApp.run(appAtomRegistry, {
+    environmentId: hostId,
+    input: { environmentId: machine.environmentId },
+  });
+  if (issued._tag === "Failure") {
+    return isAtomCommandInterrupted(issued)
+      ? { _tag: "Interrupted" }
+      : { _tag: "Failed", message: String(squashAtomCommandFailure(issued)) };
+  }
+  // Where the peer just answered first, then its other addresses this client reaches. One that
+  // does not answer as this machine never receives the code, so the next can.
+  let failure: string | null = null;
+  for (const host of appPairingAddresses(issued.value.urls, machine.onHostMachine)) {
+    const result = await connectPairing.run(appAtomRegistry, {
+      host,
+      pairingCode: issued.value.credential,
+      expectedEnvironmentId: machine.environmentId,
+    });
+    if (result._tag === "Success") return { _tag: "Added", access: issued.value.access };
+    if (isAtomCommandInterrupted(result)) return { _tag: "Interrupted" };
+    failure = String(squashAtomCommandFailure(result));
+  }
+  return {
+    _tag: "Failed",
+    message: failure ?? `${machine.label} answers only at addresses this device cannot open.`,
+  };
+}
+
+// A patch shows in the settings snapshot at once, before it is stored, so the automatic add
+// never sees a removed machine as missing and not dismissed.
+const setDismissed = async (environmentId: EnvironmentId, dismissed: boolean) => {
+  if (!isClientSettingsHydrated()) {
+    await ensureClientSettingsHydrated().catch(() => undefined);
+  }
+  const others = getClientSettings().dismissedLinkedEnvironmentIds.filter(
+    (id) => id !== environmentId,
+  );
+  return persistClientSettingsPatch({
+    dismissedLinkedEnvironmentIds: dismissed ? [...others, environmentId] : others,
+  });
+};
+
+/**
+ * Keeps a linked machine the user removes from this app out of it: it is no longer added on
+ * its own. Call it before removing. Unlinking leaves it in place; only adding by hand clears it.
+ */
+export function dismissLinkedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  return setDismissed(environmentId, true);
+}
+
+/** Lets a linked machine be added on its own again: the user chose Add to this app. */
+export function undismissLinkedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  return setDismissed(environmentId, false);
 }
 
 /** Links the user chose while adding a connection, kept until that connection connects. */
