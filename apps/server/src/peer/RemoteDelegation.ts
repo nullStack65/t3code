@@ -15,7 +15,9 @@ import {
   type OrchestratorMcpThreadTimelineItem,
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2Subagent,
-  type PeerLinkSummary,
+  type PeerLink,
+  OrchestrationV2ThreadPlacementAdmitError,
+  type ProviderInteractionMode,
   type ProjectId,
   type ProviderInstanceId,
   ProviderDriverKind,
@@ -38,6 +40,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Tool from "effect/ai/Tool";
@@ -61,6 +64,43 @@ import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
+/** What placement weighs a candidate on, gathered by this server itself. */
+export interface PlacementEvidence {
+  /** The project here; elsewhere, that machine's project with its repository. */
+  readonly projectId: ProjectId;
+  readonly modelSelection: Pick<ModelSelection, "instanceId" | "model">;
+  /** The effective mode, sent explicitly wherever the work runs. */
+  readonly runtimeMode: RuntimeMode;
+  /** This environment's own load, and whether it runs the exact model in that mode. */
+  readonly here: {
+    readonly resources: HostResourcesSnapshot | null;
+    readonly modelAvailable: boolean;
+  };
+}
+
+const NativePlacement = Schema.Struct({
+  environmentId: Schema.String,
+  projectId: Schema.String,
+  reason: Schema.Literal("capacity"),
+});
+export interface NativePlacement {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly reason: "capacity";
+}
+const NativePlacementJson = Schema.fromJsonString(NativePlacement);
+const encodeNativePlacementJson = Schema.encodeSync(NativePlacementJson);
+const decodeNativePlacementJson = Schema.decodeEffect(NativePlacementJson);
+const encodeNativePlacement = (placement: NativePlacement) => encodeNativePlacementJson(placement);
+const decodeNativePlacement = (value: string) =>
+  decodeNativePlacementJson(value).pipe(
+    Effect.map((placement): NativePlacement => ({
+      environmentId: EnvironmentId.make(placement.environmentId),
+      projectId: placement.projectId as ProjectId,
+      reason: placement.reason,
+    })),
+  );
+
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
 /** A linked environment that stops answering is retried, backing off to this. */
 const FOLLOW_MAX_BACKOFF = Duration.minutes(5);
@@ -119,17 +159,36 @@ export class RemoteDelegation extends Context.Service<
         readonly key: string;
         /** The thread the binding is recorded against. */
         readonly threadId: ThreadId;
-        readonly projectId: ProjectId;
-        readonly modelSelection: Pick<ModelSelection, "instanceId" | "model">;
-        /** The effective mode, sent explicitly wherever the work runs. */
-        readonly runtimeMode: RuntimeMode;
-        /** This environment's own load, and whether it runs the exact model in that mode. */
-        readonly here: {
-          readonly resources: HostResourcesSnapshot | null;
-          readonly modelAvailable: boolean;
-        };
-      },
+      } & PlacementEvidence,
     ) => Effect.Effect<EnvironmentId, OrchestratorMcpFailure>;
+    /**
+     * Where a native client's new-thread launch runs: the environment its operation was first
+     * bound to, or one chosen now from this environment and authenticated links the client may
+     * launch on, bound with the session that admitted it before anything is sent. Another
+     * session's operation is refused, never adopted or admitted afresh.
+     */
+    readonly admit: (
+      caller: {
+        readonly sessionId: string;
+        /** Whether that session is still signed in with operate access; asked before each write. */
+        readonly stillAuthorized: Effect.Effect<boolean>;
+      },
+      input: Omit<PlacementEvidence, "here"> & {
+        /** This environment's evidence, read only when nothing is bound yet. */
+        readonly here: Effect.Effect<
+          PlacementEvidence["here"],
+          OrchestrationV2ThreadPlacementAdmitError
+        >;
+        readonly commandId: CommandId;
+        readonly threadId: ThreadId;
+        readonly interactionMode: ProviderInteractionMode;
+        /** Narrows the choice to machines the client may launch on; never widens it. */
+        readonly candidateEnvironmentIds: ReadonlyArray<EnvironmentId>;
+      },
+    ) => Effect.Effect<
+      NativePlacement & { readonly resumed: boolean },
+      OrchestrationV2ThreadPlacementAdmitError
+    >;
     /** The environment a caller's key was placed in, if it was. */
     readonly placed: (
       scope: McpInvocationContext.McpInvocationScope,
@@ -257,7 +316,7 @@ const make = Effect.gen(function* () {
 
   /** The peer's project with this thread's repository, or the one the caller named. */
   const resolveRemoteProject = Effect.fn("RemoteDelegation.resolveRemoteProject")(function* (
-    scope: McpInvocationContext.McpInvocationScope,
+    ask: Ask,
     environmentId: EnvironmentId,
     parentProjectId: ProjectId,
     requested: ProjectId | undefined,
@@ -282,11 +341,14 @@ const make = Effect.gen(function* () {
     const matches: Array<{ readonly id: ProjectId; readonly title: string }> = [];
     let cursor: number | null = 0;
     while (cursor !== null) {
-      const listed: Tool.Success<typeof ProjectToolkit.tools.t3_project_list> =
-        yield* forwarding.call(scope, ProjectToolkit.tools.t3_project_list, environmentId, {
+      const listed: Tool.Success<typeof ProjectToolkit.tools.t3_project_list> = yield* ask(
+        ProjectToolkit.tools.t3_project_list,
+        environmentId,
+        {
           cursor,
           limit: 100,
-        });
+        },
+      );
       matches.push(
         ...listed.projects.filter((project) => project.repositoryIdentity?.canonicalKey === key),
       );
@@ -341,43 +403,52 @@ const make = Effect.gen(function* () {
     return chosen.providerInstanceId;
   });
 
+  /** One linked environment's answer for placement, asked over whichever caller's forwarding. */
+  type Ask = <T extends Tool.Any>(
+    tool: T,
+    environmentId: EnvironmentId,
+    params: Tool.Parameters<T>,
+  ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
+  const askFor =
+    (scope: McpInvocationContext.McpInvocationScope): Ask =>
+    (tool, environmentId, params) =>
+      forwarding.call(scope, tool, environmentId, params);
+  const askNative =
+    (caller: PeerForwarding.NativeCaller): Ask =>
+    (tool, environmentId, params) =>
+      forwarding.callNative(caller, tool, environmentId, params);
+
   /** A linked environment as a placement candidate, from what it answered just now. */
   const peerCandidate = Effect.fn("RemoteDelegation.peerCandidate")(
-    function* (
-      scope: McpInvocationContext.McpInvocationScope,
-      link: PeerLinkSummary,
-      input: Parameters<RemoteDelegation["Service"]["place"]>[1],
-    ) {
-      const capabilities = yield* forwarding.call(
-        scope,
-        RemoteCapabilitiesTool,
-        link.environmentId,
-        {
-          search: input.modelSelection.model,
-        },
-      );
+    function* (ask: Ask, link: PeerLink, input: PlacementEvidence) {
+      const capabilities = yield* ask(RemoteCapabilitiesTool, link.environmentId, {
+        search: input.modelSelection.model,
+      });
       const receivedAt = yield* Clock.currentTimeMillis;
-      const projectAvailable = yield* resolveRemoteProject(
-        scope,
+      const projectId = yield* resolveRemoteProject(
+        ask,
         link.environmentId,
         input.projectId,
         undefined,
       ).pipe(
-        Effect.as(true),
-        Effect.orElseSucceed(() => false),
+        Effect.asSome,
+        Effect.orElseSucceed(() => Option.none<ProjectId>()),
       );
       return {
-        environmentId: link.environmentId,
-        resources: capabilities.hostResources ?? null,
-        receivedAt,
-        weight: 1,
-        operable: true,
-        projectAvailable,
-        modelAvailable: runsModel(capabilities, input),
-      } satisfies ThreadPlacementCandidate;
+        projectId,
+        candidate: {
+          environmentId: link.environmentId,
+          resources: capabilities.hostResources ?? null,
+          receivedAt,
+          weight: 1,
+          operable: true,
+          projectAvailable: Option.isSome(projectId),
+          modelAvailable: runsModel(capabilities, input),
+        } satisfies ThreadPlacementCandidate,
+      };
     },
     // One that does not answer, or refuses this caller, is not a candidate.
-    (effect, _scope, link) =>
+    (effect, _ask, link) =>
       effect.pipe(
         Effect.tapError((cause) =>
           Effect.logDebug("remote-delegation.placement-candidate-unavailable", {
@@ -388,6 +459,96 @@ const make = Effect.gen(function* () {
         Effect.option,
       ),
   );
+
+  const exclusions = links.placementExclusions.pipe(
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message:
+            "Unable to read which machines automatic placement may use, so nothing was started. Retry with the same clientRequestId.",
+        }),
+    ),
+  );
+
+  /**
+   * Linked environments placement may ask, from what is stored here only: an excluded one, or
+   * one this work could not use, is dropped before any peer is contacted. `restrictTo` narrows
+   * them to the ones a caller can launch on.
+   */
+  const askableLinks = Effect.fn("RemoteDelegation.askableLinks")(function* (input: {
+    readonly runtimeMode: RuntimeMode;
+    readonly excluded: ReadonlySet<EnvironmentId>;
+    readonly restrictTo?: ReadonlyArray<EnvironmentId> | undefined;
+  }) {
+    if (!(yield* links.enabled)) return [];
+    const usable = (environmentId: EnvironmentId) =>
+      environmentId !== hereId && !input.excluded.has(environmentId);
+    const stored =
+      input.restrictTo === undefined
+        ? yield* links.stored.pipe(Effect.orElseSucceed((): ReadonlyArray<PeerLink> => []))
+        : (yield* Effect.forEach(input.restrictTo.filter(usable), (environmentId) =>
+            links.get(environmentId).pipe(Effect.orElseSucceed(() => Option.none<PeerLink>())),
+          )).flatMap((link) => (Option.isSome(link) ? [link.value] : []));
+    const now = yield* DateTime.now;
+    return stored.filter(
+      (link) =>
+        usable(link.environmentId) &&
+        link.access !== "read-only" &&
+        !isRuntimeModeAbove(input.runtimeMode, link.access) &&
+        DateTime.isGreaterThan(link.expiresAt, now),
+    );
+  });
+
+  /** The shared choice: this environment and the askable links, from their own answers. */
+  const choosePlacement = Effect.fn("RemoteDelegation.choosePlacement")(function* (
+    ask: Ask,
+    input: PlacementEvidence & {
+      readonly excluded: ReadonlySet<EnvironmentId>;
+      readonly restrictTo?: ReadonlyArray<EnvironmentId> | undefined;
+    },
+  ) {
+    const askable = yield* askableLinks(input);
+    const peers = (yield* Effect.forEach(askable, (link) => peerCandidate(ask, link, input), {
+      concurrency: "unbounded",
+    })).flatMap((peer) => (Option.isSome(peer) ? [peer.value] : []));
+    const now = yield* Clock.currentTimeMillis;
+    const hereCandidate =
+      !input.excluded.has(hereId) &&
+      (input.restrictTo === undefined || input.restrictTo.includes(hereId));
+    const decision = chooseThreadPlacement(
+      { originEnvironmentId: hereId },
+      [
+        ...(hereCandidate
+          ? [
+              {
+                environmentId: hereId,
+                resources: input.here.resources,
+                receivedAt: now,
+                weight: 1,
+                operable: true,
+                projectAvailable: true,
+                modelAvailable: input.here.modelAvailable,
+              },
+            ]
+          : []),
+        ...peers.map((peer) => peer.candidate),
+      ],
+      now,
+    );
+    yield* Effect.annotateCurrentSpan({
+      "placement.reason": decision.reason,
+      "placement.candidates": askable.length + (hereCandidate ? 1 : 0),
+    });
+    const projectId = !decision.accepted
+      ? undefined
+      : decision.environmentId === hereId
+        ? input.projectId
+        : peers
+            .find((peer) => peer.candidate.environmentId === decision.environmentId)
+            ?.projectId.pipe(Option.getOrUndefined);
+    return { decision, projectId };
+  });
 
   const placementBinding = (
     scope: McpInvocationContext.McpInvocationScope,
@@ -403,10 +564,27 @@ const make = Effect.gen(function* () {
         "Unable to record where this task runs, so nothing was started. Retry with the same clientRequestId.",
     });
 
+  /** A bound environment automatic placement may no longer use: nothing is sent there or anywhere. */
+  const boundExcluded = (environmentId: EnvironmentId) =>
+    new OrchestratorMcpFailure({
+      code: "target_required",
+      message: `This request is bound to environment ${environmentId}, which automatic placement may no longer use, so nothing was sent. Reconcile it there, or start new work with a new clientRequestId.`,
+    });
+
   const placed: RemoteDelegation["Service"]["placed"] = (scope, input) =>
-    threads
-      .intentOf(placementBinding(scope, input))
-      .pipe(Effect.map(Option.map(EnvironmentId.make)), Effect.mapError(bindingFailure));
+    threads.intentOf(placementBinding(scope, input)).pipe(
+      Effect.map(Option.map(EnvironmentId.make)),
+      Effect.mapError(bindingFailure),
+      // Current exclusions hold for every bound destination, this one too. A launch already
+      // made here replays before placement is consulted (`t3_thread_launch`).
+      Effect.tap((bound) =>
+        Option.isSome(bound)
+          ? Effect.flatMap(exclusions, (excluded) =>
+              excluded.has(bound.value) ? Effect.fail(boundExcluded(bound.value)) : Effect.void,
+            )
+          : Effect.void,
+      ),
+    );
 
   const place: RemoteDelegation["Service"]["place"] = Effect.fn("RemoteDelegation.place")(
     function* (scope, input) {
@@ -415,41 +593,9 @@ const make = Effect.gen(function* () {
       // stopped answering: its first attempt may have started the task there.
       const bound = yield* placed(scope, input);
       if (Option.isSome(bound)) return bound.value;
-
-      const linked = (yield* links.enabled)
-        ? yield* links.list.pipe(Effect.orElseSucceed(() => []))
-        : [];
-      const peers = yield* Effect.forEach(
-        linked.filter(
-          (link) =>
-            link.environmentId !== hereId &&
-            link.status === "reachable" &&
-            link.access !== "read-only" &&
-            !isRuntimeModeAbove(input.runtimeMode, link.access),
-        ),
-        (link) => peerCandidate(scope, link, input),
-        { concurrency: "unbounded" },
-      );
-      const now = yield* Clock.currentTimeMillis;
-      const decision = chooseThreadPlacement(
-        { originEnvironmentId: hereId },
-        [
-          {
-            environmentId: hereId,
-            resources: input.here.resources,
-            receivedAt: now,
-            weight: 1,
-            operable: true,
-            projectAvailable: true,
-            modelAvailable: input.here.modelAvailable,
-          },
-          ...peers.flatMap((peer) => (Option.isSome(peer) ? [peer.value] : [])),
-        ],
-        now,
-      );
-      yield* Effect.annotateCurrentSpan({
-        "placement.reason": decision.reason,
-        "placement.candidates": peers.length + 1,
+      const { decision } = yield* choosePlacement(askFor(scope), {
+        ...input,
+        excluded: yield* exclusions,
       });
       if (!decision.accepted) {
         return yield* new OrchestratorMcpFailure({
@@ -464,6 +610,97 @@ const make = Effect.gen(function* () {
           value: decision.environmentId,
         })
         .pipe(Effect.map(EnvironmentId.make), Effect.mapError(bindingFailure));
+    },
+  );
+
+  /**
+   * Native admission keys hang off this server's own id and the launch's command id. Its
+   * owner, the session that first admitted it, is bound before anything is chosen.
+   */
+  const nativeBinding = (kind: "placement" | "placement-owner", commandId: CommandId) =>
+    CommandId.make(
+      `command:native:${encodeURIComponent(hereId)}:${kind}:thread-launch:${encodeURIComponent(commandId)}`,
+    );
+
+  const admit: RemoteDelegation["Service"]["admit"] = Effect.fn("RemoteDelegation.admit")(
+    function* (caller, input) {
+      const refuse = (reason: OrchestrationV2ThreadPlacementAdmitError["reason"], detail: string) =>
+        new OrchestrationV2ThreadPlacementAdmitError({
+          commandId: input.commandId,
+          reason,
+          detail,
+        });
+      const unavailableHere = () =>
+        refuse(
+          "unavailable",
+          "Unable to read or record where this launch runs, so nothing was bound or started. Send it again.",
+        );
+      const signedOut = () =>
+        refuse(
+          "unavailable",
+          "This sign-in can no longer launch threads here, so nothing was bound or started.",
+        );
+      if (!(yield* caller.stillAuthorized)) return yield* signedOut();
+      const owner = yield* threads
+        .bindIntent({
+          commandId: nativeBinding("placement-owner", input.commandId),
+          threadId: input.threadId,
+          value: caller.sessionId,
+        })
+        .pipe(Effect.mapError(unavailableHere));
+      if (owner !== caller.sessionId) {
+        return yield* refuse(
+          "other-session",
+          "This launch was started from another sign-in, so it is not continued or started again from this one. Open it where it was sent from, or start a new draft.",
+        );
+      }
+      const excluded = yield* links.placementExclusions.pipe(Effect.mapError(unavailableHere));
+      const placementId = nativeBinding("placement", input.commandId);
+      const decode = (value: string) =>
+        decodeNativePlacement(value).pipe(Effect.mapError(unavailableHere));
+      // The first admission's answer holds, whatever this one asks: it may already have launched.
+      const bound = yield* threads.intentOf(placementId).pipe(Effect.mapError(unavailableHere));
+      if (Option.isSome(bound)) {
+        const placement = yield* decode(bound.value);
+        // Only this operation's own launch, accepted here for its own thread, is reconciled past a
+        // current exclusion: its `thread.create` receipt. Elsewhere that cannot be known without
+        // contact, and a thread that merely exists proves nothing.
+        const acceptedHere =
+          placement.environmentId === hereId &&
+          (yield* threads.acceptedLaunchOf(input.commandId).pipe(
+            Effect.map((launched) => Option.isSome(launched) && launched.value === input.threadId),
+            Effect.mapError(unavailableHere),
+          ));
+        if (excluded.has(placement.environmentId) && !acceptedHere) {
+          return yield* refuse(
+            "excluded",
+            `This launch is bound to environment ${placement.environmentId}, which automatic placement may no longer use, so nothing was sent. Reconcile it there, or start a new draft.`,
+          );
+        }
+        return { ...placement, resumed: true };
+      }
+      const { decision, projectId } = yield* choosePlacement(
+        askNative({
+          limits: { runtimeMode: input.runtimeMode, interactionMode: input.interactionMode },
+        }),
+        { ...input, here: yield* input.here, excluded, restrictTo: input.candidateEnvironmentIds },
+      );
+      if (!decision.accepted || projectId === undefined) {
+        return yield* refuse(
+          "no-eligible-environment",
+          `No machine you can launch on answered with spare capacity, this repository's project and ${input.modelSelection.instanceId}/${input.modelSelection.model} in ${input.runtimeMode}. Nothing was started.`,
+        );
+      }
+      if (!(yield* caller.stillAuthorized)) return yield* signedOut();
+      const value = encodeNativePlacement({
+        environmentId: EnvironmentId.make(decision.environmentId),
+        projectId,
+        reason: "capacity",
+      });
+      const held = yield* threads
+        .bindIntent({ commandId: placementId, threadId: input.threadId, value })
+        .pipe(Effect.mapError(unavailableHere));
+      return { ...(yield* decode(held)), resumed: held !== value };
     },
   );
 
@@ -548,7 +785,7 @@ const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => input.environmentId),
       );
       const projectId = yield* resolveRemoteProject(
-        scope,
+        askFor(scope),
         input.environmentId,
         input.projectId,
         undefined,
@@ -644,7 +881,7 @@ const make = Effect.gen(function* () {
           ? undefined
           : yield* resolveInteractionMode(parent.thread.interactionMode, input.interactionMode);
       const projectId = yield* resolveRemoteProject(
-        scope,
+        askFor(scope),
         target.environmentId,
         parent.thread.projectId,
         target.projectId,
@@ -1379,6 +1616,7 @@ const make = Effect.gen(function* () {
   return RemoteDelegation.of({
     delegate,
     place,
+    admit,
     placed,
     launch,
     followUp,

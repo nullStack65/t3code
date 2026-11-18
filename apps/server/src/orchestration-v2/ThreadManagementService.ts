@@ -472,6 +472,10 @@ export interface ThreadManagementServiceShape {
   }) => Effect.Effect<boolean>;
   /** Receipt replays start no work; skip enablement checks with the same command id so settings cannot reject accepted retries. */
   readonly hasReceipt: (commandId: CommandId) => Effect.Effect<boolean>;
+  /** The thread a command's launch here created, when its `thread.create` was accepted. */
+  readonly acceptedLaunchOf: (
+    commandId: CommandId,
+  ) => Effect.Effect<Option.Option<ThreadId>, CommandReceiptStore.CommandReceiptStoreV2Error>;
   /** What a caller's intent was bound to, such as the environment chosen for it, if it was. */
   readonly intentOf: (
     commandId: CommandId,
@@ -665,6 +669,19 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => Option.none()),
       Effect.map(Option.isSome),
     );
+
+  const acceptedLaunchOf: ThreadManagementServiceShape["acceptedLaunchOf"] = (commandId) =>
+    receipts
+      .getByCommandId(commandId)
+      .pipe(
+        Effect.map(
+          Option.flatMap((receipt) =>
+            receipt.status === "accepted" && receipt.commandType === "thread.create"
+              ? Option.some(receipt.threadId)
+              : Option.none(),
+          ),
+        ),
+      );
 
   // A binding is a receipt with no events, so it lives and is kept like every other
   // command's; its type carries the value.
@@ -1819,6 +1836,7 @@ const make = Effect.gen(function* () {
     assertProviderInstanceEnabled,
     isProviderInstanceEnabledForProject,
     hasReceipt,
+    acceptedLaunchOf,
     intentOf,
     bindIntent,
     waitForThread,

@@ -19,6 +19,14 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { isTriagePrompt, replaceTriagePlaybookLink } from "@t3tools/shared/triagePrompt";
+import { AuthOrchestrationOperateScope, managedRuntimeModeDenial } from "@t3tools/contracts";
+import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
+import { orchestrationEnvironment } from "../../state/orchestration";
+import {
+  type DraftPlacementRequest,
+  placeDraftBeforeSend,
+  placesBeforeSend,
+} from "./draftPlacement";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -27,13 +35,13 @@ import {
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
+import { readAttachmentUpload } from "../../lib/attachmentUploadQueue";
 import { type EnvironmentPresentation, useEnvironmentProviders } from "../../state/environments";
 import { currentClientMetadata } from "../../connection/platform";
 import { useProjects } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { DraftSessionState } from "../../composerDraftStore";
-import { loadBalancingSendWarning } from "./composerSend.logic";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { seedDraftModelSelection } from "../../lib/seedDraftModelSelection";
 import { draftFanoutSelectionsAtom } from "./chatViewSend";
@@ -147,59 +155,113 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     loadBalancingSettings.loadBalancingWeights,
   );
   const readRouting = useStableCallback(() => ({ input, loadBalancingCandidates }));
-  const refreshBeforeSend = () => {
+  const operableEnvironmentIds = useEnvironmentsWithScope(
+    logicalProjectEnvironments,
+    AuthOrchestrationOperateScope,
+  );
+  const admitPlacement = useAtomCommand(orchestrationEnvironment.admitThreadPlacement, {
+    reportFailure: false,
+  });
+  /**
+   * The machines this client may launch the request on, as it sees them: it can only narrow what
+   * the origin server admits, which checks each one itself over its link.
+   */
+  const launchableCandidates = (request: DraftPlacementRequest) =>
+    loadBalancingCandidates.filter(
+      (environmentId) =>
+        operableEnvironmentIds.has(environmentId) &&
+        managedRuntimeModeDenial(
+          environmentById.get(environmentId)?.serverConfig?.managedPolicy,
+          request.runtimeMode,
+        ) === undefined &&
+        (providersByEnvironment
+          .get(environmentId)
+          ?.some(
+            (provider) =>
+              provider.instanceId === request.modelSelection.instanceId &&
+              provider.models.some((model) => model.slug === request.modelSelection.model) &&
+              (provider.supportedRuntimeModes === undefined ||
+                provider.supportedRuntimeModes.length === 0 ||
+                provider.supportedRuntimeModes.includes(request.runtimeMode)),
+          ) ??
+          false),
+    );
+  /**
+   * Before an automatic draft's send: the server its launch was reserved on admits where it runs
+   * (`placeDraftBeforeSend`), and only then does the draft move there.
+   */
+  const refreshBeforeSend = (
+    request: DraftPlacementRequest,
+    options: { readonly directAnnotation?: boolean } = {},
+  ) => {
+    // Pinned here: attachments already uploaded to this machine, or a preview annotation of it.
+    const composer = draftId ? useComposerDraftStore.getState().getComposerDraft(draftId) : null;
+    const pinnedHere =
+      options.directAnnotation === true ||
+      (composer?.files.some((file) => file.uploadedAttachmentId !== undefined) ?? false) ||
+      [...(composer?.images ?? []), ...(composer?.files ?? [])].some(
+        (attachment) => readAttachmentUpload(attachment.id) !== undefined,
+      );
+    // An operation already reserved is reconciled first, whatever routing says now.
     if (
-      !automaticEnvironment ||
       !draftId ||
-      !draftThread?.loadBalancedEnvironmentId ||
-      draftThread.promotedTo ||
-      composerHasAttachments
+      !placesBeforeSend({
+        draft: {
+          placementOperation: getDraftSession(draftId)?.placementOperation ?? null,
+          promotedTo: draftThread?.promotedTo ?? getDraftSession(draftId)?.promotedTo ?? null,
+        },
+        // The server chooses; a client pick is not needed, nor proof of anything.
+        automatic: automaticEnvironment,
+        pinnedHere,
+        request,
+      })
     )
       return null;
-    const originalDraft = getDraftSession(draftId);
     const composerDraft = useComposerDraftStore.getState().getComposerDraft(draftId);
-    return loadBalancing.refreshSelection(loadBalancingCandidates).then((environmentId) => {
-      const current = readRouting();
-      if (
-        current.input.draftId !== draftId ||
-        !current.input.automaticEnvironment ||
-        current.input.composerHasAttachments ||
-        current.input.activeProjectKey !== activeProjectKey ||
-        current.input.selectedProvider !== selectedProvider ||
-        current.input.activeProviderInstanceId !== activeProviderInstanceId ||
-        current.input.loadBalancingSettings.loadBalancingWeights !==
-          loadBalancingSettings.loadBalancingWeights ||
-        current.loadBalancingCandidates.join("\n") !== loadBalancingCandidates.join("\n") ||
-        getDraftSession(draftId) !== originalDraft ||
-        useComposerDraftStore.getState().getComposerDraft(draftId) !== composerDraft
-      )
-        return false;
-      const target = current.input.logicalProjectEnvironments.find(
-        (candidate) => candidate.environmentId === environmentId,
-      );
-      if (!target?.projectId) {
+    return placeDraftBeforeSend({
+      draftId,
+      request,
+      candidateEnvironmentIds: launchableCandidates(request),
+      pinnedHere,
+      admit: admitPlacement,
+      canLaunchOn: (environmentId) =>
+        readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),
+      composerUnchanged: () => {
+        const current = readRouting().input;
+        return (
+          current.draftId === draftId &&
+          current.composerHasAttachments === composerHasAttachments &&
+          current.activeProjectKey === activeProjectKey &&
+          useComposerDraftStore.getState().getComposerDraft(draftId) === composerDraft
+        );
+      },
+    }).then((outcome) => {
+      if (outcome.type === "failed") {
         toastManager.add({
           type: "warning",
-          ...loadBalancingSendWarning({
-            pending: false,
-            threadContexts: referencedThreadContexts,
-            candidateEnvironmentIds: loadBalancingCandidates,
-          }),
+          id: "draft-placement",
+          title: outcome.title,
+          description: outcome.description,
         });
         return false;
       }
-      const projectRef = scopeProjectRef(target.environmentId, target.projectId);
-      if (originalDraft) carryFanoutSelections(originalDraft, target.environmentId);
+      if (outcome.type === "abandoned") return false;
+      const draft = getDraftSession(draftId);
+      if (!draft) return false;
+      // Already where it was bound: nothing to move, and its routing choice stays as it is.
+      if (draft.environmentId === outcome.environmentId && draft.projectId === outcome.projectId)
+        return true;
+      carryFanoutSelections(draft, outcome.environmentId);
       // The send must read the target project's composer and provider context after retargeting.
       flushSync(() =>
         setDraftThreadContext(draftId, {
-          projectRef,
+          projectRef: scopeProjectRef(outcome.environmentId, outcome.projectId),
           environmentSelection: "auto",
-          loadBalancedEnvironmentId: target.environmentId,
-          branch: originalDraft?.branch ?? null,
+          loadBalancedEnvironmentId: outcome.environmentId,
+          branch: draft.branch ?? null,
         }),
       );
-      return true;
+      return getDraftSession(draftId)?.environmentId === outcome.environmentId;
     });
   };
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the resolved load-balanced environment into the draft store once the async pick settles

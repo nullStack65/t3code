@@ -2,18 +2,16 @@ import {
   agentLaunchInboxRouting,
   CommandId,
   type EnvironmentId,
-  isProviderAvailable,
   MessageId,
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
   type ProviderInteractionMode,
-  resolveProjectProviderInstanceEnabled,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import type * as Tool from "effect/ai/Tool";
 import * as RemoteDelegation from "../../../peer/RemoteDelegation.ts";
-import * as HostResources from "../../../resourceTelemetry/HostResources.ts";
+import { hereEvidence } from "../../../peer/placementEvidence.ts";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -30,8 +28,8 @@ import { mutateProjectWithClone } from "../../../project/ProjectMutation.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
-import * as ServerSettings from "../../../serverSettings.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as DateTime from "effect/DateTime";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -198,15 +196,11 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
       message:
         'With placement "auto", pass clientRequestId and modelSelection: a retry must reach the environment chosen, with the exact model.',
     });
-  const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
-  const settings = yield* ServerSettings.ServerSettingsService.pipe(
-    Effect.flatMap((service) => service.getSettings),
-    Effect.mapError(unavailable),
-  );
-  const provider = providers.find(
-    (candidate) => candidate.instanceId === modelSelection.instanceId,
-  );
-  const hostResources = yield* Effect.serviceOption(HostResources.HostResources);
+  const here = yield* hereEvidence({
+    projectId: local.projectId,
+    modelSelection,
+    runtimeMode: local.runtimeMode,
+  }).pipe(Effect.mapError(unavailable));
   const environmentId = yield* delegation.value.place(scope, {
     operation: "thread-launch",
     key,
@@ -214,18 +208,7 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
     projectId: local.projectId,
     modelSelection,
     runtimeMode: local.runtimeMode,
-    here: {
-      resources: Option.isSome(hostResources) ? yield* hostResources.value.read : null,
-      modelAvailable:
-        provider !== undefined &&
-        provider.enabled &&
-        isProviderAvailable(provider) &&
-        resolveProjectProviderInstanceEnabled(settings, local.projectId, provider.instanceId) &&
-        provider.models.some((model) => model.slug === modelSelection.model) &&
-        (provider.supportedRuntimeModes === undefined ||
-          provider.supportedRuntimeModes.length === 0 ||
-          provider.supportedRuntimeModes.includes(local.runtimeMode)),
-    },
+    here,
   });
   return environmentId === scope.environmentId ? undefined : yield* sendThere(environmentId, key);
 });

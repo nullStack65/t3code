@@ -1487,6 +1487,13 @@ export const ServerSettings = Schema.Struct({
    * builds: every fleet machine links to the others.
    */
   linkedEnvironmentsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Machines automatic placement never uses or contacts, listed or not. Empty by default; a fleet
+   * machine that must not run placed work is listed here before automatic placement runs.
+   */
+  automaticPlacementExcludedEnvironmentIds: Schema.Array(EnvironmentId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   /** Beta: Claude and Codex predict the next prompt after completed turns. Codex follows a change at once; open Claude threads after they restart. */
   promptSuggestionsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
@@ -1919,6 +1926,7 @@ export const ServerSettingsPatch = Schema.Struct({
   hideTaggedThreads: Schema.optionalKey(Schema.Boolean),
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
+  automaticPlacementExcludedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

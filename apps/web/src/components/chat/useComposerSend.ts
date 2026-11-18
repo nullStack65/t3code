@@ -142,6 +142,7 @@ import {
   readSentComposer,
   restoreFailedSendComposer,
 } from "./chatViewSend";
+import { heldLaunchFor } from "./draftPlacement";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -911,15 +912,40 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
     const retriedLaunch = launchPlan?.type === "retry" ? launchPlan.launch : null;
+    // A new launch admitted to this machine goes out as the operation reserved for its admission.
+    // A held placement operation decides what this send may launch, whatever started the send.
+    const held = draftSessionForSend
+      ? heldLaunchFor({
+          draft: draftSessionForSend,
+          environmentId,
+          projectId: activeProject.id,
+        })
+      : ({ type: "none" } as const);
+    if (held.type === "blocked") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Your last send's placement is still open",
+          description:
+            "It was placed on another machine than this draft is on now. Send it again to finish it there, or start a new draft.",
+        }),
+      );
+      return;
+    }
+    const reservedLaunch =
+      retriedLaunch === null && held.type === "reserved" ? held.operation : null;
     const messageIdForSend = retriedLaunch
       ? MessageId.make(retriedLaunch.messageId)
-      : newMessageId();
-    const messageCreatedAt = retriedLaunch?.createdAt ?? new Date().toISOString();
+      : reservedLaunch
+        ? MessageId.make(reservedLaunch.messageId)
+        : newMessageId();
+    const messageCreatedAt =
+      retriedLaunch?.createdAt ?? reservedLaunch?.createdAt ?? new Date().toISOString();
     const launchOperation: PendingDraftLaunch | undefined =
       launchRequest === null
         ? undefined
         : (retriedLaunch ?? {
-            commandId: newCommandId(),
+            commandId: reservedLaunch?.commandId ?? newCommandId(),
             messageId: messageIdForSend,
             createdAt: messageCreatedAt,
             request: launchRequest,
@@ -1691,10 +1717,22 @@ export function useComposerSend(input: ComposerSendInput) {
   const onSendLatest = useStableCallback(onSend);
   const onSendWithRouting = async (...args: Parameters<typeof onSend>) => {
     args[0]?.preventDefault();
+    const sendContext = composerRef.current?.getSendContext();
+    // A direct annotation stays with its preview's machine, but held work is reconciled first.
     const refresh =
-      args[3] || sendInFlightRef.current || readPendingEnvironmentChange() !== null
+      sendInFlightRef.current ||
+      readPendingEnvironmentChange() !== null ||
+      sendContext === undefined
         ? null
-        : refreshBeforeSend();
+        : refreshBeforeSend(
+            {
+              modelSelection: sendContext.selectedModelSelection,
+              runtimeMode,
+              interactionMode: DEFAULT_INTERACTION_MODE,
+              multipleModels: (sendContext.multipleModelSelections?.length ?? 0) > 0,
+            },
+            { directAnnotation: Boolean(args[3]) },
+          );
     if (refresh === null) return onSend(...args);
     sendInFlightRef.current = true;
     const ready = await refresh.finally(() => {

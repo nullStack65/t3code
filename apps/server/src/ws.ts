@@ -64,6 +64,9 @@ import {
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
+  OrchestrationV2ThreadPlacementAdmitError,
+  type OrchestrationV2ThreadPlacementAdmitInput,
+  managedRuntimeModeDenial,
   type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
@@ -175,6 +178,9 @@ import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
+import { hereEvidence } from "./peer/placementEvidence.ts";
+import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
+import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import * as SecretCheck from "./secrets/SecretCheck.ts";
 import * as AcpRegistrySessions from "./provider/AcpRegistrySessions.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
@@ -1580,6 +1586,64 @@ export const layerWsRpc = (
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
       const hostResources = yield* HostResources.HostResources;
+      const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
+      const managedPolicy = yield* Effect.serviceOption(ManagedPolicy.ManagedPolicy);
+      const placementContext = yield* Effect.context<
+        | ProviderRegistry.ProviderRegistry
+        | ServerSettings.ServerSettingsService
+        | HostResources.HostResources
+      >();
+      /**
+       * Where this session's new-thread launch runs, decided and bound here before anything is
+       * sent. Its session must still be signed in with operate access at each write.
+       */
+      const admitThreadPlacement = Effect.fn("ws.admitThreadPlacement")(function* (
+        input: OrchestrationV2ThreadPlacementAdmitInput,
+      ) {
+        const unavailableHere = (detail: string) =>
+          new OrchestrationV2ThreadPlacementAdmitError({
+            commandId: input.commandId,
+            reason: "unavailable",
+            detail,
+          });
+        if (Option.isNone(remoteDelegation)) {
+          return yield* unavailableHere(
+            "This server cannot place launches, so nothing was started.",
+          );
+        }
+        // Read only for a new admission: a bound operation resumes whatever this machine runs now.
+        const here = hereEvidence(input).pipe(
+          Effect.provide(placementContext),
+          Effect.map((evidence) => ({
+            ...evidence,
+            // The launch here would refuse a mode above this machine's managed ceiling.
+            modelAvailable:
+              evidence.modelAvailable &&
+              managedRuntimeModeDenial(
+                Option.isSome(managedPolicy) ? managedPolicy.value.summary : undefined,
+                input.runtimeMode,
+              ) === undefined,
+          })),
+          Effect.mapError(() =>
+            unavailableHere("Unable to read this machine's providers, so nothing was started."),
+          ),
+        );
+        // Listed sessions include expired ones a socket still holds; only an unexpired one counts.
+        const stillAuthorized = Effect.gen(function* () {
+          const active = yield* sessions.listActive();
+          const now = yield* DateTime.now;
+          return active.some(
+            (session) =>
+              session.sessionId === currentSessionId &&
+              DateTime.isGreaterThan(session.expiresAt, now) &&
+              session.scopes.includes(AuthOrchestrationOperateScope),
+          );
+        }).pipe(Effect.orElseSucceed(() => false));
+        return yield* remoteDelegation.value.admit(
+          { sessionId: currentSessionId, stillAuthorized },
+          { ...input, here },
+        );
+      });
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
@@ -2146,6 +2210,19 @@ export const layerWsRpc = (
                       }),
                   ),
                 ),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.admitThreadPlacement]: (input) =>
+          startup.enqueueCommand(admitThreadPlacement(input)).pipe(
+            Effect.mapError((error) =>
+              error._tag === "OrchestrationV2ThreadPlacementAdmitError"
+                ? error
+                : new OrchestrationV2ThreadPlacementAdmitError({
+                    commandId: input.commandId,
+                    reason: "unavailable",
+                    detail:
+                      "This server is not ready to place launches yet, so nothing was started.",
+                  }),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.launchThread]: (input) =>

@@ -93,6 +93,7 @@ import {
   makeComposerMentionDragHandlers,
 } from "./composerMentionDrag";
 import { serializeComposerImages } from "./composerImagePersistence";
+import { startComposerAttachmentUploads } from "./draftPlacement";
 import {
   isInsideCollapsedComposerControls,
   isInsideRestingComposerControlScope,
@@ -355,6 +356,8 @@ export interface ChatComposerProps {
   environmentId: EnvironmentId;
   canOperateThread: boolean;
   attachmentUploadsCapabilityKnown: boolean;
+  /** Automatic work uploads only once its origin bound it here (`attachmentUploadsWaitForPlacement`). */
+  attachmentUploadsWaitForPlacement?: boolean;
   supportsAttachmentUploads: boolean;
   supportsQuestionAttachments: boolean;
   maxFileAttachmentBytes: number | null;
@@ -491,6 +494,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     environmentId,
     canOperateThread,
     attachmentUploadsCapabilityKnown,
+    attachmentUploadsWaitForPlacement = false,
     supportsAttachmentUploads,
     supportsQuestionAttachments,
     maxFileAttachmentBytes,
@@ -844,19 +848,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       maxFileAttachmentBytes === null
         ? []
         : composerFiles.filter((file) => file.sizeBytes <= maxFileAttachmentBytes);
-    const uploadableAttachments = [...composerImages, ...uploadableFiles];
-    for (const attachment of uploadableAttachments) {
-      if (attachment.type === "file" && composerFileNeedsReattach(attachment)) {
-        continue;
-      }
-      startAttachmentUpload({
-        environmentId,
-        image: attachment,
-        draftTarget: attachmentDraftTarget,
-      });
-    }
+    startComposerAttachmentUploads({
+      environmentId,
+      attachments: [...composerImages, ...uploadableFiles],
+      draftTarget: attachmentDraftTarget,
+      waitForPlacement: attachmentUploadsWaitForPlacement,
+      start: startAttachmentUpload,
+    });
   }, [
     attachmentUploadsCapabilityKnown,
+    attachmentUploadsWaitForPlacement,
     attachmentDraftTarget,
     canOperateThread,
     composerFiles,

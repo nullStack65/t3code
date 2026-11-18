@@ -428,6 +428,19 @@ const PendingLaunchTurnSchema = Schema.Struct({
 });
 const isPersistedComposerThreadDraft = Schema.is(PersistedComposerThreadDraftState);
 
+const PersistedDraftPlacementOperation = Schema.Struct({
+  commandId: Schema.String,
+  messageId: Schema.String,
+  createdAt: Schema.String,
+  admittedOn: Schema.String,
+  admittedProjectId: Schema.String,
+  intent: Schema.String,
+  admission: Schema.optionalKey(
+    Schema.Struct({ environmentId: Schema.String, projectId: Schema.String }),
+  ),
+});
+const isPersistedDraftPlacementOperation = Schema.is(PersistedDraftPlacementOperation);
+
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
   environmentId: Schema.String,
@@ -461,6 +474,7 @@ const PersistedDraftThreadState = Schema.Struct({
       }),
     ),
   ),
+  placementOperation: Schema.optionalKey(Schema.NullOr(PersistedDraftPlacementOperation)),
   pendingLaunch: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
@@ -569,6 +583,27 @@ export interface DraftSessionState {
   sentTo?: ScopedThreadRef | null;
   /** The launch last sent from this draft while its outcome is unknown; a retry resends it. */
   pendingLaunch?: PendingDraftLaunch | null;
+  /** The launch operation a send reserved before asking where it runs, and where it was bound. */
+  placementOperation?: DraftPlacementOperation | null;
+}
+
+/**
+ * A new thread's launch operation, reserved and stored before its origin server is asked where it
+ * runs: a crash after that server bound it keeps both which server owns the binding and the ids
+ * the launch then goes out under.
+ */
+export interface DraftPlacementOperation {
+  readonly commandId: string;
+  readonly messageId: string;
+  readonly createdAt: string;
+  /** The server asked, and asked again on a retry: never another. */
+  readonly admittedOn: EnvironmentId;
+  /** The project there the admission was for. */
+  readonly admittedProjectId: ProjectId;
+  /** What was asked to run (model, options, modes, project, workspace); a change is new work. */
+  readonly intent: string;
+  /** Where that server bound the launch. */
+  readonly admission?: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId };
 }
 
 /** One launch's identity and request, so a retry is the same operation, not a new one. */
@@ -1832,6 +1867,9 @@ function createDraftThreadState(
     ...(existingThread?.pendingLaunch && existingThread.threadId === threadId
       ? { pendingLaunch: existingThread.pendingLaunch }
       : {}),
+    ...(existingThread?.placementOperation && existingThread.threadId === threadId
+      ? { placementOperation: existingThread.placementOperation }
+      : {}),
   };
 }
 
@@ -1912,6 +1950,26 @@ function pendingLaunchesEqual(
   );
 }
 
+function storedPlacementOperation(candidate: unknown): DraftPlacementOperation | null {
+  if (!isPersistedDraftPlacementOperation(candidate)) return null;
+  return {
+    commandId: candidate.commandId,
+    messageId: candidate.messageId,
+    createdAt: candidate.createdAt,
+    admittedOn: candidate.admittedOn as EnvironmentId,
+    admittedProjectId: candidate.admittedProjectId as ProjectId,
+    intent: candidate.intent,
+    ...(candidate.admission
+      ? {
+          admission: {
+            environmentId: candidate.admission.environmentId as EnvironmentId,
+            projectId: candidate.admission.projectId as ProjectId,
+          },
+        }
+      : {}),
+  };
+}
+
 function storedThreadRef(candidate: unknown): ScopedThreadRef | null {
   const record =
     candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>) : null;
@@ -1972,6 +2030,8 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     checkoutPullRequestsEqual(left.checkoutPullRequest, right.checkoutPullRequest) &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo) &&
     scopedThreadRefsEqual(left.sentTo, right.sentTo) &&
+    JSON.stringify(left.placementOperation ?? null) ===
+      JSON.stringify(right.placementOperation ?? null) &&
     pendingLaunchesEqual(left.pendingLaunch, right.pendingLaunch)
   );
 }
@@ -2090,6 +2150,7 @@ function normalizePersistedDraftThreads(
       const promotedTo = storedThreadRef(candidateDraftThread.promotedTo);
       const sentTo = storedThreadRef(candidateDraftThread.sentTo);
       const pendingLaunch = storedPendingLaunch(candidateDraftThread.pendingLaunch);
+      const placementOperation = storedPlacementOperation(candidateDraftThread.placementOperation);
       if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
         continue;
       }
@@ -2135,6 +2196,7 @@ function normalizePersistedDraftThreads(
         promotedTo,
         ...(sentTo ? { sentTo } : {}),
         ...(pendingLaunch ? { pendingLaunch } : {}),
+        ...(placementOperation ? { placementOperation } : {}),
       };
     }
   }
@@ -3016,6 +3078,11 @@ function toHydratedDraftThreadState(
     ...(persistedDraftThread.pendingLaunch
       ? { pendingLaunch: hydratedPendingLaunch(persistedDraftThread.pendingLaunch) }
       : {}),
+    ...(persistedDraftThread.placementOperation
+      ? {
+          placementOperation: storedPlacementOperation(persistedDraftThread.placementOperation),
+        }
+      : {}),
   };
 }
 
@@ -3306,6 +3373,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               promotedTo: existing.promotedTo ?? null,
               ...(existing.sentTo ? { sentTo: existing.sentTo } : {}),
               ...(existing.pendingLaunch ? { pendingLaunch: existing.pendingLaunch } : {}),
+              ...(existing.placementOperation
+                ? { placementOperation: existing.placementOperation }
+                : {}),
             };
             const isUnchanged =
               nextDraftThread.environmentId === existing.environmentId &&
@@ -5056,6 +5126,68 @@ function commitsDraftThreadBinding(
   }
 }
 
+/**
+ * Commits a draft's placement operation to storage at once and reads it back. False when storage
+ * did not take it; the draft keeps what it had, and the send asks nowhere.
+ */
+function commitDraftPlacement(draftId: DraftId, next: DraftPlacementOperation | null): boolean {
+  const prior = useComposerDraftStore.getState().draftThreadsByThreadKey[draftId];
+  if (!prior) return false;
+  const set = (placementOperation: DraftPlacementOperation | null | undefined) =>
+    useComposerDraftStore.setState((state) => {
+      const draftThread = state.draftThreadsByThreadKey[draftId];
+      if (!draftThread) return state;
+      return {
+        draftThreadsByThreadKey: {
+          ...state.draftThreadsByThreadKey,
+          [draftId]: { ...draftThread, placementOperation: placementOperation ?? null },
+        },
+      };
+    });
+  set(next);
+  let committed = false;
+  try {
+    composerDebouncedStorage.flush();
+    const stored = readStoredComposerDraftState();
+    committed =
+      JSON.stringify(
+        storedPlacementOperation(stored?.draftThreadsByThreadKey[draftId]?.placementOperation),
+      ) === JSON.stringify(next);
+  } catch {
+    committed = false;
+  }
+  if (!committed) set(prior.placementOperation);
+  return committed;
+}
+
+/** Reserves a new launch's operation, and which server is asked where it runs, before asking. */
+export function reserveDraftPlacement(
+  draftId: DraftId,
+  operation: Omit<DraftPlacementOperation, "admission">,
+): boolean {
+  return commitDraftPlacement(draftId, { ...operation });
+}
+
+/** Releases a reservation its server refused without binding, so the next send is new work. */
+export function releaseDraftPlacement(draftId: DraftId, commandId: string): boolean {
+  const current =
+    useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.placementOperation;
+  if (!current || current.commandId !== commandId || current.admission) return false;
+  return commitDraftPlacement(draftId, null);
+}
+
+/** Records where the reserving server bound the operation, before anything goes there. */
+export function recordDraftPlacementAdmission(
+  draftId: DraftId,
+  commandId: string,
+  admission: NonNullable<DraftPlacementOperation["admission"]>,
+): boolean {
+  const current =
+    useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.placementOperation;
+  if (!current || current.commandId !== commandId) return false;
+  return commitDraftPlacement(draftId, { ...current, admission });
+}
+
 export function restoreFailedDraftThread(
   draftId: DraftId,
   draftThread: DraftThreadState,
@@ -5081,6 +5213,8 @@ export function restoreFailedDraftThread(
           ...(threadId !== draftThread.threadId ? { createdAt: new Date().toISOString() } : {}),
           promotedTo: null,
           sentTo,
+          // A new id is a new intent: its launch is reserved afresh.
+          ...(threadId !== draftThread.threadId ? { placementOperation: null } : {}),
           // The store holds the operation as committed, with the references it sent.
           pendingLaunch:
             threadId !== draftThread.threadId

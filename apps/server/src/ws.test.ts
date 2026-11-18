@@ -11,6 +11,9 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
+  CommandId,
+  ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2ThreadPlacementAdmitError,
   AuthSourceControlWriteScope,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
@@ -130,6 +133,7 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as NpmRelease from "./cloud/npmRelease.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
+import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
@@ -2615,6 +2619,222 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
     Effect.provide(
       Layer.mergeAll(
         EventSink.layer.pipe(Layer.provideMerge(acpStores)),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+  ),
+);
+
+it.effect.each([
+  {
+    label: "an unexpired session with operate access",
+    expiresInMs: 3_600_000,
+    listed: true,
+    admitted: true,
+  },
+  // Listed sessions include an expired one whose socket is still connected.
+  {
+    label: "an expired session its socket still holds",
+    expiresInMs: -60_000,
+    listed: true,
+    admitted: false,
+  },
+  { label: "a revoked session", expiresInMs: 3_600_000, listed: false, admitted: false },
+] as const)(
+  "a native placement admission writes only for $label",
+  ({ expiresInMs, listed, admitted }) =>
+    Effect.gen(function* () {
+      const sessionId = AuthSessionId.make("web-session");
+      const now = yield* DateTime.now;
+      const asked: Array<{ readonly sessionId: string; readonly authorized: boolean }> = [];
+      const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+      const services = Layer.mergeAll(
+        layerUnusedConfigRpcServices,
+        Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+        Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+        Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+        Layer.mock(SessionStore.SessionStore)({
+          cookieName: "admission-test",
+          legacyCookieName: undefined,
+          listActive: () =>
+            Effect.succeed(
+              listed
+                ? [
+                    {
+                      sessionId,
+                      subject: "browser",
+                      scopes: [AuthOrchestrationOperateScope],
+                      method: "browser-session-cookie" as const,
+                      client: { deviceType: "desktop" as const },
+                      issuedAt: now,
+                      expiresAt: DateTime.add(now, { milliseconds: expiresInMs }),
+                      lastConnectedAt: now,
+                      connected: true,
+                      current: true,
+                    },
+                  ]
+                : [],
+            ),
+        }),
+        // The delegation itself is covered with real links; here, what the socket hands it.
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          admit: (caller, input) =>
+            caller.stillAuthorized.pipe(
+              Effect.tap((authorized) =>
+                Effect.sync(() => asked.push({ sessionId: caller.sessionId, authorized })),
+              ),
+              Effect.flatMap((authorized) =>
+                authorized
+                  ? Effect.succeed({
+                      environmentId: EnvironmentId.make("environment-box"),
+                      projectId: input.projectId,
+                      reason: "capacity" as const,
+                      resumed: false,
+                    })
+                  : Effect.fail(
+                      new OrchestrationV2ThreadPlacementAdmitError({
+                        commandId: input.commandId,
+                        reason: "unavailable",
+                        detail: "signed out",
+                      }),
+                    ),
+              ),
+            ),
+        }),
+      );
+      const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
+        ...WS_RPC_SERVER_OPTIONS,
+        onFromServer: (response) =>
+          response._tag === "Exit" ? Queue.offer(exits, response.exit) : Effect.void,
+      }).pipe(
+        Effect.provide(
+          layerWsRpc(
+            {
+              sessionId,
+              subject: "browser",
+              method: "browser-session-cookie",
+              scopes: [AuthOrchestrationOperateScope],
+            },
+            {},
+            yield* ServerBrowser.ServerBrowser,
+            () => Effect.void,
+            { secretReferences: true },
+          ).pipe(
+            Layer.provide(services),
+            Layer.merge(RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+          ),
+        ),
+      );
+      yield* server.write(0, {
+        _tag: "Request",
+        id: RpcMessage.RequestId("admit"),
+        tag: ORCHESTRATION_V2_WS_METHODS.admitThreadPlacement,
+        payload: {
+          commandId: CommandId.make("web-launch"),
+          threadId: ThreadId.make("thread:web-launch"),
+          projectId: ProjectId.make("project:app"),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          candidateEnvironmentIds: [EnvironmentId.make("environment-box")],
+        },
+        headers: Headers.empty,
+      });
+      const exit = yield* Queue.take(exits);
+      assert.equal(Exit.isSuccess(exit), admitted);
+      // The socket's own session asks, never one the request names.
+      assert.deepEqual(asked, [{ sessionId, authorized: admitted }]);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.fresh(layerConfigSources),
+          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(ServerBrowser.ServerBrowser)({}),
+        ),
+      ),
+    ),
+);
+
+it.effect("a native placement admission needs operate access before anything is asked", () =>
+  Effect.gen(function* () {
+    let asked = 0;
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+      Layer.mock(RemoteDelegation.RemoteDelegation)({
+        admit: () =>
+          Effect.sync(() => {
+            asked += 1;
+          }).pipe(Effect.andThen(Effect.die("admitted without operate access"))),
+      }),
+    );
+    const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit" ? Queue.offer(exits, response.exit) : Effect.void,
+    }).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("read-only"),
+            subject: "browser",
+            method: "browser-session-cookie",
+            scopes: [AuthAccessReadScope],
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+          { secretReferences: true },
+        ).pipe(Layer.provide(services), Layer.merge(RpcAuthorization.layer([AuthAccessReadScope]))),
+      ),
+    );
+    yield* server.write(0, {
+      _tag: "Request",
+      id: RpcMessage.RequestId("admit"),
+      tag: ORCHESTRATION_V2_WS_METHODS.admitThreadPlacement,
+      payload: {
+        commandId: CommandId.make("web-launch"),
+        threadId: ThreadId.make("thread:web-launch"),
+        projectId: ProjectId.make("project:app"),
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        candidateEnvironmentIds: [],
+      },
+      headers: Headers.empty,
+    });
+    const exit = yield* Queue.take(exits);
+    assert.equal(Exit.isFailure(exit), true);
+    assert.equal(asked, 0);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),

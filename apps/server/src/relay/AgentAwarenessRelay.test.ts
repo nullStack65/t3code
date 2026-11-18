@@ -252,6 +252,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     assertProviderInstanceEnabled: unused,
     isProviderInstanceEnabledForProject: unused,
     hasReceipt: unused,
+    acceptedLaunchOf: unused,
     intentOf: unused,
     bindIntent: unused,
     waitForThread: unused,

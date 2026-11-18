@@ -10,6 +10,7 @@ import {
   OrchestratorMcpThreadWaitResult,
   type PeerLinkError,
   RuntimeMode,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -24,7 +25,7 @@ import type * as Tool from "effect/ai/Tool";
 import { runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
 import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { readCaller, unavailable } from "../mcp/threadAccess.ts";
+import { type CallerLimits, readCaller, unavailable } from "../mcp/threadAccess.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
@@ -34,6 +35,29 @@ const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_WAIT_TIMEOUT_MS = 45_000;
 
 type Scope = McpInvocationContext.McpInvocationScope;
+
+/**
+ * A client signed in to this server itself, rather than an agent over MCP: it has no thread
+ * here, and its requests carry the modes it asked for, already within this server's ceilings.
+ */
+export interface NativeCaller {
+  readonly limits: CallerLimits;
+}
+
+/** What a native caller may ask a linked environment: evidence for placement, never an effect. */
+const NATIVE_EVIDENCE_TOOLS: ReadonlySet<string> = new Set([
+  "orchestrator_capabilities",
+  "t3_project_list",
+]);
+
+/** Who a forwarded call is made for, as it travels: its limits, retry-key scope and thread. */
+interface ForwardedCaller {
+  readonly requestNamespace: string | undefined;
+  readonly sender:
+    | { readonly environmentId: EnvironmentId; readonly threadId: ThreadId; readonly title: string }
+    | undefined;
+  readonly limits: CallerLimits;
+}
 
 /**
  * Runs T3 MCP tools in a linked environment for an agent here. The tool's own
@@ -74,6 +98,16 @@ export class PeerForwarding extends Context.Service<
       environmentId: EnvironmentId,
       input: OrchestratorMcpThreadWaitInput,
     ) => Effect.Effect<OrchestratorMcpThreadWaitResult, OrchestratorMcpFailure>;
+    /**
+     * A read-only evidence tool (`orchestrator_capabilities`, `t3_project_list`) there for a
+     * native caller, under the link's credential narrowed to the caller's modes.
+     */
+    readonly callNative: <T extends Tool.Any>(
+      caller: NativeCaller,
+      tool: T,
+      environmentId: EnvironmentId,
+      params: Tool.Parameters<T>,
+    ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
     /** The environments this one links to, as an agent sees them. */
     readonly links: (
       scope: Scope,
@@ -149,8 +183,20 @@ const make = Effect.gen(function* () {
     });
   });
 
-  /** Tool and contract schemas are plain data: they encode and decode without services. */
-  const forward = Effect.fn("PeerForwarding.forward")(function* <A>(
+  const mcpCaller = (scope: Scope) =>
+    forwardingCaller(scope).pipe(
+      Effect.map(({ caller, limits }): ForwardedCaller => ({
+        requestNamespace: scope.requestNamespace,
+        // So a message sent there names the thread that sent it, even to a client that cannot reach here.
+        sender:
+          caller === undefined
+            ? undefined
+            : { environmentId: scope.environmentId, threadId: caller.id, title: caller.title },
+        limits,
+      })),
+    );
+
+  const forward = <A>(
     scope: Scope,
     toolName: string,
     parameters: Schema.Top,
@@ -158,8 +204,29 @@ const make = Effect.gen(function* () {
     environmentId: EnvironmentId,
     params: unknown,
     expectedIncarnation?: string,
+  ) =>
+    Effect.flatMap(mcpCaller(scope), (caller) =>
+      forwardAs<A>(
+        caller,
+        toolName,
+        parameters,
+        success,
+        environmentId,
+        params,
+        expectedIncarnation,
+      ),
+    );
+
+  /** Tool and contract schemas are plain data: they encode and decode without services. */
+  const forwardAs = Effect.fn("PeerForwarding.forward")(function* <A>(
+    { requestNamespace, sender, limits }: ForwardedCaller,
+    toolName: string,
+    parameters: Schema.Top,
+    success: Schema.Top,
+    environmentId: EnvironmentId,
+    params: unknown,
+    expectedIncarnation?: string,
   ) {
-    const { caller, limits } = yield* forwardingCaller(scope);
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
@@ -173,17 +240,14 @@ const make = Effect.gen(function* () {
       });
     }
     if (typeof args.clientRequestId === "string") {
-      args.clientRequestId = yield* scopedRequestId(scope.requestNamespace, args.clientRequestId);
+      if (requestNamespace === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "This caller cannot send a request with a retry key to a linked environment.",
+        });
+      }
+      args.clientRequestId = yield* scopedRequestId(requestNamespace, args.clientRequestId);
     }
-    // So a message sent there names the thread that sent it, even to a client that cannot reach here.
-    const sender =
-      caller === undefined
-        ? undefined
-        : {
-            environmentId: scope.environmentId,
-            threadId: caller.id,
-            title: caller.title,
-          };
     return yield* peers.call({
       environmentId,
       tool: toolName,
@@ -290,8 +354,34 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const callNative: PeerForwarding["Service"]["callNative"] = (
+    caller,
+    tool,
+    environmentId,
+    params,
+  ) =>
+    NATIVE_EVIDENCE_TOOLS.has(tool.name)
+      ? Effect.andThen(
+          requireEnabled,
+          forwardAs<Tool.Success<typeof tool>>(
+            { requestNamespace: undefined, sender: undefined, limits: caller.limits },
+            tool.name,
+            tool.parametersSchema,
+            tool.successSchema,
+            environmentId,
+            params,
+          ),
+        )
+      : Effect.fail(
+          new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: `${tool.name} is not placement evidence, so it is not sent for a native caller.`,
+          }),
+        );
+
   return PeerForwarding.of({
     call,
+    callNative,
     readThread,
     interruptThread,
     waitForThread,
