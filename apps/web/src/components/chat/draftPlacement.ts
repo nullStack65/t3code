@@ -68,6 +68,38 @@ export const draftPlacementIntent = (
   });
 
 /**
+ * Whether a draft is automatic work: routed by this client's Auto choice, not pinned anywhere.
+ * Fresh attachments do not pin it; their uploads wait for its placement instead.
+ */
+export const draftRoutesAutomatically = (input: {
+  readonly clientSettingsHydrated: boolean;
+  readonly isDraft: boolean;
+  readonly envLocked: boolean;
+  readonly canAutoBalanceEnvironments: boolean;
+  readonly loadBalancingEnabled: boolean;
+  readonly draft: Pick<
+    DraftSessionState,
+    "environmentSelection" | "sentTo" | "loadBalancedEnvironmentId" | "branch" | "worktreePath"
+  > | null;
+  /** Kept for callers; attachments not yet uploaded no longer decide it. */
+  readonly composerHasAttachments?: boolean;
+}) => {
+  const { draft } = input;
+  return Boolean(
+    input.clientSettingsHydrated &&
+    input.isDraft &&
+    !input.envLocked &&
+    input.canAutoBalanceEnvironments &&
+    input.loadBalancingEnabled &&
+    draft?.environmentSelection !== "manual" &&
+    // A send that may have started there keeps its thread id on that machine.
+    !draft?.sentTo &&
+    (!draft?.branch || draft.environmentSelection === "auto") &&
+    !draft?.worktreePath,
+  );
+};
+
+/**
  * Whether a send goes through placement first: always when its draft holds an operation already
  * (reserved, uncertain or bound), whatever automatic routing says now; otherwise only new work
  * automatic routing may place.
@@ -106,17 +138,32 @@ export const heldLaunchFor = (input: {
 };
 
 /**
- * Whether a draft's attachments wait to upload: automatic work until its origin has bound it, and
- * stored that, to the machine the draft is on. A client's own load-balanced pick is not a binding.
+ * Operations this page has reconciled with their origin and that answered with their stored
+ * binding. Memory only: a reload forgets it, so a cached binding never authorizes by itself.
+ */
+const reconciledThisPage = new Set<string>();
+const reconciledKey = (
+  commandId: string,
+  admission: NonNullable<DraftPlacementOperation["admission"]>,
+) => `${commandId}\n${admission.environmentId}\n${admission.projectId}`;
+
+/**
+ * Whether a draft's attachments wait to upload: automatic work until its origin has bound it to
+ * the machine the draft is on and answered so on this page. A client's load-balanced pick, or a
+ * binding read back from storage alone, is not that answer.
  */
 export const attachmentUploadsWaitForPlacement = (input: {
   readonly draft: Pick<DraftSessionState, "placementOperation"> | null;
   readonly automatic: boolean;
   readonly environmentId: EnvironmentId;
-}) =>
-  input.draft?.placementOperation
-    ? input.draft.placementOperation.admission?.environmentId !== input.environmentId
-    : input.automatic;
+}) => {
+  const operation = input.draft?.placementOperation;
+  if (!operation) return input.automatic;
+  return !(
+    operation.admission?.environmentId === input.environmentId &&
+    reconciledThisPage.has(reconciledKey(operation.commandId, operation.admission))
+  );
+};
 
 /**
  * Starts the composer's attachment uploads to `environmentId` over this client's own connection
@@ -217,6 +264,9 @@ export async function placeDraftBeforeSend(input: {
         "It was placed from another machine than this draft is on now. Switch back to send it, or start a new draft.",
       );
   }
+  // Asked again: until its origin answers this time, its binding authorizes nothing here.
+  if (existing?.admission)
+    reconciledThisPage.delete(reconciledKey(existing.commandId, existing.admission));
   const reserved: DraftPlacementOperation = existing ?? {
     commandId: newCommandId(),
     messageId: newMessageId(),
@@ -290,5 +340,6 @@ export async function placeDraftBeforeSend(input: {
       description: "Its sign-in changed while the draft was being placed. Nothing was started.",
     };
   }
+  reconciledThisPage.add(reconciledKey(reserved.commandId, admission));
   return { type: "placed", ...admission };
 }

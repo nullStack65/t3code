@@ -1,4 +1,9 @@
-import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  OrchestrationV2ThreadPlacementAdmitError,
+  ProjectId,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
@@ -71,12 +76,29 @@ async function withStorage(run: () => Promise<void>) {
   }
 }
 
+/** Whether ChatView treats the draft as automatic work, by its own rule, for this state. */
+function routesAutomatically(tab: Tab, draftId: string) {
+  const id = tab.store.DraftId.make(draftId);
+  const state = tab.store.useComposerDraftStore.getState();
+  const composer = state.getComposerDraft(id);
+  return tab.placement.draftRoutesAutomatically({
+    clientSettingsHydrated: true,
+    isDraft: true,
+    envLocked: false,
+    canAutoBalanceEnvironments: true,
+    loadBalancingEnabled: true,
+    draft: state.getDraftSession(id),
+    composerHasAttachments: (composer?.images.length ?? 0) + (composer?.files.length ?? 0) > 0,
+  });
+}
+
 /** The composer's upload effect, as ChatView configures it for this draft now. */
-async function uploadEffect(tab: Tab, draftId: string, automatic: boolean) {
+async function uploadEffect(tab: Tab, draftId: string) {
   const id = tab.store.DraftId.make(draftId);
   const state = tab.store.useComposerDraftStore.getState();
   const session = state.getDraftSession(id);
   const composer = state.getComposerDraft(id)!;
+  const automatic = routesAutomatically(tab, draftId);
   const started = tab.placement.startComposerAttachmentUploads({
     environmentId: session!.environmentId,
     attachments: [...composer.images, ...composer.files],
@@ -92,13 +114,17 @@ async function uploadEffect(tab: Tab, draftId: string, automatic: boolean) {
   return started;
 }
 
-async function composeAutoDraft(tab: Tab, name: string) {
+async function composeAutoDraft(
+  tab: Tab,
+  name: string,
+  /** The client's own pick, not a binding; null while it is still choosing. */
+  picked: EnvironmentId | null = origin,
+) {
   const id = tab.store.DraftId.make(`draft-${name}`);
   const store = tab.store.useComposerDraftStore.getState();
-  // The client's own pick: not a binding.
   store.setProjectDraftThreadId(scopeProjectRef(origin, projectHere), id, {
     environmentSelection: "auto",
-    loadBalancedEnvironmentId: origin,
+    loadBalancedEnvironmentId: picked,
   });
   store.setPrompt(id, "Review the report");
   const report = new File(["report bytes"], "report.pdf", { type: "application/pdf" });
@@ -159,7 +185,7 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
         tab.store.useComposerDraftStore.getState().getComposerDraft(id)?.persistedAttachments,
       ).toHaveLength(1);
       // Attached on an automatic draft: the bytes stay here, nothing is uploaded.
-      expect(await uploadEffect(tab, id, true)).toBe(0);
+      expect(await uploadEffect(tab, id)).toBe(0);
       expect(uploads.to).toEqual([]);
 
       // Storage cannot hold the operation: nothing is asked, nothing uploaded.
@@ -168,13 +194,13 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
         AsyncResult.failure(Cause.die("never asked"))) as never);
       storageFaults.drops = false;
       expect(unsaved.type).toBe("failed");
-      expect(await uploadEffect(tab, id, true)).toBe(0);
+      expect(await uploadEffect(tab, id)).toBe(0);
 
       // Its admission's answer is lost: reserved, unbound, still nothing uploaded.
       const lost = await place(tab, id, (async () =>
         AsyncResult.failure(Cause.die("connection lost"))) as never);
       expect(lost.type).toBe("failed");
-      expect(await uploadEffect(tab, id, true)).toBe(0);
+      expect(await uploadEffect(tab, id)).toBe(0);
       const reserved = tab.store.useComposerDraftStore
         .getState()
         .getDraftSession(id)!.placementOperation!;
@@ -182,7 +208,7 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
       vi.clearAllTimers();
       vi.resetModules();
       const reloaded = await openTab();
-      expect(await uploadEffect(reloaded, id, true)).toBe(0);
+      expect(await uploadEffect(reloaded, id)).toBe(0);
       const asked: Array<string> = [];
       const placed = await place(reloaded, id, (async ({
         input,
@@ -200,7 +226,7 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
       expect(placed).toEqual({ type: "placed", environmentId: box, projectId: projectThere });
       expect(asked).toEqual([reserved.commandId]);
       // Bound to B, the draft is still on A: nothing uploads to A.
-      expect(await uploadEffect(reloaded, id, true)).toBe(0);
+      expect(await uploadEffect(reloaded, id)).toBe(0);
       // The routing hook moves it to B; only then do its attachments upload, to B.
       reloaded.store.useComposerDraftStore.getState().setDraftThreadContext(id, {
         projectRef: scopeProjectRef(box, projectThere),
@@ -208,7 +234,7 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
         loadBalancedEnvironmentId: box,
       });
       // The image uploads, to B; the file lost its bytes in the reload and needs attaching again.
-      expect(await uploadEffect(reloaded, id, true)).toBe(1);
+      expect(await uploadEffect(reloaded, id)).toBe(1);
       expect(uploads.to).toEqual([{ environmentId: box, name: "shot.png" }]);
       // And the launch there goes out as the operation reserved before the reload.
       expect(
@@ -237,8 +263,107 @@ describe("PR74-R1-F4: a fresh automatic draft's attachments", () => {
         environmentSelection: "manual",
         loadBalancedEnvironmentId: null,
       });
-      expect(await uploadEffect(tab, id, false)).toBe(2);
+      expect(await uploadEffect(tab, id)).toBe(2);
       expect(uploads.to.map(({ environmentId }) => environmentId)).toEqual([origin, origin]);
+    });
+  });
+});
+
+describe("PR74-R1-F4: automatic work's uploads wait for its origin", () => {
+  it("keeps an Auto draft automatic when a fresh attachment arrives before the client's pick", async () => {
+    await withStorage(async () => {
+      const tab = await openTab();
+      const id = await composeAutoDraft(tab, "unpicked", null);
+      // Still automatic work by ChatView's own rule: nothing pins it, the bytes stay here.
+      expect(routesAutomatically(tab, id)).toBe(true);
+      expect(await uploadEffect(tab, id)).toBe(0);
+      expect(uploads.to).toEqual([]);
+      // And its send goes through admission rather than around it.
+      expect(
+        tab.placement.placesBeforeSend({
+          draft: tab.store.useComposerDraftStore.getState().getDraftSession(id),
+          automatic: routesAutomatically(tab, id),
+          pinnedHere: false,
+          request,
+        }),
+      ).toBe(true);
+    });
+  });
+
+  it("uploads nothing after a reload on its bound machine until its origin reconciles it", async () => {
+    await withStorage(async () => {
+      const tab = await openTab();
+      const id = await composeAutoDraft(tab, "rebound");
+      const bindTo = (async () =>
+        AsyncResult.success({
+          environmentId: box,
+          projectId: projectThere,
+          reason: "capacity" as const,
+          resumed: false,
+        })) as never;
+      expect((await place(tab, id, bindTo)).type).toBe("placed");
+      // The routing hook moves it to B; the renderer dies before the upload or the launch.
+      tab.store.useComposerDraftStore.getState().setDraftThreadContext(id, {
+        projectRef: scopeProjectRef(box, projectThere),
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: box,
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      vi.clearAllTimers();
+      vi.resetModules();
+      uploads.to.length = 0;
+      const reloaded = await openTab();
+      const session = () => reloaded.store.useComposerDraftStore.getState().getDraftSession(id)!;
+      expect(session().environmentId).toBe(box);
+      const reserved = session().placementOperation!;
+      // On B, bound to B: still nothing uploads before its origin answers this time.
+      expect(await uploadEffect(reloaded, id)).toBe(0);
+      // Its origin refuses (replaced sign-in, exclusion) or cannot answer: still nothing.
+      for (const answer of [
+        AsyncResult.failure(
+          Cause.fail(
+            new OrchestrationV2ThreadPlacementAdmitError({
+              commandId: reserved.commandId as never,
+              reason: "other-session",
+              detail: "another sign-in",
+            }),
+          ),
+        ),
+        AsyncResult.failure(
+          Cause.fail(
+            new OrchestrationV2ThreadPlacementAdmitError({
+              commandId: reserved.commandId as never,
+              reason: "excluded",
+              detail: "excluded",
+            }),
+          ),
+        ),
+        AsyncResult.failure(Cause.die("connection lost")),
+      ]) {
+        expect((await place(reloaded, id, (async () => answer) as never)).type).toBe("failed");
+        expect(await uploadEffect(reloaded, id)).toBe(0);
+      }
+      expect(uploads.to).toEqual([]);
+      // Its origin answers with the same binding for the same command: it uploads, only to B.
+      const asked: Array<string> = [];
+      const resumed = (async ({ input }: { input: { commandId: string } }) => {
+        asked.push(input.commandId);
+        return AsyncResult.success({
+          environmentId: box,
+          projectId: projectThere,
+          reason: "capacity" as const,
+          resumed: true,
+        });
+      }) as never;
+      expect(await place(reloaded, id, resumed)).toEqual({
+        type: "placed",
+        environmentId: box,
+        projectId: projectThere,
+      });
+      expect(asked).toEqual([reserved.commandId]);
+      expect(await uploadEffect(reloaded, id)).toBe(1);
+      expect(uploads.to).toEqual([{ environmentId: box, name: "shot.png" }]);
+      expect(session().placementOperation).toEqual(reserved);
     });
   });
 });

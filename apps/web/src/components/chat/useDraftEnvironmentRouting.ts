@@ -210,7 +210,8 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
           placementOperation: getDraftSession(draftId)?.placementOperation ?? null,
           promotedTo: draftThread?.promotedTo ?? getDraftSession(draftId)?.promotedTo ?? null,
         },
-        automatic: automaticEnvironment && Boolean(draftThread?.loadBalancedEnvironmentId),
+        // The server chooses; a client pick is not needed, nor proof of anything.
+        automatic: automaticEnvironment,
         pinnedHere,
         request,
       })

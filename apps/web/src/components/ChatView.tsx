@@ -381,7 +381,7 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
-import { attachmentUploadsWaitForPlacement } from "./chat/draftPlacement";
+import { attachmentUploadsWaitForPlacement, draftRoutesAutomatically } from "./chat/draftPlacement";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -1319,19 +1319,15 @@ export default function ChatView(props: ChatViewProps) {
     loadBalancingEnabled: settings.loadBalancingEnabled,
     loadBalancingWeights: settings.loadBalancingWeights,
   }));
-  const automaticEnvironment = Boolean(
-    clientSettingsHydrated &&
-    draftId &&
-    !envLocked &&
-    canAutoBalanceEnvironments &&
-    loadBalancingSettings.loadBalancingEnabled &&
-    draftThread?.environmentSelection !== "manual" &&
-    // A send that may have started there keeps its thread id on that machine.
-    !draftThread?.sentTo &&
-    (!composerHasAttachments || Boolean(draftThread?.loadBalancedEnvironmentId)) &&
-    (!draftThread?.branch || draftThread.environmentSelection === "auto") &&
-    !draftThread?.worktreePath,
-  );
+  const automaticEnvironment = draftRoutesAutomatically({
+    clientSettingsHydrated,
+    isDraft: Boolean(draftId),
+    envLocked,
+    canAutoBalanceEnvironments,
+    loadBalancingEnabled: loadBalancingSettings.loadBalancingEnabled,
+    draft: draftThread ?? null,
+    composerHasAttachments,
+  });
   const autoUpdateEnvironments = automaticEnvironment
     ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
         const environment = environmentById.get(environmentId);

@@ -662,12 +662,13 @@ const make = Effect.gen(function* () {
       const bound = yield* threads.intentOf(placementId).pipe(Effect.mapError(unavailableHere));
       if (Option.isSome(bound)) {
         const placement = yield* decode(bound.value);
-        // Only a launch this server already accepted is reconciled past a current exclusion:
-        // its thread exists here. Elsewhere that cannot be known without contact.
+        // Only this operation's own launch, accepted here for its own thread, is reconciled past a
+        // current exclusion: its `thread.create` receipt. Elsewhere that cannot be known without
+        // contact, and a thread that merely exists proves nothing.
         const acceptedHere =
           placement.environmentId === hereId &&
-          (yield* threads.getThreadShell(input.threadId).pipe(
-            Effect.map((shell) => shell !== null && shell.deletedAt === null),
+          (yield* threads.acceptedLaunchOf(input.commandId).pipe(
+            Effect.map((launched) => Option.isSome(launched) && launched.value === input.threadId),
             Effect.mapError(unavailableHere),
           ));
         if (excluded.has(placement.environmentId) && !acceptedHere) {
