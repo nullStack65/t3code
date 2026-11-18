@@ -3230,3 +3230,86 @@ it.effect(
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+it.effect(
+  "PR74-R1-F1: a launch admitted here, then excluded, is refused unless it was launched here",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const laptopEnv = yield* makeLaptop(database, offers);
+        yield* linkTo(laptopEnv.links, b, "full-access");
+        yield* seedParent(laptopEnv);
+        // The box is full, so this machine is chosen: admission only, nothing launched here.
+        yield* Ref.set(thread.resources, loadOf(0.99));
+        const runsHere = Effect.succeed({ resources: loadOf(0.1), modelAvailable: true });
+        const admitHere = (commandId: string, threadId?: ThreadId) =>
+          laptopEnv.remote
+            .admit(
+              { sessionId: "web-session", stillAuthorized: Effect.succeed(true) },
+              {
+                commandId: CommandId.make(commandId),
+                threadId: threadId ?? ThreadId.make(`thread:${commandId}`),
+                projectId: laptopProject.id,
+                modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                candidateEnvironmentIds: [laptop.environmentId, box.environmentId],
+                here: runsHere,
+              },
+            )
+            .pipe(Effect.result);
+        const placeHere = (key: string) =>
+          laptopEnv.remote
+            .place(outsideScope, {
+              operation: "thread-launch",
+              key,
+              threadId: ThreadId.make(`thread:${key}`),
+              projectId: laptopProject.id,
+              modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+              runtimeMode: "full-access",
+              here: { resources: loadOf(0.1), modelAvailable: true },
+            })
+            .pipe(Effect.result);
+        const pending = yield* admitHere("local-pending");
+        expect(Result.isSuccess(pending) && pending.success.environmentId).toBe(
+          laptop.environmentId,
+        );
+        // Its thread exists here: that launch was accepted.
+        const accepted = yield* admitHere("local-accepted", parentThreadId);
+        expect(Result.isSuccess(accepted) && accepted.success.environmentId).toBe(
+          laptop.environmentId,
+        );
+        expect(yield* placeHere("mcp-local-pending")).toEqual(Result.succeed(laptop.environmentId));
+
+        yield* laptopEnv.settings.updateSettings({
+          automaticPlacementExcludedEnvironmentIds: [laptop.environmentId],
+        });
+        // Not launched yet: refused, its binding kept as it was, never placed again.
+        const refused = yield* admitHere("local-pending");
+        expect(Result.isFailure(refused) && refused.failure.reason).toBe("excluded");
+        const refusedMcp = yield* placeHere("mcp-local-pending");
+        expect(Result.isFailure(refusedMcp) && refusedMcp.failure.code).toBe("target_required");
+        yield* laptopEnv.settings.updateSettings({ automaticPlacementExcludedEnvironmentIds: [] });
+        const kept = yield* admitHere("local-pending");
+        expect(Result.isSuccess(kept) && kept.success).toMatchObject({
+          environmentId: laptop.environmentId,
+          resumed: true,
+        });
+        // Launched here already: its accepted result still reconciles.
+        yield* laptopEnv.settings.updateSettings({
+          automaticPlacementExcludedEnvironmentIds: [laptop.environmentId],
+        });
+        const replayed = yield* admitHere("local-accepted", parentThreadId);
+        expect(Result.isSuccess(replayed) && replayed.success).toMatchObject({
+          environmentId: laptop.environmentId,
+          resumed: true,
+        });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);

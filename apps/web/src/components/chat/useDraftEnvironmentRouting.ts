@@ -35,6 +35,7 @@ import {
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
+import { readAttachmentUpload } from "../../lib/attachmentUploadQueue";
 import { type EnvironmentPresentation, useEnvironmentProviders } from "../../state/environments";
 import { currentClientMetadata } from "../../connection/platform";
 import { useProjects } from "../../state/entities";
@@ -189,7 +190,18 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
    * Before an automatic draft's send: the server its launch was reserved on admits where it runs
    * (`placeDraftBeforeSend`), and only then does the draft move there.
    */
-  const refreshBeforeSend = (request: DraftPlacementRequest) => {
+  const refreshBeforeSend = (
+    request: DraftPlacementRequest,
+    options: { readonly directAnnotation?: boolean } = {},
+  ) => {
+    // Pinned here: attachments already uploaded to this machine, or a preview annotation of it.
+    const composer = draftId ? useComposerDraftStore.getState().getComposerDraft(draftId) : null;
+    const pinnedHere =
+      options.directAnnotation === true ||
+      (composer?.files.some((file) => file.uploadedAttachmentId !== undefined) ?? false) ||
+      [...(composer?.images ?? []), ...(composer?.files ?? [])].some(
+        (attachment) => readAttachmentUpload(attachment.id) !== undefined,
+      );
     // An operation already reserved is reconciled first, whatever routing says now.
     if (
       !draftId ||
@@ -199,7 +211,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
           promotedTo: draftThread?.promotedTo ?? getDraftSession(draftId)?.promotedTo ?? null,
         },
         automatic: automaticEnvironment && Boolean(draftThread?.loadBalancedEnvironmentId),
-        hasAttachments: composerHasAttachments,
+        pinnedHere,
         request,
       })
     )
@@ -209,7 +221,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       draftId,
       request,
       candidateEnvironmentIds: launchableCandidates(request),
-      hasAttachments: composerHasAttachments,
+      pinnedHere,
       admit: admitPlacement,
       canLaunchOn: (environmentId) =>
         readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),

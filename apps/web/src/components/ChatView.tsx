@@ -381,6 +381,7 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
+import { attachmentUploadsWaitForPlacement } from "./chat/draftPlacement";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -3642,6 +3643,13 @@ export default function ChatView(props: ChatViewProps) {
                                 composerDraftTarget={composerDraftTarget}
                                 environmentId={environmentId}
                                 attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
+                                attachmentUploadsWaitForPlacement={attachmentUploadsWaitForPlacement(
+                                  {
+                                    draft: isLocalDraftThread ? (draftThread ?? null) : null,
+                                    automatic: automaticEnvironment,
+                                    environmentId,
+                                  },
+                                )}
                                 supportsAttachmentUploads={supportsAttachmentUploads}
                                 supportsQuestionAttachments={supportsQuestionAttachments}
                                 maxFileAttachmentBytes={maxFileAttachmentBytes}

@@ -14,6 +14,10 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 import {
+  type ComposerFileAttachment,
+  type ComposerImageAttachment,
+  type ComposerThreadTarget,
+  composerFileNeedsReattach,
   type DraftId,
   type DraftPlacementOperation,
   type DraftSessionState,
@@ -35,16 +39,23 @@ export interface DraftPlacementRequest {
 
 /**
  * The work a placement is for, fixed when its operation is reserved: the exact model with its
- * options, the modes, the logical project and the workspace. A different one is new work.
+ * options, the modes, the logical project, the workspace and the routing choice. A different one,
+ * such as a machine pinned by hand since, is new work.
  */
 export const draftPlacementIntent = (
   request: DraftPlacementRequest,
   draft: Pick<
     DraftSessionState,
-    "logicalProjectKey" | "branch" | "worktreePath" | "envMode" | "startFromOrigin"
+    | "logicalProjectKey"
+    | "branch"
+    | "worktreePath"
+    | "envMode"
+    | "startFromOrigin"
+    | "environmentSelection"
   >,
 ) =>
   JSON.stringify({
+    environmentSelection: draft.environmentSelection === "manual" ? "manual" : "auto",
     modelSelection: request.modelSelection,
     runtimeMode: request.runtimeMode,
     interactionMode: request.interactionMode,
@@ -64,13 +75,77 @@ export const draftPlacementIntent = (
 export const placesBeforeSend = (input: {
   readonly draft: Pick<DraftSessionState, "placementOperation" | "promotedTo"> | null;
   readonly automatic: boolean;
-  readonly hasAttachments: boolean;
+  /** Pinned to the machine it is on: attachments uploaded there, or a preview annotation. */
+  readonly pinnedHere: boolean;
   readonly request: DraftPlacementRequest;
 }) =>
   input.draft !== null &&
   !input.draft.promotedTo &&
   (Boolean(input.draft.placementOperation) ||
-    (input.automatic && !input.hasAttachments && !input.request.multipleModels));
+    (input.automatic && !input.pinnedHere && !input.request.multipleModels));
+
+/**
+ * What a draft's send may launch under, read at the send itself: nothing held, the operation its
+ * origin bound to this machine, or blocked, when one is held for another machine or unbound. A
+ * blocked send makes no effect and never mints a replacement.
+ */
+export const heldLaunchFor = (input: {
+  readonly draft: Pick<DraftSessionState, "placementOperation"> | null;
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+}):
+  | { readonly type: "none" }
+  | { readonly type: "reserved"; readonly operation: DraftPlacementOperation }
+  | { readonly type: "blocked" } => {
+  const operation = input.draft?.placementOperation;
+  if (!operation) return { type: "none" };
+  return operation.admission?.environmentId === input.environmentId &&
+    operation.admission.projectId === input.projectId
+    ? { type: "reserved", operation }
+    : { type: "blocked" };
+};
+
+/**
+ * Whether a draft's attachments wait to upload: automatic work until its origin has bound it, and
+ * stored that, to the machine the draft is on. A client's own load-balanced pick is not a binding.
+ */
+export const attachmentUploadsWaitForPlacement = (input: {
+  readonly draft: Pick<DraftSessionState, "placementOperation"> | null;
+  readonly automatic: boolean;
+  readonly environmentId: EnvironmentId;
+}) =>
+  input.draft?.placementOperation
+    ? input.draft.placementOperation.admission?.environmentId !== input.environmentId
+    : input.automatic;
+
+/**
+ * Starts the composer's attachment uploads to `environmentId` over this client's own connection
+ * there, unless they wait for placement. Returns how many it started.
+ */
+export function startComposerAttachmentUploads(input: {
+  readonly environmentId: EnvironmentId;
+  readonly attachments: ReadonlyArray<ComposerImageAttachment | ComposerFileAttachment>;
+  readonly draftTarget: ComposerThreadTarget;
+  readonly waitForPlacement: boolean;
+  readonly start: (upload: {
+    readonly environmentId: EnvironmentId;
+    readonly image: ComposerImageAttachment | ComposerFileAttachment;
+    readonly draftTarget: ComposerThreadTarget;
+  }) => void;
+}): number {
+  if (input.waitForPlacement) return 0;
+  let started = 0;
+  for (const attachment of input.attachments) {
+    if (attachment.type === "file" && composerFileNeedsReattach(attachment)) continue;
+    input.start({
+      environmentId: input.environmentId,
+      image: attachment,
+      draftTarget: input.draftTarget,
+    });
+    started += 1;
+  }
+  return started;
+}
 
 export type DraftPlacementOutcome =
   | {
@@ -113,8 +188,8 @@ export async function placeDraftBeforeSend(input: {
   readonly request: DraftPlacementRequest;
   /** The machines this client may launch on; they narrow the server's choice. */
   readonly candidateEnvironmentIds: ReadonlyArray<EnvironmentId>;
-  /** The composer holds attachments, which are prepared for the machine it is on. */
-  readonly hasAttachments: boolean;
+  /** Pinned to the machine it is on: attachments uploaded there, or a preview annotation. */
+  readonly pinnedHere: boolean;
   readonly admit: (target: {
     readonly environmentId: EnvironmentId;
     readonly input: OrchestrationV2ThreadPlacementAdmitInput;
@@ -202,10 +277,10 @@ export async function placeDraftBeforeSend(input: {
     current.projectId !== session.projectId
   )
     return { type: "abandoned" };
-  // Attachments are prepared for the machine the draft is on, so they never move with it.
-  if (input.hasAttachments && admission.environmentId !== session.environmentId)
+  // What is pinned to the machine the draft is on never moves with it.
+  if (input.pinnedHere && admission.environmentId !== session.environmentId)
     return stillOpen(
-      "It runs on another machine than its attachments were added on. Remove them and attach them there, or start a new draft.",
+      "It runs on another machine than the attachments or annotation it now holds. Remove them and add them there, or start a new draft.",
     );
   // The grant to launch there is this client's own, checked again now that it is needed.
   if (!input.canLaunchOn(admission.environmentId)) {

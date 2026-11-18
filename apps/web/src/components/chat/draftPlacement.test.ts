@@ -110,7 +110,7 @@ const place = (
   admit: Admit,
   options: {
     readonly canLaunchOn?: () => boolean;
-    readonly hasAttachments?: boolean;
+    readonly pinnedHere?: boolean;
     readonly request?: PlacementRequest;
   } = {},
 ) =>
@@ -118,7 +118,7 @@ const place = (
     draftId: tab.store.DraftId.make(draftId),
     request: options.request ?? request,
     candidateEnvironmentIds: [origin, box],
-    hasAttachments: options.hasAttachments ?? false,
+    pinnedHere: options.pinnedHere ?? false,
     admit: admit as never,
     canLaunchOn: options.canLaunchOn ?? (() => true),
     composerUnchanged: () => true,
@@ -355,7 +355,7 @@ describe("placing an automatic draft before its send", () => {
       const draftId = composeDraft(tab, "attached");
       const seen: Array<{ environmentId: EnvironmentId; commandId: string; stored: unknown }> = [];
       const outcome = await place(tab, draftId, admittedTo(seen, memory, draftId), {
-        hasAttachments: true,
+        pinnedHere: true,
       });
       expect(outcome).toMatchObject({ type: "failed" });
       expect(
@@ -381,9 +381,9 @@ describe("placing an automatic draft before its send", () => {
         [fresh, true, true, request, false],
         [fresh, true, false, multiple, false],
       ];
-      for (const [draft, automatic, hasAttachments, asked, places] of cases) {
+      for (const [draft, automatic, pinnedHere, asked, places] of cases) {
         expect(
-          tab.placement.placesBeforeSend({ draft, automatic, hasAttachments, request: asked }),
+          tab.placement.placesBeforeSend({ draft, automatic, pinnedHere, request: asked }),
         ).toBe(places);
       }
       // A send already bound for its launch is not placed again.
@@ -391,7 +391,7 @@ describe("placing an automatic draft before its send", () => {
         tab.placement.placesBeforeSend({
           draft: { ...held, promotedTo: scopeThreadRef(box, ThreadId.make("thread")) },
           automatic: true,
-          hasAttachments: false,
+          pinnedHere: false,
           request,
         }),
       ).toBe(false);
@@ -407,3 +407,119 @@ const heldOperation = {
   admittedProjectId: projectHere,
   intent: "{}",
 };
+
+describe("PR74-R1-F3: a manual pin after a saved admission", () => {
+  it("stops for reconciliation instead of resuming the old automatic destination", async () => {
+    await withStorage(async (memory) => {
+      const tab = await openTab();
+      const draftId = composeDraft(tab, "pinned");
+      const store = tab.store.useComposerDraftStore.getState();
+      const seen: Array<{ environmentId: EnvironmentId; commandId: string; stored: unknown }> = [];
+      // Saved A→B, but the composer changed during the await: the draft stays on A.
+      const abandoned = await tab.placement.placeDraftBeforeSend({
+        draftId: tab.store.DraftId.make(draftId),
+        request,
+        candidateEnvironmentIds: [origin, box],
+        pinnedHere: false,
+        admit: admittedTo(seen, memory, draftId) as never,
+        canLaunchOn: () => true,
+        composerUnchanged: () => false,
+      });
+      expect(abandoned.type).toBe("abandoned");
+      const bound = storedOperation(memory, draftId);
+      expect(bound.admission).toEqual({ environmentId: box, projectId: projectThere });
+      // The user then pins A by hand, as the machine picker does.
+      store.setDraftThreadContext(tab.store.DraftId.make(draftId), {
+        projectRef: scopeProjectRef(origin, projectHere),
+        environmentSelection: "manual",
+        loadBalancedEnvironmentId: null,
+      });
+      const asked: Array<string> = [];
+      const outcome = await place(tab, draftId, refusing("unavailable", asked));
+      expect(outcome).toMatchObject({
+        type: "failed",
+        title: "Your last send's placement is still open",
+      });
+      expect(asked).toEqual([]);
+      const after = tab.store.useComposerDraftStore
+        .getState()
+        .getDraftSession(tab.store.DraftId.make(draftId));
+      expect(after?.environmentSelection).toBe("manual");
+      expect(after?.environmentId).toBe(origin);
+      expect(storedOperation(memory, draftId)).toEqual(bound);
+    });
+  });
+});
+
+describe("PR74-R1-F2: a direct annotation send while an operation is held", () => {
+  it("reconciles the held operation first and launches nothing elsewhere or afresh", async () => {
+    await withStorage(async (memory) => {
+      const tab = await openTab();
+      const draftId = composeDraft(tab, "annotated");
+      const id = tab.store.DraftId.make(draftId);
+      const seen: Array<{ environmentId: EnvironmentId; commandId: string; stored: unknown }> = [];
+      // A bound B, but the composer changed while it was asked: the draft stays on A.
+      await tab.placement.placeDraftBeforeSend({
+        draftId: id,
+        request,
+        candidateEnvironmentIds: [origin, box],
+        pinnedHere: false,
+        admit: admittedTo(seen, memory, draftId) as never,
+        canLaunchOn: () => true,
+        composerUnchanged: () => false,
+      });
+      const bound = storedOperation(memory, draftId);
+      const session = () => tab.store.useComposerDraftStore.getState().getDraftSession(id);
+      // An annotation send is not new automatic work, but the held operation still goes first.
+      expect(
+        tab.placement.placesBeforeSend({
+          draft: session(),
+          automatic: false,
+          pinnedHere: true,
+          request,
+        }),
+      ).toBe(true);
+      // Its origin refuses now: nothing is placed, and nothing may launch on A.
+      const asked: Array<string> = [];
+      const refused = await place(tab, draftId, refusing("other-session", asked), {
+        pinnedHere: true,
+      });
+      expect(refused.type).toBe("failed");
+      expect(asked).toEqual([bound.commandId]);
+      // Its origin answers B: the annotation belongs to A's preview, so it does not move.
+      const kept = await place(tab, draftId, admittedTo(seen, memory, draftId), {
+        pinnedHere: true,
+      });
+      expect(kept).toMatchObject({
+        type: "failed",
+        title: "Your last send's placement is still open",
+      });
+      // The send itself on A is blocked: no replacement command, no launch.
+      expect(
+        tab.placement.heldLaunchFor({
+          draft: session(),
+          environmentId: origin,
+          projectId: projectHere,
+        }),
+      ).toEqual({ type: "blocked" });
+      expect(storedOperation(memory, draftId)).toEqual(bound);
+      // On B, where it was bound, the send goes out as the reserved operation.
+      tab.store.useComposerDraftStore.getState().setDraftThreadContext(id, {
+        projectRef: scopeProjectRef(box, projectThere),
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: box,
+      });
+      expect(
+        tab.placement.heldLaunchFor({
+          draft: session(),
+          environmentId: box,
+          projectId: projectThere,
+        }),
+      ).toEqual({ type: "reserved", operation: bound });
+      // A draft holding nothing sends as before.
+      expect(
+        tab.placement.heldLaunchFor({ draft: null, environmentId: origin, projectId: projectHere }),
+      ).toEqual({ type: "none" });
+    });
+  });
+});

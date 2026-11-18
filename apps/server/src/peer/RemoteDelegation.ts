@@ -575,8 +575,10 @@ const make = Effect.gen(function* () {
     threads.intentOf(placementBinding(scope, input)).pipe(
       Effect.map(Option.map(EnvironmentId.make)),
       Effect.mapError(bindingFailure),
+      // Current exclusions hold for every bound destination, this one too. A launch already
+      // made here replays before placement is consulted (`t3_thread_launch`).
       Effect.tap((bound) =>
-        Option.isSome(bound) && bound.value !== hereId
+        Option.isSome(bound)
           ? Effect.flatMap(exclusions, (excluded) =>
               excluded.has(bound.value) ? Effect.fail(boundExcluded(bound.value)) : Effect.void,
             )
@@ -660,7 +662,15 @@ const make = Effect.gen(function* () {
       const bound = yield* threads.intentOf(placementId).pipe(Effect.mapError(unavailableHere));
       if (Option.isSome(bound)) {
         const placement = yield* decode(bound.value);
-        if (placement.environmentId !== hereId && excluded.has(placement.environmentId)) {
+        // Only a launch this server already accepted is reconciled past a current exclusion:
+        // its thread exists here. Elsewhere that cannot be known without contact.
+        const acceptedHere =
+          placement.environmentId === hereId &&
+          (yield* threads.getThreadShell(input.threadId).pipe(
+            Effect.map((shell) => shell !== null && shell.deletedAt === null),
+            Effect.mapError(unavailableHere),
+          ));
+        if (excluded.has(placement.environmentId) && !acceptedHere) {
           return yield* refuse(
             "excluded",
             `This launch is bound to environment ${placement.environmentId}, which automatic placement may no longer use, so nothing was sent. Reconcile it there, or start a new draft.`,

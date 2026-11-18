@@ -231,29 +231,37 @@ it("refreshes a stored automatic choice before sending an unsent draft", async (
   expect(appAtomRegistry.get(destinationSelections)).toEqual(selections);
 });
 
-it.each(["manual", "attachments", "promoted"] as const)(
-  "keeps the machine for %s drafts",
-  async (kind) => {
-    const { a, draftId, input, store } = setup();
-    if (kind === "manual") store.setDraftThreadContext(draftId, { environmentSelection: "manual" });
-    const guardedInput = {
-      ...input,
-      automaticEnvironment: kind !== "manual",
-      composerHasAttachments: kind === "attachments",
-      draftThread:
-        kind === "promoted"
-          ? {
-              ...input.draftThread!,
-              promotedTo: { environmentId: a, threadId: input.draftThread!.threadId },
-            }
-          : input.draftThread,
-    };
-    await using screen = await render(<Harness input={guardedInput} />);
-    await screen.getByRole("button", { name: "Send" }).click();
-    expect(resources.place).not.toHaveBeenCalled();
-    expect(store.getDraftSession(draftId)?.environmentId).toBe(a);
-  },
-);
+it.each(["manual", "promoted"] as const)("keeps the machine for %s drafts", async (kind) => {
+  const { a, draftId, input, store } = setup();
+  if (kind === "manual") store.setDraftThreadContext(draftId, { environmentSelection: "manual" });
+  const guardedInput = {
+    ...input,
+    automaticEnvironment: kind !== "manual",
+    draftThread:
+      kind === "promoted"
+        ? {
+            ...input.draftThread!,
+            promotedTo: { environmentId: a, threadId: input.draftThread!.threadId },
+          }
+        : input.draftThread,
+  };
+  await using screen = await render(<Harness input={guardedInput} />);
+  await screen.getByRole("button", { name: "Send" }).click();
+  expect(resources.place).not.toHaveBeenCalled();
+  expect(store.getDraftSession(draftId)?.environmentId).toBe(a);
+});
+
+// PR74-R1-F4: attachments not uploaded anywhere yet do not pin an automatic draft.
+it("places a fresh automatic draft whose attachments have not uploaded yet", async () => {
+  const { draftId, input } = setup();
+  await using screen = await render(<Harness input={{ ...input, composerHasAttachments: true }} />);
+  await screen.getByRole("button", { name: "Send" }).click();
+  await vi.waitFor(() =>
+    expect(resources.place).toHaveBeenCalledWith(
+      expect.objectContaining({ draftId, pinnedHere: false }),
+    ),
+  );
+});
 
 it("keeps the draft where it is when no machine was admitted", async () => {
   const { a, input } = setup();
