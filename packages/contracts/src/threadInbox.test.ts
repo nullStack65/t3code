@@ -7,6 +7,7 @@ import {
   routeThreadInbox,
   matchesInboxView,
   effectiveInboxView,
+  inboxOriginFor,
   founderInboxLane,
   compositeThreadKey,
 } from "./threadInbox.ts";
@@ -49,6 +50,21 @@ describe("shared fleet organizational inbox", () => {
       const saved = decode(encode({ ...jeffClient, founderInboxView: picked }));
       expect([effectiveInboxView(saved), saved.founderInboxOwner]).toEqual([picked, "jeff"]);
     }
+  });
+  it("attributes new work only to a chosen founder and leaves unchosen work in All", () => {
+    expect(inboxOriginFor({})).toBeUndefined();
+    // The server creates no inbox for a human thread without an origin, like legacy history.
+    for (const view of ["kameron", "jeff", "agents", "shared"] as const) {
+      expect(matchesInboxView(undefined, view)).toBe(false);
+    }
+    expect(matchesInboxView(undefined, effectiveInboxView({}))).toBe(true);
+    const origin = inboxOriginFor({ founderInboxOwner: "jeff" });
+    expect(origin).toEqual(jeff);
+    const inbox = makeThreadInbox({ actor: origin ?? null });
+    expect([matchesInboxView(inbox, "jeff"), matchesInboxView(inbox, "kameron")]).toEqual([
+      true,
+      false,
+    ]);
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });

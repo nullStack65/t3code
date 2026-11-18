@@ -103,6 +103,14 @@ export const effectiveInboxView = (settings: {
   readonly founderInboxOwner?: Founder | undefined;
 }): InboxView => settings.founderInboxView ?? settings.founderInboxOwner ?? "all";
 
+/** New work is attributed only to a chosen founder; otherwise it stays unclassified (All). */
+export const inboxOriginFor = (settings: {
+  readonly founderInboxOwner?: Founder | undefined;
+}): InboxActor | undefined =>
+  settings.founderInboxOwner === undefined
+    ? undefined
+    : { kind: "human", id: settings.founderInboxOwner };
+
 /** All deliberately includes every thread, including unclassified history. */
 export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: InboxView) {
   if (view === "all") return true;
