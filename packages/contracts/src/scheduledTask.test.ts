@@ -3,6 +3,8 @@ import * as Schema from "effect/Schema";
 
 import {
   MIN_SCHEDULED_TASK_INTERVAL_MS,
+  ScheduledTaskListResult,
+  ScheduledTaskPlacementPolicy,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
 } from "./scheduledTask.ts";
@@ -72,5 +74,45 @@ describe("webhook filters", () => {
     expect(accepts([{ path: "body.label.name", op: "in", value: ["needs review"] }])).toBe(true);
     expect(accepts([{ path: "body.action", op: "equals" }])).toBe(false);
     expect(accepts([{ path: "body.action", op: "matches", value: "^opened$" }])).toBe(false);
+  });
+});
+
+describe("owned task contracts", () => {
+  const decodeList = Schema.decodeUnknownSync(ScheduledTaskListResult);
+  const decodePolicy = Schema.decodeUnknownSync(ScheduledTaskPlacementPolicy);
+  const policy = {
+    revision: 1,
+    placement: "auto",
+    originEnvironmentId: "environment-origin",
+    destinations: [{ environmentId: "environment-box", linkIncarnation: "link-1" }],
+    runtimeModeCeiling: "full-access",
+    interactionModeCeiling: "default",
+    acceptedVia: "mcp",
+    acceptedAt: "2026-11-18T12:00:00.000Z",
+  };
+
+  it("reads a list without unsupported records, as older servers send it", () => {
+    expect(decodeList({ tasks: [] })).toEqual({ tasks: [] });
+  });
+
+  it("keeps unsupported records apart from tasks", () => {
+    const unsupported = {
+      id: "task:future",
+      title: "Future",
+      projectId: "project:test",
+      createdAt: "2026-11-18T12:00:00.000Z",
+      updatedAt: "2026-11-18T12:00:00.000Z",
+      reason: "Saved by another version.",
+    };
+    expect(decodeList({ tasks: [], unsupported: [unsupported] }).unsupported).toEqual([
+      unsupported,
+    ]);
+  });
+
+  it("accepts only an automatic placement with a positive revision", () => {
+    expect(decodePolicy(policy)).toEqual(policy);
+    expect(() => decodePolicy({ ...policy, placement: "manual" })).toThrow();
+    expect(() => decodePolicy({ ...policy, revision: 0 })).toThrow();
+    expect(() => decodePolicy({ ...policy, acceptedVia: "label" })).toThrow();
   });
 });

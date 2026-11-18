@@ -220,6 +220,17 @@ jobs:
             apps/server/src/mcp/OrchestratorMcpService.test.ts \
             apps/server/src/cli/thread.test.ts \
             apps/server/src/ws.test.ts \
+            packages/contracts/src/scheduledTask.test.ts \
+            apps/server/src/scheduledTasks/storedSchedule.test.ts \
+            apps/server/src/scheduledTasks/Schedule.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.interval.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.schedule.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.webhook.test.ts \
+            apps/server/src/scheduledTasks/ScheduledTaskService.placement.test.ts \
+            apps/server/src/scheduledTasks/webhookRoute.test.ts \
+            apps/server/src/persistence/Migrations.test.ts \
+            apps/server/src/persistence/Migrations/102_ScheduledTaskOccurrences.test.ts \
             packages/contracts/src/environment.test.ts \
             scripts/feature-map.test.ts
 
