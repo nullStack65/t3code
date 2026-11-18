@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { describe, expect, it } from "vite-plus/test";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
@@ -8,6 +8,8 @@ import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
+  draftLaunchRequest,
+  resolveDraftLaunch,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -164,5 +166,81 @@ describe("approvalRedirectNotice", () => {
   it("stays quiet when the decline failed or the user left the thread", () => {
     expect(approvalRedirectNotice({ ...settled, declined: false })).toBeNull();
     expect(approvalRedirectNotice(settled)).toBeNull();
+  });
+});
+
+describe("draft launch retry", () => {
+  const request = (model: string) =>
+    draftLaunchRequest({
+      modelSelection: { instanceId: "claudeAgent", model },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      projectId: "project-1",
+      branch: null,
+      worktreePath: null,
+      baseBranch: null,
+      startFromOrigin: false,
+    });
+  const bound = {
+    commandId: "command-1",
+    messageId: "message-1",
+    createdAt: "2026-11-18T00:00:00.000Z",
+    request: request("claude-sonnet-4-6"),
+    restoredCopy: "restored",
+  };
+  // The turn is stored before the launch goes out, so this one may have.
+  const pending = {
+    ...bound,
+    turn: {
+      environmentId: EnvironmentId.make("environment-local"),
+      input: {
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("message-1"),
+          role: "user" as const,
+          text: "Run the suite",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        createdAt: bound.createdAt,
+      },
+    },
+  };
+
+  it("keeps a bound launch that never went out as itself, and lets a change start afresh", () => {
+    // Unchanged, it stays the same operation, its turn still to be prepared.
+    expect(resolveDraftLaunch(bound, request("claude-sonnet-4-6"), "restored")).toEqual({
+      type: "retry",
+      launch: bound,
+    });
+    // Without a turn nothing went out, so an edit or another model is a new operation.
+    expect(resolveDraftLaunch(bound, request("claude-sonnet-4-6"), "edited").type).toBe("new");
+    expect(resolveDraftLaunch(bound, request("claude-opus-5-5"), "restored").type).toBe("new");
+  });
+
+  it("resends a pending launch only from its unedited restored copy and unchanged request", () => {
+    expect(resolveDraftLaunch(null, request("claude-sonnet-4-6"), "anything")).toEqual({
+      type: "new",
+    });
+    expect(resolveDraftLaunch(pending, request("claude-sonnet-4-6"), "restored")).toEqual({
+      type: "retry",
+      launch: pending,
+    });
+    // An edited composer, another model, or a copy never put back is a different request.
+    expect(resolveDraftLaunch(pending, request("claude-sonnet-4-6"), "edited").type).toBe(
+      "changed",
+    );
+    expect(resolveDraftLaunch(pending, request("claude-opus-5-5"), "restored").type).toBe(
+      "changed",
+    );
+    const { restoredCopy: _copy, ...unrestored } = pending;
+    expect(resolveDraftLaunch(unrestored, request("claude-sonnet-4-6"), "restored").type).toBe(
+      "changed",
+    );
   });
 });

@@ -1,4 +1,5 @@
 import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { PendingDraftLaunch } from "../../composerDraftStore";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 
@@ -101,4 +102,44 @@ export function approvalRedirectNotice(input: {
     return "Another approval arrived, so your message wasn't sent.";
   }
   return null;
+}
+
+/**
+ * What a new thread's launch asks for besides its message: model, modes and workspace. The
+ * message itself is the composer, which a retry must leave as it was restored.
+ */
+export function draftLaunchRequest(input: {
+  readonly modelSelection: unknown;
+  readonly runtimeMode: string;
+  readonly interactionMode: string;
+  readonly projectId: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  readonly baseBranch: string | null;
+  readonly startFromOrigin: boolean;
+}): string {
+  return JSON.stringify(input);
+}
+
+/**
+ * A pending launch sent again unchanged (its restored copy, `composerDraftCopySignature`, and its
+ * request) stays that operation. Changed, it waits while it may have gone out; its turn is stored
+ * before it does, so one without a turn never did and a change starts afresh on the same binding.
+ */
+export function resolveDraftLaunch(
+  pending: PendingDraftLaunch | null | undefined,
+  request: string,
+  composerSignature: string,
+):
+  | { readonly type: "new" }
+  | { readonly type: "retry"; readonly launch: PendingDraftLaunch }
+  | { readonly type: "changed" } {
+  if (!pending) return { type: "new" };
+  if (
+    pending.request === request &&
+    pending.restoredCopy !== undefined &&
+    pending.restoredCopy === composerSignature
+  )
+    return { type: "retry", launch: pending };
+  return pending.turn ? { type: "changed" } : { type: "new" };
 }

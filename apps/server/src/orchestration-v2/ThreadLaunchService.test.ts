@@ -67,6 +67,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import { OrchestratorProjectionError } from "./Orchestrator.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -138,6 +139,10 @@ interface HarnessOptions {
   readonly getLaunchSettings?: ServerSettings.ServerSettingsService["Service"]["getSettings"];
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
+  /** Replaces methods of the thread service the launch uses, around the real one. */
+  readonly threads?: (
+    threads: ThreadManagement.ThreadManagementService["Service"],
+  ) => Partial<ThreadManagement.ThreadManagementService["Service"]>;
   readonly isGitRepository?: CheckpointStore.CheckpointStore["Service"]["isGitRepository"];
 }
 
@@ -247,11 +252,22 @@ function makeHarness(options: HarnessOptions = {}) {
         folderForThread: () => Effect.succeedNone,
       }),
   );
+  const wrapThreads = options.threads;
+  const layerLaunchThreads =
+    wrapThreads === undefined
+      ? layerThreadManagement
+      : Layer.effect(
+          ThreadManagement.ThreadManagementService,
+          Effect.gen(function* () {
+            const threads = yield* ThreadManagement.ThreadManagementService;
+            return { ...threads, ...wrapThreads(threads) };
+          }),
+        ).pipe(Layer.provide(layerThreadManagement));
   const layerLaunch = ThreadLaunch.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         layerExternalServices,
-        layerThreadManagement,
+        layerLaunchThreads,
         layerReceipts,
         layerOrchestrator,
         IdAllocator.layer,
@@ -1996,6 +2012,45 @@ it.effect("replays a server-allocated launch", () =>
       assert.equal(settled.projection.messages[0]?.id, first.projection.messages[0]?.id);
       assert.equal(settled.projection.runs[0]?.id, first.projection.runs[0]?.id);
       assert.equal(harness.runSetup.mock.calls.length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+// A launch can fail after its claim committed the thread, its message and its run: the caller
+// gets a launch error for a launch that exists, so only the same command can settle it.
+it.effect("a launch that fails after its claim committed is recovered by the same command", () =>
+  Effect.gen(function* () {
+    let failedReads = 0;
+    const harness = makeHarness({
+      threads: (threads) => ({
+        getThreadProjection: (threadId) =>
+          failedReads++ === 0
+            ? Effect.fail(new OrchestratorProjectionError({ threadId }))
+            : threads.getThreadProjection(threadId),
+      }),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = launchInput({
+        command: "command:launch:fails-after-claim",
+        thread: "thread:fails-after-claim",
+        message: "Run the suite",
+      });
+      const failed = yield* launches.launch(input).pipe(Effect.flip);
+      assert.equal(failed._tag, "ThreadLaunchError");
+      // The launch it reported as failed was accepted: its thread, message and run exist.
+      const accepted = yield* threads.getThreadProjection(input.threadId);
+      assert.equal(accepted.messages.length, 1);
+      assert.equal(accepted.runs.length, 1);
+      // The same command returns that launch; it starts nothing new.
+      const retried = yield* launches.launch(input);
+      assert.isTrue(retried.resumed);
+      assert.equal(retried.threadId, input.threadId);
+      assert.equal(retried.projection.messages.length, 1);
+      assert.equal(retried.projection.messages[0]?.id, accepted.messages[0]?.id);
+      assert.equal(retried.projection.runs.length, 1);
+      assert.equal(retried.projection.runs[0]?.id, accepted.runs[0]?.id);
     }).pipe(Effect.provide(harness.layer));
   }),
 );

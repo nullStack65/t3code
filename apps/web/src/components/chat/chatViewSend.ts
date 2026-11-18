@@ -28,10 +28,19 @@ import { newThreadId } from "~/lib/utils";
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type ComposerThreadTarget,
+  type PendingDraftLaunch,
+  type PreparedFileUpload,
+  composerDraftHasUserContent,
+  markRestoredLaunchCopy,
+  markUnchangedLaunchCopy,
+  toSentComposerDraft,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
+import { composerDraftContentChanged } from "./composerSend.logic";
+import { serializeComposerImages } from "./composerImagePersistence";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import { createModelSelection } from "@t3tools/shared/model";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -259,6 +268,52 @@ export async function rewindToMessage(input: {
 }
 
 /**
+ * Clears what a send took from the composer, unless the user changed it after `before` was read:
+ * that edit is theirs, not the send's, so it stays. True when cleared.
+ */
+export function clearSentComposerContent(
+  draftTarget: ComposerThreadTarget,
+  before: ComposerThreadDraftState | null,
+): boolean {
+  const store = useComposerDraftStore.getState();
+  if (composerDraftContentChanged(before, store.getComposerDraft(draftTarget) ?? null))
+    return false;
+  store.clearComposerContent(draftTarget);
+  return true;
+}
+
+/**
+ * The composer a launch is sent from, stored whole so a reload can put it back: every image's
+ * bytes are read now, not left to the draft's own background saving. Rejects when one cannot be.
+ */
+export async function readSentComposer(draft: ComposerThreadDraftState) {
+  const images = await serializeComposerImages(draft.images, draft.persistedAttachments);
+  if (images.length !== draft.images.length) {
+    throw new Error("An image could not be saved before sending, so nothing was started.");
+  }
+  return toSentComposerDraft(draft, images);
+}
+
+/**
+ * The upload each sent file went out as, keyed by its own id. `prepared` is what
+ * `prepareTurnAttachments` returned for `attachments`, in the same order.
+ */
+export function preparedFileUploads(input: {
+  readonly environmentId: EnvironmentId;
+  readonly attachments: ReadonlyArray<ComposerImageAttachment | ComposerFileAttachment>;
+  readonly prepared: ReadonlyArray<{ readonly id: string }>;
+  readonly usesAttachmentUploads: boolean;
+}): PreparedFileUpload[] {
+  if (!input.usesAttachmentUploads) return [];
+  return input.attachments.flatMap((attachment, index) => {
+    const upload = input.prepared[index];
+    return attachment.type === "file" && upload
+      ? [{ fileId: attachment.id, environmentId: input.environmentId, attachmentId: upload.id }]
+      : [];
+  });
+}
+
+/**
  * Writes a failed send's composer contents back into its draft. Returns the
  * restored images, which are fresh copies so their preview URLs outlive the
  * optimistic row that held the originals.
@@ -279,6 +334,44 @@ export function restoreComposerDraft(
   store.setThreadContexts(draftTarget, snapshot.threadContexts);
   store.setEnvironmentContexts(draftTarget, snapshot.environmentContexts);
   return images;
+}
+
+/**
+ * The launch a failed draft send leaves pending. Once storage held its binding its outcome is the
+ * open one, sent or not: sent unchanged again it stays that launch. Unbound, it leaves the prior.
+ */
+export function launchLeftPendingAfterFailure(input: {
+  readonly launch: PendingDraftLaunch | undefined;
+  readonly priorLaunch: PendingDraftLaunch | null;
+  readonly bound: boolean;
+}): PendingDraftLaunch | null {
+  return input.bound && input.launch ? input.launch : input.priorLaunch;
+}
+
+/**
+ * Leaves the composer of a failed send ready to send it again. `kept`: never cleared nor edited, it
+ * still is the sent copy. `edited`: the user's newer content stays as it is. `restored`: put back.
+ */
+export function restoreFailedSendComposer(input: {
+  readonly draftTarget: ComposerThreadTarget;
+  /** The draft whose launch this send bound; null when its binding did not commit, so no other launch is relabelled. */
+  readonly boundDraftId: DraftId | null;
+  readonly before: ComposerThreadDraftState | null;
+  readonly cleared: boolean;
+  readonly snapshot: ComposerSendSnapshot;
+}):
+  | { readonly type: "kept" }
+  | { readonly type: "edited" }
+  | { readonly type: "restored"; readonly images: ComposerImageAttachment[] } {
+  const current = useComposerDraftStore.getState().getComposerDraft(input.draftTarget) ?? null;
+  if (!input.cleared && !composerDraftContentChanged(input.before, current)) {
+    if (input.boundDraftId) markUnchangedLaunchCopy(input.boundDraftId);
+    return { type: "kept" };
+  }
+  if (composerDraftHasUserContent(current)) return { type: "edited" };
+  const images = restoreComposerDraft(input.draftTarget, input.snapshot);
+  if (input.boundDraftId) markRestoredLaunchCopy(input.boundDraftId);
+  return { type: "restored", images };
 }
 
 export interface MultipleModelTarget {
