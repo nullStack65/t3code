@@ -7,11 +7,12 @@ import {
   type EnvironmentId,
   type ThreadInbox,
 } from "@t3tools/contracts";
-import type { ClientSettings } from "@t3tools/contracts/settings";
+import type { ClientSettings, ThreadAttribution } from "@t3tools/contracts/settings";
 
 export interface ThreadListFilter {
   readonly inboxes: ReadonlyArray<InboxChoice>;
   readonly hiddenEnvironmentIds: ReadonlyArray<EnvironmentId>;
+  readonly hiddenAttributions: ReadonlyArray<ThreadAttribution>;
 }
 
 interface FilterableThread {
@@ -25,11 +26,15 @@ interface FilterableThread {
 export const threadListFilterOf = (
   settings: Pick<
     ClientSettings,
-    "founderInboxFilter" | "founderInboxOwner" | "sidebarHiddenEnvironmentIds"
+    | "founderInboxFilter"
+    | "founderInboxOwner"
+    | "sidebarHiddenEnvironmentIds"
+    | "sidebarHiddenThreadAttributions"
   >,
 ): ThreadListFilter => ({
   inboxes: effectiveInboxFilter(settings),
   hiddenEnvironmentIds: settings.sidebarHiddenEnvironmentIds ?? [],
+  hiddenAttributions: settings.sidebarHiddenThreadAttributions ?? [],
 });
 
 const matchesInboxes = (thread: FilterableThread, inboxes: ReadonlyArray<InboxChoice>) =>
@@ -39,8 +44,14 @@ const matchesInboxes = (thread: FilterableThread, inboxes: ReadonlyArray<InboxCh
     thread.source.createdBy === "agent" &&
     primaryInbox(thread.source.inbox) === null);
 
-export const matchesThreadListFilter = (thread: FilterableThread, filter: ThreadListFilter) =>
+/** Without an attribution (notifications), the From section does not apply. */
+export const matchesThreadListFilter = (
+  thread: FilterableThread,
+  filter: ThreadListFilter,
+  attribution?: ThreadAttribution,
+) =>
   !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&
+  (attribution === undefined || !filter.hiddenAttributions.includes(attribution)) &&
   matchesInboxes(thread, filter.inboxes);
 
 /** The chosen founder's inbox first, then Agents, so the common pair sits together. */
@@ -77,34 +88,43 @@ export function changedThreadListFilters(
   filter: ThreadListFilter,
   owner: Founder | undefined,
   environmentIds: ReadonlyArray<EnvironmentId>,
-): { readonly inboxes: boolean; readonly environments: boolean } {
+): { readonly inboxes: boolean; readonly environments: boolean; readonly from: boolean } {
   return {
     inboxes: !sameMembers(filter.inboxes, effectiveInboxFilter({ founderInboxOwner: owner })),
     environments: filter.hiddenEnvironmentIds.some((id) => environmentIds.includes(id)),
+    from: filter.hiddenAttributions.length > 0,
   };
 }
 
+const increment = <K>(counts: Map<K, number>, key: K) =>
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+
 /**
- * Faceted counts: each inbox counts threads in the shown environments, and each environment
- * counts threads in the chosen inboxes, so a count is what checking that option would add.
+ * Faceted counts: each section counts threads that pass the other two sections, so a count
+ * is what checking that option would add.
  */
-export function threadListFilterCounts(
-  threads: ReadonlyArray<FilterableThread>,
+export function threadListFilterCounts<T extends FilterableThread>(
+  threads: ReadonlyArray<T>,
   filter: ThreadListFilter,
+  attributionOf: (thread: T) => ThreadAttribution,
 ) {
   const inboxes = new Map<InboxChoice, number>();
   const environments = new Map<EnvironmentId, number>();
+  const from = new Map<ThreadAttribution, number>();
   for (const thread of threads) {
-    if (!filter.hiddenEnvironmentIds.includes(thread.environmentId)) {
+    const attribution = attributionOf(thread);
+    const environmentShown = !filter.hiddenEnvironmentIds.includes(thread.environmentId);
+    const fromShown = !filter.hiddenAttributions.includes(attribution);
+    const inboxShown = matchesInboxes(thread, filter.inboxes);
+    if (environmentShown && fromShown) {
       for (const choice of InboxChoice.literals) {
-        if (matchesInboxes(thread, [choice])) inboxes.set(choice, (inboxes.get(choice) ?? 0) + 1);
+        if (matchesInboxes(thread, [choice])) increment(inboxes, choice);
       }
     }
-    if (matchesInboxes(thread, filter.inboxes)) {
-      environments.set(thread.environmentId, (environments.get(thread.environmentId) ?? 0) + 1);
-    }
+    if (inboxShown && fromShown) increment(environments, thread.environmentId);
+    if (inboxShown && environmentShown) increment(from, attribution);
   }
-  return { inboxes, environments };
+  return { inboxes, environments, from };
 }
 
 /** Toggles one option, keeping at least one checked so the list never empties by accident. */

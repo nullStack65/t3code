@@ -403,11 +403,23 @@ export const VoiceTranscriptionDestination = Schema.Union([
 ]);
 export type VoiceTranscriptionDestination = typeof VoiceTranscriptionDestination.Type;
 
+/** Who a thread came from, for the sidebar's From filter and row badges. */
+export const ThreadAttribution = Schema.Literals([
+  "kameron",
+  "kameron-agents",
+  "jeff",
+  "jeff-agents",
+  "unknown",
+]);
+export type ThreadAttribution = typeof ThreadAttribution.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   // Absent until chosen; whole-snapshot saves must not record a default as a choice.
   founderInboxOwner: Schema.optionalKey(Founder),
   founderInboxFilter: Schema.optionalKey(Schema.Array(InboxChoice)),
   sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
+  sidebarHiddenThreadAttributions: Schema.optionalKey(Schema.Array(ThreadAttribution)),
+  founderByEnvironmentId: Schema.optionalKey(Schema.Record(EnvironmentId, Founder)),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
@@ -2057,6 +2069,8 @@ export const ClientSettingsPatch = Schema.Struct({
   founderInboxOwner: Schema.optionalKey(Founder),
   founderInboxFilter: Schema.optionalKey(Schema.Array(InboxChoice)),
   sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
+  sidebarHiddenThreadAttributions: Schema.optionalKey(Schema.Array(ThreadAttribution)),
+  founderByEnvironmentId: Schema.optionalKey(Schema.Record(EnvironmentId, Founder)),
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),

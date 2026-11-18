@@ -36,11 +36,13 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 
-import type { TimestampFormat } from "@t3tools/contracts/settings";
+import type { ThreadAttribution, TimestampFormat } from "@t3tools/contracts/settings";
+import { THREAD_ATTRIBUTION_LABELS } from "@t3tools/client-runtime/state/thread-attribution";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
   ArrowRightLeftIcon,
+  BotIcon,
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
@@ -442,6 +444,31 @@ type SortableThreadRowBag = Pick<
   "listeners" | "setNodeRef" | "transform" | "transition" | "isDragging"
 >;
 
+const ATTRIBUTION_INITIALS: Record<ThreadAttribution, string> = {
+  kameron: "K",
+  "kameron-agents": "K",
+  jeff: "J",
+  "jeff-agents": "J",
+  unknown: "?",
+};
+
+/** Who the thread came from; the row's accessible name carries the full label. */
+function ThreadAttributionBadge({ attribution }: { attribution: ThreadAttribution }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-4 shrink-0 items-center gap-0.5 rounded-sm px-1 font-medium text-2xs leading-none",
+        attribution === "unknown"
+          ? "text-sidebar-muted-foreground/60"
+          : "bg-sidebar-row-hover text-sidebar-muted-foreground",
+      )}
+    >
+      {ATTRIBUTION_INITIALS[attribution]}
+      {attribution.endsWith("-agents") ? <BotIcon className="size-3" /> : null}
+    </span>
+  );
+}
+
 export const draftSurfaceClassName = "bg-warning/4 hover:bg-warning/8";
 export const draftPenClassName = "size-3 shrink-0 text-warning-foreground";
 
@@ -574,6 +601,7 @@ type SidebarThreadRowProps = {
   readOpensPullRequestsInRightPanel: () => boolean;
   jumpLabel: string | null;
   currentEnvironmentId: string | null;
+  attribution: ThreadAttribution;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
   scratchMachineLabel: string | null;
@@ -1037,6 +1065,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     title: thread.title,
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
+    attributionLabel:
+      props.attribution === "unknown" ? null : THREAD_ATTRIBUTION_LABELS[props.attribution],
     isActive: props.isActive,
   });
 
@@ -1158,6 +1188,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     )
   ) : null;
 
+  const attributionBadge = <ThreadAttributionBadge attribution={props.attribution} />;
   const remoteMachineIcon =
     isRemote && !showsScratchMachine ? (
       <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
@@ -1205,6 +1236,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         aria-hidden
         className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
       >
+        {attributionBadge}
         {remoteMachineIcon}
         <SidebarProviderStack
           thread={thread}
@@ -1215,6 +1247,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const titleLineIcons = metaLineEmpty ? (
     <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
+      {attributionBadge}
       {remoteMachineIcon}
       <SidebarProviderStack
         thread={thread}

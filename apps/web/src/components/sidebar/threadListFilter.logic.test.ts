@@ -41,19 +41,36 @@ describe("thread list filter", () => {
     expect(matchesThreadListFilter(thread(laptop, kameron), hidingCrown)).toBe(true);
   });
 
-  it("counts each section within the other section's selection", () => {
+  it("counts each section within the other sections' selection", () => {
     const threads = [
-      thread(laptop, kameron),
-      thread(laptop, bot),
-      thread(crown, jeff),
-      thread(crown, kameron),
+      { ...thread(laptop, kameron), from: "kameron" as const },
+      { ...thread(laptop, bot), from: "kameron-agents" as const },
+      { ...thread(crown, jeff), from: "jeff" as const },
+      { ...thread(crown, kameron), from: "kameron" as const },
+      { ...thread(laptop, kameron), from: "unknown" as const },
     ];
-    const counts = threadListFilterCounts(threads, {
-      inboxes: ["kameron"],
-      hiddenEnvironmentIds: [crown],
-    });
+    const counts = threadListFilterCounts(
+      threads,
+      { inboxes: ["kameron"], hiddenEnvironmentIds: [crown], hiddenAttributions: ["unknown"] },
+      (candidate) => candidate.from,
+    );
     expect(Object.fromEntries(counts.inboxes)).toEqual({ kameron: 1, agents: 1 });
     expect(Object.fromEntries(counts.environments)).toEqual({ laptop: 1, crown: 1 });
+    expect(Object.fromEntries(counts.from)).toEqual({ kameron: 1, unknown: 1 });
+    expect(
+      matchesThreadListFilter(
+        threads[4]!,
+        threadListFilterOf({ sidebarHiddenThreadAttributions: ["unknown"] }),
+        "unknown",
+      ),
+    ).toBe(false);
+    // Notifications pass no attribution, so the From section does not silence them.
+    expect(
+      matchesThreadListFilter(
+        threads[4]!,
+        threadListFilterOf({ sidebarHiddenThreadAttributions: ["unknown"] }),
+      ),
+    ).toBe(true);
   });
 
   it("reports only sections that differ from this device's default", () => {
@@ -62,6 +79,7 @@ describe("thread list filter", () => {
     expect(changedThreadListFilters(unchanged, "jeff", environments)).toEqual({
       inboxes: false,
       environments: false,
+      from: false,
     });
     const reordered = { ...unchanged, inboxes: ["agents", "jeff"] as const };
     expect(changedThreadListFilters(reordered, "jeff", environments).inboxes).toBe(false);
@@ -74,7 +92,7 @@ describe("thread list filter", () => {
         "jeff",
         environments,
       ),
-    ).toEqual({ inboxes: false, environments: true });
+    ).toEqual({ inboxes: false, environments: true, from: false });
   });
 
   it("toggles in menu order and never unchecks the last option", () => {
