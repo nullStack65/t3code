@@ -357,11 +357,11 @@ Link two machines, such as your laptop and a VPS, and agents on one can work on
 the other: launch, message, wait on and stop its threads, answer their
 questions, and manage its queues, projects and scheduled tasks.
 
-Linked environments is a beta. Turn it on for both machines in **Settings →
-Labs**; on mobile, **Settings → Labs** lists each connected machine. While it is
-off on either machine, agents start nothing over a link between them. A task
-already running on the other machine still finishes, and if that machine has it
-off, its result arrives once it is back on.
+Linked environments is a beta, on by default in Closura builds. It needs to be on
+for both machines in **Settings → Labs**; on mobile, **Settings → Labs** lists
+each connected machine. While it is off on either machine, agents start nothing
+over a link between them. A task already running on the other machine still
+finishes, and if that machine has it off, its result arrives once it is back on.
 
 On the machine you will work from, open **Settings → Environments → Linked environments**,
 choose **Link**, and pick the other machine or enter its address. The list
