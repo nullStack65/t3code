@@ -201,6 +201,9 @@ function delegatedCompletionNotification(
   ).length;
   const outcome = combinedOutcome(reports.map((report) => report.outcome));
   const verb = outcome === "failed" ? "failed" : outcome === "cancelled" ? "stopped" : "finished";
+  const alerts = taskIds.filter(
+    (taskId) => tasks.find((task) => task.id === taskId)?.workerAlert !== undefined,
+  ).length;
   const [only] = reports;
   if (reports.length === 1 && only !== undefined) {
     const label = reportLabel(only.label);
@@ -211,7 +214,7 @@ function delegatedCompletionNotification(
         ...(only.childThreadId === undefined ? {} : { childThreadId: only.childThreadId }),
       },
       outcome,
-      summary: `Delegated task${label === undefined ? "" : ` "${label}"`} ${verb}`,
+      summary: `Delegated task${label === undefined ? "" : ` "${label}"`} ${verb}${alerts === 0 ? "" : " with a worker alert"}`,
     };
   }
   const labels = reports.flatMap((report) => reportLabel(report.label) ?? []);
@@ -222,7 +225,7 @@ function delegatedCompletionNotification(
   return {
     source: { kind: "delegated_task", taskIds },
     outcome,
-    summary: `${count} delegated tasks ${verb}${labels.length === 0 ? "" : `: ${labels.join(", ")}`}`,
+    summary: `${count} delegated tasks ${verb}${alerts === 0 ? "" : `, ${alerts} with a worker alert`}${labels.length === 0 ? "" : `: ${labels.join(", ")}`}`,
   };
 }
 

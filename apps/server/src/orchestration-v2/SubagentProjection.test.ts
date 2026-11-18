@@ -31,6 +31,7 @@ import {
   endOrphanedNativeSubagent,
   endRunlessRootTurns,
   PROVIDER_STOP_REASON_SIGNAL,
+  withholdsTask,
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
@@ -528,8 +529,74 @@ it("orders a task's assistant messages by turn item, not by timestamps", () => {
       { ...projection, messages: [report.message], providerTurns: [reported as never] },
       run,
     ).text,
-    "Requested model gpt-5.4; the provider reported running gpt-5.4-mini.\n\nAll steps passed.",
+    "Worker alert: it ran gpt-5.4-mini instead of gpt-5.4. Replace the worker if it cannot do the task.\n\nAll steps passed.",
   );
+});
+
+it("alerts the parent when a safeguard swapped the model and the worker held the task", () => {
+  const { projection, run } = taskFixture();
+  const at = DateTime.makeUnsafe("2026-07-24T10:05:00.000Z");
+  const reply = makeSubagentConversationArtifacts({
+    messageId: MessageId.make("held"),
+    turnItemId: TurnItemId.make("held"),
+    threadId: parentThreadId,
+    rootNodeId: NodeId.make("root"),
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    role: "assistant",
+    text: "I'm holding until Kameron gives direct confirmation.",
+    ordinal: 2,
+    now: at,
+  });
+  const notice = (runId: RunId, id: string) =>
+    ({
+      ...reply.turnItem,
+      id: TurnItemId.make(id),
+      runId,
+      ordinal: 1,
+      type: "system_notice",
+      message: "Switched to claude-opus-4-8 after a safeguard.",
+      fallbackModel: "claude-opus-4-8",
+    }) as OrchestrationV2TurnItem;
+  const result = subagentResultForRun(
+    {
+      ...projection,
+      messages: [{ ...reply.message, runId: run.id }],
+      turnItems: [
+        { ...reply.turnItem, runId: run.id },
+        notice(run.id, "fallback"),
+        notice(RunId.make("run:other"), "other-fallback"),
+      ],
+      providerTurns: [
+        { runAttemptId: run.activeAttemptId, ordinal: 1, model: "claude-opus-4-8" } as never,
+      ],
+    },
+    { ...run, modelSelection: { ...run.modelSelection, model: "claude-opus-5-5" } },
+  );
+  const alert =
+    "Worker alert: it ran claude-opus-4-8 instead of claude-opus-5-5; a provider safeguard switched it to claude-opus-4-8; its final message withholds the task. Replace the worker if it cannot do the task.";
+  assert.deepEqual(result.workerAlert, {
+    reasons: ["model_substituted", "provider_fallback", "withheld_task"],
+    notice: alert,
+  });
+  assert.equal(result.text, `${alert}\n\nI'm holding until Kameron gives direct confirmation.`);
+});
+
+it.each([
+  ["I'm holding until you confirm.", true],
+  ["Holding off on the merge until Lead relays approval.", true],
+  ["I need direct confirmation from Kameron before I start.", true],
+  ["Please confirm directly that you want this.", true],
+  ["I need your explicit approval to continue.", true],
+  ["I can\u2019t help with this request.", true],
+  ["I won't proceed without a human sign-off.", true],
+  ["Merged after Kameron's approval; all checks pass.", false],
+  ["The PR is open and awaiting review.", false],
+  ["Added a test for the holding-pattern parser.", false],
+  ["Fixed the bug where the queue kept holding stale entries.", false],
+])("withholdsTask(%j) is %s", (text, expected) => {
+  assert.equal(withholdsTask(text), expected);
 });
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>

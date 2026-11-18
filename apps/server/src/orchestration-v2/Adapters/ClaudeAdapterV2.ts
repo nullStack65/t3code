@@ -10983,6 +10983,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 status: "completed",
                 title: message.content,
                 message: message.content,
+                ...(message.subtype === "model_refusal_fallback"
+                  ? { fallbackModel: message.fallback_model }
+                  : {}),
                 startedAt: now,
                 completedAt: now,
                 updatedAt: now,

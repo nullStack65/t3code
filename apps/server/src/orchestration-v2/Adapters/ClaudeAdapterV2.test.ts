@@ -10249,7 +10249,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     { name: "hides a passive summary", level: "notice", visible: false },
     { name: "shows a blocking notice", level: "notice", preventContinuation: true, visible: true },
     { name: "shows a warning", level: "warning", visible: true },
-  ])("Claude Stop-hook notices: $name", ({ level, preventContinuation, visible }) =>
+    { name: "marks a safeguard fallback", fallbackModel: "claude-opus-4-8", visible: true },
+  ])("Claude system notices: $name", ({ level, preventContinuation, fallbackModel, visible }) =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
       yield* harness.runtime.startTurn(
@@ -10267,9 +10268,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         harness.sdkMessages,
         claudeSdkFrame({
           type: "system",
-          subtype: "informational",
+          ...(fallbackModel === undefined
+            ? { subtype: "informational", level }
+            : {
+                subtype: "model_refusal_fallback",
+                trigger: "refusal",
+                direction: "retry",
+                original_model: "claude-opus-5-5",
+                fallback_model: fallbackModel,
+                request_id: null,
+              }),
           content,
-          level,
           ...(preventContinuation === undefined
             ? {}
             : { prevent_continuation: preventContinuation }),
@@ -10285,10 +10294,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.deepEqual(
         harness.events.flatMap((event) =>
           event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
-            ? [event.turnItem.message]
+            ? [[event.turnItem.message, event.turnItem.fallbackModel]]
             : [],
         ),
-        visible ? [content] : [],
+        visible ? [[content, fallbackModel]] : [],
       );
       assert.isFalse(
         harness.events.some(

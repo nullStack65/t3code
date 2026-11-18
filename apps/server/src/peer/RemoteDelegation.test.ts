@@ -1957,13 +1957,14 @@ it.effect("a task's result is its own run's whole last reply, not a later run's"
       yield* Deferred.succeed(thread.finished, undefined);
       const task = yield* taskResult(a, taskId);
       expect(task?.status).toBe("completed");
-      expect(task?.result).toBe(
-        `Requested model gpt-5.4; the provider reported running gpt-5.4-mini.\n\n${long}`,
-      );
+      const notice =
+        "Worker alert: it ran gpt-5.4-mini instead of gpt-5.4. Replace the worker if it cannot do the task.";
+      expect(task?.result).toBe(`${notice}\n\n${long}`);
       const status = yield* a.call("task_status", { taskId });
       expect(status.structuredContent).toMatchObject({
         status: "completed",
         executedModel: "gpt-5.4-mini",
+        workerAlert: { reasons: ["model_substituted"], notice },
       });
       // Every wait was for the run the launch started.
       const waits = yield* Ref.get(thread.waitedFor);

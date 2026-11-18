@@ -87,6 +87,7 @@ import { modelSwitchSince } from "./modelSwitch.ts";
 import { isPlaceholderThreadTitle } from "./placeholderThreadTitle.ts";
 import { combinePullRequestWatchWakes, type PullRequestWatchWake } from "./pullRequestWatch.ts";
 import { recordThreadOpen } from "@t3tools/shared/paletteSearch";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   backgroundWorkHoldsCompletion,
   derivePendingBackgroundWork,
@@ -931,7 +932,15 @@ function delegatedCompletionWakeDetail(
   return taskIds
     .map((taskId) => {
       const task = tasks.find((candidate) => candidate.id === taskId);
-      const label = `Delegated task ${taskId}${task?.title == null ? "" : ` (${task.title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}`;
+      const child =
+        task?.childThreadId != null
+          ? { environmentId: null, threadId: task.childThreadId }
+          : task?.remoteChild;
+      const alert =
+        task?.workerAlert === undefined
+          ? ""
+          : ` raised a worker alert${child === undefined ? "" : ` (child ${formatThreadLink(child, task.title ?? undefined)})`}`;
+      const label = `Delegated task ${taskId}${task?.title == null ? "" : ` (${task.title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}${alert}`;
       if (task?.result != null) {
         const detail = `${label}:\n${task.result}`;
         const bytes = Buffer.byteLength(detail);
@@ -940,7 +949,7 @@ function delegatedCompletionWakeDetail(
           return detail;
         }
       }
-      return `${label}. Use task_status with taskId ${taskId} to read the result.`;
+      return `${label}. ${task?.workerAlert === undefined ? "" : `${task.workerAlert.notice} `}Use task_status with taskId ${taskId} to read the result.`;
     })
     .join("\n\n");
 }
@@ -10103,6 +10112,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       status: command.status,
       result: command.result,
       ...(command.executedModel === undefined ? {} : { executedModel: command.executedModel }),
+      ...(command.workerAlert === undefined ? {} : { workerAlert: command.workerAlert }),
       completedAt: now,
       updatedAt: now,
     };
@@ -14513,11 +14523,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentTurnItem = parentTask.turnItems.find(
         (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
       );
+      const { workerAlert: _previousAlert, ...taskWithoutAlert } = task;
       const updatedTask: OrchestrationV2Subagent = {
-        ...task,
+        ...taskWithoutAlert,
         providerThreadId: childRun.providerThreadId,
         status: terminalStatus,
         result: result.text,
+        ...(result.workerAlert === undefined ? {} : { workerAlert: result.workerAlert }),
         completedAt: now,
         updatedAt: now,
         // The cancelling parent gets no wake, and the task records the run it settled from.

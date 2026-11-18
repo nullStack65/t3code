@@ -4005,6 +4005,10 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           ],
         });
         yield* orchestrator.recoverDelegatedTasks;
+        const limited = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === child.taskId,
+        );
+        assert.deepEqual(limited?.workerAlert?.reasons, ["usage_limit"]);
         const childShell = Effect.map(orchestrator.getShellSnapshot(), (snapshot) =>
           snapshot.threads.find((thread) => thread.id === child.childThreadId),
         );
@@ -4737,6 +4741,132 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         `Child task completed without an assistant result.\n\n${stopReason}`,
       );
       assert.isUndefined(task?.cancelledRunId);
+    }),
+  );
+
+  it.effect("tells the parent when a safeguard swapped its child's model and the child held", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:worker-alert-parent");
+      const runId = RunId.make("run:worker-alert-parent");
+      const rootNodeId = NodeId.make("node:worker-alert-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId: ProjectId.make("project:worker-alert-parent"),
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:worker-alert-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId: ProjectId.make("project:worker-alert-parent"),
+        parentRunId: runId,
+        rootNodeId,
+        name: "worker-alert-child",
+        completionWake: "always",
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+      const item = {
+        threadId: child.childThreadId,
+        runId: child.childRunId,
+        nodeId: rootNodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        status: "completed" as const,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      };
+      const scope = {
+        threadId: child.childThreadId,
+        runId: child.childRunId,
+        nodeId: rootNodeId,
+        providerInstanceId: modelSelection.instanceId,
+        occurredAt: now,
+      };
+      const reply = "Holding until Kameron gives direct confirmation.";
+      yield* eventSink.write({
+        commandId: CommandId.make("command:worker-alert-child:turn"),
+        events: [
+          {
+            ...scope,
+            id: EventId.make("event:worker-alert-child:fallback"),
+            type: "turn-item.updated",
+            payload: {
+              ...item,
+              id: TurnItemId.make("item:worker-alert-child:fallback"),
+              type: "system_notice",
+              ordinal: 1,
+              title: "Switched models",
+              message: "Switched to claude-opus-4-8 after a safeguard.",
+              fallbackModel: "claude-opus-4-8",
+            },
+          },
+          {
+            ...scope,
+            id: EventId.make("event:worker-alert-child:reply"),
+            type: "message.updated",
+            payload: {
+              id: MessageId.make("message:worker-alert-child:reply"),
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              nodeId: null,
+              role: "assistant",
+              text: reply,
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId);
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      const task = parent.subagents.find((row) => row.id === child.taskId);
+      const notice =
+        "Worker alert: a provider safeguard switched it to claude-opus-4-8; its final message withholds the task. Replace the worker if it cannot do the task.";
+      assert.deepEqual(task?.workerAlert, {
+        reasons: ["provider_fallback", "withheld_task"],
+        notice,
+      });
+      assert.equal(task?.result, `${notice}\n\n${reply}`);
+
+      const delivery = parent.runs.find((run) => run.id === runId)?.delegatedCompletion?.delivery;
+      assert.deepEqual(delivery?.taskIds, [child.taskId]);
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "server",
+        commandId: CommandId.make("command:worker-alert-wake"),
+        threadId,
+        messageId: delivery!.messageId,
+        text: "Delegated task completed",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        delegatedCompletion: {
+          parentRunId: runId,
+          generation: delivery!.generation,
+          taskIds: delivery!.taskIds,
+        },
+      });
+      const wake = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+        (message) => message.id === delivery!.messageId,
+      );
+      assert.equal(
+        wake?.text,
+        `Delegated task ${child.taskId} [completed] raised a worker alert (child <t3-thread://v1/${child.childThreadId}>):\n${notice}\n\n${reply}`,
+      );
     }),
   );
 

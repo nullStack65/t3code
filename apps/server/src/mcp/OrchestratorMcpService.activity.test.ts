@@ -178,6 +178,7 @@ it("readThread preserves caller access errors and prefers activity-run status ov
       makeRun({ id: cancelledRunId, ordinal: 2, status: "cancelled" }),
     ],
     visibleTurnItems: [],
+    turnItems: [],
     providerTurns: [],
     runtimeRequests: [],
     messages: [],

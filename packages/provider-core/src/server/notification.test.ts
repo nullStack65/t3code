@@ -160,4 +160,19 @@ describe("notificationTurnItem", () => {
       },
     });
   });
+
+  it("flags delegated tasks whose worker raised an alert", () => {
+    const alerted = tasks.map((entry): OrchestrationV2Subagent =>
+      entry.id === NodeId.make("a")
+        ? { ...entry, workerAlert: { reasons: ["model_substituted"], notice: "Worker alert." } }
+        : entry,
+    );
+    assert.deepInclude(notificationTurnItem(userMessage, delivery(["a"]), alerted), {
+      summary: 'Delegated task "Review src/math.ts" finished with a worker alert',
+    });
+    assert.deepInclude(notificationTurnItem(userMessage, delivery(["a", "b"]), alerted), {
+      summary:
+        "2 of 3 delegated tasks finished, 1 with a worker alert: Review src/math.ts, Write tests",
+    });
+  });
 });
