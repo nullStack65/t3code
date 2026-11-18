@@ -30,7 +30,11 @@ import {
   type ComposerImageAttachment,
   type ComposerThreadDraftState,
   type ComposerThreadTarget,
+  type PendingDraftLaunch,
   type PreparedFileUpload,
+  composerDraftHasUserContent,
+  markRestoredLaunchCopy,
+  markUnchangedLaunchCopy,
   toSentComposerDraft,
   useComposerDraftStore,
   DraftId,
@@ -330,6 +334,44 @@ export function restoreComposerDraft(
   store.setThreadContexts(draftTarget, snapshot.threadContexts);
   store.setEnvironmentContexts(draftTarget, snapshot.environmentContexts);
   return images;
+}
+
+/**
+ * The launch a failed draft send leaves pending. Once storage held its binding its outcome is the
+ * open one, sent or not: sent unchanged again it stays that launch. Unbound, it leaves the prior.
+ */
+export function launchLeftPendingAfterFailure(input: {
+  readonly launch: PendingDraftLaunch | undefined;
+  readonly priorLaunch: PendingDraftLaunch | null;
+  readonly bound: boolean;
+}): PendingDraftLaunch | null {
+  return input.bound && input.launch ? input.launch : input.priorLaunch;
+}
+
+/**
+ * Leaves the composer of a failed send ready to send it again. `kept`: never cleared nor edited, it
+ * still is the sent copy. `edited`: the user's newer content stays as it is. `restored`: put back.
+ */
+export function restoreFailedSendComposer(input: {
+  readonly draftTarget: ComposerThreadTarget;
+  /** The draft whose launch this send bound; null when its binding did not commit, so no other launch is relabelled. */
+  readonly boundDraftId: DraftId | null;
+  readonly before: ComposerThreadDraftState | null;
+  readonly cleared: boolean;
+  readonly snapshot: ComposerSendSnapshot;
+}):
+  | { readonly type: "kept" }
+  | { readonly type: "edited" }
+  | { readonly type: "restored"; readonly images: ComposerImageAttachment[] } {
+  const current = useComposerDraftStore.getState().getComposerDraft(input.draftTarget) ?? null;
+  if (!input.cleared && !composerDraftContentChanged(input.before, current)) {
+    if (input.boundDraftId) markUnchangedLaunchCopy(input.boundDraftId);
+    return { type: "kept" };
+  }
+  if (composerDraftHasUserContent(current)) return { type: "edited" };
+  const images = restoreComposerDraft(input.draftTarget, input.snapshot);
+  if (input.boundDraftId) markRestoredLaunchCopy(input.boundDraftId);
+  return { type: "restored", images };
 }
 
 export interface MultipleModelTarget {

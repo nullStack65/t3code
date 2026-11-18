@@ -74,7 +74,6 @@ import {
   commitPendingLaunchPayload,
   composerDraftCopySignature,
   type PendingLaunchTurn,
-  markRestoredLaunchCopy,
   type PendingDraftLaunch,
   checkoutPullRequestUrlToLink,
   composerDraftHasUserContent,
@@ -138,9 +137,10 @@ import {
   resolveMultipleModelTargets,
   prepareTurnAttachments,
   clearSentComposerContent,
+  launchLeftPendingAfterFailure,
   preparedFileUploads,
   readSentComposer,
-  restoreComposerDraft,
+  restoreFailedSendComposer,
 } from "./chatViewSend";
 import type {
   EnvironmentProject,
@@ -1305,8 +1305,6 @@ export function useComposerSend(input: ComposerSendInput) {
             ? { ...launchOperation, composer: sentComposer.value }
             : launchOperation,
         ));
-    // Set once the launch itself goes out; failures before it sent nothing.
-    let launchAttempted = false;
     // A draft's launch clears the composer only once its turn is stored; an edit is the user's.
     let composerCleared = false;
     const clearSentComposer = () => {
@@ -1495,7 +1493,6 @@ export function useComposerSend(input: ComposerSendInput) {
           )
         : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-      launchAttempted = true;
       const startPromise = startThreadTurn(turnForLaunch);
       if (backgroundThreadRef) {
         try {
@@ -1581,8 +1578,12 @@ export function useComposerSend(input: ComposerSendInput) {
           wasBootstrapThreadDeleted(squashAtomCommandFailure(failure))
             ? newThreadId()
             : threadIdForSend,
-          // No launch answer proves the host did not accept it, so a sent launch stays pending.
-          launchAttempted ? (launchOperation ?? null) : priorLaunch,
+          // No launch answer proves the host did not accept it, so a bound launch stays pending.
+          launchLeftPendingAfterFailure({
+            launch: launchOperation,
+            priorLaunch,
+            bound: sentDraftThreadRef !== null && sendBound,
+          }),
         );
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
@@ -1593,11 +1594,15 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       // A restored draft clones its images, so the sent copies are no longer used.
       optimisticBlobPreviews.release(optimisticMessage);
-      const composerAfterFailure =
-        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) ?? null;
-      if (!composerCleared && !composerDraftContentChanged(draftBeforeSend, composerAfterFailure)) {
-        // Never cleared, the composer still holds the message to send again.
-      } else if (composerDraftHasUserContent(composerAfterFailure)) {
+      const failedComposer = restoreFailedSendComposer({
+        draftTarget: composerDraftTarget,
+        boundDraftId:
+          isLocalDraftThread && sentDraftThreadRef !== null && sendBound ? draftId : null,
+        before: draftBeforeSend,
+        cleared: composerCleared,
+        snapshot: sendSnapshot,
+      });
+      if (failedComposer.type === "edited") {
         // A draft typed meanwhile keeps the composer, so the failed text stays reachable here.
         const failedText = sendSnapshot.draftText;
         const hasText = failedText.trim().length > 0;
@@ -1628,12 +1633,10 @@ export function useComposerSend(input: ComposerSendInput) {
               : {}),
           }),
         );
-      } else {
-        const retryComposerImages = restoreComposerDraft(composerDraftTarget, sendSnapshot);
-        if (isLocalDraftThread && draftId) markRestoredLaunchCopy(draftId);
+      } else if (failedComposer.type === "restored") {
         if (currentRouteThreadKeyRef.current === routeThreadKey) {
           promptRef.current = sendSnapshot.draftText;
-          composerImagesRef.current = retryComposerImages;
+          composerImagesRef.current = failedComposer.images;
           composerFilesRef.current = composerFilesSnapshot;
           composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
           composerRef.current?.resetCursorState({

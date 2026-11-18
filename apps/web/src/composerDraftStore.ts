@@ -5125,6 +5125,21 @@ export function markRestoredLaunchCopy(draftId: DraftId): void {
 }
 
 /**
+ * Marks a composer a failed send never cleared as its pending launch's copy, only while it still
+ * is exactly what that launch sent: a later edit stays the user's, never taken for that copy.
+ */
+export function markUnchangedLaunchCopy(draftId: DraftId): void {
+  const state = useComposerDraftStore.getState();
+  const sent = state.draftThreadsByThreadKey[draftId]?.pendingLaunch?.composer;
+  if (
+    sent &&
+    composerDraftCopySignature(state.draftsByThreadKey[draftId]) ===
+      composerDraftCopySignature(toHydratedThreadDraft(sent))
+  )
+    markRestoredLaunchCopy(draftId);
+}
+
+/**
  * Records exactly what a launch is about to send and commits it to storage, so a retry resends it
  * as is, with the uploads its files went out as on its sent composer, so a reload can send it.
  * False when storage did not take the whole operation: the launch must not go out.
