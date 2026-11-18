@@ -17,6 +17,8 @@ import { BearerConnectionTarget, type ConnectionTarget } from "./model.ts";
 export type ConnectionRouteKind =
   | "relay"
   | "loopback"
+  /** A saved loopback address, such as a `cloudflared access tcp` port, that reaches another machine. */
+  | "forward"
   | "lan"
   | "tailnet"
   | "vpn"
@@ -24,6 +26,9 @@ export type ConnectionRouteKind =
   | "ssh";
 
 export const RELAY_ROUTE_ID = "relay";
+
+/** Desktop-local secondary backends, such as WSL, register bearer routes under this id prefix. */
+export const DESKTOP_LOCAL_CONNECTION_ID_PREFIX = "local:";
 
 export function connectionRouteId(target: ConnectionTarget): string {
   switch (target._tag) {
@@ -99,23 +104,33 @@ export function connectionRouteKind(route: ConnectionRoute): ConnectionRouteKind
       const hostname = routeHostname(route);
       if (hostname === null) return "public";
       const profile = Option.getOrNull(route.profile);
-      return directAddressKind(
+      const kind = directAddressKind(
         hostname,
         profile?._tag === "BearerConnectionProfile" && profile.network === "tailscale",
       );
+      // Servers on this device come from the platform: the primary and the
+      // desktop-local backends. A user-saved loopback address is a port
+      // forward to another machine, so it ranks behind that machine's direct
+      // routes.
+      return kind === "loopback" &&
+        route.target._tag === "BearerConnectionTarget" &&
+        !route.target.connectionId.startsWith(DESKTOP_LOCAL_CONNECTION_ID_PREFIX)
+        ? "forward"
+        : kind;
     }
   }
 }
 
 /**
  * Whether the route's address reaches the same machine on every network: TLS
- * proves who answers, and loopback cannot move. Any other plain http address,
- * a tailnet one too once Tailscale is down, can belong to another machine after
- * a network change, so an answer from it is not kept.
+ * proves who answers, and loopback, a forward too, cannot move. Any other
+ * plain http address, a tailnet one too once Tailscale is down, can belong to
+ * another machine after a network change, so an answer from it is not kept.
  */
 export function routeKeepsItsHost(route: ConnectionRoute): boolean {
   if (routeHttpBaseUrl(route)?.startsWith("https:") === true) return true;
-  return connectionRouteKind(route) === "loopback";
+  const kind = connectionRouteKind(route);
+  return kind === "loopback" || kind === "forward";
 }
 
 /** A loopback or LAN host answers within a few seconds or is not there. */
@@ -134,6 +149,7 @@ const ROUTE_KIND_RANK: Record<ConnectionRouteKind, number> = {
   tailnet: 2,
   vpn: 2,
   public: 3,
+  forward: 3,
   ssh: 4,
   relay: 5,
 };
@@ -192,6 +208,8 @@ export function connectionRouteLabel(route: ConnectionRoute): string {
       return "T3 Connect";
     case "loopback":
       return "This device";
+    case "forward":
+      return "Forwarded";
     case "lan":
       return "LAN";
     case "tailnet":
