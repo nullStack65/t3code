@@ -23,6 +23,7 @@ import {
   type ScheduledTaskRunNowResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskThreadMode,
+  type ScheduledTaskUnsupported,
   type ScheduledTaskUpsertInput,
   managedPolicyDeniedMessage,
   scheduledTaskThreadMode,
@@ -45,6 +46,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import { readStoredSchedule } from "./storedSchedule.ts";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -132,6 +134,15 @@ class WebhookDeliverySkipped extends Schema.TaggedError<WebhookDeliverySkipped>(
   { reason: Schema.String },
 ) {}
 
+/**
+ * The task is owned or stored by a newer version, so this legacy path leaves it alone. Unlike a
+ * skipped delivery, nothing is recorded for it: no run, delivery, replay or pending state changes.
+ */
+class OwnedTaskHeld extends Schema.TaggedError<OwnedTaskHeld>()("OwnedTaskHeld", {
+  reason: Schema.String,
+}) {}
+const isOwnedTaskHeld = Schema.is(OwnedTaskHeld);
+
 interface RateWindow {
   readonly accepted: ReadonlyArray<{ readonly at: number }>;
   readonly rejectedLogged: boolean;
@@ -181,9 +192,24 @@ const webhookFilters = (filters: ReadonlyArray<ScheduledTaskWebhookFilter> | und
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
 const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
-const decodeScheduleJson = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(ScheduledTask.fields.schedule),
-);
+/**
+ * In SQL: the row's stored schedule is not in the owned/versioned envelope family (see
+ * `storedSchedule.ts`). Malformed JSON stays legacy, so corrupt rows keep their handling. Every
+ * legacy write carries this at the statement itself, so a stale read cannot reach a held row.
+ */
+const legacyScheduleSql = (column: string) =>
+  `((CASE WHEN json_valid(${column}) THEN json_type(${column}, '$.format') END) IS NULL)`;
+const LEGACY_ROW = legacyScheduleSql("schedule_json");
+const LEGACY_TASK_ROW = legacyScheduleSql("scheduled_tasks.schedule_json");
+/** In SQL, for pending webhook rows: the saved task snapshot is not an owned task's. */
+const OWNED_SNAPSHOT_FREE =
+  "((CASE WHEN json_valid(task_json) THEN json_type(task_json, '$.placement') END) IS NULL)";
+/** In SQL, for webhook tables: no held (owned or newer-format) task owns this row's task. */
+const NO_HELD_TASK = (taskIdColumn: string) =>
+  `NOT EXISTS (SELECT 1 FROM scheduled_tasks held WHERE held.task_id = ${taskIdColumn} AND NOT ${legacyScheduleSql("held.schedule_json")})`;
+/** Owned tasks wait for placement that this server does not run yet; see `storedSchedule.ts`. */
+const OWNED_TASK_HELD =
+  "This task's automatic placement is not available on this server yet, so it is held.";
 const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.workspaceStrategy),
 );
@@ -395,7 +421,18 @@ function webhookEndpoint(
 // Runs per task row; list and lookup operations already own the span.
 const decodeRow = Effect.fnUntraced(
   function* (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) {
-    const schedule = yield* decodeScheduleJson(row.schedule_json);
+    const stored = readStoredSchedule(row.schedule_json);
+    if (stored.kind === "unsupported") {
+      return yield* taskError(stored.reason, { taskId: ScheduledTaskId.make(row.task_id) });
+    }
+    if (stored.kind === "malformed") {
+      const taskId = decodeTaskId(row.task_id);
+      return yield* taskError("Could not decode schedule task row.", {
+        ...(Option.isSome(taskId) ? { taskId: taskId.value } : {}),
+        cause: stored.cause,
+      });
+    }
+    const schedule = stored.schedule;
     const webhook = schedule.type === "webhook" ? webhookEndpoint(row, origin) : undefined;
     const workspaceStrategy = yield* decodeWorkspaceStrategyJson(row.workspace_strategy_json);
     const modelSelection = yield* decodeModelSelectionJson(row.model_selection_json);
@@ -422,11 +459,13 @@ const decodeRow = Effect.fnUntraced(
       lastRunError: row.last_run_error,
       runCount: row.run_count,
       ...(webhook === undefined ? {} : { webhook }),
+      ...(stored.kind === "owned" ? { placement: stored.placement } : {}),
     });
   },
   (effect, row, _origin?) =>
     effect.pipe(
       Effect.mapError((cause) => {
+        if (isScheduledTaskError(cause)) return cause;
         const taskId = decodeTaskId(row.task_id);
         return taskError("Could not decode schedule task row.", {
           ...(Option.isSome(taskId) ? { taskId: taskId.value } : {}),
@@ -440,10 +479,12 @@ export const listDueTasks = Effect.fn("ScheduledTaskService.listDueTasks")(funct
   now: DateTime.DateTime,
 ) {
   const sql = yield* SqlClient.SqlClient;
+  // Owned and newer-format rows never run through this legacy poll.
   const rows = yield* sql<ScheduledTaskRow>`
     SELECT * FROM scheduled_tasks
     WHERE enabled = 1 AND next_run_at IS NOT NULL
       AND next_run_at <= ${iso(now)} AND last_run_status <> 'running'
+      AND ${sql.literal(LEGACY_ROW)}
     ORDER BY next_run_at ASC, task_id ASC
   `.pipe(NodeSqliteClient.readOnly);
   const tasks: ScheduledTask[] = [];
@@ -451,6 +492,7 @@ export const listDueTasks = Effect.fn("ScheduledTaskService.listDueTasks")(funct
     const decoded = yield* Effect.result(decodeRow(row));
     if (Result.isSuccess(decoded)) {
       const task = decoded.success;
+      if (task.placement !== undefined) continue;
       // next_run_at is freeform; skip unparseable values before they defect the poll.
       if (task.nextRunAt === null || Option.isSome(DateTime.make(task.nextRunAt))) {
         tasks.push(task);
@@ -493,7 +535,9 @@ export const layer = Layer.effect(
     const withPolicy = (task: ScheduledTask): ScheduledTask =>
       webhookPolicyBlock !== undefined && task.schedule.type === "webhook"
         ? { ...task, blockedByPolicy: webhookPolicyBlock }
-        : task;
+        : task.placement !== undefined
+          ? { ...task, blockedByPolicy: OWNED_TASK_HELD }
+          : task;
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
@@ -556,11 +600,25 @@ export const layer = Layer.effect(
     const listRows = Effect.fn("ScheduledTaskService.listRows")(function* () {
       const rows = yield* selectAllRows();
       const origin = yield* readWebhookOrigin;
-      return yield* Effect.forEach(
-        rows,
-        (row) => decodeRow(row, origin).pipe(Effect.map(withPolicy)),
-        { concurrency: 1 },
-      );
+      const tasks: ScheduledTask[] = [];
+      const unsupported: ScheduledTaskUnsupported[] = [];
+      for (const row of rows) {
+        const stored = readStoredSchedule(row.schedule_json);
+        // Listed as it is stored, so it stays visible without being read as a task.
+        if (stored.kind === "unsupported") {
+          unsupported.push({
+            id: ScheduledTaskId.make(row.task_id),
+            title: row.title,
+            projectId: row.project_id,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            reason: stored.reason,
+          });
+          continue;
+        }
+        tasks.push(withPolicy(yield* decodeRow(row, origin)));
+      }
+      return { tasks, unsupported };
     });
 
     const getRows = (id: ScheduledTaskId) =>
@@ -592,6 +650,20 @@ export const layer = Layer.effect(
       FROM scheduled_tasks
       WHERE task_id = ${id}
     `.pipe(NodeSqliteClient.readOnly);
+
+    /** Whether the stored row is owned or newer-format, read raw so it never needs decoding. */
+    const rowHeld = Effect.fn("ScheduledTaskService.rowHeld")(function* (id: ScheduledTaskId) {
+      const rows = yield* sql<{ schedule_json: string }>`
+        SELECT schedule_json FROM scheduled_tasks WHERE task_id = ${id}
+      `.pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError((cause) =>
+          taskError("Could not load schedule task.", { taskId: id, cause }),
+        ),
+      );
+      const kind = rows[0] === undefined ? null : readStoredSchedule(rows[0].schedule_json).kind;
+      return kind === "owned" || kind === "unsupported";
+    });
 
     const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
       const rows = yield* getRows(id).pipe(
@@ -737,6 +809,8 @@ export const layer = Layer.effect(
             WHEN ${webhook.secretChanged ? 1 : 0} = 1 THEN excluded.webhook_secret
             ELSE scheduled_tasks.webhook_secret
           END
+        -- An owned or newer-format task is never rewritten through the legacy form.
+        WHERE ${sql.literal(LEGACY_TASK_ROW)}
         RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
@@ -770,14 +844,24 @@ export const layer = Layer.effect(
             last_run_webhook_delivery_id = ${webhookDeliveryId ?? null},
             last_run_status = 'running',
             last_run_error = NULL
-        WHERE task_id = ${id}
+        WHERE task_id = ${id} AND ${sql.literal(LEGACY_ROW)}
         RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
           taskError("Could not mark schedule task as running.", { taskId: id, cause }),
         ),
         Effect.flatMap((rows) =>
-          rows.length > 0 ? Effect.void : taskError("Schedule task not found.", { taskId: id }),
+          rows.length > 0
+            ? Effect.void
+            : rowHeld(id).pipe(
+                Effect.flatMap((held) =>
+                  Effect.fail(
+                    held
+                      ? new OwnedTaskHeld({ reason: OWNED_TASK_HELD })
+                      : taskError("Schedule task not found.", { taskId: id }),
+                  ),
+                ),
+              ),
         ),
       );
 
@@ -799,6 +883,7 @@ export const layer = Layer.effect(
         WHERE task_id = ${input.id}
           AND last_run_status = 'running'
           AND last_run_at = ${input.startedAtIso}
+          AND ${sql.literal(LEGACY_ROW)}
         RETURNING task_id
       `.pipe(
         Effect.map((rows) => rows.length > 0),
@@ -831,7 +916,7 @@ export const layer = Layer.effect(
                 SELECT 1 FROM scheduled_task_webhook_pending
                 WHERE delivery_id = ${pendingDeliveryId ?? null} AND state = 'running'
               ) THEN 0 ELSE 1 END
-          WHERE task_id = ${task.id} AND last_run_status = 'running'
+          WHERE task_id = ${task.id} AND last_run_status = 'running' AND ${sql.literal(LEGACY_ROW)}
         `;
         yield* notifyChanged;
       },
@@ -874,6 +959,7 @@ export const layer = Layer.effect(
           WHERE task_id = ${task.id} AND created_at = ${task.createdAt}
             AND project_id = ${task.projectId}
             AND thread_id IS NULL AND thread_mode != 'new_thread'
+            AND ${sql.literal(LEGACY_ROW)}
         `;
         const shell = yield* threadManagement.getThreadShell(threadId);
         if (shell === null || shell.deletedAt != null) yield* deleteForThread(threadId);
@@ -924,6 +1010,7 @@ export const layer = Layer.effect(
         UPDATE scheduled_tasks
         SET last_run_status = 'failed', last_run_error = ${error}
         WHERE task_id = ${taskId} AND last_run_at = ${startedAtIso} AND last_run_status = 'succeeded'
+          AND ${sql.literal(LEGACY_ROW)}
         RETURNING task_id
       `;
       if (updated.length > 0) yield* notifyChanged;
@@ -954,6 +1041,12 @@ export const layer = Layer.effect(
             return yield* taskError("Schedule task not found.", { taskId: task.id });
           }
           return { task, threadId: null, dispatchFailed: false };
+        }
+        // Before any reservation or effect: an owned task does not run through this path.
+        if (active.placement !== undefined) {
+          if (trigger === "scheduled")
+            return { task: active, threadId: null, dispatchFailed: false };
+          return yield* new OwnedTaskHeld({ reason: OWNED_TASK_HELD });
         }
         if (
           webhook !== undefined &&
@@ -1190,7 +1283,10 @@ export const layer = Layer.effect(
         return { task: recorded, threadId, dispatchFailed: !runSucceeded };
       }).pipe(
         Effect.onError((cause) =>
-          releaseStuckRun(task, startedAtIso, errorMessage(cause), webhook?.deliveryId),
+          // A hold changed nothing, so there is no run to release.
+          isOwnedTaskHeld(Cause.squash(cause))
+            ? Effect.void
+            : releaseStuckRun(task, startedAtIso, errorMessage(cause), webhook?.deliveryId),
         ),
       );
 
@@ -1241,6 +1337,7 @@ export const layer = Layer.effect(
         WHERE task_id = ${task.id}
           AND next_run_at IS ${task.nextRunAt}
           AND last_run_at IS ${task.lastRunAt}
+          AND ${sql.literal(LEGACY_ROW)}
         RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
@@ -1258,6 +1355,7 @@ export const layer = Layer.effect(
       const [next] = yield* sql<{ next_run_at: string | null }>`
         SELECT MIN(next_run_at) AS next_run_at FROM scheduled_tasks
         WHERE enabled = 1 AND next_run_at IS NOT NULL AND last_run_status <> 'running'
+          AND ${sql.literal(LEGACY_ROW)}
       `.pipe(
         NodeSqliteClient.readOnly,
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
@@ -1304,7 +1402,11 @@ export const layer = Layer.effect(
     // Recover crash-left running rows that the due-task filter would otherwise skip forever.
     yield* Effect.gen(function* () {
       const rows = yield* selectAllRows();
-      const stuck = rows.filter((row) => row.last_run_status === "running");
+      // Owned and newer-format rows are recovered from their own occurrence records, not here.
+      const stuck = rows.filter((row) => {
+        const kind = readStoredSchedule(row.schedule_json).kind;
+        return row.last_run_status === "running" && (kind === "legacy" || kind === "malformed");
+      });
       if (stuck.length === 0) return;
       const now = yield* localNow;
       yield* Effect.forEach(
@@ -1325,6 +1427,7 @@ export const layer = Layer.effect(
                         AND delivery_id = scheduled_tasks.last_run_webhook_delivery_id
                     ) THEN 0 ELSE 1 END
                 WHERE task_id IS ${row.task_id} AND last_run_status = 'running'
+                  AND ${sql.literal(LEGACY_ROW)}
               `;
               return;
             }
@@ -1343,6 +1446,7 @@ export const layer = Layer.effect(
                         AND delivery_id = scheduled_tasks.last_run_webhook_delivery_id
                   ) THEN 0 ELSE 1 END
               WHERE task_id IS ${row.task_id} AND last_run_status = 'running'
+                AND ${sql.literal(LEGACY_ROW)}
             `;
           }),
         { concurrency: 1, discard: true },
@@ -1358,8 +1462,9 @@ export const layer = Layer.effect(
 
     const list: ScheduledTaskService["Service"]["list"] = () =>
       listRows().pipe(
-        Effect.map((tasks) => ({
+        Effect.map(({ tasks, unsupported }) => ({
           tasks,
+          ...(unsupported.length > 0 ? { unsupported } : {}),
           timeZone: DateTime.zoneToString(DateTime.zoneMakeLocal()),
         })),
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
@@ -1431,6 +1536,13 @@ export const layer = Layer.effect(
       // keep their run history, and so real load failures propagate instead
       // of silently resetting an existing row.
       const existingTask = yield* findTask(id);
+      // Owned tasks are edited only through the checked placement form, title-only edits included.
+      if (existingTask?.placement !== undefined) {
+        return yield* taskError(
+          "This task is placed automatically, so it can't be changed with this form.",
+          { taskId: id },
+        );
+      }
       const threadMode = resolveThreadMode(input, existingTask);
       const keptThreadId = input.threadId ?? existingTask?.threadId ?? null;
       // A bound thread belongs to its project, so moving the task leaves it for a new one.
@@ -1575,6 +1687,9 @@ export const layer = Layer.effect(
     )(function* (input) {
       const existing = yield* loadTask(input.id);
       if (existing.enabled === input.enabled) return { task: existing };
+      if (input.enabled && existing.placement !== undefined) {
+        return yield* taskError(OWNED_TASK_HELD, { taskId: input.id });
+      }
       if (
         input.enabled &&
         existing.schedule.type === "webhook" &&
@@ -1604,6 +1719,7 @@ export const layer = Layer.effect(
               next_run_at = ${next},
               updated_at = ${iso(now)}
           WHERE task_id = ${input.id}
+            AND (${input.enabled ? 0 : 1} = 1 OR ${sql.literal(LEGACY_ROW)})
           RETURNING task_id
         `.pipe(
         Effect.mapError((cause) =>
@@ -1666,12 +1782,18 @@ export const layer = Layer.effect(
       const removed = yield* sql
         .withTransaction(
           Effect.gen(function* () {
+            // A local thread id never owns an owned or newer-format task's binding.
             yield* sql`
             DELETE FROM scheduled_task_webhook_deliveries
-            WHERE task_id IN (SELECT task_id FROM scheduled_tasks WHERE thread_id = ${threadId})
+            WHERE task_id IN (
+              SELECT task_id FROM scheduled_tasks
+              WHERE thread_id = ${threadId} AND ${sql.literal(LEGACY_ROW)}
+            )
           `;
             return yield* sql<{ task_id: ScheduledTaskId }>`
-            DELETE FROM scheduled_tasks WHERE thread_id = ${threadId} RETURNING task_id
+            DELETE FROM scheduled_tasks
+            WHERE thread_id = ${threadId} AND ${sql.literal(LEGACY_ROW)}
+            RETURNING task_id
           `;
           }),
         )
@@ -1693,6 +1815,7 @@ export const layer = Layer.effect(
       const moved = yield* sql<{ task_id: ScheduledTaskId }>`
         UPDATE scheduled_tasks SET project_id = ${input.projectId}
         WHERE project_id != ${input.projectId} AND thread_id IN ${sql.in(input.threadIds)}
+          AND ${sql.literal(LEGACY_ROW)}
         RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
@@ -1711,11 +1834,16 @@ export const layer = Layer.effect(
           taskId: input.id,
         });
       }
+      // This keyless path is local only; it never runs a task an accepted placement owns.
+      if (task.placement !== undefined)
+        return yield* taskError(OWNED_TASK_HELD, { taskId: input.id });
       return yield* runTask(task, "manual").pipe(
         Effect.mapError((cause) =>
           isScheduledTaskError(cause)
             ? cause
-            : taskError("Could not run schedule task.", { taskId: input.id, cause }),
+            : isOwnedTaskHeld(cause)
+              ? taskError(OWNED_TASK_HELD, { taskId: input.id })
+              : taskError("Could not run schedule task.", { taskId: input.id, cause }),
         ),
       );
     });
@@ -1727,6 +1855,8 @@ export const layer = Layer.effect(
       if (task.schedule.type !== "webhook") {
         return yield* taskError("Only webhook tasks have a URL token.", { taskId: input.id });
       }
+      if (task.placement !== undefined)
+        return yield* taskError(OWNED_TASK_HELD, { taskId: input.id });
       const token = yield* newWebhookToken;
       const now = yield* localNow;
       // Matching created_at keeps a rotation from landing on a task deleted
@@ -1734,7 +1864,7 @@ export const layer = Layer.effect(
       const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET webhook_token = ${token}, updated_at = ${iso(now)}
-          WHERE task_id = ${input.id} AND created_at = ${task.createdAt}
+          WHERE task_id = ${input.id} AND created_at = ${task.createdAt} AND ${sql.literal(LEGACY_ROW)}
           RETURNING task_id
         `.pipe(
         Effect.mapError((cause) =>
@@ -2051,6 +2181,8 @@ export const layer = Layer.effect(
         // Dispatch success owns the replay key even if later bookkeeping fails.
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
+            // Held: nothing ran or was recorded, and the delivery stays as it is.
+            if (isOwnedTaskHeld(Cause.squash(cause))) return false;
             const started = yield* Ref.get(dispatched);
             yield* Effect.logWarning("Webhook dispatch failed", { taskId: task.id, cause });
             yield* runOutcome(started ? "started" : "failed");
@@ -2069,7 +2201,7 @@ export const layer = Layer.effect(
                 WHERE delivery_id = ${deliveryId} AND state = 'running' RETURNING delivery_id`;
                     if (counted.length > 0)
                       yield* sql`UPDATE scheduled_tasks SET run_count = run_count + 1
-                WHERE task_id = ${task.id} AND created_at = ${task.createdAt}`;
+                WHERE task_id = ${task.id} AND created_at = ${task.createdAt} AND ${sql.literal(LEGACY_ROW)}`;
                   }),
                 )
                 .pipe(Effect.mapError(dedupeError));
@@ -2150,6 +2282,13 @@ export const layer = Layer.effect(
         ))
       ) {
         return yield* notFound;
+      }
+      // Answered as a paused hook, before any claim, log, dedupe, capacity or dispatch write.
+      const storedKind = readStoredSchedule(row.schedule_json).kind;
+      if (storedKind === "owned" || storedKind === "unsupported") {
+        return yield* observeDelivery(request, "disabled", undefined, undefined).pipe(
+          Effect.as({ _tag: "disabled" as const }),
+        );
       }
       const task = yield* decodeRow(row);
       yield* Effect.annotateCurrentSpan({ "scheduled_task.id": task.id });
@@ -2514,14 +2653,19 @@ export const layer = Layer.effect(
       const now = DateTime.toEpochMillis(yield* localNow);
       if (yield* pendingWebhooks.isIdle(now)) return;
       const readVersion = yield* pendingWebhooks.version;
-      yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'dispatching' WHERE state = 'pending' AND due_at <= ${now}`;
+      // A held task's pending rows stay exactly as they are: not promoted, cleaned up or sent.
+      yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'dispatching' WHERE state = 'pending' AND due_at <= ${now}
+        AND ${sql.literal(NO_HELD_TASK("scheduled_task_webhook_pending.task_id"))}
+        AND ${sql.literal(OWNED_SNAPSHOT_FREE)}`;
       const tasks = yield* sql<{ task_id: ScheduledTaskId }>`
         SELECT DISTINCT task_id FROM scheduled_task_webhook_pending WHERE state IN ('dispatching', 'running', 'completed', 'failed')
+          AND ${sql.literal(NO_HELD_TASK("scheduled_task_webhook_pending.task_id"))}
       `.pipe(NodeSqliteClient.readOnly);
       // Workers can leave rows behind to retry, so keep polling while any are claimed.
       if (tasks.length === 0) {
         const [next] = yield* sql<{ due_at: number | null }>`
           SELECT MIN(due_at) AS due_at FROM scheduled_task_webhook_pending WHERE state = 'pending'
+            AND ${sql.literal(NO_HELD_TASK("scheduled_task_webhook_pending.task_id"))}
         `.pipe(NodeSqliteClient.readOnly);
         yield* pendingWebhooks.record(readVersion, next?.due_at ?? Infinity, now);
       }
@@ -2532,6 +2676,8 @@ export const layer = Layer.effect(
           // Other tasks remain independent and ticks never reload an active task's payloads.
           const dispatch = Effect.gen(function* () {
             while (true) {
+              // Rechecked per entry: the task may have become held since this pass began.
+              if (yield* rowHeld(taskId)) return;
               const [entry] = yield* sql<{
                 delivery_id: string;
                 task_json: string;
@@ -2555,6 +2701,10 @@ export const layer = Layer.effect(
                 // A running row was already sent, so recovery keeps the prompt it was sent with.
                 const current = entry.state === "dispatching" ? yield* findTask(taskId) : null;
                 const snapshot = yield* decodePendingTask(entry.task_json);
+                // An owned snapshot is never authority for this path, nor a current owned task.
+                if (snapshot.placement !== undefined || current?.placement !== undefined) {
+                  return { held: true as const };
+                }
                 // The snapshot keeps the identity runTask checks; the prompt is the one saved now.
                 const task =
                   current?.createdAt === snapshot.createdAt && current.prompt !== snapshot.prompt
@@ -2563,6 +2713,7 @@ export const layer = Layer.effect(
                 const request = yield* decodePendingRequest(entry.request_json);
                 const frameId = Buffer.from(yield* random.randomBytes(6)).toString("hex");
                 return {
+                  held: false as const,
                   task,
                   taskJson: task === snapshot ? null : yield* encodePendingTask(task),
                   rendered: renderWebhookPrompt(task.prompt, request, frameId),
@@ -2579,6 +2730,7 @@ export const layer = Layer.effect(
                 yield* remove;
                 continue;
               }
+              if (prepared.value.held) return;
               const { task, taskJson, rendered } = prepared.value;
               if (rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
                 yield* markDeliveryFailed(entry.delivery_id, PROMPT_TOO_LONG);
