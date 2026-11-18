@@ -210,6 +210,18 @@ export function resolveSidebarThreadSection(input: {
   return "active";
 }
 
+/**
+ * The shelf a thread lists in while the Working shelf is on. Work the thread waits on, such as
+ * its own background task or child agent, keeps it Working even when pinned; it returns to
+ * Pinned when it finishes. Snoozed and settled threads stay put.
+ */
+export function resolveSidebarShelf(
+  section: SidebarSection,
+  working: boolean,
+): SidebarSection | "working" {
+  return working && (section === "active" || section === "pinned") ? "working" : section;
+}
+
 const SIDEBAR_MARKER_PREFIX = "sidebar-marker-";
 
 export type SidebarListMarker =

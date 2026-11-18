@@ -79,6 +79,16 @@ describe("createInboxReturnTracker", () => {
     unsubscribe();
   });
 
+  it("gives a pinned thread the same grace, so it doesn't flicker out of Working", () => {
+    const tracker = createInboxReturnTracker();
+    const pinned = { pinnedAt: "2026-06-01T00:00:01Z" };
+    tracker.observe([{ ...thread("a", true), ...pinned }]);
+    tracker.observe([{ ...thread("a", false), ...pinned }]);
+    expect(tracker.isWorking(thread("a", false))).toBe(true);
+    vi.advanceTimersByTime(2_000);
+    expect(tracker.isWorking(thread("a", false))).toBe(false);
+  });
+
   it("moves a thread whose run ended long ago at once, as after a reconnect", () => {
     const tracker = createInboxReturnTracker();
     const finished = {

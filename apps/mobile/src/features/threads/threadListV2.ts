@@ -795,10 +795,11 @@ export function buildThreadListV2Items(input: {
       queuedThreadKeys?.has(`${thread.environmentId}:${thread.id}`) === true;
     if (supportsSettlement && thread.settledOverride === "settled" && !hasQueuedMessages) {
       settled.push(thread);
+    } else if (workingShelfEnabled && (input.isWorking ?? isThreadWorking)(thread)) {
+      // Pinned or not: a thread working or waiting on its own agents returns to Pinned when done.
+      working.push(thread);
     } else if (thread.pinnedAt != null) {
       pinned.push(thread);
-    } else if (workingShelfEnabled && (input.isWorking ?? isThreadWorking)(thread)) {
-      working.push(thread);
     } else {
       active.push(thread);
     }
