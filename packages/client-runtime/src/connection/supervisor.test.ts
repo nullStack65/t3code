@@ -48,7 +48,14 @@ import * as RpcSession from "../rpc/session.ts";
 import { presentConnectionState } from "./presentation.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
-import { connectionRouteId, entryWithRoutes, isLearned, mergeLearnedRoutes } from "./routes.ts";
+import {
+  connectionRouteId,
+  connectionRouteLabel,
+  connectionRoutes,
+  entryWithRoutes,
+  isLearned,
+  mergeLearnedRoutes,
+} from "./routes.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -2318,6 +2325,105 @@ describe("EnvironmentSupervisor routes", () => {
         "RelayConnectionTarget",
       );
     }),
+  );
+
+  it.effect(
+    "prefers a learned Tailscale route over a forwarded tunnel and fails over between them",
+    () =>
+      Effect.gen(function* () {
+        // A `cloudflared access tcp` forward to another machine, paired on this laptop.
+        const forwardTarget = new BearerConnectionTarget({
+          environmentId: TARGET.environmentId,
+          label: TARGET.label,
+          connectionId: "bearer:r720-forward",
+        });
+        const forwardEntry: ConnectionCatalogEntry = {
+          target: forwardTarget,
+          profile: Option.some(
+            new BearerConnectionProfile({
+              connectionId: forwardTarget.connectionId,
+              environmentId: TARGET.environmentId,
+              label: TARGET.label,
+              httpBaseUrl: "http://127.0.0.1:23780/",
+              wsBaseUrl: "ws://127.0.0.1:23780/",
+            }),
+          ),
+          enabled: true,
+        };
+        const tailnetId = `learned:${TARGET.environmentId}:http://100.101.102.103:3773@${forwardTarget.connectionId}`;
+        const tailnetReachable = yield* Ref.make(true);
+        const harness = yield* makeHarness({
+          checkRoute: (route) =>
+            connectionRouteId(route.target) === tailnetId
+              ? Ref.get(tailnetReachable).pipe(
+                  Effect.map((reachable) => (reachable ? "answered" : "silent")),
+                )
+              : Effect.succeed("answered"),
+          prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+          initialConfig: () =>
+            Effect.succeed({
+              directEndpoints: [{ kind: "tailnet", httpBaseUrl: "http://100.101.102.103:3773/" }],
+            } as unknown as ServerConfig),
+        });
+        const current = yield* Ref.make(forwardEntry);
+        const supervisor = yield* EnvironmentSupervisor.make(forwardEntry, {
+          initiallyDesired: true,
+          learnRoutes: ({ activeRoute, reported }) =>
+            Effect.gen(function* () {
+              const entry = yield* Ref.get(current);
+              const routes = mergeLearnedRoutes({
+                entry,
+                activeRoute,
+                reported,
+                allowInsecure: true,
+              });
+              if (routes === null) return Option.none();
+              const next = entryWithRoutes(entry, routes);
+              yield* Ref.set(current, next);
+              return Option.some(next);
+            }),
+        }).pipe(Effect.provide(harness.dependencies));
+        const routeInUse = Effect.gen(function* () {
+          const prepared = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.prepared));
+          const route = connectionRoutes(yield* Ref.get(current)).find(
+            (candidate) =>
+              connectionRouteId(candidate.target) === connectionRouteId(prepared.target),
+          );
+          return route === undefined ? undefined : connectionRouteLabel(route);
+        });
+
+        // 1. The first connect can only use the forward. The Tailscale address
+        // it reports is saved ahead of the forward, and the connection moves to it.
+        yield* awaitState(
+          supervisor.state,
+          (state) => state.phase === "connected" && state.generation === 2,
+        );
+        expect(connectionRoutes(yield* Ref.get(current)).map(connectionRouteLabel)).toEqual([
+          "Tailscale",
+          "Forwarded",
+        ]);
+        expect(yield* routeInUse).toBe("Tailscale");
+
+        // 2. Away from the tailnet the direct socket drops; the forward takes over.
+        yield* Ref.set(tailnetReachable, false);
+        yield* harness.closeLatestSession();
+        yield* awaitState(supervisor.state, (state) => state.phase === "backoff");
+        yield* TestClock.adjust("250 millis");
+        yield* awaitState(
+          supervisor.state,
+          (state) => state.phase === "connected" && state.generation === 3,
+        );
+        expect(yield* routeInUse).toBe("Forwarded");
+
+        // 3. Back on the tailnet, the next network change moves it back to direct.
+        yield* Ref.set(tailnetReachable, true);
+        yield* harness.wake("network-changed");
+        yield* awaitState(
+          supervisor.state,
+          (state) => state.phase === "connected" && state.generation === 4,
+        );
+        expect(yield* routeInUse).toBe("Tailscale");
+      }),
   );
 
   it.effect.each(["initial", "late", "withdrawn", "withdrawn-upgrade", "omitted"] as const)(
