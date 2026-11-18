@@ -699,20 +699,6 @@ export type OrchestratorMcpEnvironmentLink = typeof OrchestratorMcpEnvironmentLi
 export const OrchestratorMcpEnvironmentLinksResult = Schema.Struct({
   environmentId: EnvironmentId,
   links: Schema.Array(OrchestratorMcpEnvironmentLink),
-  /** Machines the user's app holds that are not linked here, so no tool can act there yet. */
-  inAppOnly: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        environmentId: EnvironmentId,
-        label: Schema.String,
-        serverVersion: Schema.NullOr(Schema.String),
-        why: Schema.String.annotate({
-          description:
-            "Why it is not linked and what fixes it. Tell the user; linking still needs their approval.",
-        }),
-      }),
-    ),
-  ),
   /** What to do when the machine the user means is not among `links`. */
   notListed: Schema.String,
 });
