@@ -1951,6 +1951,7 @@ export const layerWsRpc = (
           shellThreadFamilies: true,
           threadLinkMetadata: true,
           shellOlderSettled: true,
+          machineOwner: true,
           threadResumeCompletionMarker: true,
           threadSnapshotPagination: true,
           threadFind: true,

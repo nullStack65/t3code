@@ -8,7 +8,6 @@ import type {
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2ShellStreamItem,
   OrchestrationV2StoredEvent,
-  ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -36,6 +35,7 @@ import * as Stream from "effect/Stream";
 
 import type * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { bufferLatestLiveStream } from "./LiveStreamBudget.ts";
+import { countOlderSettledThreads, type OlderSettledCountRow } from "./olderSettledCounts.ts";
 import type { ActiveShellIndexEntry } from "./ProjectionStore.ts";
 
 type ShellDelta = Extract<OrchestrationV2ShellStreamItem, { readonly sequence: number }>;
@@ -180,7 +180,8 @@ function buildActiveShellSnapshot(input: {
 type ShellTrimRow = Pick<
   OrchestrationV2ThreadShell,
   "id" | "projectId" | "lineage" | "settledOverride" | "settledAt"
-> & { readonly hasRemoteTasks?: boolean };
+> &
+  Pick<OlderSettledCountRow, "inbox" | "createdBy"> & { readonly hasRemoteTasks?: boolean };
 
 /**
  * What a subscriber's trims read across every active row. Computed from full shells or from the
@@ -219,20 +220,17 @@ function shellTrimFacts(rows: ReadonlyArray<ShellTrimRow>): ShellTrimFacts {
   settledTimes.sort((left, right) => right - left);
   // With fewer than 25, the oldest one is the cut, so nothing is older.
   const olderSettledBeforeMs = settledTimes[NEWEST_SETTLED_KEPT - 1] ?? settledTimes.at(-1);
-  const counts = new Map<ProjectId, number>();
-  if (olderSettledBeforeMs !== undefined) {
-    for (const row of rows) {
-      if (isOlderSettledThreadShell(row, olderSettledBeforeMs)) {
-        counts.set(row.projectId, (counts.get(row.projectId) ?? 0) + 1);
-      }
-    }
-  }
   return {
     subagentParentIds,
     subagentThreadIds,
     remoteTaskParentIds,
     olderSettledBeforeMs,
-    olderSettledCounts: Array.from(counts, ([projectId, count]) => ({ projectId, count })),
+    olderSettledCounts:
+      olderSettledBeforeMs === undefined
+        ? []
+        : countOlderSettledThreads(rows, (row) =>
+            isOlderSettledThreadShell(row, olderSettledBeforeMs),
+          ),
   };
 }
 

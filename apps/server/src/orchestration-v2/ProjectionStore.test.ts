@@ -30,8 +30,12 @@ import {
   ThreadId,
   TurnItemId,
   type ThreadPullRequestLink,
+  type OrchestrationV2OlderSettledCount,
+  type ThreadInbox,
+  inboxRoutingFor,
   isLiveSubagentShell,
   isListedThreadLineage,
+  makeThreadInbox,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -157,6 +161,8 @@ const assertShellIndexCoversShells = Effect.fnUntraced(function* () {
       | "pinnedAt"
       | "pinOrderKey"
       | "snoozedUntil"
+      | "inbox"
+      | "createdBy"
     >,
   ) => ({
     id: row.id,
@@ -167,6 +173,8 @@ const assertShellIndexCoversShells = Effect.fnUntraced(function* () {
     pinnedAt: iso(row.pinnedAt),
     pinOrderKey: row.pinOrderKey ?? null,
     snoozedUntil: iso(row.snoozedUntil),
+    inbox: row.inbox ?? null,
+    createdBy: row.createdBy ?? null,
   });
   assert.deepEqual(index.map(trimmed), shells.map(trimmed));
   shells.forEach((shell, position) => {
@@ -3077,6 +3085,8 @@ it.effect("SQL list older settled threads below a cursor", () =>
       readonly subagent?: boolean;
       readonly archived?: boolean;
       readonly snoozedUntilDay?: number;
+      readonly inbox?: ThreadInbox;
+      readonly parent?: string;
     }) =>
       store.apply({
         id: EventId.make(`event:older:${input.name}`),
@@ -3096,10 +3106,16 @@ it.effect("SQL list older settled threads below a cursor", () =>
           branch: null,
           worktreePath: null,
           activeProviderThreadId: null,
+          ...(input.inbox === undefined ? {} : { inbox: input.inbox }),
           lineage: {
-            parentThreadId: input.subagent === true ? id("b") : null,
+            parentThreadId:
+              input.subagent === true
+                ? id("b")
+                : input.parent === undefined
+                  ? null
+                  : id(input.parent),
             relationshipToParent: input.subagent === true ? "subagent" : null,
-            rootThreadId: input.subagent === true ? id("b") : id(input.name),
+            rootThreadId: input.subagent === true ? id("b") : id(input.parent ?? input.name),
           },
           forkedFrom: null,
           createdAt: now,
@@ -3127,24 +3143,21 @@ it.effect("SQL list older settled threads below a cursor", () =>
       limit: number,
       projectIds?: ReadonlyArray<ProjectId>,
     ) => store.listOlderSettledThreads({ before, projectIds, limit });
+    const totals = (listing: {
+      readonly counts: ReadonlyArray<OrchestrationV2OlderSettledCount>;
+    }) => listing.counts.map(({ projectId, count }) => ({ projectId, count }));
     const before = { settledAt: DateTime.formatIso(at(10)) };
     const first = yield* list(before, 2);
     assert.deepEqual(first, { threadIds: [id("a"), id("b")], counts: [] });
-    assert.sameDeepMembers(
-      [...(yield* list(before, 0)).counts],
-      [
-        { projectId: ProjectId.make("project:a"), count: 4 },
-        { projectId: ProjectId.make("project:b"), count: 1 },
-      ],
-    );
+    assert.sameDeepMembers(totals(yield* list(before, 0)), [
+      { projectId: ProjectId.make("project:a"), count: 4 },
+      { projectId: ProjectId.make("project:b"), count: 1 },
+    ]);
     // A cursor without an id is strict, as the snapshot's cut is: the day-4 tie is not counted.
-    assert.sameDeepMembers(
-      [...(yield* list({ settledAt: DateTime.formatIso(at(4)) }, 0)).counts],
-      [
-        { projectId: ProjectId.make("project:a"), count: 1 },
-        { projectId: ProjectId.make("project:b"), count: 1 },
-      ],
-    );
+    assert.sameDeepMembers(totals(yield* list({ settledAt: DateTime.formatIso(at(4)) }, 0)), [
+      { projectId: ProjectId.make("project:a"), count: 1 },
+      { projectId: ProjectId.make("project:b"), count: 1 },
+    ]);
     // The cursor is the last row: the tie on day 4 continues by id.
     const next = yield* list({ settledAt: DateTime.formatIso(at(4)), threadId: id("b") }, 10);
     assert.deepEqual(next.threadIds, [id("c"), id("d"), id("snoozed")]);
@@ -3153,8 +3166,51 @@ it.effect("SQL list older settled threads below a cursor", () =>
     const scoped = yield* list(before, 0, [ProjectId.make("project:b")]);
     assert.deepEqual(scoped, {
       threadIds: [],
-      counts: [{ projectId: ProjectId.make("project:b"), count: 1 }],
+      counts: [
+        {
+          projectId: ProjectId.make("project:b"),
+          count: 1,
+          groups: [
+            { inbox: null, agentCreated: false, founder: "machine", byAgent: false, count: 1 },
+          ],
+        },
+      ],
     });
+
+    // Recounts group like snapshots: by routing, and by sender through an active parent.
+    yield* createThread({
+      name: "jeff-root",
+      settledDay: null,
+      project: "project:c",
+      inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }),
+    });
+    yield* createThread({
+      name: "agent-child",
+      settledDay: 6,
+      project: "project:c",
+      parent: "jeff-root",
+      inbox: makeThreadInbox({
+        actor: { kind: "agent", id: "lead" },
+        routing: inboxRoutingFor("agents"),
+      }),
+    });
+    yield* createThread({
+      name: "kameron",
+      settledDay: 7,
+      project: "project:c",
+      inbox: makeThreadInbox({ actor: { kind: "human", id: "kameron" } }),
+    });
+    // The index carries the routing the snapshot's counts group by, as the shells do.
+    yield* assertShellIndexCoversShells();
+    const routed = yield* list(before, 0, [ProjectId.make("project:c")]);
+    assert.equal(routed.counts.length, 1);
+    assert.sameDeepMembers(
+      [...(routed.counts[0]?.groups ?? [])],
+      [
+        { inbox: "agents", agentCreated: false, founder: "jeff", byAgent: true, count: 1 },
+        { inbox: "kameron", agentCreated: false, founder: "kameron", byAgent: false, count: 1 },
+      ],
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 

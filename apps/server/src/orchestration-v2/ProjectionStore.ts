@@ -80,6 +80,7 @@ import {
   NodeId,
   ProjectId,
   ProviderInstanceId,
+  ThreadInbox,
 } from "@t3tools/contracts";
 import { createOrchestrationV2TurnItemVisibility } from "@t3tools/shared/orchestrationV2Timeline";
 import {
@@ -90,6 +91,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -98,6 +100,7 @@ import type * as Statement from "effect/sql/Statement";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { readableSearchText } from "./messageSearchIndex.ts";
+import { countOlderSettledThreads } from "./olderSettledCounts.ts";
 import {
   isFoldableWorkItem,
   isThreadHistoryUserTurn,
@@ -474,6 +477,9 @@ export interface ActiveShellIndexEntry extends Pick<
   | "pinOrderKey"
   | "snoozedUntil"
 > {
+  /** Read only to count older settled threads by sender. */
+  readonly inbox?: ThreadInbox | undefined;
+  readonly createdBy?: string | undefined;
   /** False only when no run, request, work item, or watch can make the shell live. */
   readonly mayBeLive: boolean;
   /** Whether it delegated a task to a linked environment, whose clients nest that task under it. */
@@ -1205,6 +1211,19 @@ const shellIndexLineage = (row: {
   rootThreadId: ThreadId.make(row.root_thread_id),
   ...(row.side_chat === null ? {} : { sideChat: row.side_chat === 1 }),
 });
+
+const decodeIndexInbox = Schema.decodeUnknownOption(Schema.fromJsonString(ThreadInbox));
+/** The fields older settled counts group an index row by, as they read its shell. */
+const shellIndexSender = (row: {
+  readonly inbox_json: string | null;
+  readonly created_by: string | null;
+}): Pick<ActiveShellIndexEntry, "inbox" | "createdBy"> => {
+  const inbox = row.inbox_json === null ? Option.none() : decodeIndexInbox(row.inbox_json);
+  return {
+    ...(Option.isSome(inbox) ? { inbox: inbox.value } : {}),
+    ...(row.created_by === null ? {} : { createdBy: row.created_by }),
+  };
+};
 
 const encodeIdList = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
@@ -8956,12 +8975,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly pinned_at: string | null;
         readonly pin_order_key: string | null;
         readonly snoozed_until: string | null;
+        readonly inbox_json: string | null;
+        readonly created_by: string | null;
         readonly may_be_live: number;
         readonly has_remote_tasks: number;
       }>`
         SELECT
           t.thread_id,
           t.project_id,
+          json_extract(t.payload_json, '$.inbox') AS inbox_json,
+          json_extract(t.payload_json, '$.createdBy') AS created_by,
           json_extract(t.payload_json, '$.lineage.relationshipToParent') AS relationship_to_parent,
           json_extract(t.payload_json, '$.lineage.parentThreadId') AS parent_thread_id,
           json_extract(t.payload_json, '$.lineage.rootThreadId') AS root_thread_id,
@@ -9030,6 +9053,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
         pinOrderKey: row.pin_order_key,
         snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
+        ...shellIndexSender(row),
         mayBeLive: row.may_be_live === 1,
         hasRemoteTasks: row.has_remote_tasks === 1,
       }));
@@ -9171,21 +9195,44 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY older.settled_at DESC, older.thread_id ASC
               LIMIT ${limit}
             `;
+      // Every active row, so the counts group by sender through parents as snapshots do.
       const countRows =
         limit !== 0
           ? []
-          : yield* sql<{ readonly project_id: string; readonly count: number }>`
-              WITH older AS (${older})
-              SELECT older.project_id, COUNT(*) AS count FROM older
-              WHERE ${belowCursor}
-              GROUP BY older.project_id
+          : yield* sql<{
+              readonly thread_id: string;
+              readonly project_id: string;
+              readonly parent_thread_id: string | null;
+              readonly inbox_json: string | null;
+              readonly created_by: string | null;
+              readonly is_older: number;
+            }>`
+              SELECT t.thread_id, t.project_id,
+                json_extract(t.payload_json, '$.lineage.parentThreadId') AS parent_thread_id,
+                json_extract(t.payload_json, '$.inbox') AS inbox_json,
+                json_extract(t.payload_json, '$.createdBy') AS created_by,
+                t.thread_id IN (
+                  SELECT older.thread_id FROM (${older}) older WHERE ${belowCursor}
+                ) AS is_older
+              FROM orchestration_v2_projection_threads t
+              WHERE t.deleted_at IS NULL
+                AND t.archived_at IS NULL
             `;
       return {
         threadIds: pageRows.map((row) => ThreadId.make(row.thread_id)),
-        counts: countRows.map((row) => ({
-          projectId: ProjectId.make(row.project_id),
-          count: row.count,
-        })),
+        counts: countOlderSettledThreads(
+          countRows.map((row) => ({
+            id: ThreadId.make(row.thread_id),
+            projectId: ProjectId.make(row.project_id),
+            lineage: {
+              parentThreadId:
+                row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
+            },
+            ...shellIndexSender(row),
+            isOlder: row.is_older === 1,
+          })),
+          (row) => row.isOlder,
+        ),
       };
     }, Effect.mapError(shellSnapshotReadError));
 

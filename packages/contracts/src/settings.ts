@@ -419,6 +419,7 @@ export const ClientSettingsSchema = Schema.Struct({
   founderInboxFilter: Schema.optionalKey(Schema.Array(InboxChoice)),
   sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   sidebarHiddenThreadAttributions: Schema.optionalKey(Schema.Array(ThreadAttribution)),
+  // Machine owners for servers too old to report `ownerFounder`; newer servers' own value wins.
   founderByEnvironmentId: Schema.optionalKey(Schema.Record(EnvironmentId, Founder)),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -1409,6 +1410,11 @@ export const ServerSettings = Schema.Struct({
   requireConnectDeviceApproval: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  /**
+   * The founder this machine belongs to, which every client credits its threads without sender
+   * details to. Null credits them to no one. A label only; it grants nothing.
+   */
+  ownerFounder: Schema.NullOr(Founder).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
 
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   cloudSpeechCredentials: CloudSpeechCredentials.pipe(
@@ -1878,6 +1884,7 @@ export const ServerSettingsPatch = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   keepAwakeWhileAgentsWork: Schema.optionalKey(Schema.Boolean),
   requireConnectDeviceApproval: Schema.optionalKey(Schema.Boolean),
+  ownerFounder: Schema.optionalKey(Schema.NullOr(Founder)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   cloudSpeechCredentials: Schema.optionalKey(
     Schema.Struct({

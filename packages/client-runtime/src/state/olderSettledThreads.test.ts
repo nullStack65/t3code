@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  makeThreadInbox,
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationV2GetShellSnapshotError,
   ProjectId,
@@ -52,6 +53,7 @@ const older: OlderSettled = {
   before,
   beforeMs: 50 * DAY,
   counts: new Map([[project, 3]]),
+  groups: null,
 };
 
 const row = (
@@ -97,6 +99,13 @@ describe("olderSettledCountKey", () => {
     expect(key([{ ...base[0]!, projectId: ProjectId.make("project-b") }, base[1]!])).not.toBe(
       start,
     );
+    // An older row routed to another inbox, which moves it between the counts' groups.
+    expect(
+      key([
+        { ...base[0]!, inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }) },
+        base[1]!,
+      ]),
+    ).not.toBe(start);
   });
 
   it("stays put for new threads and subagents", () => {

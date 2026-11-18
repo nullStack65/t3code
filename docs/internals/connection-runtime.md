@@ -125,6 +125,11 @@ server first.
 The Settled count is local Settled rows, minus local rows below the cut, plus the
 server's counts
 ([older settled threads](../../packages/client-runtime/src/state/olderSettledThreads.ts)).
+Both sides pass through the list's inbox filter: each count is broken into groups by
+primary inbox and sender (`resolveThreadSenders`), and a sender's `"machine"` resolves
+through the owner the machine reports. A local row below the cut then cancels itself on
+both sides, so the total is the same on every client whichever pages it loaded. Counts
+without groups, from older servers, are exact only for a filter that shows everything.
 The counts are re-read when a removal or an old row's arrival or change could
 move them, so archiving any thread costs one small read. A shelf lists an older
 row only above the highest page frontier of the environments that can still

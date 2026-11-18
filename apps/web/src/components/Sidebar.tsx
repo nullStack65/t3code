@@ -1,9 +1,14 @@
 import { SidebarThreadFilterMenu } from "./sidebar/SidebarThreadFilterMenu";
 import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
 import {
+  resolveMachineOwners,
   resolveThreadAttributions,
   threadAttributionKey,
 } from "@t3tools/client-runtime/state/thread-attribution";
+import {
+  matchesOlderSettledGroup,
+  threadListFilterCoverage,
+} from "@t3tools/client-runtime/state/thread-list-filter";
 import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
@@ -69,6 +74,7 @@ import {
 } from "@t3tools/contracts";
 import {
   resolveListedAncestorThreadRef,
+  type OlderSettledFilter,
   type OlderSettledScope,
 } from "@t3tools/client-runtime/state/threads";
 
@@ -337,7 +343,6 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
-const NO_MACHINE_OWNERS = {};
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -432,6 +437,8 @@ function useSidebarThreads(input: {
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
+  /** The list filter `threads` passed, applied to the older settled threads servers count. */
+  readonly olderSettledFilter: OlderSettledFilter | null;
   readonly delegatedUnderParent: ReadonlySet<string>;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
@@ -446,6 +453,7 @@ function useSidebarThreads(input: {
     connectedEnvironmentIds,
     optimisticDrop,
     threads,
+    olderSettledFilter,
     delegatedUnderParent,
     routeRowThreadKey,
     folderGroups,
@@ -511,8 +519,13 @@ function useSidebarThreads(input: {
   });
   const listedSettledThreads = settledThreads.filter(olderSettledShelf.isListed);
   useOlderSettledShelfGrowth(olderSettledShelf, listedSettledThreads);
-  const settledCount =
-    settledThreads.length + olderSettledShelf.unloadedCount(partition.visibleThreads);
+  // The servers' total for this filter, not just the loaded rows, so every client agrees.
+  const settledTotal = olderSettledShelf.total({
+    threads: partition.visibleThreads,
+    settledCount: settledThreads.length,
+    filter: olderSettledFilter,
+  });
+  const settledCount = settledTotal.count;
   const visibleSettledThreads = (() => {
     const visible = listedSettledThreads.slice(0, settledVisibleCount);
     if (
@@ -587,8 +600,13 @@ function useSidebarThreads(input: {
     ],
     settledVisibleCount,
     settledCount,
+    settledCountExact: settledTotal.exact,
     olderSettledShelf,
-    hiddenSettledCount: Math.max(0, settledCount - visibleSettledThreads.length),
+    // A lower-bound total still offers the pages a server has left.
+    hiddenSettledCount: Math.max(
+      settledCount - visibleSettledThreads.length,
+      !settledTotal.exact && olderSettledShelf.canLoadMore ? 1 : 0,
+    ),
     showMoreSettled: () =>
       setSettledTail((current) => ({
         scopeKey: current.scopeKey,
@@ -1110,19 +1128,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const threadListFilter = useClientSettings(threadListFilterOf);
   const founderByEnvironmentId = useClientSettings((settings) => settings.founderByEnvironmentId);
-  const threadAttributions = resolveThreadAttributions(
-    threads,
-    founderByEnvironmentId ?? NO_MACHINE_OWNERS,
-  );
+  const machineOwners = resolveMachineOwners(serverConfigs, founderByEnvironmentId);
+  const threadAttributions = resolveThreadAttributions(threads, machineOwners);
   const attributionOf = (thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) =>
     threadAttributions.get(threadAttributionKey(thread)) ?? "unknown";
   // Search always looks across every inbox, sender and environment.
-  const inboxThreads =
-    threadSearchQuery.trim().length > 0
-      ? threads
-      : threads.filter((thread) =>
-          matchesThreadListFilter(thread, threadListFilter, attributionOf(thread)),
-        );
+  const listFilterApplies = threadSearchQuery.trim().length === 0;
+  const inboxThreads = listFilterApplies
+    ? threads.filter((thread) =>
+        matchesThreadListFilter(thread, threadListFilter, attributionOf(thread)),
+      )
+    : threads;
+  // The same filter over threads servers counted but did not send, for the Settled total.
+  const olderSettledFilter: OlderSettledFilter | null = listFilterApplies
+    ? {
+        matches: (environmentId, group) =>
+          matchesOlderSettledGroup(environmentId, group, threadListFilter, machineOwners),
+        coverage: (environmentId) => threadListFilterCoverage(environmentId, threadListFilter),
+      }
+    : null;
   const listedThreads =
     promotingDraftThreadKeys.length === 0
       ? inboxThreads
@@ -1333,6 +1357,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     searchableThreads,
     settledVisibleCount,
     settledCount,
+    settledCountExact,
     olderSettledShelf,
     hiddenSettledCount,
     showMoreSettled,
@@ -1363,6 +1388,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     connectedEnvironmentIds,
     optimisticDrop,
     threads: listedThreads,
+    olderSettledFilter,
     delegatedUnderParent,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
@@ -3647,6 +3673,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 )}
                                 label="Settled"
                                 count={settledCount}
+                                countIsLowerBound={!settledCountExact}
                                 dragging={from !== null}
                                 isDropTarget={dragTargetSection === "settled"}
                                 toggle={{
@@ -3698,7 +3725,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             ? "Loading"
                             : olderSettledShelf.failed
                               ? "Could not load older threads. Retry"
-                              : `Show ${Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT)} more`}
+                              : settledCountExact
+                                ? `Show ${Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT)} more`
+                                : "Show more"}
                         </button>
                       </li>
                     ) : null}

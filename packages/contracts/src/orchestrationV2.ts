@@ -3,7 +3,13 @@ import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { ThreadInbox, ThreadInboxRoutingPatch, InboxActor } from "./threadInbox.ts";
+import {
+  Founder,
+  InboxActor,
+  InboxChoice,
+  ThreadInbox,
+  ThreadInboxRoutingPatch,
+} from "./threadInbox.ts";
 import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaGetter from "effect/SchemaGetter";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -2340,9 +2346,25 @@ export function isOlderSettledThreadShell(
   );
 }
 
+/**
+ * Older settled threads that share what an inbox filter reads: their `primaryInbox`, whether an
+ * agent created them, and their `ThreadSender`. Clients apply their filter to these, so a filtered
+ * Settled count includes threads they have not loaded.
+ */
+export const OrchestrationV2OlderSettledGroup = Schema.Struct({
+  inbox: Schema.NullOr(InboxChoice),
+  agentCreated: Schema.Boolean,
+  founder: Schema.NullOr(Schema.Union([Founder, Schema.Literal("machine")])),
+  byAgent: Schema.Boolean,
+  count: NonNegativeInt,
+});
+export type OrchestrationV2OlderSettledGroup = typeof OrchestrationV2OlderSettledGroup.Type;
+
 export const OrchestrationV2OlderSettledCount = Schema.Struct({
   projectId: ProjectId,
   count: NonNegativeInt,
+  /** `count` broken down; older servers omit it. */
+  groups: Schema.optionalKey(Schema.Array(OrchestrationV2OlderSettledGroup)),
 });
 export type OrchestrationV2OlderSettledCount = typeof OrchestrationV2OlderSettledCount.Type;
 

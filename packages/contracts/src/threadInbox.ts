@@ -160,14 +160,16 @@ export function primaryInbox(inbox: ThreadInbox | null | undefined): InboxChoice
   return matchesInboxView(inbox, "agents") ? "agents" : null;
 }
 
+/** `matchesInboxFilter` for a thread already reduced to its `primaryInbox`. */
+export const matchesPrimaryInbox = (
+  primary: InboxChoice | null,
+  filter: ReadonlyArray<InboxChoice>,
+) => isAllInboxes(filter) || (primary !== null && filter.includes(primary));
+
 export const matchesInboxFilter = (
   inbox: ThreadInbox | null | undefined,
   filter: ReadonlyArray<InboxChoice>,
-) => {
-  if (isAllInboxes(filter)) return true;
-  const primary = primaryInbox(inbox);
-  return primary !== null && filter.includes(primary);
-};
+) => matchesPrimaryInbox(primaryInbox(inbox), filter);
 
 /** New work is attributed only to a chosen founder; otherwise it stays unclassified (All). */
 export const inboxOriginFor = (settings: {
@@ -189,4 +191,68 @@ export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: In
   if (view === "shared") return inbox?.audience === "shared";
   const lane = founderInboxLane(inbox, view);
   return lane === "action" || lane === "FYI";
+}
+
+/**
+ * Who a thread came from, before its machine's owner is applied: `"machine"` stands for that
+ * owner, which clients look up. `byAgent` marks an agent's work for that founder.
+ */
+export interface ThreadSender {
+  readonly founder: Founder | "machine" | null;
+  readonly byAgent: boolean;
+}
+
+export interface ThreadSenderInput {
+  readonly key: string;
+  /** The parent's key; a parent always shares the thread's environment. */
+  readonly parentKey: string | null;
+  readonly inbox?: ThreadInbox | null | undefined;
+  readonly createdBy?: string | undefined;
+}
+
+const humanFounder = (actor: InboxActor | null | undefined): Founder | null =>
+  actor?.kind === "human" ? actor.id : null;
+
+/**
+ * Every thread's sender, keyed by `key`. A human origin or requester is that founder; agent work
+ * takes its owner, else its parent's founder; only history without inbox fields falls back to the
+ * machine's owner. Servers count older settled threads by sender and clients label rows by it, so
+ * the two agree.
+ */
+export function resolveThreadSenders(
+  threads: ReadonlyArray<ThreadSenderInput>,
+): ReadonlyMap<string, ThreadSender> {
+  const byKey = new Map(threads.map((thread) => [thread.key, thread]));
+  const resolved = new Map<string, ThreadSender>();
+  const resolving = new Set<string>();
+  const resolve = (thread: ThreadSenderInput): ThreadSender => {
+    const known = resolved.get(thread.key);
+    if (known !== undefined) return known;
+    // A lineage cycle resolves the repeated thread without its parent.
+    resolving.add(thread.key);
+    const inbox = thread.inbox;
+    const parent =
+      thread.parentKey === null || resolving.has(thread.parentKey)
+        ? undefined
+        : byKey.get(thread.parentKey);
+    const human = humanFounder(inbox?.origin);
+    const founder =
+      human ??
+      humanFounder(inbox?.requestedBy) ??
+      (inbox?.origin?.kind === "agent"
+        ? (inbox.owner ?? (parent ? resolve(parent).founder : null))
+        : null) ??
+      // Only history from before inbox routing falls back to the machine: a shared machine
+      // runs both founders' agents, so crediting routed work to its owner would be a guess.
+      (inbox ? null : "machine");
+    const sender: ThreadSender = {
+      founder,
+      byAgent: human === null && (inbox?.origin?.kind === "agent" || thread.createdBy === "agent"),
+    };
+    resolving.delete(thread.key);
+    resolved.set(thread.key, sender);
+    return sender;
+  };
+  for (const thread of byKey.values()) resolve(thread);
+  return resolved;
 }
