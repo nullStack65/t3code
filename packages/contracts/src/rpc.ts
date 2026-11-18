@@ -235,6 +235,7 @@ import {
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2RpcSchemas,
   OrchestrationV2ThreadLaunchError,
+  OrchestrationV2ThreadPlacementAdmitError,
 } from "./orchestrationV2.ts";
 import {
   ProjectCreateNewInput,
@@ -1950,6 +1951,15 @@ const WsOrchestrationV2LaunchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.la
   error: Schema.Union([OrchestrationV2ThreadLaunchError, EnvironmentAuthorizationError]),
 });
 
+const WsOrchestrationV2AdmitThreadPlacementRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.admitThreadPlacement,
+  {
+    payload: OrchestrationV2RpcSchemas.admitThreadPlacement.input,
+    success: OrchestrationV2RpcSchemas.admitThreadPlacement.output,
+    error: Schema.Union([OrchestrationV2ThreadPlacementAdmitError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2SubscribeShellRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.subscribeShell, {
   payload: OrchestrationV2RpcSchemas.subscribeShell.input,
   success: OrchestrationV2RpcSchemas.subscribeShell.output,
@@ -2328,6 +2338,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetOlderSettledThreadsRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,
+  WsOrchestrationV2AdmitThreadPlacementRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,

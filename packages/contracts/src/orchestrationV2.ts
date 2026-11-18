@@ -3842,6 +3842,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   forceStopThread: "orchestration.forceStopThread",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
+  admitThreadPlacement: "orchestration.admitThreadPlacement",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
   subscribeCommandOutput: "orchestration.subscribeCommandOutput",
@@ -3926,6 +3927,37 @@ export const OrchestrationV2ThreadLaunchResult = Schema.Struct({
   sequence: Schema.optionalKey(NonNegativeInt),
 });
 export type OrchestrationV2ThreadLaunchResult = typeof OrchestrationV2ThreadLaunchResult.Type;
+
+/**
+ * Where a new thread's launch runs, admitted by this server before anything is sent there. The
+ * operation is the launch's own `commandId`; its first admission binds one destination, which a
+ * retry gets back unchanged, whatever it asks now.
+ */
+export const OrchestrationV2ThreadPlacementAdmitInput = Schema.Struct({
+  commandId: CommandId,
+  /** The thread the launch creates. */
+  threadId: ThreadId,
+  /** The project here; elsewhere the launch runs in that machine's project with its repository. */
+  projectId: ProjectId,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  /** The machines the client may launch on; it narrows the choice and never widens it. */
+  candidateEnvironmentIds: Schema.Array(EnvironmentId),
+});
+export type OrchestrationV2ThreadPlacementAdmitInput =
+  typeof OrchestrationV2ThreadPlacementAdmitInput.Type;
+
+export const OrchestrationV2ThreadPlacementAdmitResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  /** The project there the launch runs in. */
+  projectId: ProjectId,
+  reason: Schema.Literals(["capacity"]),
+  /** Bound by an earlier admission of the same operation. */
+  resumed: Schema.Boolean,
+});
+export type OrchestrationV2ThreadPlacementAdmitResult =
+  typeof OrchestrationV2ThreadPlacementAdmitResult.Type;
 
 export const OrchestrationV2DispatchCommandResult = Schema.Struct({
   sequence: NonNegativeInt,
@@ -4223,6 +4255,29 @@ export class OrchestrationV2GetShellSnapshotError extends Schema.TaggedError<Orc
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
+
+/**
+ * Why a launch was not admitted. Nothing was bound or sent. `other-session`: the operation
+ * belongs to another sign-in, so it is reconciled there, never adopted or started afresh here.
+ * `excluded`: it is bound to a machine automatic placement may not use.
+ */
+export class OrchestrationV2ThreadPlacementAdmitError extends Schema.TaggedError<OrchestrationV2ThreadPlacementAdmitError>()(
+  "OrchestrationV2ThreadPlacementAdmitError",
+  {
+    commandId: CommandId,
+    reason: Schema.Literals([
+      "no-eligible-environment",
+      "other-session",
+      "excluded",
+      "unavailable",
+    ]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
 
 export class OrchestrationV2ThreadLaunchError extends Schema.TaggedError<OrchestrationV2ThreadLaunchError>()(
   "OrchestrationV2ThreadLaunchError",
@@ -4558,6 +4613,10 @@ export const OrchestrationV2RpcSchemas = {
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,
     output: OrchestrationV2ThreadLaunchResult,
+  },
+  admitThreadPlacement: {
+    input: OrchestrationV2ThreadPlacementAdmitInput,
+    output: OrchestrationV2ThreadPlacementAdmitResult,
   },
   subscribeShell: {
     input: OrchestrationV2SubscribeShellInput,

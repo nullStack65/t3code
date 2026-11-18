@@ -206,6 +206,11 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:force-stop-thread",
       tag: ORCHESTRATION_V2_WS_METHODS.forceStopThread,
     }),
+    /** Where a new thread's launch runs, bound on that server before anything is sent. */
+    admitThreadPlacement: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:admit-thread-placement",
+      tag: ORCHESTRATION_V2_WS_METHODS.admitThreadPlacement,
+    }),
     turnItem: (target: {
       readonly environmentId: EnvironmentId;
       readonly input: OrchestrationV2GetTurnItemInput;

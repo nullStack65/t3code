@@ -911,15 +911,26 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
     const retriedLaunch = launchPlan?.type === "retry" ? launchPlan.launch : null;
+    // A new launch admitted to this machine goes out as the operation reserved for its admission.
+    const placed = draftSessionForSend?.placementOperation;
+    const reservedLaunch =
+      retriedLaunch === null &&
+      placed?.admission?.environmentId === environmentId &&
+      placed.admission.projectId === activeProject.id
+        ? placed
+        : null;
     const messageIdForSend = retriedLaunch
       ? MessageId.make(retriedLaunch.messageId)
-      : newMessageId();
-    const messageCreatedAt = retriedLaunch?.createdAt ?? new Date().toISOString();
+      : reservedLaunch
+        ? MessageId.make(reservedLaunch.messageId)
+        : newMessageId();
+    const messageCreatedAt =
+      retriedLaunch?.createdAt ?? reservedLaunch?.createdAt ?? new Date().toISOString();
     const launchOperation: PendingDraftLaunch | undefined =
       launchRequest === null
         ? undefined
         : (retriedLaunch ?? {
-            commandId: newCommandId(),
+            commandId: reservedLaunch?.commandId ?? newCommandId(),
             messageId: messageIdForSend,
             createdAt: messageCreatedAt,
             request: launchRequest,
@@ -1691,10 +1702,19 @@ export function useComposerSend(input: ComposerSendInput) {
   const onSendLatest = useStableCallback(onSend);
   const onSendWithRouting = async (...args: Parameters<typeof onSend>) => {
     args[0]?.preventDefault();
+    const sendContext = composerRef.current?.getSendContext();
     const refresh =
-      args[3] || sendInFlightRef.current || readPendingEnvironmentChange() !== null
+      args[3] ||
+      sendInFlightRef.current ||
+      readPendingEnvironmentChange() !== null ||
+      sendContext === undefined
         ? null
-        : refreshBeforeSend();
+        : refreshBeforeSend({
+            modelSelection: sendContext.selectedModelSelection,
+            runtimeMode,
+            interactionMode: DEFAULT_INTERACTION_MODE,
+            multipleModels: (sendContext.multipleModelSelections?.length ?? 0) > 0,
+          });
     if (refresh === null) return onSend(...args);
     sendInFlightRef.current = true;
     const ready = await refresh.finally(() => {

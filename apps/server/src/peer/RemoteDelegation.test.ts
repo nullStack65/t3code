@@ -17,6 +17,7 @@ import {
   type RepositoryIdentity,
   RunId,
   type HostResourcesSnapshot,
+  OrchestrationV2ThreadPlacementAdmitError,
   type ServerProvider,
   ThreadId,
   TurnItemId,
@@ -31,6 +32,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -3032,4 +3034,199 @@ it.effect("a local task runs in this thread's project", () =>
       expect(JSON.stringify(result.content)).toContain("invalid_request");
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+/** A native client's new-thread launch, admitted on the laptop for the box's Claude model. */
+const nativeAdmission = (
+  laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
+  options: {
+    readonly commandId: string;
+    readonly sessionId?: string;
+    readonly stillAuthorized?: Effect.Effect<boolean>;
+    readonly model?: string;
+    readonly here?: Effect.Effect<
+      { readonly resources: HostResourcesSnapshot | null; readonly modelAvailable: boolean },
+      OrchestrationV2ThreadPlacementAdmitError
+    >;
+  },
+) =>
+  laptopEnv.remote
+    .admit(
+      {
+        sessionId: options.sessionId ?? "web-session",
+        stillAuthorized: options.stillAuthorized ?? Effect.succeed(true),
+      },
+      {
+        commandId: CommandId.make(options.commandId),
+        threadId: ThreadId.make(`thread:${options.commandId}`),
+        projectId: laptopProject.id,
+        modelSelection: {
+          instanceId: boxClaude.instanceId,
+          model: options.model ?? "claude-sonnet-4-6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        candidateEnvironmentIds: [laptop.environmentId, box.environmentId],
+        // The laptop cannot run the model, so only the box can take it.
+        here: options.here ?? Effect.succeed({ resources: loadOf(0.1), modelAvailable: false }),
+      },
+    )
+    .pipe(Effect.result);
+
+const nativePlacementBinding = (commandId: string) =>
+  CommandId.make(
+    `command:native:${encodeURIComponent(laptop.environmentId)}:placement:thread-launch:${encodeURIComponent(commandId)}`,
+  );
+
+it.effect(
+  "a native launch is bound to the box with its session, and only that session resumes it, as bound",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const laptopEnv = yield* makeLaptop(database, offers);
+        yield* linkTo(laptopEnv.links, b, "full-access");
+
+        const admitted = yield* nativeAdmission(laptopEnv, { commandId: "web-launch" });
+        expect(admitted).toEqual(
+          Result.succeed({
+            environmentId: box.environmentId,
+            projectId: boxProject,
+            reason: "capacity",
+            resumed: false,
+          }),
+        );
+        // Admission sends no launch: the client launches there over its own connection.
+        expect(yield* Ref.get(thread.launched)).toBeNull();
+
+        // The box fills up and the request changes; this machine's evidence cannot even be read.
+        // Its binding still holds for the session that made it, without reading any of that.
+        yield* Ref.set(thread.resources, loadOf(0.99));
+        const hereRead = yield* Ref.make(0);
+        const resumed = yield* nativeAdmission(laptopEnv, {
+          commandId: "web-launch",
+          model: "a-model-nowhere",
+          here: Ref.update(hereRead, (count) => count + 1).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new OrchestrationV2ThreadPlacementAdmitError({
+                  commandId: CommandId.make("web-launch"),
+                  reason: "unavailable",
+                  detail: "providers unreadable",
+                }),
+              ),
+            ),
+          ),
+        });
+        expect(resumed).toEqual(
+          Result.succeed({
+            environmentId: box.environmentId,
+            projectId: boxProject,
+            reason: "capacity",
+            resumed: true,
+          }),
+        );
+        expect(yield* Ref.get(hereRead)).toBe(0);
+
+        // Another sign-in neither adopts it nor starts it afresh.
+        const other = yield* nativeAdmission(laptopEnv, {
+          commandId: "web-launch",
+          sessionId: "replaced-session",
+        });
+        expect(Result.isFailure(other) && other.failure.reason).toBe("other-session");
+
+        // A session no longer signed in binds nothing, so nothing of it stays to be adopted.
+        yield* Ref.set(thread.resources, loadOf(0.1));
+        const signedOut = yield* nativeAdmission(laptopEnv, {
+          commandId: "signed-out",
+          stillAuthorized: Effect.succeed(false),
+        });
+        expect(Result.isFailure(signedOut) && signedOut.failure.reason).toBe("unavailable");
+        const later = yield* nativeAdmission(laptopEnv, {
+          commandId: "signed-out",
+          sessionId: "another-session",
+        });
+        expect(Result.isSuccess(later)).toBe(true);
+
+        // Signed out while the machines were asked: the choice is not bound.
+        const checks = yield* Ref.make(0);
+        const revokedMidway = yield* nativeAdmission(laptopEnv, {
+          commandId: "revoked-midway",
+          stillAuthorized: Ref.updateAndGet(checks, (count) => count + 1).pipe(
+            Effect.map((count) => count === 1),
+          ),
+        });
+        expect(Result.isFailure(revokedMidway) && revokedMidway.failure.reason).toBe("unavailable");
+        expect(yield* Ref.get(checks)).toBe(2);
+        expect(yield* laptopEnv.threads.intentOf(nativePlacementBinding("revoked-midway"))).toEqual(
+          Option.none(),
+        );
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "automatic placement never contacts an excluded machine, and refuses a launch bound to one",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const laptopEnv = yield* makeLaptop(database, offers);
+        yield* linkTo(laptopEnv.links, b, "full-access");
+        // Bound before the box is excluded: both the native and the MCP operations.
+        expect(
+          Result.isSuccess(yield* nativeAdmission(laptopEnv, { commandId: "bound-before" })),
+        ).toBe(true);
+        const placeHere = (key: string, here = { resources: loadOf(0.1), modelAvailable: false }) =>
+          laptopEnv.remote
+            .place(outsideScope, {
+              operation: "thread-launch",
+              key,
+              threadId: ThreadId.make(`thread:${key}`),
+              projectId: laptopProject.id,
+              modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+              runtimeMode: "full-access",
+              here,
+            })
+            .pipe(Effect.result);
+        expect(yield* placeHere("mcp-bound-before")).toEqual(Result.succeed(box.environmentId));
+
+        yield* laptopEnv.settings.updateSettings({
+          automaticPlacementExcludedEnvironmentIds: [box.environmentId],
+        });
+        const contact = Effect.all([Ref.get(b.probes), Ref.get(b.bearers)]);
+        const before = yield* contact;
+
+        // The box still answers with room to spare, yet nobody asks it: this machine is chosen.
+        const native = yield* nativeAdmission(laptopEnv, {
+          commandId: "fresh",
+          here: Effect.succeed({ resources: loadOf(0.5), modelAvailable: true }),
+        });
+        expect(Result.isSuccess(native) && native.success.environmentId).toBe(laptop.environmentId);
+        expect(
+          yield* placeHere("mcp-fresh", { resources: loadOf(0.5), modelAvailable: true }),
+        ).toEqual(Result.succeed(laptop.environmentId));
+
+        // Work bound there earlier is refused, never rescored elsewhere or sent there.
+        const boundNative = yield* nativeAdmission(laptopEnv, { commandId: "bound-before" });
+        expect(Result.isFailure(boundNative) && boundNative.failure.reason).toBe("excluded");
+        const boundMcp = yield* placeHere("mcp-bound-before");
+        expect(Result.isFailure(boundMcp) && boundMcp.failure.code).toBe("target_required");
+        // An excluded machine alone leaves nowhere eligible.
+        const nowhere = yield* nativeAdmission(laptopEnv, { commandId: "nowhere" });
+        expect(Result.isFailure(nowhere) && nowhere.failure.reason).toBe("no-eligible-environment");
+
+        expect(yield* contact).toEqual(before);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

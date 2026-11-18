@@ -24,11 +24,26 @@ import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import { useDraftEnvironmentRouting } from "./useDraftEnvironmentRouting";
 import { appAtomRegistry, AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { draftFanoutSelectionsAtom } from "./chatViewSend";
+import type { DraftPlacementOutcome, placeDraftBeforeSend } from "./draftPlacement";
+
+type PlaceInput = Parameters<typeof placeDraftBeforeSend>[0];
+const sendRequest = {
+  modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol"),
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  multipleModels: false,
+} as const;
 
 const resources = vi.hoisted(() => ({
   projects: [] as EnvironmentProject[],
   pickedEnvironmentId: null as EnvironmentId | null,
   refreshSelection: vi.fn<(ids: readonly EnvironmentId[]) => Promise<EnvironmentId | null>>(),
+  // The server's admission is covered in draftPlacement.test.ts; here, what the hook does with it.
+  place: vi.fn<(input: PlaceInput) => Promise<DraftPlacementOutcome>>(),
+}));
+vi.mock("./draftPlacement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./draftPlacement")>()),
+  placeDraftBeforeSend: resources.place,
 }));
 vi.mock("../../hooks/useLoadBalancedEnvironment", () => ({
   useLoadBalancedEnvironment: () => ({
@@ -50,6 +65,7 @@ vi.mock("../../hooks/useScratchProject", () => ({ useScratchProject: () => ({}) 
 
 function setup() {
   resources.refreshSelection.mockReset();
+  resources.place.mockReset();
   resources.projects = [];
   resources.pickedEnvironmentId = null;
   const a = EnvironmentId.make("machine-a");
@@ -123,7 +139,11 @@ function setup() {
     projectGroupingSettings: DEFAULT_UNIFIED_SETTINGS,
     sendInFlightRef: { current: false },
   };
-  resources.refreshSelection.mockImplementation(async (ids) => (ids.includes(b) ? b : null));
+  resources.place.mockImplementation(async () => ({
+    type: "placed",
+    environmentId: b,
+    projectId,
+  }));
   return { a, b, draftId, input, store };
 }
 
@@ -164,7 +184,7 @@ function RoutingProbe({ input, onPrepared }: HarnessProps) {
       <span>{draft?.environmentId}</span>
       <button
         onClick={async () => {
-          const ready = await routing.refreshBeforeSend();
+          const ready = await routing.refreshBeforeSend(sendRequest);
           onPrepared?.(ready);
         }}
       >
@@ -199,7 +219,9 @@ it("refreshes a stored automatic choice before sending an unsent draft", async (
   await expect.element(screen.getByText(a)).toBeInTheDocument();
   await screen.getByRole("button", { name: "Send" }).click();
   await expect.element(screen.getByText(b)).toBeInTheDocument();
-  expect(resources.refreshSelection).toHaveBeenCalledWith([a, b]);
+  expect(resources.place).toHaveBeenCalledWith(
+    expect.objectContaining({ draftId, request: sendRequest }),
+  );
   expect(store.getDraftSession(draftId)).toMatchObject({
     loadBalancedEnvironmentId: b,
     branch: "main",
@@ -228,14 +250,18 @@ it.each(["manual", "attachments", "promoted"] as const)(
     };
     await using screen = await render(<Harness input={guardedInput} />);
     await screen.getByRole("button", { name: "Send" }).click();
-    expect(resources.refreshSelection).not.toHaveBeenCalled();
+    expect(resources.place).not.toHaveBeenCalled();
     expect(store.getDraftSession(draftId)?.environmentId).toBe(a);
   },
 );
 
-it("does not reuse a stored choice when refreshed resources have no winner", async () => {
+it("keeps the draft where it is when no machine was admitted", async () => {
   const { a, input } = setup();
-  resources.refreshSelection.mockResolvedValue(null);
+  resources.place.mockResolvedValue({
+    type: "failed",
+    title: "Could not choose a machine for this draft",
+    description: "Nothing was started.",
+  });
   const onPrepared = vi.fn();
   await using screen = await render(<Harness input={input} onPrepared={onPrepared} />);
   await screen.getByRole("button", { name: "Send" }).click();
@@ -243,19 +269,23 @@ it("does not reuse a stored choice when refreshed resources have no winner", asy
   await vi.waitFor(() => expect(onPrepared).toHaveBeenCalledWith(false));
 });
 
-it("abandons a refresh when the draft changes while resources are in flight", async () => {
+it("abandons a placement when the draft changes while its admission is in flight", async () => {
   const { a, b, draftId, input, store } = setup();
-  let resolve!: (environmentId: EnvironmentId) => void;
-  resources.refreshSelection.mockReturnValue(
-    new Promise<EnvironmentId>((done) => {
-      resolve = done;
-    }),
-  );
+  let resolve!: () => void;
+  const admitted = new Promise<void>((done) => {
+    resolve = done;
+  });
+  resources.place.mockImplementation(async (placement) => {
+    await admitted;
+    return placement.composerUnchanged()
+      ? { type: "placed", environmentId: b, projectId: input.draftThread!.projectId }
+      : { type: "abandoned" };
+  });
   await using screen = await render(<Harness input={input} />);
   await screen.getByRole("button", { name: "Send" }).click();
   await act(async () => {
     store.setPrompt(draftId, "Edited while checking");
-    resolve(b);
+    resolve();
   });
   await expect.element(screen.getByText(a)).toBeInTheDocument();
   expect(store.getComposerDraft(draftId)?.prompt).toBe("Edited while checking");

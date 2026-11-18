@@ -100,6 +100,13 @@ export class PeerLinks extends Context.Service<
     readonly link: (input: PeerLinkCreateInput) => Effect.Effect<PeerLink, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
     /**
+     * Machines automatic placement never uses or contacts (server settings). Unreadable settings
+     * fail, so placement contacts nobody rather than everyone.
+     */
+    readonly placementExclusions: Effect.Effect<ReadonlySet<EnvironmentId>, PeerLinkError>;
+    /** The stored links, read here only: no peer is asked whether it answers. */
+    readonly stored: Effect.Effect<ReadonlyArray<PeerLink>, PeerLinkError>;
+    /**
      * Names the link's session there without revealing its token. Linking again
      * starts a new session there, so this changes exactly when that does.
      */
@@ -240,6 +247,13 @@ const make = Effect.gen(function* () {
   const enabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
     Effect.orElseSucceed(() => false),
+  );
+  const placementExclusions = serverSettings.getSettings.pipe(
+    Effect.map(
+      (settings): ReadonlySet<EnvironmentId> =>
+        new Set(settings.automaticPlacementExcludedEnvironmentIds),
+    ),
+    Effect.catch(failStorage),
   );
 
   /** A fresh name for one link's token; the row records it. */
@@ -619,6 +633,10 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const stored: PeerLinks["Service"]["stored"] = Effect.flatMap(readRows, (rows) =>
+    Effect.forEach(rows, toLink),
+  );
+
   const get: PeerLinks["Service"]["get"] = (environmentId) =>
     readRow(environmentId).pipe(
       Effect.flatMap(
@@ -730,6 +748,8 @@ const make = Effect.gen(function* () {
     enabled,
     link,
     list,
+    stored,
+    placementExclusions,
     session,
     get,
     unlink,
