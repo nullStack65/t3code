@@ -579,8 +579,9 @@ it("keeps a missing destination selected without claiming it cannot transcribe",
   );
   await expect
     .element(screen.getByRole("combobox", { name: "Transcribe with" }))
-    .toHaveTextContent("Chosen environment (unavailable)");
-  await expect.element(screen.getByText(/can’t transcribe audio/)).not.toBeInTheDocument();
+    .toHaveTextContent("Local model (unavailable)");
+  await expect.element(screen.getByText(/can’t run a local model/)).not.toBeInTheDocument();
+  await expect.element(screen.getByText(/Choose a backend to set it up again/)).toBeVisible();
 });
 
 it("shows the model's effective language and restores the saved preference when supported again", async () => {
