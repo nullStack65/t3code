@@ -50,7 +50,7 @@ import {
   connectSshEnvironment as connectSshEnvironmentAtom,
 } from "~/connection/onboarding";
 import { useEnvironmentQuery } from "~/state/query";
-import { linkOnConnect, usePeerLinkHosts } from "~/state/peerLinks";
+import { forgetLinkOnConnect, linkOnConnect, usePeerLinkHosts } from "~/state/peerLinks";
 import { useEnvironmentsWithScope } from "~/state/session";
 import { Checkbox } from "../ui/checkbox";
 import { LinkAccessPicker } from "./LinkAccessPicker";
@@ -264,12 +264,16 @@ export function AddEnvironmentDialog({
       return;
     }
 
-    if (routeTarget === null && linkForAgents) {
-      linkOnConnect(
-        result.value,
-        linkAccess,
-        linkHosts.map((host) => host.environmentId),
-      );
+    if (routeTarget === null) {
+      if (linkForAgents && linkHosts.length > 0) {
+        linkOnConnect(
+          result.value,
+          linkAccess,
+          linkHosts.map((host) => host.environmentId),
+        );
+      } else {
+        forgetLinkOnConnect(result.value);
+      }
     }
     handleOpenChange(false);
     toastManager.add(

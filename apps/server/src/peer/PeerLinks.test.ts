@@ -3,7 +3,13 @@ import * as NodeFS from "node:fs";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - A peer with a certificate this machine does not trust.
 import * as NodeHttps from "node:https";
 import { NodeHttpServer } from "@effect/platform-node";
-import { type ExecutionEnvironmentDescriptor, OrchestratorMcpFailure } from "@t3tools/contracts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import {
+  EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
+  OrchestratorMcpFailure,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -28,6 +34,10 @@ import {
 } from "effect/http";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
@@ -913,3 +923,49 @@ it("reads Node's TLS verification code from anywhere in a cause chain", () => {
   expect(PeerLinks.certificateErrorCode({ cause: { code: "ECONNREFUSED" } })).toBeUndefined();
   expect(PeerLinks.certificateErrorCode(new Error("timed out"))).toBeUndefined();
 });
+
+it.effect("counts a client's app report only while its session is signed in", () =>
+  Effect.gen(function* () {
+    const layerSessions = SessionStore.layer.pipe(
+      Layer.provide(Sqlite.layerMemory),
+      Layer.provide(ServerSecretStore.layer),
+      Layer.provide(
+        Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-a")),
+        }),
+      ),
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-peer-link-sessions-" })),
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    );
+    const context = yield* Layer.build(
+      layerLinkingEnvironment(descriptorOf("environment-a", "A")).pipe(
+        Layer.provideMerge(layerSessions),
+      ),
+    );
+    const links = Context.get(context, PeerLinks.PeerLinks);
+    const sessions = Context.get(context, SessionStore.SessionStore);
+    const holds = (id: string) => [
+      {
+        environmentId: EnvironmentId.make(id),
+        label: id,
+        urls: [`https://${id}.example.ts.net`],
+        serverVersion: "0.1.10",
+        keepsLinkLimits: true,
+      },
+    ];
+    const phone = yield* sessions.issue({ subject: "phone" });
+    const tablet = yield* sessions.issue({ subject: "tablet", ttl: Duration.hours(1) });
+    const laptop = yield* sessions.issue({ subject: "laptop" });
+    yield* links.reportAppConnections(phone.sessionId, holds("crown"));
+    yield* links.reportAppConnections(tablet.sessionId, holds("box"));
+    yield* links.reportAppConnections(laptop.sessionId, holds("asus"));
+    const inApp = links.environments.pipe(
+      Effect.map((known) => known.map((environment) => environment.environmentId)),
+    );
+    expect(yield* inApp).toEqual(["crown", "box", "asus"]);
+    yield* sessions.revoke(phone.sessionId);
+    expect(yield* inApp).toEqual(["box", "asus"]);
+    yield* TestClock.adjust(Duration.hours(1));
+    expect(yield* inApp).toEqual(["asus"]);
+  }).pipe(Effect.scoped),
+);

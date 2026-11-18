@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   ANOTHER_ADDRESS,
+  appPairingAddresses,
   type KnownEnvironmentRow,
   linkRequestFailureMessage,
 } from "@t3tools/client-runtime/link-request";
@@ -26,7 +27,7 @@ import { mintPairingCodeOn } from "~/state/peerPairingCode";
 import { environmentCatalog } from "~/connection/catalog";
 import { connectPairing as connectPairingAtom } from "~/connection/onboarding";
 import { useKnownEnvironments } from "~/state/knownEnvironments";
-import { peerLinkEnvironment, useLinkableMachines } from "~/state/peerLinks";
+import { forgetLinkOnConnect, peerLinkEnvironment, useLinkableMachines } from "~/state/peerLinks";
 import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { accessConfig } from "../auth/ConnectAgentSurface";
@@ -182,7 +183,7 @@ function LinkedEnvironmentRow({
   const [busy, setBusy] = useState(false);
   const forget = async () => {
     const confirmed = await (requestConfirmDialog(
-      `Forget ${link.label}? Agents here stop working there. Revoke "T3 Code · …" in ${link.label}'s Sharing & access to end the session there too.`,
+      `Forget ${link.label}? Agents here stop working there. Revoke "T3 Code · …" in ${link.label}'s Sharing & access to end the session there too. An app added through this link stays under Authorized clients there until you revoke it.`,
       { variant: "destructive" },
     ) ?? Promise.resolve(false));
     if (!confirmed) return;
@@ -198,30 +199,46 @@ function LinkedEnvironmentRow({
     // The way back out: the app's own connection stays unless the user removes it too.
     if (!row.inThisApp) return;
     const alsoRemove = await (requestConfirmDialog(
-      `Also remove ${row.label} from this app? Its threads stay there; this app forgets its pairing.`,
+      `Also remove ${row.label} from this app? Its threads stay there; this app forgets its pairing. ${row.label} still lists this app under Authorized clients, where you can revoke it.`,
       { variant: "destructive" },
     ) ?? Promise.resolve(false));
     if (!alsoRemove) return;
     const removed = await removeFromApp(link.environmentId);
-    if (removed._tag === "Failure" && !isAtomCommandInterrupted(removed)) {
+    if (removed._tag === "Success") forgetLinkOnConnect(link.environmentId);
+    else if (!isAtomCommandInterrupted(removed)) {
       failureToast(`Could not remove ${row.label}`, String(squashAtomCommandFailure(removed)));
     }
   };
+  const connectAt = async (hosts: ReadonlyArray<string>, pairingCode: string) => {
+    // A host that does not answer as this machine never receives the code, so the next can.
+    let result: Awaited<ReturnType<typeof connectPairing>> | undefined;
+    for (const host of hosts) {
+      result = await connectPairing({
+        host,
+        pairingCode,
+        expectedEnvironmentId: link.environmentId,
+      });
+      if (result._tag === "Success" || isAtomCommandInterrupted(result)) return result;
+    }
+    return result;
+  };
   const add = async () => {
-    // The link's own address, which this client reaches: see `appPairingAddress`.
-    const host = row.appAddress;
-    if (host === null) return;
+    if (row.appAddress === null) return;
     setBusy(true);
     const issued = await addToApp({ environmentId, input: { environmentId: link.environmentId } });
+    // Where the peer just answered first, then its other addresses this client reaches.
+    const hosts =
+      issued._tag === "Success" ? appPairingAddresses(issued.value.urls, row.onHostMachine) : [];
     const added =
-      issued._tag === "Success"
-        ? await connectPairing({
-            host,
-            pairingCode: issued.value.credential,
-            expectedEnvironmentId: link.environmentId,
-          })
-        : issued;
+      issued._tag === "Success" ? await connectAt(hosts, issued.value.credential) : issued;
     setBusy(false);
+    if (added === undefined) {
+      failureToast(
+        `Could not add ${link.label} to this app`,
+        `${link.label} answers only at addresses this device cannot open.`,
+      );
+      return;
+    }
     if (added._tag === "Failure") {
       if (!isAtomCommandInterrupted(added)) {
         failureToast(

@@ -7,6 +7,21 @@ import type {
 } from "@t3tools/contracts";
 import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassification";
 
+const MAX_REPORTED_LABEL = 200;
+const MAX_REPORTED_URL = 2048;
+const MAX_REPORTED_URLS = 16;
+
+/**
+ * A client's report as this server keeps it: label and version cut to size, and only a few
+ * URLs of a sane length. The client strips their userinfo before sending.
+ */
+export const boundedAppConnectionReport = (report: AppConnectionReport): AppConnectionReport => ({
+  ...report,
+  label: report.label.slice(0, MAX_REPORTED_LABEL),
+  serverVersion: report.serverVersion?.slice(0, MAX_REPORTED_LABEL) ?? null,
+  urls: report.urls.filter((url) => url.length <= MAX_REPORTED_URL).slice(0, MAX_REPORTED_URLS),
+});
+
 const versioned = (label: string, version: string | null) =>
   version === null ? label : `${label} ${version}`;
 

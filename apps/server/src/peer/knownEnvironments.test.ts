@@ -7,7 +7,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { knownEnvironments } from "./knownEnvironments.ts";
+import { boundedAppConnectionReport, knownEnvironments } from "./knownEnvironments.ts";
 
 const self = EnvironmentId.make("laptop");
 
@@ -139,5 +139,18 @@ describe("knownEnvironments", () => {
     ]);
     expect(listed[0]?.link?.access).toBe("full-access");
     expect(listed[1]?.link).toBeNull();
+  });
+
+  it("keeps a client's report to a bounded size", () => {
+    const urls = Array.from({ length: 40 }, (_, index) => `https://box-${index}.example.ts.net`);
+    const bounded = boundedAppConnectionReport(
+      app("box", "B".repeat(5000), {
+        serverVersion: "9".repeat(5000),
+        urls: [`https://${"a".repeat(5000)}.example.ts.net`, ...urls],
+      }),
+    );
+    expect(bounded.label).toHaveLength(200);
+    expect(bounded.serverVersion).toHaveLength(200);
+    expect(bounded.urls).toEqual(urls.slice(0, 16));
   });
 });

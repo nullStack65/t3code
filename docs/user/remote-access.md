@@ -400,7 +400,8 @@ link's access: a full-access link adds a full client, anything less adds a
 read-only one, and that machine lists it under **Sharing & access**. An
 environment too old for either shows **Update it**. Removing an environment
 offers to forget its link too, and forgetting a link offers to remove the
-environment from the app.
+environment from the app. Neither ends the app's access on the other machine:
+it still lists this app under **Authorized clients** until you revoke it there.
 
 An agent can also hand a task to a linked machine with `delegate_task`: it runs
 there as an ordinary thread, in the project with the same repository (or the

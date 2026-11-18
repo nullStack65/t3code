@@ -45,7 +45,12 @@ import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
-import { hostsLinking, peerLinkEnvironment, usePeerLinkHosts } from "~/state/peerLinks";
+import {
+  forgetLinkOnConnect,
+  hostsLinking,
+  peerLinkEnvironment,
+  usePeerLinkHosts,
+} from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
@@ -702,6 +707,8 @@ function ConnectionsSettingsContent({
       );
       return;
     }
+    // A link chosen while adding it was for this connection, which is gone.
+    forgetLinkOnConnect(environmentId);
     // The way back out of a link: agents there keep it unless the user forgets it too.
     for (const hostId of linkingHosts) {
       const host = peerLinkHosts.find((candidate) => candidate.environmentId === hostId);

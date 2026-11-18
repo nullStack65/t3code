@@ -40,9 +40,10 @@ import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassification";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { knownEnvironments } from "./knownEnvironments.ts";
+import { boundedAppConnectionReport, knownEnvironments } from "./knownEnvironments.ts";
 
 const PeerHttpApi = HttpApi.make(EnvironmentHttpApi.identifier)
   .add(EnvironmentHttpApi.groups.metadata)
@@ -107,7 +108,9 @@ export class PeerLinks extends Context.Service<
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
     /**
      * Replaces what one client session says its app holds. Kept in memory: a
-     * client reports again whenever it connects or its connections change.
+     * client reports again whenever it connects or its connections change. A
+     * report counts only while its session is active, so a revoked or expired
+     * session's report drops out.
      */
     readonly reportAppConnections: (
       sessionId: string,
@@ -667,17 +670,35 @@ const make = Effect.gen(function* () {
     connections,
   ) =>
     Ref.update(appReports, (current) =>
-      new Map(current).set(sessionId, connections.slice(0, MAX_REPORTED_CONNECTIONS)),
+      new Map(current).set(
+        sessionId,
+        connections.slice(0, MAX_REPORTED_CONNECTIONS).map(boundedAppConnectionReport),
+      ),
     );
+
+  // Absent only where no client reports, such as the CLI.
+  const sessions = yield* Effect.serviceOption(SessionStore.SessionStore);
+  /** The reports of sessions still signed in: a revoked or expired session's stop counting. */
+  const activeReports = Effect.gen(function* () {
+    const reports = [...(yield* Ref.get(appReports))];
+    if (Option.isNone(sessions)) return reports.flatMap(([, connections]) => connections);
+    const active = new Set<string>(
+      (yield* sessions.value.listActive().pipe(Effect.catch(failStorage))).map(
+        (session) => session.sessionId,
+      ),
+    );
+    return reports.flatMap(([sessionId, connections]) =>
+      active.has(sessionId) ? connections : [],
+    );
+  });
 
   const environments: PeerLinks["Service"]["environments"] = Effect.gen(function* () {
     const self = yield* environment.getDescriptor;
     const links = yield* list;
-    const reports = yield* Ref.get(appReports);
     return knownEnvironments({
       self: self.environmentId,
       links,
-      reports: [...reports.values()].flat(),
+      reports: yield* activeReports,
     });
   });
 

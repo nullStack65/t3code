@@ -18,6 +18,7 @@ import {
   ANOTHER_ADDRESS,
   appConnectionReports,
   appPairingAddress,
+  appPairingAddresses,
   knownEnvironmentRows,
   linkableMachines,
   linkedEnvironmentNames,
@@ -366,7 +367,8 @@ describe("appConnectionReports", () => {
       {},
     );
     const vps = configured(
-      presentation("environment-vps", "VPS", { saved: ["https://vps.ts.net"] }),
+      // A user:pass@ in a saved address is a credential and is never reported.
+      presentation("environment-vps", "VPS", { saved: ["https://me:secret@vps.ts.net"] }),
       "0.1.10",
       { mcpModeLimitHeader: true, linkFence: true },
     );
@@ -403,6 +405,7 @@ describe("knownEnvironmentRows", () => {
     id: string,
     action: "link" | "add-to-app" | null,
     linked: boolean,
+    inApp = !linked,
   ): KnownEnvironment => ({
     environmentId: EnvironmentId.make(id),
     label: id,
@@ -419,9 +422,10 @@ describe("knownEnvironmentRows", () => {
           lastReachedAt: null,
           lastError: null,
           status: "reachable",
+          appPairing: true,
         }
       : null,
-    inApp: !linked,
+    inApp,
     issue: action === null ? null : { action, message: `${id}: ${action}` },
   });
 
@@ -432,6 +436,8 @@ describe("knownEnvironmentRows", () => {
         known("r720", "add-to-app", true),
         known("box", "link", false),
         known("crown", "link", false),
+        // Another session's app holds it, so the server's merged view has no issue.
+        known("mini", null, true, true),
       ],
       [
         presentation("r720", "R720", { connected: false }),
@@ -456,6 +462,8 @@ describe("knownEnvironmentRows", () => {
       ["box", "link", "link", true, "reachable", null],
       // Only a connected app can mint the code a link needs; the issue still shows.
       ["crown", null, "link", false, "unknown", null],
+      // Another device holding it says nothing about this one, which can still add it.
+      ["mini", "add-to-app", "add-to-app", false, "reachable", "read-only"],
     ]);
   });
 
@@ -485,6 +493,10 @@ describe("knownEnvironmentRows", () => {
     expect(
       appPairingAddress(["http://127.0.0.1:13780", "https://asus.example.ts.net"], false),
     ).toBe("https://asus.example.ts.net");
+    // Adding tries each address the peer just answered at, in order, that this client can open.
+    const answered = ["https://asus.example.ts.net", "http://127.0.0.1:13780"];
+    expect(appPairingAddresses(answered, true)).toEqual(answered);
+    expect(appPairingAddresses(answered, false)).toEqual(["https://asus.example.ts.net"]);
   });
 });
 

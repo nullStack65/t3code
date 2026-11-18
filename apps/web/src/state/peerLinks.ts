@@ -197,7 +197,7 @@ export function linkOnConnect(
   hosts: ReadonlyArray<EnvironmentId>,
 ) {
   const hostsElsewhere = hosts.filter((host) => host !== environmentId);
-  if (hostsElsewhere.length === 0) return;
+  if (hostsElsewhere.length === 0) return forgetLinkOnConnect(environmentId);
   appAtomRegistry.set(
     pendingLinksAtom,
     new Map(appAtomRegistry.get(pendingLinksAtom)).set(environmentId, {
@@ -205,6 +205,18 @@ export function linkOnConnect(
       hosts: hostsElsewhere,
     }),
   );
+}
+
+/**
+ * Drops a `linkOnConnect` choice that has not run yet. Call it when the environment is
+ * removed, or added again without the link, so an old choice never links it later.
+ */
+export function forgetLinkOnConnect(environmentId: EnvironmentId) {
+  const pending = appAtomRegistry.get(pendingLinksAtom);
+  if (!pending.has(environmentId)) return;
+  const remaining = new Map(pending);
+  remaining.delete(environmentId);
+  appAtomRegistry.set(pendingLinksAtom, remaining);
 }
 
 /** Carries out `linkOnConnect` choices as their connections come up. */

@@ -32,6 +32,13 @@ export const linkAppPairing = Effect.map(
             message: "Only a linked T3 Code environment can add this one to its app.",
           });
         }
+        // A call the link makes for one of its agent threads: an agent never gets a credential.
+        if (client.senderThread !== undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Only the linked environment's app can add this one, not its agents.",
+          });
+        }
         if (Option.isNone(environmentAuth)) {
           return yield* new OrchestratorMcpFailure({
             code: "orchestration_error",
