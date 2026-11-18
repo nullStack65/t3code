@@ -1,5 +1,6 @@
 import {
   AuthSessionId,
+  EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -177,6 +178,8 @@ const ProjectListResult = Schema.Struct({
 
 const ThreadLaunchResult = Schema.Struct({
   threadId: ThreadId,
+  /** The linked environment the thread was placed in; absent when it runs on this server. */
+  environmentId: Schema.optional(EnvironmentId),
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
 });
@@ -215,6 +218,18 @@ const makeThreadTools = (session: McpToolSession, origin: string) => {
   };
 };
 export type ThreadTools = ReturnType<typeof makeThreadTools>;
+
+/** The same tools, acting on a thread in the linked environment it was placed in. */
+const toolsIn = (tools: ThreadTools, environmentId: EnvironmentId | undefined): ThreadTools =>
+  environmentId === undefined
+    ? tools
+    : {
+        call: <S extends Schema.Decoder<unknown>>(
+          tool: string,
+          args: Readonly<Record<string, unknown>>,
+          schema: S,
+        ) => tools.call(tool, { ...args, environmentId }, schema),
+      };
 
 /** A `thread start --request-id` whose launch is not yet known: the session it is sent with. */
 const PendingLaunch = Schema.Struct({ sessionId: Schema.String, token: Schema.String });
@@ -997,7 +1012,8 @@ const threadStartCommand = Command.make("start", {
           if (intent !== undefined) yield* intent.record(launched);
           if (flags.wait && launched.runId !== null) {
             if (!flags.json) yield* Console.error(`Thread ${launched.threadId}`);
-            return yield* finishRun(tools, {
+            // Placed elsewhere, the thread is only found there.
+            return yield* finishRun(toolsIn(tools, launched.environmentId), {
               threadId: launched.threadId,
               runId: launched.runId,
               json: flags.json,

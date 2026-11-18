@@ -130,6 +130,11 @@ export class RemoteDelegation extends Context.Service<
         };
       },
     ) => Effect.Effect<EnvironmentId, OrchestratorMcpFailure>;
+    /** The environment a caller's key was placed in, if it was. */
+    readonly placed: (
+      scope: McpInvocationContext.McpInvocationScope,
+      input: { readonly operation: "delegate-task" | "thread-launch"; readonly key: string },
+    ) => Effect.Effect<Option.Option<EnvironmentId>, OrchestratorMcpFailure>;
     /**
      * A top-level `t3_thread_launch` there, sent only under the link session its
      * key was first bound to: a retry after linking again never starts a second
@@ -384,21 +389,32 @@ const make = Effect.gen(function* () {
       ),
   );
 
+  const placementBinding = (
+    scope: McpInvocationContext.McpInvocationScope,
+    input: { readonly operation: string; readonly key: string },
+  ) =>
+    CommandId.make(
+      `command:mcp:${encodeURIComponent(scope.requestNamespace)}:placement:${input.operation}:${encodeURIComponent(input.key)}`,
+    );
+  const bindingFailure = () =>
+    new OrchestratorMcpFailure({
+      code: "orchestration_error",
+      message:
+        "Unable to record where this task runs, so nothing was started. Retry with the same clientRequestId.",
+    });
+
+  const placed: RemoteDelegation["Service"]["placed"] = (scope, input) =>
+    threads
+      .intentOf(placementBinding(scope, input))
+      .pipe(Effect.map(Option.map(EnvironmentId.make)), Effect.mapError(bindingFailure));
+
   const place: RemoteDelegation["Service"]["place"] = Effect.fn("RemoteDelegation.place")(
     function* (scope, input) {
-      const bindingId = CommandId.make(
-        `command:mcp:${encodeURIComponent(scope.requestNamespace)}:placement:${input.operation}:${encodeURIComponent(input.key)}`,
-      );
-      const bindingFailure = () =>
-        new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message:
-            "Unable to record where this task runs, so nothing was started. Retry with the same clientRequestId.",
-        });
+      const bindingId = placementBinding(scope, input);
       // A bound intent keeps its environment, even one that has since filled up or
       // stopped answering: its first attempt may have started the task there.
-      const bound = yield* threads.intentOf(bindingId).pipe(Effect.mapError(bindingFailure));
-      if (Option.isSome(bound)) return EnvironmentId.make(bound.value);
+      const bound = yield* placed(scope, input);
+      if (Option.isSome(bound)) return bound.value;
 
       const linked = (yield* links.enabled)
         ? yield* links.list.pipe(Effect.orElseSucceed(() => []))
@@ -1360,7 +1376,16 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, place, launch, followUp, cancel, runStatus, start });
+  return RemoteDelegation.of({
+    delegate,
+    place,
+    placed,
+    launch,
+    followUp,
+    cancel,
+    runStatus,
+    start,
+  });
 });
 
 /** A defect, logged, as a failure, so a retry covers it. */

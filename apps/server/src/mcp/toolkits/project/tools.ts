@@ -15,6 +15,7 @@ import {
   Project,
   ProjectCreatePayload,
   ProjectUpdatePayload,
+  EnvironmentId,
   ProjectId,
   OrchestratorMcpClientRequestId,
   OrchestratorMcpEnvironmentTarget,
@@ -170,6 +171,8 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   success: Schema.Struct({
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
+    /** The linked environment placement chose; its tools take it to reach the thread. */
+    environmentId: Schema.optional(EnvironmentId),
     projectId: ProjectId,
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),

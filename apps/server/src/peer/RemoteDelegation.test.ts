@@ -672,6 +672,8 @@ const makeLaptop = (
     readonly afterBindIntent?: (commandId: string) => Effect.Effect<void>;
     /** Runs once delegation has read the link session it binds a launch to. */
     readonly afterSession?: (session: Option.Option<string>) => Effect.Effect<void>;
+    /** Runs whenever something here reaches for a local launch, which this harness cannot make. */
+    readonly localLaunch?: Effect.Effect<void>;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -776,10 +778,21 @@ const makeLaptop = (
         }),
       ),
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-      Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+      Layer.provide(
+        Layer.mock(ProjectService.ProjectService)({
+          getById: (id) => Effect.succeedSome({ ...laptopProject, id }),
+        }),
+      ),
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-      Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
+      Layer.provide(
+        Layer.mock(ThreadLaunch.ThreadLaunchService)({
+          launch: () =>
+            (hooks.localLaunch ?? Effect.void).pipe(Effect.andThen(Effect.die("no local launch"))),
+          checkWorktreeBase: () =>
+            (hooks.localLaunch ?? Effect.void).pipe(Effect.andThen(Effect.die("no local launch"))),
+        }),
+      ),
       Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
       Layer.provide(
         Layer.merge(
@@ -829,6 +842,19 @@ const parentScope: McpInvocationContext.McpInvocationScope = {
   client: undefined,
   capabilities: new Set(["orchestration"]),
   issuedAt: 1,
+};
+
+/** The laptop's project, with this repository, as its project tools read it. */
+const laptopProject: Project = {
+  id: ProjectId.make("project:laptop"),
+  title: "app",
+  workspaceRoot: "/home/me/app",
+  repositoryIdentity: null,
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: "2026-10-01T00:00:00.000Z",
+  updatedAt: "2026-10-01T00:00:00.000Z",
+  deletedAt: null,
 };
 
 /** An outside client of the laptop, such as the t3 CLI or another agent, in no thread. */
@@ -1568,6 +1594,84 @@ it.effect(
         });
         expect(pinned.isError, JSON.stringify(pinned.content)).toBe(false);
         expect((pinned.structuredContent as { threadId: ThreadId }).threadId).not.toBe(lostThere);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an outside client's auto-placed launch starts at the project's default mode", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      // The client may run anything; this project starts its threads approval-required.
+      yield* a.settings.updateSettings({
+        projectSettingsOverrides: {
+          [laptopProject.id]: { defaultRuntimeMode: "approval-required" },
+        },
+      });
+      yield* linkTo(a.links, b, "full-access");
+      const launched = yield* launchPlaced(a, { clientRequestId: "defaults" });
+      expect(launched.isError, JSON.stringify(launched.content)).toBe(false);
+      expect((yield* Ref.get(thread.launchedWith))?.runtimeMode).toBe("approval-required");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "a retry that drops placement or asks for this checkout reaches the thread placed there",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const localLaunches = yield* Ref.make(0);
+        const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+          localLaunch: Ref.update(localLaunches, (count) => count + 1),
+        });
+        yield* linkTo(a.links, b, "full-access");
+        // The box takes the launch, but its answer is lost.
+        yield* Ref.set(thread.afterLaunch, Effect.die("connection lost"));
+        expect((yield* launchPlaced(a, { clientRequestId: "kept" })).isError).toBe(true);
+        const placedThere = yield* Ref.get(thread.launched);
+        expect(placedThere).not.toBeNull();
+        yield* Ref.set(thread.afterLaunch, Effect.void);
+
+        // The same request without placement is the same intent: it reaches that thread.
+        const unplaced = yield* a.call(
+          "t3_thread_launch",
+          {
+            projectId: "project:laptop",
+            title: "Suite",
+            message: "Run the suite wherever there is room.",
+            modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+            clientRequestId: "kept",
+          },
+          outsideScope,
+        );
+        expect(unplaced.isError, JSON.stringify(unplaced.content)).toBe(false);
+        expect(unplaced.structuredContent).toMatchObject({
+          threadId: placedThere,
+          environmentId: box.environmentId,
+        });
+        // So does one asking for a worktree only this checkout has.
+        const local = yield* launchPlaced(a, {
+          clientRequestId: "kept",
+          workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+        });
+        expect(local.isError, JSON.stringify(local.content)).toBe(false);
+        expect((local.structuredContent as { threadId: ThreadId }).threadId).toBe(placedThere);
+        // Nothing here ever reached for a launch of its own.
+        expect(yield* Ref.get(localLaunches)).toBe(0);
+        expect(yield* Ref.get(thread.launched)).toBe(placedThere);
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
