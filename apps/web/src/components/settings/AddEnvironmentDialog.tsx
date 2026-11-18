@@ -3,6 +3,8 @@ import { ChevronsLeftRightEllipsisIcon, PlusIcon, TerminalIcon } from "lucide-re
 import { useAtomValue } from "@effect/atom-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
+  AuthAccessWriteScope,
+  type AuthMcpClientAccess,
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
@@ -48,6 +50,10 @@ import {
   connectSshEnvironment as connectSshEnvironmentAtom,
 } from "~/connection/onboarding";
 import { useEnvironmentQuery } from "~/state/query";
+import { forgetLinkOnConnect, linkOnConnect, usePeerLinkHosts } from "~/state/peerLinks";
+import { useEnvironmentsWithScope } from "~/state/session";
+import { Checkbox } from "../ui/checkbox";
+import { LinkAccessPicker } from "./LinkAccessPicker";
 import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desktopSshHosts";
 import { type EnvironmentPresentation, useRelayEnvironmentDiscovery } from "~/state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -96,6 +102,12 @@ export function AddEnvironmentDialog({
     reportFailure: false,
   });
   const relayDiscoveryState = useRelayEnvironmentDiscovery();
+  // Adding is the approval: the user sees, and can untick, the link it also asks for.
+  const peerLinkHosts = usePeerLinkHosts();
+  const linkableFrom = useEnvironmentsWithScope(peerLinkHosts, AuthAccessWriteScope);
+  const linkHosts = peerLinkHosts.filter((host) => linkableFrom.has(host.environmentId));
+  const [linkForAgents, setLinkForAgents] = useState(true);
+  const [linkAccess, setLinkAccess] = useState<AuthMcpClientAccess>("approval-required");
   const savedDesktopSshEnvironmentKeys = (() => {
     const keys = new Set<string>();
     for (const environment of savedEnvironments) {
@@ -252,6 +264,17 @@ export function AddEnvironmentDialog({
       return;
     }
 
+    if (routeTarget === null) {
+      if (linkForAgents && linkHosts.length > 0) {
+        linkOnConnect(
+          result.value,
+          linkAccess,
+          linkHosts.map((host) => host.environmentId),
+        );
+      } else {
+        forgetLinkOnConnect(result.value);
+      }
+    }
     handleOpenChange(false);
     toastManager.add(
       routeTarget
@@ -476,6 +499,31 @@ export function AddEnvironmentDialog({
         </div>
       ) : null}
       {renderRemoteFields()}
+      {routeTarget === null && linkHosts.length > 0 ? (
+        <div className="space-y-2">
+          <label className="flex cursor-pointer items-start gap-3">
+            <Checkbox
+              className="mt-0.5"
+              checked={linkForAgents}
+              disabled={isAddingSavedBackend}
+              onCheckedChange={(checked) => setLinkForAgents(checked === true)}
+            />
+            <span className="text-xs text-foreground">
+              Also link it for agents on {linkHosts.map((host) => host.label).join(", ")}
+              <span className="block text-muted-foreground">
+                So agents there can work on it too. It links once it connects.
+              </span>
+            </span>
+          </label>
+          {linkForAgents ? (
+            <LinkAccessPicker
+              value={linkAccess}
+              onChange={setLinkAccess}
+              disabled={isAddingSavedBackend}
+            />
+          ) : null}
+        </div>
+      ) : null}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
       <Button
         variant="outline"

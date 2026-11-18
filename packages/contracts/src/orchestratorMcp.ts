@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { AuthMcpClientAccess } from "./auth.ts";
+import { PeerLinkAppAccess } from "./peerLink.ts";
 import {
   ContextTransferId,
   EnvironmentId,
@@ -945,6 +946,14 @@ export const OrchestratorMcpEnvironmentUnlinkResult = Schema.Struct({
 });
 export type OrchestratorMcpEnvironmentUnlinkResult =
   typeof OrchestratorMcpEnvironmentUnlinkResult.Type;
+
+/** A one-time pairing credential for the linking environment's own client app. */
+export const OrchestratorMcpLinkAppPairingResult = Schema.Struct({
+  credential: TrimmedNonEmptyString,
+  expiresAt: Schema.String,
+  access: PeerLinkAppAccess,
+});
+export type OrchestratorMcpLinkAppPairingResult = typeof OrchestratorMcpLinkAppPairingResult.Type;
 
 export const OrchestratorMcpDeleteScheduledTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,

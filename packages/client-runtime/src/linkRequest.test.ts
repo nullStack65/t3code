@@ -1,5 +1,12 @@
-import { EnvironmentId, type ServerConfig, ThreadId, TurnItemId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type KnownEnvironment,
+  type ServerConfig,
+  ThreadId,
+  TurnItemId,
+} from "@t3tools/contracts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -9,6 +16,10 @@ import type { EnvironmentPresentation } from "./connection/presentation.ts";
 import type { RelayDiscoveredEnvironment } from "./relay/discovery.ts";
 import {
   ANOTHER_ADDRESS,
+  appConnectionReports,
+  appPairingAddress,
+  appPairingAddresses,
+  knownEnvironmentRows,
   linkableMachines,
   linkedEnvironmentNames,
   linkRequestAnswerInput,
@@ -334,6 +345,158 @@ describe("linkableMachines", () => {
         connect: new Map([["environment-local", published]]),
       })[0]?.urls,
     ).toEqual([]);
+  });
+});
+
+describe("appConnectionReports", () => {
+  it("reports where each connection answers and whether it can be linked, and nothing else", () => {
+    const configured = (
+      environment: ReturnType<typeof presentation>,
+      serverVersion: string,
+      capabilities: object,
+    ) => ({
+      ...environment,
+      serverConfig: {
+        environment: { serverVersion, capabilities },
+        directEndpoints: [],
+      } as unknown as ServerConfig,
+    });
+    const crown = configured(
+      presentation("environment-crown", "Crown", { saved: ["http://192.168.0.27:3773"] }),
+      "0.1.2",
+      {},
+    );
+    const vps = configured(
+      // A user:pass@ in a saved address is a credential and is never reported.
+      presentation("environment-vps", "VPS", { saved: ["https://me:secret@vps.ts.net"] }),
+      "0.1.10",
+      { mcpModeLimitHeader: true, linkFence: true },
+    );
+    const mini = presentation("environment-mini", "Mini", { connected: false });
+    expect(appConnectionReports([crown, vps, mini])).toEqual([
+      {
+        environmentId: crown.environmentId,
+        label: "Crown",
+        urls: ["http://192.168.0.27:3773"],
+        serverVersion: "0.1.2",
+        keepsLinkLimits: false,
+      },
+      {
+        environmentId: vps.environmentId,
+        label: "VPS",
+        urls: ["https://vps.ts.net"],
+        serverVersion: "0.1.10",
+        keepsLinkLimits: true,
+      },
+      // Never reached, so whether it can be linked is unknown rather than "too old".
+      {
+        environmentId: mini.environmentId,
+        label: "Mini",
+        urls: [],
+        serverVersion: null,
+        keepsLinkLimits: null,
+      },
+    ]);
+  });
+});
+
+describe("knownEnvironmentRows", () => {
+  const known = (
+    id: string,
+    action: "link" | "add-to-app" | null,
+    linked: boolean,
+    inApp = !linked,
+  ): KnownEnvironment => ({
+    environmentId: EnvironmentId.make(id),
+    label: id,
+    urls: [],
+    serverVersion: null,
+    link: linked
+      ? {
+          environmentId: EnvironmentId.make(id),
+          label: id,
+          urls: [`https://${id}.example.ts.net`],
+          access: "read-only",
+          linkedAt: DateTime.makeUnsafe("2026-11-01T00:00:00Z"),
+          expiresAt: DateTime.makeUnsafe("2026-12-01T00:00:00Z"),
+          lastReachedAt: null,
+          lastError: null,
+          status: "reachable",
+          appPairing: true,
+        }
+      : null,
+    inApp,
+    issue: action === null ? null : { action, message: `${id}: ${action}` },
+  });
+
+  it("offers an action only where this client can take it", () => {
+    const rows = knownEnvironmentRows(
+      [
+        known("asus", "add-to-app", true),
+        known("r720", "add-to-app", true),
+        known("box", "link", false),
+        known("crown", "link", false),
+        // Another session's app holds it, so the server's merged view has no issue.
+        known("mini", null, true, true),
+      ],
+      [
+        presentation("r720", "R720", { connected: false }),
+        presentation("box", "Box"),
+        presentation("crown", "Crown", { connected: false }),
+      ],
+      { label: "Laptop", onHostMachine: true },
+    );
+    expect(
+      rows.map((row) => [
+        row.environmentId,
+        row.action,
+        row.issue?.action ?? null,
+        row.connected,
+        row.reachability,
+        row.linkAccess,
+      ]),
+    ).toEqual([
+      ["asus", "add-to-app", "add-to-app", false, "reachable", "read-only"],
+      // Already in this app, before the server heard so: nothing is missing.
+      ["r720", null, null, false, "reachable", "read-only"],
+      ["box", "link", "link", true, "reachable", null],
+      // Only a connected app can mint the code a link needs; the issue still shows.
+      ["crown", null, "link", false, "unknown", null],
+      // Another device holding it says nothing about this one, which can still add it.
+      ["mini", "add-to-app", "add-to-app", false, "reachable", "read-only"],
+    ]);
+  });
+
+  it("adds a link's local forward only from the host's own machine", () => {
+    const base = known("asus", "add-to-app", true);
+    const forwarded = {
+      ...base,
+      link: base.link === null ? null : { ...base.link, urls: ["http://127.0.0.1:13780"] },
+    };
+    const [onLaptop] = knownEnvironmentRows([forwarded], [], {
+      label: "Laptop",
+      onHostMachine: true,
+    });
+    expect([onLaptop?.action, onLaptop?.appAddress]).toEqual([
+      "add-to-app",
+      "http://127.0.0.1:13780",
+    ]);
+    // A browser on a phone would open its own loopback: say so instead of offering a dead button.
+    const [elsewhere] = knownEnvironmentRows([forwarded], [], {
+      label: "Laptop",
+      onHostMachine: false,
+    });
+    expect(elsewhere?.action).toBeNull();
+    expect(elsewhere?.issue?.message).toBe(
+      "Laptop reaches asus only at its own local address, which this device cannot open. Add it from the app on Laptop.",
+    );
+    expect(
+      appPairingAddress(["http://127.0.0.1:13780", "https://asus.example.ts.net"], false),
+    ).toBe("https://asus.example.ts.net");
+    // Adding tries each address the peer just answered at, in order, that this client can open.
+    const answered = ["https://asus.example.ts.net", "http://127.0.0.1:13780"];
+    expect(appPairingAddresses(answered, true)).toEqual(answered);
+    expect(appPairingAddresses(answered, false)).toEqual(["https://asus.example.ts.net"]);
   });
 });
 

@@ -21,6 +21,10 @@ import {
   PeerLinkCreateInput,
   PeerLinkError,
   PeerLinkRemoveInput,
+  PeerLinkAddToAppInput,
+  PeerLinkAppPairing,
+  AppConnectionsReportInput,
+  KnownEnvironment,
   PeerLinkRemoveResult,
   PeerLinkRequestAnswerInput,
   PeerLinkRequestError,
@@ -523,6 +527,9 @@ export const WS_METHODS = {
   peerLinksList: "peerLinks.list",
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
+  peerLinksAddToApp: "peerLinks.addToApp",
+  peerLinksEnvironments: "peerLinks.environments",
+  peerLinksReportAppConnections: "peerLinks.reportAppConnections",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
@@ -859,6 +866,23 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
   payload: PeerLinkRemoveInput,
   success: PeerLinkRemoveResult,
   error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerLinksAddToAppRpc = Rpc.make(WS_METHODS.peerLinksAddToApp, {
+  payload: PeerLinkAddToAppInput,
+  success: PeerLinkAppPairing,
+  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerLinksEnvironmentsRpc = Rpc.make(WS_METHODS.peerLinksEnvironments, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({ environments: Schema.Array(KnownEnvironment) }),
+  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerLinksReportAppConnectionsRpc = Rpc.make(WS_METHODS.peerLinksReportAppConnections, {
+  payload: AppConnectionsReportInput,
+  error: EnvironmentAuthorizationError,
 });
 
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
@@ -2156,6 +2180,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
+  WsPeerLinksAddToAppRpc,
+  WsPeerLinksEnvironmentsRpc,
+  WsPeerLinksReportAppConnectionsRpc,
   WsPeerLinksAnswerRequestRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerCheckSecretSourceRpc,

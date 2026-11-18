@@ -392,6 +392,19 @@ an address you trust: the code is sent there.
   removes it here.
 - Links last 30 days. Link again with a new pairing code to renew one.
 
+The app and its machine keep one list of your environments: what this machine
+links and what the app connects to. **Linked environments** shows a machine
+that is on only one side with the reason and the fix, and agents see the same
+reasons. When you add an environment in **Settings → Environments**, leave **Also link it
+for agents** ticked to link it once it connects. A linked machine the app is
+not connected to has **Add to this app**, which adds it at no more than the
+link's access: a full-access link adds a full client, anything less adds a
+read-only one, and that machine lists it under **Sharing & access**. An
+environment too old for either shows **Update it**. Removing an environment
+offers to forget its link too, and forgetting a link offers to remove the
+environment from the app. Neither ends the app's access on the other machine:
+it still lists this app under **Authorized clients** until you revoke it there.
+
 An agent can also hand a task to a linked machine with `delegate_task`: it runs
 there as an ordinary thread, in the project with the same repository (or the
 one `target.projectId` names), and this thread wakes with its result when it
