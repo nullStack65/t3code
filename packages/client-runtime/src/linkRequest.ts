@@ -252,6 +252,26 @@ export function knownEnvironmentRows(
   });
 }
 
+/**
+ * Runs at most one `start` per key at a time: a second call while one runs gets the same
+ * promise. `onChange` receives the keys in flight whenever they change, before `run` returns.
+ */
+export function singleFlightByKey<K, A>(onChange: (inFlight: ReadonlySet<K>) => void) {
+  const flights = new Map<K, Promise<A>>();
+  const publish = () => onChange(new Set(flights.keys()));
+  return (key: K, start: () => Promise<A>): Promise<A> => {
+    const existing = flights.get(key);
+    if (existing !== undefined) return existing;
+    const flight = new Promise<A>((resolve) => resolve(start())).finally(() => {
+      flights.delete(key);
+      publish();
+    });
+    flights.set(key, flight);
+    publish();
+    return flight;
+  };
+}
+
 /** Names one automatic add: `environmentId` added from `hostId`'s links. */
 export const autoAddKey = (hostId: EnvironmentId, environmentId: EnvironmentId): string =>
   JSON.stringify([hostId, environmentId]);

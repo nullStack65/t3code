@@ -28,6 +28,7 @@ import {
   linkRequestAnswerInput,
   linkRequestDisplay,
   linkRequestFailureMessage,
+  singleFlightByKey,
   linkRequestInitialMachine,
   linkRequestTarget,
   linkRequestTargetName,
@@ -766,5 +767,52 @@ describe("linkRequestFailureMessage", () => {
     expect(linkRequestFailureMessage({ _tag: "SchemaError", message: "code=abc" })).toBe(
       "Could not answer the request. Try again.",
     );
+  });
+});
+
+describe("singleFlightByKey", () => {
+  it("shares one run per key and reports the keys in flight", async () => {
+    const changes: Array<ReadonlyArray<string>> = [];
+    const run = singleFlightByKey<string, number>((inFlight) => changes.push([...inFlight]));
+    let finish!: (value: number) => void;
+    let starts = 0;
+    const start = () => {
+      starts += 1;
+      return new Promise<number>((resolve) => (finish = resolve));
+    };
+
+    const first = run("a", start);
+    // Reported before run returns, so a caller checking right after sees it in flight.
+    expect(changes).toEqual([["a"]]);
+    const second = run("a", start);
+    expect(second).toBe(first);
+    expect(starts).toBe(1);
+
+    finish(7);
+    await expect(first).resolves.toBe(7);
+    expect(changes).toEqual([["a"], []]);
+
+    // Once settled, the key runs again.
+    const third = run("a", start);
+    expect(third).not.toBe(first);
+    expect(starts).toBe(2);
+    finish(8);
+    await third;
+  });
+
+  it("keeps keys apart and clears a key whose run fails", async () => {
+    const changes: Array<ReadonlyArray<string>> = [];
+    const run = singleFlightByKey<string, string>((inFlight) =>
+      changes.push([...inFlight].toSorted()),
+    );
+    const ok = run("a", () => Promise.resolve("ok"));
+    const failed = run("b", () => {
+      throw new Error("no code");
+    });
+    expect(changes.at(-1)).toEqual(["a", "b"]);
+
+    await expect(ok).resolves.toBe("ok");
+    await expect(failed).rejects.toThrow("no code");
+    expect(changes.at(-1)).toEqual([]);
   });
 });

@@ -9,9 +9,16 @@ import { AuthAccessWriteScope, type EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useEffectEvent } from "react";
 
 import { toastManager } from "../components/ui/toast";
+import { useLiveRefresh } from "../hooks/useLiveRefresh";
 import { useClientSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import { useEnvironments } from "./environments";
-import { addLinkedEnvironmentToApp, peerLinkEnvironment, usePeerLinkHosts } from "./peerLinks";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import {
+  addingLinkedEnvironmentsAtom,
+  addLinkedEnvironmentToApp,
+  peerLinkEnvironment,
+  usePeerLinkHosts,
+} from "./peerLinks";
 import { useEnvironmentQuery } from "./query";
 import { useEnvironmentsWithScope } from "./session";
 
@@ -44,14 +51,17 @@ export function useKnownEnvironments(environmentId: EnvironmentId | null): {
   };
 }
 
-// Shared by every host, so two hosts linking one machine add it once.
-const autoAdding = new Set<EnvironmentId>();
+/** Shared with the Linked environments panel, so either one's read counts for both. */
+export const linkedEnvironmentsRefreshKey = (environmentId: EnvironmentId) =>
+  `linked-environments:${environmentId}`;
+
 // The link state each (host, machine) add last failed at. Each try spends a single-use code.
 const autoAddFailures = new Map<string, string>();
 
 /**
  * Adds the machines connected hosts link, but this app lacks, without a click. Runs when a
- * host's list changes, which includes its reconnecting, and never on a timer.
+ * host's list changes. Nothing tells this client a peer came online, so each host's list is read
+ * again on returning to the app or a network change, at most once per stale time, never on a timer.
  */
 export function AutoAddLinkedEnvironments() {
   const hosts = usePeerLinkHosts();
@@ -76,6 +86,13 @@ function AutoAddFromHost({
   readonly hostLabel: string;
 }) {
   const known = useKnownEnvironments(hostId);
+  // Listing probes every linked machine, so this rides return and reconnect events only.
+  useLiveRefresh(
+    () => {
+      if (!known.isPending) known.refresh();
+    },
+    { key: linkedEnvironmentsRefreshKey(hostId), intervalMs: null, refreshOnReconnect: true },
+  );
   const { environments, isReady } = useEnvironments();
   // Until both load, a held or dismissed machine would look addable.
   const settingsReady = useClientSettingsHydrated();
@@ -88,14 +105,13 @@ function AutoAddFromHost({
       rows: known.rows,
       catalog: new Set(environments.map((environment) => environment.environmentId)),
       dismissed: new Set(dismissed),
-      adding: autoAdding,
+      // Read now, not at render: an add another host started this commit is already in it.
+      adding: appAtomRegistry.get(addingLinkedEnvironmentsAtom),
       failed: autoAddFailures,
     });
     for (const key of forget) autoAddFailures.delete(key);
     for (const { row, key, linkState } of add) {
-      autoAdding.add(row.environmentId);
       void addLinkedEnvironmentToApp(hostId, row).then((outcome) => {
-        autoAdding.delete(row.environmentId);
         if (outcome._tag !== "Added") {
           // It stays offered under Linked environments, where the user can add it by hand.
           autoAddFailures.set(key, linkState);

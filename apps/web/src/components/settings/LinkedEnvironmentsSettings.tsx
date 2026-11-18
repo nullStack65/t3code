@@ -24,13 +24,13 @@ import { useId, useRef, useState } from "react";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { mintPairingCodeOn } from "~/state/peerPairingCode";
 import { environmentCatalog } from "~/connection/catalog";
-import { useKnownEnvironments } from "~/state/knownEnvironments";
+import { linkedEnvironmentsRefreshKey, useKnownEnvironments } from "~/state/knownEnvironments";
+import { dismissLinkedEnvironment } from "~/state/linkedEnvironmentDismissals";
 import {
+  addingLinkedEnvironmentsAtom,
   addLinkedEnvironmentToApp,
-  dismissLinkedEnvironment,
   forgetLinkOnConnect,
   peerLinkEnvironment,
-  undismissLinkedEnvironment,
   useLinkableMachines,
 } from "~/state/peerLinks";
 import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
@@ -81,7 +81,7 @@ export function LinkedEnvironmentsSettings({
       if (!known.isPending) known.refresh();
     },
     {
-      key: `linked-environments:${environmentId}`,
+      key: linkedEnvironmentsRefreshKey(environmentId),
       intervalMs: null,
       refreshOnShow: true,
     },
@@ -184,6 +184,8 @@ function LinkedEnvironmentRow({
   const canAddToApp = useAtomValue(peerLinkEnvironment.addToApp.permissionAtom(environmentId));
   const removeFromApp = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const [busy, setBusy] = useState(false);
+  // An add of this machine runs from any host's row or the automatic add; one at a time.
+  const adding = useAtomValue(addingLinkedEnvironmentsAtom).has(link.environmentId);
   const forget = async () => {
     const confirmed = await (requestConfirmDialog(
       `Forget ${link.label}? Agents here stop working there. Revoke "T3 Code · …" in ${link.label}'s Sharing & access to end the session there too. An app added through this link stays under Authorized clients there until you revoke it.`,
@@ -207,29 +209,28 @@ function LinkedEnvironmentRow({
     ) ?? Promise.resolve(false));
     if (!alsoRemove) return;
     // Another host may still link it. Recorded first, so it is never added back on its own.
-    void dismissLinkedEnvironment(link.environmentId);
+    const undoDismiss = dismissLinkedEnvironment(link.environmentId);
     const removed = await removeFromApp(link.environmentId);
     if (removed._tag === "Success") forgetLinkOnConnect(link.environmentId);
     else if (!isAtomCommandInterrupted(removed)) {
+      // Still in the app, so it is not removed, and nothing should keep it from coming back.
+      void undoDismiss.then((undo) => undo());
       failureToast(`Could not remove ${row.label}`, String(squashAtomCommandFailure(removed)));
     }
   };
   const add = async () => {
     if (row.appAddress === null) return;
-    setBusy(true);
+    // Pairing clears a dismissal on success, so a later removal starts fresh.
     const added = await addLinkedEnvironmentToApp(environmentId, {
       environmentId: link.environmentId,
       label: link.label,
       onHostMachine: row.onHostMachine,
     });
-    setBusy(false);
     if (added._tag === "Interrupted") return;
     if (added._tag === "Failed") {
       failureToast(`Could not add ${link.label} to this app`, added.message);
       return;
     }
-    // Choosing it again is the way back from removing it, so a later removal starts fresh.
-    void undismissLinkedEnvironment(link.environmentId);
     toastManager.add({
       type: "success",
       title: `Added ${link.label} to this app`,
@@ -282,15 +283,21 @@ function LinkedEnvironmentRow({
         {canUnlink || (canAddToApp && row.action === "add-to-app") ? (
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             {canAddToApp && row.action === "add-to-app" ? (
-              <Button size="xs" variant="outline" disabled={busy} onClick={() => void add()}>
-                Add to this app
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={busy || adding}
+                aria-busy={adding}
+                onClick={() => void add()}
+              >
+                {adding ? "Adding…" : "Add to this app"}
               </Button>
             ) : null}
             {canUnlink ? (
               <Button
                 size="xs"
                 variant="destructive-outline"
-                disabled={busy}
+                disabled={busy || adding}
                 onClick={() => void forget()}
               >
                 Forget

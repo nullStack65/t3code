@@ -604,7 +604,7 @@ export const ClientSettingsSchema = Schema.Struct({
   // KaTeX out of the render path entirely.
   mathRenderingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Linked environments the user removed from this app, so it stops adding them on its own.
-  // Adding one by hand clears it.
+  // Adding one back, by any path, clears it.
   dismissedLinkedEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),

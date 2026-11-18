@@ -58,6 +58,7 @@ import { desktopSshHostsStateAtom, filterDiscoveredSshHosts } from "~/state/desk
 import { type EnvironmentPresentation, useRelayEnvironmentDiscovery } from "~/state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { primaryServerKeybindingsAtom } from "~/state/server";
+import { undismissLinkedEnvironment } from "~/state/linkedEnvironmentDismissals";
 import {
   resolveShortcutCommand,
   shortcutLabelForCommand,
@@ -474,6 +475,7 @@ export function AddEnvironmentDialog({
       }
       return;
     }
+    void undismissLinkedEnvironment(relayRouteOffer.environmentId);
     handleOpenChange(false);
     toastManager.add({
       type: "success",
