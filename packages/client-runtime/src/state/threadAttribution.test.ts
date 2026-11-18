@@ -65,6 +65,9 @@ describe("thread attribution", () => {
           thread("old-human", null, { environmentId: air }),
           thread("old-agent", null, { environmentId: air, createdBy: "agent" }),
           thread("unmapped", null),
+          // Routed agent work with no founder anywhere is Unknown, even on a mapped machine.
+          thread("unowned-agent", makeThreadInbox({ actor: bot }), { environmentId: air }),
+          thread("orphan", makeThreadInbox({ actor: bot }), { environmentId: air, parent: "gone" }),
           // A lineage cycle still resolves.
           thread("a", makeThreadInbox({ actor: bot }), { parent: "b" }),
           thread("b", makeThreadInbox({ actor: bot }), { parent: "a" }),
@@ -75,6 +78,8 @@ describe("thread attribution", () => {
       "old-human": "jeff",
       "old-agent": "jeff-agents",
       unmapped: "unknown",
+      "unowned-agent": "unknown",
+      orphan: "unknown",
       a: "unknown",
       b: "unknown",
     });

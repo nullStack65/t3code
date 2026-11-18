@@ -41,7 +41,7 @@ const humanFounder = (actor: ThreadInbox["origin"] | undefined): Founder | null 
 /**
  * Resolves every thread's attribution, keyed by `threadAttributionKey`. A human origin or
  * requester is that founder; agent work takes its requester's or owner's founder, else its
- * parent's; history without inbox fields falls back to the machine's owner.
+ * parent's; only history without inbox fields falls back to the machine's owner.
  */
 export function resolveThreadAttributions(
   threads: ReadonlyArray<AttributableThread>,
@@ -70,7 +70,9 @@ export function resolveThreadAttributions(
         ? (inbox.owner ??
           (parent && parentKey ? founderOfAttribution(resolve(parentKey, parent)) : null))
         : null) ??
-      founderByEnvironmentId[thread.environmentId] ??
+      // Only history from before inbox routing falls back to the machine: a shared machine
+      // runs both founders' agents, so crediting routed work to its owner would be a guess.
+      (inbox ? null : founderByEnvironmentId[thread.environmentId]) ??
       null;
     const attribution =
       founder === null

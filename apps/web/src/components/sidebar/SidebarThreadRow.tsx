@@ -459,7 +459,7 @@ function ThreadAttributionBadge({ attribution }: { attribution: ThreadAttributio
       className={cn(
         "inline-flex h-4 shrink-0 items-center gap-0.5 rounded-sm px-1 font-medium text-2xs leading-none",
         attribution === "unknown"
-          ? "text-sidebar-muted-foreground/60"
+          ? "text-sidebar-muted-foreground"
           : "bg-sidebar-row-hover text-sidebar-muted-foreground",
       )}
     >

@@ -1,6 +1,10 @@
 import type { EnvironmentId, Founder } from "@t3tools/contracts";
 
-import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
+import {
+  getClientSettings,
+  updateClientSettings,
+  useClientSettings,
+} from "../../hooks/useSettings";
 import { useEnvironmentIdentities } from "../../state/environments";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow } from "./settingsLayout";
@@ -45,7 +49,8 @@ export function MachineOwnersRow() {
   const environments = useEnvironmentIdentities();
   const owners = useClientSettings((settings) => settings.founderByEnvironmentId) ?? {};
   const setOwner = (environmentId: EnvironmentId, founder: Founder | null) => {
-    const next = { ...owners };
+    // Read at change time, so a second quick edit or another tab's edit is not overwritten.
+    const next = { ...getClientSettings().founderByEnvironmentId };
     if (founder === null) delete next[environmentId];
     else next[environmentId] = founder;
     void updateClientSettings({ founderByEnvironmentId: next });

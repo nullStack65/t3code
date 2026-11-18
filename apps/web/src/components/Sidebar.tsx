@@ -337,6 +337,7 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
+const NO_MACHINE_OWNERS = {};
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -1109,7 +1110,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const threadListFilter = useClientSettings(threadListFilterOf);
   const founderByEnvironmentId = useClientSettings((settings) => settings.founderByEnvironmentId);
-  const threadAttributions = resolveThreadAttributions(threads, founderByEnvironmentId ?? {});
+  const threadAttributions = resolveThreadAttributions(
+    threads,
+    founderByEnvironmentId ?? NO_MACHINE_OWNERS,
+  );
   const attributionOf = (thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) =>
     threadAttributions.get(threadAttributionKey(thread)) ?? "unknown";
   // Search always looks across every inbox, sender and environment.
