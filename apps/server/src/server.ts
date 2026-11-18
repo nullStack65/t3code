@@ -194,6 +194,7 @@ import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
+import * as MachinePresence from "./resourceTelemetry/MachinePresence.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as TriageService from "./triage/TriageService.ts";
@@ -314,8 +315,14 @@ const layerUsage = UsageService.layer.pipe(
   Layer.provide(layerServerSettings),
 );
 
+// One machine role for placement evidence and the agent slice limits.
+const layerMachinePresence = MachinePresence.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(layerServerSettings),
+);
+
 const layerResourceDiagnostics = Layer.mergeAll(
-  HostResources.layer,
+  HostResources.layer.pipe(Layer.provide(layerMachinePresence)),
   layerResourceTelemetry,
   ProcessDiagnostics.layer.pipe(Layer.provide(layerResourceTelemetry)),
   ProcessResourceMonitor.layer.pipe(Layer.provide(layerResourceTelemetry)),
@@ -1355,7 +1362,7 @@ const layerMakeServer = Layer.unwrap(
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provide(VcsProcess.layer),
-      Layer.provideMerge(AgentScopeLive.layer),
+      Layer.provideMerge(AgentScopeLive.layer.pipe(Layer.provide(layerMachinePresence))),
       Layer.provideMerge(layerPlatformServices),
       Layer.provide(Layer.succeed(HostProcess.InvokedAs, invokedAs)),
     );

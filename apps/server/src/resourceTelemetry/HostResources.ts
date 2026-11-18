@@ -8,12 +8,26 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 export class HostResources extends Context.Service<
   HostResources,
   { readonly read: Effect.Effect<HostResourcesSnapshot> }
 >()("t3/resourceTelemetry/HostResources") {}
+
+/** Who this machine is for, joined into each snapshot so placement can protect a person's computer. */
+export class MachinePresence extends Context.Service<
+  MachinePresence,
+  {
+    readonly read: Effect.Effect<Pick<HostResourcesSnapshot, "placementRole" | "humanActive">>;
+    /** This machine's resolved role, without probing whether its person is active. */
+    readonly role: Effect.Effect<"headless" | "interactive">;
+  }
+>()("t3/resourceTelemetry/HostResources/MachinePresence") {}
+
+// The user manager's slice holding every T3 server's agent scopes (agentScope.ts).
+const AGENTS_SLICE_PATH = "app.slice/app-t3code.slice/app-t3code-agents.slice";
 
 // Linux CPU list syntax, as in Cpus_allowed_list: "0-3,8,10-11".
 function parseCpuList(list: string): ReadonlySet<number> | null {
@@ -76,6 +90,30 @@ const make = Effect.fn("makeHostResources")(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
   const readFile = (path: string) => fs.readFileString(path).pipe(Effect.orElseSucceed(() => ""));
+  const presence = yield* Effect.serviceOption(MachinePresence);
+
+  // Populated agent scopes under this user's manager, from every T3 server on the host.
+  const countAgents = Effect.fn("HostResources.countAgents")(function* (
+    cgroupPath: string | undefined,
+  ) {
+    const manager =
+      cgroupPath === undefined ? undefined : /^(.*\/user@\d+\.service)\//.exec(cgroupPath)?.[1];
+    if (manager === undefined) return undefined;
+    const root = `/sys/fs/cgroup${manager}/${AGENTS_SLICE_PATH}`;
+    const slices = yield* fs.readDirectory(root).pipe(Effect.orElseSucceed(() => null));
+    if (slices === null) return 0;
+    let running = 0;
+    for (const slice of slices.filter((name) => name.endsWith(".slice"))) {
+      const scopes = yield* fs
+        .readDirectory(`${root}/${slice}`)
+        .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+      for (const scope of scopes.filter((name) => name.endsWith(".scope"))) {
+        const events = yield* readFile(`${root}/${slice}/${scope}/cgroup.events`);
+        if (/^populated 1$/m.test(events)) running++;
+      }
+    }
+    return running;
+  });
 
   const sample = Effect.fn("HostResources.sample")(function* () {
     // cgroup v2 only; limits of the server's own cgroup, which is `/` inside a container.
@@ -172,12 +210,24 @@ const make = Effect.fn("makeHostResources")(function* () {
         memoryMax - (memoryCurrent - reclaimable),
       );
     }
+    // Windows reports no load average. It is per host CPU, since a cgroup quota does not
+    // shrink the run queue the machine's person feels.
+    const loadAverage = NodeOS.loadavg()[0];
+    const loadPerCpu =
+      platform === "win32" || loadAverage === undefined || cpu.count <= 0
+        ? undefined
+        : loadAverage / cpu.count;
+    const runningAgents = platform === "linux" ? yield* countAgents(cgroupPath) : undefined;
+    const role = Option.isSome(presence) ? yield* presence.value.read : {};
     return {
       sampledAt: DateTime.toEpochMillis(yield* DateTime.now),
       cpuUtilization,
       cpuCount,
       availableMemoryBytes: Math.min(totalMemoryBytes, Math.max(0, availableMemoryBytes)),
       totalMemoryBytes,
+      ...(loadPerCpu === undefined ? {} : { loadPerCpu }),
+      ...(runningAgents === undefined ? {} : { runningAgents }),
+      ...role,
     };
   });
 

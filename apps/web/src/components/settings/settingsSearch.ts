@@ -518,6 +518,20 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["beta link another machine vps peer agents work there delegate"],
   },
   {
+    id: "machine-placement-role",
+    title: "Load balancing",
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: ["placement load balance headless gui laptop desktop busy machine spread agents"],
+  },
+  {
+    id: "automatic-placement-default",
+    title: "Place new agent threads automatically",
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: ["placement auto default load balance worktree origin other machine"],
+  },
+  {
     id: "prompt-suggestions-beta",
     title: "Suggest next prompt",
     to: "/settings/labs",

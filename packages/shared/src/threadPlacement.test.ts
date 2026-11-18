@@ -15,6 +15,9 @@ const host = (
     cpuCount: 8,
     availableMemoryBytes: 8 * GiB,
     totalMemoryBytes: 16 * GiB,
+    loadPerCpu: 0,
+    runningAgents: 0,
+    placementRole: "headless",
   },
   receivedAt: now,
   weight: 50,
@@ -79,8 +82,10 @@ describe("chooseThreadPlacement", () => {
           cpuCount: 8,
           availableMemoryBytes: 0.05 * 16 * GiB,
           totalMemoryBytes: 16 * GiB,
+          placementRole: "headless",
         },
       }),
+      host("queued", 0.1, { resources: { ...host("q", 0.1).resources!, loadPerCpu: 1 } }),
       host("absent", 0.1, { resources: null }),
     ];
     expect(chooseThreadPlacement(origin, candidates, now)).toEqual({
@@ -91,6 +96,59 @@ describe("chooseThreadPlacement", () => {
       accepted: false,
       reason: "no-eligible-environment",
     });
+  });
+
+  it("fills headless machines first, by run queue and running agents as well as CPU", () => {
+    const busy = (id: string, extra: object) =>
+      host(id, 0.2, { resources: { ...host(id, 0.2).resources!, ...extra } });
+    // A short CPU sample can look idle while 8 runnable tasks per core wait (load 64 on 8 cores).
+    expect(
+      chooseThreadPlacement(origin, [busy("asus", { loadPerCpu: 8 }), host("r720", 0.6)], now),
+    ).toMatchObject({ environmentId: "r720" });
+    // Equal machines split by how many agents each already runs.
+    expect(
+      chooseThreadPlacement(
+        origin,
+        [busy("three", { runningAgents: 3 }), busy("one", { runningAgents: 1 })],
+        now,
+      ),
+    ).toMatchObject({ environmentId: "one" });
+  });
+
+  it("uses a person's computer only when every headless machine is full and they are away", () => {
+    const laptop = (extra: object) =>
+      host("laptop", 0.05, {
+        resources: {
+          ...host("laptop", 0.05).resources!,
+          placementRole: "interactive",
+          humanActive: false,
+          ...extra,
+        },
+      });
+    const full = host("r720", 0.96);
+    expect(chooseThreadPlacement(origin, [laptop({}), host("r720", 0.8)], now)).toMatchObject({
+      environmentId: "r720",
+    });
+    expect(chooseThreadPlacement(origin, [laptop({}), full], now)).toMatchObject({
+      environmentId: "laptop",
+    });
+    // Present, unsure, an older server that cannot say, or near the person's own headroom: never.
+    for (const extra of [
+      { humanActive: true },
+      { humanActive: undefined },
+      { placementRole: undefined, humanActive: undefined },
+      { loadPerCpu: undefined },
+      { cpuUtilization: 0.5 },
+      { loadPerCpu: 0.5 },
+      { runningAgents: 2 },
+      { availableMemoryBytes: 6 * GiB },
+      { availableMemoryBytes: 2.9 * GiB, totalMemoryBytes: 4 * GiB },
+    ]) {
+      expect(chooseThreadPlacement(origin, [laptop(extra), full], now)).toEqual({
+        accepted: false,
+        reason: "no-eligible-environment",
+      });
+    }
   });
 
   it("refuses evidence that names one environment twice", () => {
