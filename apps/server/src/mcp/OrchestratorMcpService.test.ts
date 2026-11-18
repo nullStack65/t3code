@@ -2906,6 +2906,22 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(child.providerInstanceId, selection.instanceId);
           assert.equal(child.model, selection.model);
           assert.deepEqual(yield* service.createThreads(scope, request), first);
+          // Its threads share this checkout, so another environment is refused, not ignored.
+          const elsewhere = yield* service
+            .createThreads(scope, {
+              threads: [
+                {
+                  target: {
+                    ...request.threads[0]!.target,
+                    environmentId: EnvironmentId.make("environment-elsewhere"),
+                  },
+                },
+              ],
+              clientRequestId: "elsewhere",
+            })
+            .pipe(Effect.flip);
+          assert.equal(elsewhere.code, "invalid_request");
+          assert.include(elsewhere.message, "t3_thread_launch");
 
           // The creation receipt exists, but this prompt has not been accepted yet.
           const withPrompt = {

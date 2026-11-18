@@ -16,6 +16,7 @@ import {
   type Project,
   type RepositoryIdentity,
   RunId,
+  type HostResourcesSnapshot,
   type ServerProvider,
   ThreadId,
   TurnItemId,
@@ -58,6 +59,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -141,7 +143,18 @@ interface BoxThread {
   readonly sent: Ref.Ref<ReadonlyArray<string>>;
   /** Runs as the launch there is answered, before the laptop hears back. */
   readonly afterLaunch: Ref.Ref<Effect.Effect<void>>;
+  /** The box's load as its `orchestrator_capabilities` reports it. */
+  readonly resources: Ref.Ref<HostResourcesSnapshot>;
 }
+
+const GiB = 1024 ** 3;
+const loadOf = (cpuUtilization: number): HostResourcesSnapshot => ({
+  sampledAt: 0,
+  cpuUtilization,
+  cpuCount: 8,
+  availableMemoryBytes: 8 * GiB,
+  totalMemoryBytes: 16 * GiB,
+});
 
 const makeBoxThread = Effect.gen(function* () {
   return {
@@ -179,6 +192,7 @@ const makeBoxThread = Effect.gen(function* () {
     releaseStop: yield* Deferred.make<void>(),
     sent: yield* Ref.make<ReadonlyArray<string>>([]),
     afterLaunch: yield* Ref.make<Effect.Effect<void>>(Effect.void),
+    resources: yield* Ref.make(loadOf(0.1)),
   } satisfies BoxThread;
 });
 
@@ -549,7 +563,12 @@ const boxToolkitLayer = (thread: BoxThread) => {
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provide(NodeCrypto.layer),
     Layer.provide(layerBoxThreads),
-    Layer.provide(layerBoxLaunches),
+    Layer.provide(
+      Layer.merge(
+        layerBoxLaunches,
+        Layer.succeed(HostResources.HostResources, { read: Ref.get(thread.resources) }),
+      ),
+    ),
     Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
     Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
     Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
@@ -715,8 +734,15 @@ const makeLaptop = (
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
       Layer.provide(NodeCrypto.layer),
       Layer.provideMerge(layerThreads),
-      Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
-      Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+      // The laptop lists no provider of its own, so it never runs the box's model.
+      Layer.provide(
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      ),
+      Layer.provide(
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+      ),
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
@@ -1338,6 +1364,67 @@ it.effect("follows an open task again after the laptop restarts", () =>
       yield* after.remote.start();
       const task = yield* taskResult(after, delegated.taskId);
       expect(task).toMatchObject({ status: "completed", result: "Finished while you were away." });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an auto-placed task keeps its environment after a lost answer and a restart", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      // Its link outlives the restart, so the box knows it as the same link session.
+      const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
+      const placeTask = (
+        laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
+        clientRequestId: string,
+      ) =>
+        laptopEnv.call("delegate_task", {
+          task: "Run the suite wherever there is room.",
+          placement: "auto",
+          target: { providerInstanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+          clientRequestId,
+        });
+      // The box takes the launch with room to spare, but its answer never arrives.
+      yield* Ref.set(thread.afterLaunch, Effect.die("connection lost"));
+      const lost = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const before = yield* makeLaptop(database, offers, linking);
+          yield* linkTo(before.links, b, "full-access");
+          yield* seedParent(before);
+          return yield* placeTask(before, "auto-suite");
+        }),
+      );
+      expect(lost.isError).toBe(true);
+      const launchedThere = yield* Ref.get(thread.launched);
+      expect(launchedThere).not.toBeNull();
+
+      // The box fills up while the laptop restarts: choosing afresh finds nowhere.
+      yield* Ref.set(thread.resources, loadOf(0.99));
+      yield* Ref.set(thread.afterLaunch, Effect.void);
+      const after = yield* makeLaptop(database, offers, linking);
+      const fresh = yield* placeTask(after, "another-suite");
+      expect(fresh.isError).toBe(true);
+      expect(JSON.stringify(fresh.content)).toContain("no-eligible-environment");
+      expect(yield* Ref.get(thread.launched)).toBe(launchedThere);
+
+      // The retry keeps the binding: the same thread there, recorded once here.
+      const retried = yield* placeTask(after, "auto-suite");
+      expect(retried.isError, JSON.stringify(retried.content)).toBe(false);
+      expect(retried.structuredContent).toMatchObject({
+        remoteChild: { environmentId: box.environmentId, threadId: launchedThere },
+      });
+      expect((yield* Ref.get(thread.launchedWith))?.modelSelection).toEqual({
+        instanceId: boxClaude.instanceId,
+        model: "claude-sonnet-4-6",
+      });
+      expect(
+        (yield* after.orchestrator.getThreadProjection(parentThreadId)).subagents,
+      ).toHaveLength(1);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

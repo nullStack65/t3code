@@ -132,11 +132,12 @@ jobs:
         run: |
           set -euo pipefail
           vp run --filter @t3tools/contracts typecheck
+          vp run --filter @t3tools/shared typecheck
           vp run --filter @t3tools/client-runtime typecheck
           vp run --filter @t3tools/provider-core typecheck
           vp run --filter t3 typecheck
 
-      - name: Test AssemblyAI dictation and native inbox behavior
+      - name: Test AssemblyAI dictation, native inbox and thread placement behavior
         shell: bash
         run: |
           set -euo pipefail
@@ -146,7 +147,10 @@ jobs:
             packages/contracts/src/threadMetadataMcp.test.ts \
             apps/web/src/components/threadActionMenu.logic.test.ts \
             apps/server/src/orchestration-v2/ThreadLaunchService.test.ts \
-            apps/server/src/orchestration-v2/SubagentProjection.test.ts
+            apps/server/src/orchestration-v2/SubagentProjection.test.ts \
+            packages/shared/src/threadPlacement.test.ts \
+            apps/server/src/peer/RemoteDelegation.test.ts \
+            apps/server/src/mcp/OrchestratorMcpService.test.ts
 
       - name: Build native T3 server
         shell: bash

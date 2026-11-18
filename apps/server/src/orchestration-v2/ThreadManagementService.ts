@@ -12,6 +12,7 @@ import type {
 import {
   type ChatAttachment,
   CommandId,
+  EnvironmentId,
   isDelegatedAppThread,
   isListedThreadLineage,
   MessageId,
@@ -472,6 +473,19 @@ export interface ThreadManagementServiceShape {
   }) => Effect.Effect<boolean>;
   /** Receipt replays start no work; skip enablement checks with the same command id so settings cannot reject accepted retries. */
   readonly hasReceipt: (commandId: CommandId) => Effect.Effect<boolean>;
+  /** The environment a placement intent was bound to, if it was. */
+  readonly placementOf: (
+    commandId: CommandId,
+  ) => Effect.Effect<Option.Option<EnvironmentId>, CommandReceiptStore.CommandReceiptStoreV2Error>;
+  /**
+   * Binds a placement intent to an environment unless it is bound already, and
+   * returns the binding that holds: the first writer's, read back from storage.
+   */
+  readonly bindPlacement: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly environmentId: EnvironmentId;
+  }) => Effect.Effect<EnvironmentId, CommandReceiptStore.CommandReceiptStoreV2Error>;
   readonly waitForThread: (
     input: ThreadManagementWaitInput,
   ) => Effect.Effect<ThreadManagementWaitResult, ThreadManagementError>;
@@ -604,6 +618,8 @@ const FORCE_STOP_REASON = "Force stopped by user";
 const FORCE_STOP_RELEASE_WAIT = "10 seconds";
 const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 
+const PLACEMENT_RECEIPT_TYPE = "placement.bind:";
+
 const make = Effect.gen(function* () {
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -650,6 +666,44 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => Option.none()),
       Effect.map(Option.isSome),
     );
+
+  // A placement binding is a receipt with no events, so it lives and is kept like every
+  // other command's; its type names the environment.
+  const placementOf: ThreadManagementServiceShape["placementOf"] = (commandId) =>
+    receipts
+      .getByCommandId(commandId)
+      .pipe(
+        Effect.map(
+          Option.flatMap((receipt) =>
+            receipt.commandType.startsWith(PLACEMENT_RECEIPT_TYPE)
+              ? Option.some(
+                  EnvironmentId.make(receipt.commandType.slice(PLACEMENT_RECEIPT_TYPE.length)),
+                )
+              : Option.none(),
+          ),
+        ),
+      );
+
+  const bindPlacement: ThreadManagementServiceShape["bindPlacement"] = Effect.fn(
+    "orchestrationV2.threadManagement.bindPlacement",
+  )(function* (input) {
+    yield* receipts.insertIfAbsent({
+      commandId: input.commandId,
+      threadId: input.threadId,
+      commandType: `${PLACEMENT_RECEIPT_TYPE}${input.environmentId}`,
+      acceptedAt: yield* DateTime.now,
+      resultSequence: 0,
+      status: "accepted",
+      error: null,
+    });
+    const bound = yield* placementOf(input.commandId);
+    if (Option.isNone(bound)) {
+      return yield* new CommandReceiptStore.CommandReceiptStoreReadError({
+        commandId: input.commandId,
+      });
+    }
+    return bound.value;
+  });
 
   const ensureLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
@@ -1768,6 +1822,8 @@ const make = Effect.gen(function* () {
     assertProviderInstanceEnabled,
     isProviderInstanceEnabledForProject,
     hasReceipt,
+    placementOf,
+    bindPlacement,
     waitForThread,
     settleAfterRun,
     settleThread,
