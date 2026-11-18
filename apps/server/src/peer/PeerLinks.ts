@@ -97,6 +97,13 @@ export class PeerLinks extends Context.Service<
     readonly enabled: Effect.Effect<boolean>;
     readonly link: (input: PeerLinkCreateInput) => Effect.Effect<PeerLink, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    /**
+     * Names the link's session there without revealing its token. Linking again
+     * starts a new session there, so this changes exactly when that does.
+     */
+    readonly session: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<Option.Option<string>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
     readonly get: (
       environmentId: EnvironmentId,
@@ -712,10 +719,15 @@ const make = Effect.gen(function* () {
       Effect.ignoreCause({ log: true }),
     );
 
+  // Each link stores its token under a fresh random name, so the name identifies the session.
+  const session: PeerLinks["Service"]["session"] = (environmentId) =>
+    readRow(environmentId).pipe(Effect.map(Option.map((row) => row.secret_name)));
+
   return PeerLinks.of({
     enabled,
     link,
     list,
+    session,
     get,
     unlink,
     resolve,
