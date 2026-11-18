@@ -2,6 +2,7 @@ import {
   effectiveInboxFilter,
   InboxChoice,
   matchesInboxFilter,
+  primaryInbox,
   type EnvironmentId,
   type Founder,
   type ThreadInbox,
@@ -34,7 +35,9 @@ export const threadListFilterOf = (
 const matchesInboxes = (thread: FilterableThread, inboxes: ReadonlyArray<InboxChoice>) =>
   matchesInboxFilter(thread.source.inbox, inboxes) ||
   // Agent-created threads from before inbox routing carry no Agents routing.
-  (inboxes.includes("agents") && thread.source.createdBy === "agent");
+  (inboxes.includes("agents") &&
+    thread.source.createdBy === "agent" &&
+    primaryInbox(thread.source.inbox) === null);
 
 export const matchesThreadListFilter = (thread: FilterableThread, filter: ThreadListFilter) =>
   !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&

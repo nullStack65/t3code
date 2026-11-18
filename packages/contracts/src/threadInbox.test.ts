@@ -12,6 +12,7 @@ import {
   founderInboxLane,
   compositeThreadKey,
   agentLaunchInboxRouting,
+  inboxRoutingFor,
 } from "./threadInbox.ts";
 const kameron = { kind: "human", id: "kameron" } as const;
 const jeff = { kind: "human", id: "jeff" } as const;
@@ -56,6 +57,17 @@ describe("shared fleet organizational inbox", () => {
       ["kameron", "shared"],
       "jeff",
     ]);
+    // Agent work filed to another founder or Shared stays out of "Kameron + Agents".
+    const mineAndAgents = ["kameron", "agents"] as const;
+    const filedToJeff = makeThreadInbox({ actor: bot, routing: inboxRoutingFor("jeff") });
+    const sharedByKameron = makeThreadInbox({ actor: kameron, routing: { audience: "shared" } });
+    expect(matchesInboxFilter(filedToJeff, mineAndAgents)).toBe(false);
+    expect(matchesInboxFilter(filedToJeff, ["jeff"])).toBe(true);
+    expect(matchesInboxFilter(sharedByKameron, mineAndAgents)).toBe(false);
+    expect(matchesInboxFilter(sharedByKameron, ["shared"])).toBe(true);
+    const filedToKameron = makeThreadInbox({ actor: bot, routing: inboxRoutingFor("kameron") });
+    expect(matchesInboxFilter(filedToKameron, ["kameron"])).toBe(true);
+    expect(matchesInboxFilter(filedToKameron, ["agents"])).toBe(false);
     // Every inbox is All, which keeps unclassified history.
     const every = ["shared", "jeff", "agents", "kameron"] as const;
     expect(matchesInboxFilter(undefined, every)).toBe(true);

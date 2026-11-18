@@ -148,10 +148,24 @@ export const effectiveInboxFilter = (settings: {
 const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
   InboxChoice.literals.every((choice) => filter.includes(choice));
 
+/**
+ * The one inbox a thread is filtered under, so unchecking an inbox hides all of its threads:
+ * Shared, else the founder it is filed to, else Agents. Null is unclassified history.
+ */
+export function primaryInbox(inbox: ThreadInbox | null | undefined): InboxChoice | null {
+  if (matchesInboxView(inbox, "shared")) return "shared";
+  for (const founder of Founder.literals) if (matchesInboxView(inbox, founder)) return founder;
+  return matchesInboxView(inbox, "agents") ? "agents" : null;
+}
+
 export const matchesInboxFilter = (
   inbox: ThreadInbox | null | undefined,
   filter: ReadonlyArray<InboxChoice>,
-) => isAllInboxes(filter) || filter.some((choice) => matchesInboxView(inbox, choice));
+) => {
+  if (isAllInboxes(filter)) return true;
+  const primary = primaryInbox(inbox);
+  return primary !== null && filter.includes(primary);
+};
 
 /** New work is attributed only to a chosen founder; otherwise it stays unclassified (All). */
 export const inboxOriginFor = (settings: {
