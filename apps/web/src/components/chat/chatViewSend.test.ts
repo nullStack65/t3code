@@ -57,16 +57,29 @@ async function openTab() {
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
-// Storage that can refuse a write, or drop it without saying so.
-const storageFaults = { throws: false, drops: false };
+// Storage that can refuse a write, drop it without saying so, or take it and fail the read after.
+const storageFaults = { throws: false, drops: false, landsUnread: false, readFails: false };
+function resetStorageFaults() {
+  storageFaults.throws = false;
+  storageFaults.drops = false;
+  storageFaults.landsUnread = false;
+  storageFaults.readFails = false;
+}
 function faultyStorage() {
   const memory = createMemoryStorage();
   return {
-    getItem: (name: string) => memory.getItem(name),
+    getItem: (name: string) => {
+      if (storageFaults.readFails) {
+        storageFaults.readFails = false;
+        throw new Error("SecurityError");
+      }
+      return memory.getItem(name);
+    },
     removeItem: (name: string) => memory.removeItem(name),
     setItem: (name: string, value: string) => {
       if (storageFaults.throws) throw new Error("QuotaExceededError");
       if (!storageFaults.drops) memory.setItem(name, value);
+      if (storageFaults.landsUnread) storageFaults.readFails = true;
     },
   };
 }
@@ -81,8 +94,7 @@ async function withReloadableStorage(run: () => Promise<void>) {
     await run();
   } finally {
     gate = null;
-    storageFaults.throws = false;
-    storageFaults.drops = false;
+    resetStorageFaults();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.resetModules();
@@ -179,10 +191,10 @@ function composeDraft(
 }
 
 /**
- * A first send in the composer hook's order: read the composer, start or retry its uploads, start
+ * A new send in the composer hook's order: read the composer, start or retry its uploads, start
  * preparing attachments, read the sent composer whole, bind, commit the turn with the uploads its
- * files went out as, clear, and on an uncertain launch error restore the draft. `edit` runs while
- * reads are pending; `commitFault` makes storage refuse or drop the turn's commit.
+ * files went out as, clear, and on any failure run the hook's own cleanup. `edit` runs while reads
+ * are pending, `editBeforeCommit` after binding; the faults make storage refuse or drop a write.
  */
 async function sendDraft(
   tab: Tab,
@@ -191,8 +203,12 @@ async function sendDraft(
     uploads: boolean;
     stopAfterBind?: boolean;
     edit?: () => void;
+    editBeforeCommit?: () => void;
     launchFails?: boolean;
-    commitFault?: "throws" | "drops";
+    bindFault?: "throws" | "drops" | "landsUnread";
+    commitFault?: "throws" | "drops" | "landsUnread";
+    /** Distinguishes a later send's operation on the same thread. */
+    label?: string;
   },
 ) {
   const store = tab.store.useComposerDraftStore.getState();
@@ -218,8 +234,8 @@ async function sendDraft(
   );
   expect(plan.type).toBe("new");
   const operation = {
-    commandId: `command-${draft.threadId}`,
-    messageId: `message-${draft.threadId}`,
+    commandId: `command-${draft.threadId}${options.label ?? ""}`,
+    messageId: `message-${draft.threadId}${options.label ?? ""}`,
     createdAt: "2026-11-18T11:00:00.000Z",
     request: launchRequest(tab),
   };
@@ -245,9 +261,33 @@ async function sendDraft(
     gate = null;
   }
   const composer = await sentComposer;
-  expect(tab.store.markPromotedDraftThreadByRef(sentRef, { ...operation, composer })).toBe(true);
+  if (options.bindFault) storageFaults[options.bindFault] = true;
+  const bound = tab.store.markPromotedDraftThreadByRef(sentRef, { ...operation, composer });
+  resetStorageFaults();
+  // The hook's cleanup for a send that did not complete: the same seams, in the same order.
+  const cleanUp = (cleared: boolean) => {
+    tab.store.restoreFailedDraftThread(
+      draft.draftId,
+      draftThread,
+      draft.threadId,
+      tab.send.launchLeftPendingAfterFailure({
+        launch: operation,
+        priorLaunch: draftThread.pendingLaunch ?? null,
+        bound,
+      }),
+    );
+    return tab.send.restoreFailedSendComposer({
+      draftTarget: draft.draftId,
+      boundDraftId: bound ? draft.draftId : null,
+      before,
+      cleared,
+      snapshot,
+    }).type;
+  };
+  if (!bound) return { bound, committed: false, cleared: false, failed: cleanUp(false), before };
   if (options.stopAfterBind) return null;
   const attachments = await prepared;
+  options.editBeforeCommit?.();
   const turn = {
     environmentId,
     input: {
@@ -279,17 +319,26 @@ async function sendDraft(
     turn,
     fileUploads,
   );
-  storageFaults.throws = false;
-  storageFaults.drops = false;
-  if (!committed) return { committed, boundLaunch, turn, cleared: false, before, operation };
-  const cleared = tab.send.clearSentComposerContent(draft.draftId, before);
-  if (options.launchFails) {
-    // No launch answer proves the host did not take it: the hook's restore for an emptied draft.
-    tab.store.restoreFailedDraftThread(draft.draftId, draftThread, draft.threadId, operation);
-    tab.send.restoreComposerDraft(draft.draftId, snapshot);
-    tab.store.markRestoredLaunchCopy(draft.draftId);
+  resetStorageFaults();
+  if (!committed) {
+    const rolledBack = store.getDraftSession(draft.draftId)?.pendingLaunch;
+    const failed = cleanUp(false);
+    return {
+      bound,
+      committed,
+      boundLaunch,
+      rolledBack,
+      turn,
+      cleared: false,
+      failed,
+      before,
+      operation,
+    };
   }
-  return { committed, boundLaunch, turn, cleared, before, operation };
+  const cleared = tab.send.clearSentComposerContent(draft.draftId, before);
+  // No launch answer proves the host did not take it.
+  const failed = options.launchFails ? cleanUp(cleared) : undefined;
+  return { bound, committed, boundLaunch, turn, cleared, failed, before, operation };
 }
 
 function sendAgain(
@@ -340,7 +389,7 @@ describe("a draft launch interrupted by a reload", () => {
         uploads: true,
       });
       const sent = (await sendDraft(tab, draft, { uploads: true }))!;
-      expect(sent.turn.input.message.attachments.map((attachment) => attachment.id)).toEqual([
+      expect(sent.turn!.input.message.attachments.map((attachment) => attachment.id)).toEqual([
         "upload-shot-1",
         "upload-file-1",
       ]);
@@ -351,7 +400,7 @@ describe("a draft launch interrupted by a reload", () => {
       expect(composer?.threadContexts.map((record) => record.title)).toEqual(["Fix login flow"]);
       // A reload links the file inline; the sent message keeps the text it had.
       expect(composer?.prompt).toContain("(t3-context://v1/file/file_file-1)");
-      expect(sent.turn.input.message.text).toBe(sent.before.prompt);
+      expect(sent.turn!.input.message.text).toBe(sent.before.prompt);
       expect(plan.type).toBe("retry");
       expect(plan.type === "retry" ? plan.launch.turn : null).toEqual(
         JSON.parse(JSON.stringify(sent.turn)),
@@ -438,7 +487,7 @@ describe("a draft launch interrupted by a reload", () => {
       expect(sent.cleared).toBe(false);
       expect(store.getComposerDraft(draft.draftId)?.prompt).toBe("Describe this and the logs");
       // What was sent, and stored to resend, is the message as the send read it.
-      expect(sent.turn.input.message.text).toBe("Describe this");
+      expect(sent.turn!.input.message.text).toBe("Describe this");
       expect(store.getDraftSession(draft.draftId)?.pendingLaunch?.composer?.prompt).toBe(
         "Describe this",
       );
@@ -466,7 +515,7 @@ describe("a draft launch whose file's first upload failed", () => {
       const sent = (await sendDraft(tab, draft, { uploads: true }))!;
       // The send read the file before its retried upload finished.
       expect(sent.before.files[0]?.uploadedAttachmentId).toBeUndefined();
-      expect(sent.turn.input.message.attachments.map((attachment) => attachment.id)).toEqual([
+      expect(sent.turn!.input.message.attachments.map((attachment) => attachment.id)).toEqual([
         "upload-shot-1",
         "upload-file-retried",
       ]);
@@ -478,8 +527,8 @@ describe("a draft launch whose file's first upload failed", () => {
       expect(composer?.files.some(reloaded.store.composerFileNeedsReattach)).toBe(false);
       expect(plan.type).toBe("retry");
       expect(plan.type === "retry" ? plan.launch : null).toMatchObject({
-        commandId: sent.operation.commandId,
-        messageId: sent.operation.messageId,
+        commandId: sent.operation!.commandId,
+        messageId: sent.operation!.messageId,
         turn: JSON.parse(JSON.stringify(sent.turn)),
       });
     });
@@ -505,15 +554,15 @@ describe("a draft launch whose file's first upload failed", () => {
       expect(composer?.files.some(reloaded.store.composerFileNeedsReattach)).toBe(false);
       expect(plan.type).toBe("retry");
       expect(plan.type === "retry" ? plan.launch : null).toMatchObject({
-        commandId: sent.operation.commandId,
-        messageId: sent.operation.messageId,
+        commandId: sent.operation!.commandId,
+        messageId: sent.operation!.messageId,
         turn: JSON.parse(JSON.stringify(sent.turn)),
       });
     });
   });
 
-  it.each(["throws", "drops"] as const)(
-    "keeps the bound operation, its composer and the draft when storage %s the turn's commit",
+  it.each(["throws", "drops", "landsUnread"] as const)(
+    "keeps a bound first launch as itself through the failure cleanup (turn write fault: %s)",
     async (fault) => {
       await withReloadableStorage(async () => {
         const tab = await openTab();
@@ -525,23 +574,120 @@ describe("a draft launch whose file's first upload failed", () => {
         });
         const sent = (await sendDraft(tab, draft, { uploads: true, commitFault: fault }))!;
         expect(sent.committed).toBe(false);
-        const session = tab.store.useComposerDraftStore.getState().getDraftSession(draft.draftId)!;
-        // In memory and in storage: the operation as bound, no turn, no upload on its composer.
-        expect(session.pendingLaunch).toEqual(sent.boundLaunch);
-        expect(session.pendingLaunch?.turn).toBeUndefined();
-        expect(session.pendingLaunch?.composer?.files?.[0]?.attachmentId).toBeUndefined();
-        expect(session.promotedTo).toEqual(scopeThreadRef(environmentId, draft.threadId));
-        expect(
-          tab.store.useComposerDraftStore.getState().getComposerDraft(draft.draftId)?.prompt,
-        ).toBe("Review the report");
-        const reloaded = await reload();
-        const stored = reloaded.store.useComposerDraftStore
-          .getState()
-          .getDraftSession(draft.draftId);
-        expect(stored?.pendingLaunch?.turn).toBeUndefined();
-        expect(stored?.pendingLaunch?.commandId).toBe(sent.operation.commandId);
-        expect(stored?.sentTo).toEqual(scopeThreadRef(environmentId, draft.threadId));
+        // The commit's rollback left the operation as bound: no turn, no upload on its composer.
+        expect(sent.rolledBack).toEqual(sent.boundLaunch);
+        expect(sent.boundLaunch?.turn).toBeUndefined();
+        expect(sent.boundLaunch?.composer?.files?.[0]?.attachmentId).toBeUndefined();
+        // Never cleared, never launched: the composer still is the sent copy.
+        expect(sent.failed).toBe("kept");
+        const sentRef = scopeThreadRef(environmentId, draft.threadId);
+        // A reload links the uploaded file inline after the user's own text.
+        const expectSameLaunch = (current: Tab, prompt: string) => {
+          const session = current.store.useComposerDraftStore
+            .getState()
+            .getDraftSession(draft.draftId)!;
+          const { restoredCopy: _copy, ...committed } = session.pendingLaunch!;
+          expect(committed).toEqual(sent.boundLaunch);
+          expect(session.sentTo).toEqual(sentRef);
+          expect(
+            current.store.useComposerDraftStore.getState().getComposerDraft(draft.draftId)?.prompt,
+          ).toBe(prompt);
+          // Sent again unchanged, it is that launch: same command, message and creation time.
+          const { plan } = sendAgain(current, draft.draftId);
+          expect(plan.type).toBe("retry");
+          expect(plan.type === "retry" ? plan.launch : null).toMatchObject({
+            commandId: sent.operation!.commandId,
+            messageId: sent.operation!.messageId,
+            createdAt: sent.operation!.createdAt,
+          });
+        };
+        expectSameLaunch(tab, "Review the report");
+        await vi.advanceTimersByTimeAsync(300);
+        expectSameLaunch(
+          await reload(),
+          "Review the report [report.pdf](t3-context://v1/file/file_file-1) ",
+        );
       });
     },
   );
+
+  it.each([
+    { fault: "throws", emptied: false },
+    { fault: "drops", emptied: false },
+    { fault: "drops", emptied: true },
+    // Storage takes the binding but its read back fails, so the rollback must replace it.
+    { fault: "landsUnread", emptied: false },
+  ] as const)(
+    "leaves the earlier bound launch untouched when an edited send's binding $fault (emptied: $emptied)",
+    async ({ fault, emptied }) => {
+      await withReloadableStorage(async () => {
+        const tab = await openTab();
+        const draft = composeDraft(tab, `unbound-${fault}-${emptied}`, { prompt: "Run the suite" });
+        const first = (await sendDraft(tab, draft, { uploads: false, commitFault: "throws" }))!;
+        expect(first.failed).toBe("kept");
+        const store = tab.store.useComposerDraftStore.getState();
+        // A bound launch that never went out, recognised as its own copy.
+        const earlier = store.getDraftSession(draft.draftId)!.pendingLaunch!;
+        expect(earlier.turn).toBeUndefined();
+        expect(earlier.restoredCopy).toBeDefined();
+        // Edited, it is a new candidate; storage refuses its binding, so it never binds.
+        store.setPrompt(draft.draftId, "Run the suite and the linter");
+        const second = (await sendDraft(tab, draft, {
+          uploads: false,
+          bindFault: fault,
+          label: "-2",
+          // Emptied while the send reads it, the composer gets the new send back on failure.
+          ...(emptied ? { edit: () => store.clearComposerContent(draft.draftId) } : {}),
+        }))!;
+        expect(second.bound).toBe(false);
+        expect(second.failed).toBe(emptied ? "restored" : "kept");
+        const candidate = `command-${draft.threadId}-2`;
+        const expectEarlier = (current: Tab) => {
+          const state = current.store.useComposerDraftStore.getState();
+          const session = state.getDraftSession(draft.draftId)!;
+          // The earlier operation exactly as it was, signature included: nothing relabelled.
+          expect(session.pendingLaunch).toEqual(earlier);
+          expect(session.sentTo).toEqual(scopeThreadRef(environmentId, draft.threadId));
+          expect(state.getComposerDraft(draft.draftId)?.prompt).toBe(
+            "Run the suite and the linter",
+          );
+          expect(
+            localStorage.getItem(current.store.COMPOSER_DRAFT_STORAGE_KEY) ?? "",
+          ).not.toContain(candidate);
+          // The new text is not the earlier launch's copy: that never went out, so this is new.
+          expect(sendAgain(current, draft.draftId).plan.type).toBe("new");
+        };
+        expectEarlier(tab);
+        await vi.advanceTimersByTimeAsync(300);
+        expectEarlier(await reload());
+      });
+    },
+  );
+
+  it("keeps an edit made before a failed commit as the user's, not as the bound launch's copy", async () => {
+    await withReloadableStorage(async () => {
+      const tab = await openTab();
+      const draft = composeDraft(tab, "edited-failure", { prompt: "Run the suite" });
+      const store = tab.store.useComposerDraftStore.getState();
+      const sent = (await sendDraft(tab, draft, {
+        uploads: false,
+        commitFault: "drops",
+        editBeforeCommit: () => store.setPrompt(draft.draftId, "Run only the unit tests"),
+      }))!;
+      expect(sent.failed).toBe("edited");
+      const expectEdited = (current: Tab) => {
+        const state = current.store.useComposerDraftStore.getState();
+        expect(state.getComposerDraft(draft.draftId)?.prompt).toBe("Run only the unit tests");
+        const session = state.getDraftSession(draft.draftId)!;
+        expect(session.pendingLaunch?.commandId).toBe(sent.operation!.commandId);
+        expect(session.pendingLaunch?.restoredCopy).toBeUndefined();
+        // Not the bound launch's copy: it never went out, so it starts afresh on the same thread.
+        expect(sendAgain(current, draft.draftId).plan.type).toBe("new");
+        expect(session.sentTo).toEqual(scopeThreadRef(environmentId, draft.threadId));
+      };
+      expectEdited(tab);
+      await vi.advanceTimersByTimeAsync(300);
+      expectEdited(await reload());
+    });
+  });
 });

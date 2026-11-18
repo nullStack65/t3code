@@ -766,6 +766,157 @@ describe("composerDraftStore context persistence", () => {
       vi.resetModules();
     }
   });
+
+  /** Shared storage that can drop a write, or take one and then fail or misread the read after. */
+  function unreliableStorage() {
+    const memory = createMemoryStorage();
+    const faults = { drops: false, readAfterWrite: null as null | "throws" | "stale" };
+    let failedRead: { readonly kind: "throws" | "stale"; readonly before: string | null } | null =
+      null;
+    const storage = {
+      getItem: (name: string) => {
+        const read = failedRead;
+        failedRead = null;
+        if (read?.kind === "throws") throw new Error("SecurityError");
+        return read ? read.before : memory.getItem(name);
+      },
+      removeItem: (name: string) => memory.removeItem(name),
+      setItem: (name: string, value: string) => {
+        const before = memory.getItem(name) as string | null;
+        if (!faults.drops) memory.setItem(name, value);
+        if (faults.readAfterWrite) failedRead = { kind: faults.readAfterWrite, before };
+        faults.readAfterWrite = null;
+      },
+    };
+    return { memory, faults, storage };
+  }
+
+  async function twoTabs(storage: ReturnType<typeof unreliableStorage>["storage"]) {
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("window", new EventTarget());
+    vi.useFakeTimers();
+    vi.resetModules();
+    const thisTab = await import("./composerDraftStore");
+    vi.resetModules();
+    const otherTab = await import("./composerDraftStore");
+    return { thisTab, otherTab };
+  }
+
+  async function reloadTab() {
+    vi.clearAllTimers();
+    vi.resetModules();
+    return (await import("./composerDraftStore")).useComposerDraftStore.getState();
+  }
+
+  const unreliableRefs = {
+    alpha: scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("alpha-unreliable")),
+    beta: scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("beta-unreliable")),
+    gamma: scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("gamma-unreliable")),
+  };
+  const storedPrompts = (memory: ReturnType<typeof createMemoryStorage>) => {
+    const drafts = JSON.parse(memory.getItem(COMPOSER_DRAFT_STORAGE_KEY) as string).state
+      .draftsByThreadKey;
+    return Object.values(unreliableRefs).map((ref) => drafts[scopedThreadKey(ref)]?.prompt);
+  };
+
+  it("keeps an edit whose write storage dropped, and another tab's draft, through a reload", async () => {
+    const { memory, faults, storage } = unreliableStorage();
+    try {
+      const { thisTab, otherTab } = await twoTabs(storage);
+      const { alpha, beta, gamma } = unreliableRefs;
+      thisTab.useComposerDraftStore.getState().setPrompt(alpha, "first");
+      await vi.advanceTimersByTimeAsync(300);
+      // Storage drops the edit without saying so; it must not become this tab's merge baseline.
+      faults.drops = true;
+      thisTab.useComposerDraftStore.getState().setPrompt(alpha, "edited");
+      await vi.advanceTimersByTimeAsync(300);
+      faults.drops = false;
+      otherTab.useComposerDraftStore.getState().setPrompt(beta, "beta draft");
+      await vi.advanceTimersByTimeAsync(300);
+      window.dispatchEvent(
+        Object.assign(new Event("storage"), { key: COMPOSER_DRAFT_STORAGE_KEY }),
+      );
+      thisTab.useComposerDraftStore.getState().setPrompt(gamma, "third");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(storedPrompts(memory)).toEqual(["edited", "beta draft", "third"]);
+      const reloaded = await reloadTab();
+      expect(reloaded.getComposerDraft(alpha)?.prompt).toBe("edited");
+      expect(reloaded.getComposerDraft(beta)?.prompt).toBe("beta draft");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
+  it("replaces a binding storage took but could not read back with the rollback", async () => {
+    const { memory, faults, storage } = unreliableStorage();
+    try {
+      const { thisTab } = await twoTabs(storage);
+      const store = thisTab.useComposerDraftStore.getState();
+      const draftId = DraftId.make("draft-unread-binding");
+      const threadId = ThreadId.make("thread-unread-binding");
+      store.setProjectDraftThreadId(
+        scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("project-unread")),
+        draftId,
+        { threadId },
+      );
+      store.setPrompt(draftId, "Run the suite");
+      await vi.advanceTimersByTimeAsync(300);
+      faults.readAfterWrite = "throws";
+      const bound = thisTab.markPromotedDraftThreadByRef(
+        scopeThreadRef(TEST_ENVIRONMENT_ID, threadId),
+        {
+          commandId: "command-unread",
+          messageId: "message-unread",
+          createdAt: "2026-11-18T12:00:00.000Z",
+          request: "{}",
+        },
+      );
+      // Unconfirmed, it is not bound, though storage did take those bytes.
+      expect(bound).toBe(false);
+      expect(memory.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toContain("command-unread");
+      // Those bytes are this tab's own write, so its rollback is written over them.
+      await vi.advanceTimersByTimeAsync(300);
+      expect(memory.getItem(COMPOSER_DRAFT_STORAGE_KEY)).not.toContain("command-unread");
+      const reloaded = await reloadTab();
+      const session = reloaded.getDraftSession(draftId);
+      expect(session?.promotedTo ?? null).toBeNull();
+      expect(session?.pendingLaunch ?? null).toBeNull();
+      expect(reloaded.getComposerDraft(draftId)?.prompt).toBe("Run the suite");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
+  it("merges another tab's change over a write storage took but misread", async () => {
+    const { memory, faults, storage } = unreliableStorage();
+    try {
+      const { thisTab, otherTab } = await twoTabs(storage);
+      const { alpha, beta, gamma } = unreliableRefs;
+      thisTab.useComposerDraftStore.getState().setPrompt(alpha, "first");
+      await vi.advanceTimersByTimeAsync(300);
+      // The edit lands, but the read after it shows the old bytes: it stays unconfirmed.
+      faults.readAfterWrite = "stale";
+      thisTab.useComposerDraftStore.getState().setPrompt(alpha, "edited");
+      await vi.advanceTimersByTimeAsync(300);
+      // Another tab then saves its own draft over those bytes: a genuinely different document.
+      otherTab.useComposerDraftStore.getState().setPrompt(beta, "beta draft");
+      await vi.advanceTimersByTimeAsync(300);
+      thisTab.useComposerDraftStore.getState().setPrompt(gamma, "third");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(storedPrompts(memory)).toEqual(["edited", "beta draft", "third"]);
+      const reloaded = await reloadTab();
+      expect(reloaded.getComposerDraft(beta)?.prompt).toBe("beta draft");
+      expect(reloaded.getComposerDraft(alpha)?.prompt).toBe("edited");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
 });
 
 describe("composerDraftStore thread contexts", () => {

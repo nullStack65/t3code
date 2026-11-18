@@ -141,8 +141,11 @@ interface ComposerDraftWrite {
   readonly merged: PersistedComposerDraftStoreState;
 }
 let composerDraftLoadedState: PersistedComposerDraftStoreState | null = null;
+/** This tab's last write that storage was read back holding: the merge baseline. */
 let composerDraftLastWrite: ComposerDraftWrite | null = null;
 let composerDraftPendingWrite: ComposerDraftWrite | null = null;
+/** A write this tab made that was not read back; it may still have landed. */
+let composerDraftUnconfirmedWrite: ComposerDraftWrite | null = null;
 
 function readStoredComposerDraftState(): PersistedComposerDraftStoreState | null {
   const text = composerDraftBaseStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
@@ -208,6 +211,15 @@ function serializeComposerDraftState(value: StorageValue<ComposerPersistState>):
     return JSON.stringify({ state: value.state, version: value.version });
   }
   const local = partializeComposerDraftStoreState(value.state.capturedState);
+  // Storage holding exactly the bytes of an unconfirmed write holds this tab's write, not another's.
+  if (composerDraftUnconfirmedWrite) {
+    if (
+      composerDraftBaseStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) ===
+      composerDraftUnconfirmedWrite.text
+    )
+      composerDraftLastWrite = composerDraftUnconfirmedWrite;
+    composerDraftUnconfirmedWrite = null;
+  }
   const baseline = composerDraftLastWrite?.local ?? composerDraftLoadedState;
   const stored = baseline ? readStoredComposerDraftState() : null;
   const merged = stored && baseline ? mergeComposerDraftStates(stored, local, baseline) : local;
@@ -220,14 +232,20 @@ const composerDebouncedStorage = createDeferredStorage<StorageValue<ComposerPers
   {
     getItem: (name) => composerDraftBaseStorage.getItem(name),
     setItem: (name, text) => {
+      const attempted = composerDraftPendingWrite?.text === text ? composerDraftPendingWrite : null;
+      composerDraftUnconfirmedWrite = attempted;
       composerDraftBaseStorage.setItem(name, text);
-      if (composerDraftPendingWrite?.text === text)
-        composerDraftLastWrite = composerDraftPendingWrite;
+      // Storage can drop a write without saying so: only reading those bytes back confirms it.
+      if (attempted && composerDraftBaseStorage.getItem(name) === text) {
+        composerDraftLastWrite = attempted;
+        composerDraftUnconfirmedWrite = null;
+      }
     },
     removeItem: (name) => {
       composerDraftBaseStorage.removeItem(name);
       composerDraftLoadedState = null;
       composerDraftLastWrite = null;
+      composerDraftUnconfirmedWrite = null;
     },
   },
   serializeComposerDraftState,
@@ -5122,6 +5140,21 @@ export function markRestoredLaunchCopy(draftId: DraftId): void {
       },
     };
   });
+}
+
+/**
+ * Marks a composer a failed send never cleared as its pending launch's copy, only while it still
+ * is exactly what that launch sent: a later edit stays the user's, never taken for that copy.
+ */
+export function markUnchangedLaunchCopy(draftId: DraftId): void {
+  const state = useComposerDraftStore.getState();
+  const sent = state.draftThreadsByThreadKey[draftId]?.pendingLaunch?.composer;
+  if (
+    sent &&
+    composerDraftCopySignature(state.draftsByThreadKey[draftId]) ===
+      composerDraftCopySignature(toHydratedThreadDraft(sent))
+  )
+    markRestoredLaunchCopy(draftId);
 }
 
 /**
