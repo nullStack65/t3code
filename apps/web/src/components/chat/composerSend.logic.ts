@@ -1,10 +1,5 @@
-import type {
-  ChatAttachment,
-  EnvironmentId,
-  ThreadContextRecord,
-  UploadChatAttachment,
-} from "@t3tools/contracts";
-import type { PendingDraftLaunch, SentLaunchAttachment } from "../../composerDraftStore";
+import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { PendingDraftLaunch } from "../../composerDraftStore";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 
@@ -110,66 +105,10 @@ export function approvalRedirectNotice(input: {
 }
 
 /**
- * What identifies an attachment's content: the SHA-256 of its bytes, or the upload that holds
- * them when the composer kept only that. Name, type and size do not: two files can share them.
- */
-export async function attachmentContentIdentity(attachment: {
-  readonly file: File | null;
-  readonly uploadedAttachmentId?: string;
-}): Promise<string> {
-  if (attachment.file !== null) {
-    const digest = await crypto.subtle.digest("SHA-256", await attachment.file.arrayBuffer());
-    return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-  }
-  // Neither bytes nor an upload: nothing can show a retry carries the same content.
-  if (attachment.uploadedAttachmentId === undefined)
-    throw new Error("An attachment needs to be attached again before sending.");
-  return `upload:${attachment.uploadedAttachmentId}`;
-}
-
-/** The attachments as the launch sends them, without an inline image's bytes. */
-export function sentLaunchAttachments(
-  sent: ReadonlyArray<ChatAttachment | UploadChatAttachment>,
-): SentLaunchAttachment[] {
-  return sent.map((attachment) => {
-    if (!("dataUrl" in attachment)) return { attachment, inline: false };
-    const { dataUrl: _bytes, ...reference } = attachment;
-    return { attachment: reference as ChatAttachment, inline: true };
-  });
-}
-
-/**
- * Exactly what a launch sent, again: the same references and ids. An inline image's bytes come
- * from the restored file, which the request's content identity already proved unchanged.
- */
-export function replayLaunchAttachments(
-  sent: ReadonlyArray<SentLaunchAttachment>,
-  current: ReadonlyArray<{ readonly file: File | null }>,
-  readDataUrl: (file: File) => Promise<string>,
-): Promise<Array<ChatAttachment | UploadChatAttachment>> {
-  return Promise.all(
-    sent.map(async ({ attachment, inline }, index) => {
-      if (!inline) return attachment;
-      const file = current[index]?.file;
-      if (!file) throw new Error(`Attachment '${attachment.name}' is no longer here to resend.`);
-      return { ...attachment, dataUrl: await readDataUrl(file) } as UploadChatAttachment;
-    }),
-  );
-}
-
-/**
- * What a new thread's launch asks for. Attachments compare by content identity, not id: a
- * restored draft clones them under new ids and is still the same request.
+ * What a new thread's launch asks for besides its message: model, modes and workspace. The
+ * message itself is the composer, which a retry must leave as it was restored.
  */
 export function draftLaunchRequest(input: {
-  readonly text: string;
-  readonly attachments: ReadonlyArray<{
-    readonly name: string;
-    readonly mimeType: string;
-    readonly sizeBytes: number;
-    /** From `attachmentContentIdentity`. */
-    readonly content: string;
-  }>;
   readonly modelSelection: unknown;
   readonly runtimeMode: string;
   readonly interactionMode: string;
@@ -179,30 +118,28 @@ export function draftLaunchRequest(input: {
   readonly baseBranch: string | null;
   readonly startFromOrigin: boolean;
 }): string {
-  return JSON.stringify({
-    ...input,
-    attachments: input.attachments.map(({ name, mimeType, sizeBytes, content }) => ({
-      name,
-      mimeType,
-      sizeBytes,
-      content,
-    })),
-  });
+  return JSON.stringify(input);
 }
 
 /**
- * A launch whose outcome is unknown is resent as itself; a different request waits until it
- * settles, since the host may already be running the first one.
+ * A pending launch sent again unchanged (its restored copy, `composerDraftCopySignature`, and its
+ * request) stays that operation. Changed, it waits while it may have gone out; its turn is stored
+ * before it does, so one without a turn never did and a change starts afresh on the same binding.
  */
 export function resolveDraftLaunch(
   pending: PendingDraftLaunch | null | undefined,
   request: string,
+  composerSignature: string,
 ):
   | { readonly type: "new" }
   | { readonly type: "retry"; readonly launch: PendingDraftLaunch }
-  | {
-      readonly type: "changed";
-    } {
+  | { readonly type: "changed" } {
   if (!pending) return { type: "new" };
-  return pending.request === request ? { type: "retry", launch: pending } : { type: "changed" };
+  if (
+    pending.request === request &&
+    pending.restoredCopy !== undefined &&
+    pending.restoredCopy === composerSignature
+  )
+    return { type: "retry", launch: pending };
+  return pending.turn ? { type: "changed" } : { type: "new" };
 }

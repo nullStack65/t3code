@@ -22,7 +22,9 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   ChatAttachmentId,
+  CommandId,
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -76,6 +78,11 @@ function selectionsByProvider(
 }
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vite-plus/test";
 import { createMemoryStorage } from "./lib/storage";
+import {
+  composerDraftContentChanged,
+  draftLaunchRequest,
+  resolveDraftLaunch,
+} from "./components/chat/composerSend.logic";
 
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
@@ -90,6 +97,7 @@ import {
   resolveDraftPromotionNavigationTarget,
   restoreFailedDraftThread,
   markRestoredLaunchCopy,
+  type PendingLaunchTurn,
   subscribeDraftThreadPromotion,
   type ComposerFileAttachment,
   type ComposerImageAttachment,
@@ -1355,21 +1363,20 @@ describe("composerDraftStore project draft thread mapping", () => {
         const launch = raw
           ? JSON.parse(raw).state.draftThreadsByThreadKey[draftKey]?.pendingLaunch
           : undefined;
-        return launch?.attachments === undefined
+        const stored = launch?.turn?.input?.message?.attachments;
+        return stored === undefined
           ? null
-          : (launch.attachments as Array<{ attachment: { id: string } }>).map(
-              ({ attachment }) => attachment.id,
-            );
+          : (stored as Array<{ id: string }>).map((attachment) => attachment.id);
       };
       const launchThere = (
         draftKey: DraftId,
         operation: { commandId: string; messageId: string },
         sent: ThreadId,
-        attachments: ReadonlyArray<{ id: string }>,
+        attachments: ReadonlyArray<unknown>,
       ) => {
         sends.push({
           commandId: operation.commandId,
-          attachmentIds: attachments.map((attachment) => attachment.id),
+          attachmentIds: attachments.map((attachment) => (attachment as { id: string }).id),
           persistedIds: persistedAttachmentIds(draftKey),
         });
         const replayed = accepted.get(operation.commandId);
@@ -1398,9 +1405,20 @@ describe("composerDraftStore project draft thread mapping", () => {
           sizeBytes: 4,
         },
       ];
-      // The composer's send, in its order: bind the operation, clear the composer, prepare the
-      // attachments, commit their references, launch; any failure restores the draft with the
-      // launch still unknown (the one sent, or before sending, the one pending before).
+      // The composer's send, in its order: bind the operation with the composer it is sent from,
+      // prepare the attachments, commit their references, clear the composer, launch; any failure
+      // restores the draft with the launch still unknown (the one sent, or before sending, the one
+      // pending before).
+      const request = draftLaunchRequest({
+        modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        projectId: projectRef.projectId,
+        branch: null,
+        worktreePath: null,
+        baseBranch: null,
+        startFromOrigin: false,
+      });
       const send = (
         tab: typeof import("./composerDraftStore"),
         draftKey: DraftId,
@@ -1408,22 +1426,31 @@ describe("composerDraftStore project draft thread mapping", () => {
         crashBeforePayload = false,
       ) => {
         const store = tab.useComposerDraftStore.getState();
+        // The user's composer: typing `text` if it holds something else.
+        if ((store.getComposerDraft(draftKey)?.prompt ?? "") !== text)
+          store.setPrompt(draftKey, text);
+        const draftBefore = store.getComposerDraft(draftKey) ?? null;
         const draft = store.getDraftSession(draftKey)!;
-        const request = JSON.stringify({
-          text,
-          model: "claude-sonnet-4-6",
-          runtimeMode: "full-access",
-        });
         const priorLaunch = draft.pendingLaunch ?? null;
-        if (priorLaunch && priorLaunch.request !== request) return { changed: true } as const;
-        allocated += 1;
-        const operation = priorLaunch ?? {
-          commandId: `command-${allocated}`,
-          messageId: `message-${allocated}`,
-          createdAt: "2026-11-18T00:00:00.000Z",
+        const plan = resolveDraftLaunch(
+          priorLaunch,
           request,
-        };
+          tab.composerDraftCopySignature(draftBefore ?? undefined),
+        );
+        if (plan.type === "changed") return { changed: true } as const;
+        allocated += 1;
+        const operation =
+          plan.type === "retry"
+            ? plan.launch
+            : {
+                commandId: `command-${allocated}`,
+                messageId: `message-${allocated}`,
+                createdAt: "2026-11-18T00:00:00.000Z",
+                request,
+                composer: tab.toSentComposerDraft(draftBefore!, []),
+              };
         const sentRef = scopeThreadRef(draft.environmentId, draft.threadId);
+        // The hook's failure path: the draft and, from the send's own snapshot, its composer.
         const fail = (launchAttempted: boolean) => {
           tab.restoreFailedDraftThread(
             draftKey,
@@ -1435,28 +1462,44 @@ describe("composerDraftStore project draft thread mapping", () => {
           tab.markRestoredLaunchCopy(draftKey);
         };
         const bound = tab.markPromotedDraftThreadByRef(sentRef, operation);
-        store.clearComposerContent(draftKey);
         if (!bound) {
           fail(false);
           return { unbound: true } as const;
         }
         if (crashBeforePayload) return { crashed: true } as const;
-        // A retry sends the references its launch committed; a first send commits them first.
-        const attachments = operation.attachments?.map(({ attachment }) => attachment) ?? prepare();
+        // A retry resends the turn its launch committed; a first send commits its turn first.
+        const turn: PendingLaunchTurn = operation.turn ?? {
+          environmentId: draft.environmentId,
+          input: {
+            commandId: CommandId.make(operation.commandId),
+            threadId: draft.threadId,
+            message: {
+              messageId: MessageId.make(operation.messageId),
+              role: "user" as const,
+              text,
+              attachments: prepare(),
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+          },
+        };
         if (storageFailsBeforePayload) storageFails = true;
         if (storageDropsBeforePayload) storageDrops = true;
         if (
-          operation.attachments === undefined &&
-          !tab.commitPendingLaunchPayload(
-            sentRef,
-            operation.commandId,
-            attachments.map((attachment) => ({ attachment, inline: false })),
-          )
+          operation.turn === undefined &&
+          !tab.commitPendingLaunchPayload(sentRef, operation.commandId, turn)
         ) {
           fail(false);
           return { unbound: true } as const;
         }
-        const answer = launchThere(draftKey, operation, draft.threadId, attachments);
+        const now = tab.useComposerDraftStore.getState().getComposerDraft(draftKey) ?? null;
+        if (!composerDraftContentChanged(draftBefore, now)) store.clearComposerContent(draftKey);
+        const answer = launchThere(
+          draftKey,
+          operation,
+          draft.threadId,
+          turn.input.message.attachments,
+        );
         if ("runId" in answer) {
           tab.finalizePromotedDraftThreadByRef(sentRef);
           return { launched: answer, operation } as const;
@@ -1557,10 +1600,10 @@ describe("composerDraftStore project draft thread mapping", () => {
       vi.clearAllTimers();
       vi.resetModules();
       const crashed = await import("./composerDraftStore");
+      // Hydration alone brings it back as an unconfirmed send, kept on its machine.
       const unsent = crashed.useComposerDraftStore.getState().getDraftSession(crashDraftId)!;
-      crashed.restoreFailedDraftThread(crashDraftId, unsent, crashThreadId, unsent.pendingLaunch);
-      crashed.useComposerDraftStore.getState().setPrompt(crashDraftId, "Crash task");
-      crashed.markRestoredLaunchCopy(crashDraftId);
+      expect(unsent.promotedTo ?? null).toBeNull();
+      expect(unsent.sentTo).toEqual(scopeThreadRef(TEST_ENVIRONMENT_ID, crashThreadId));
       // A retry commits its binding, then cannot commit its references, nor the restore after.
       storageFailsBeforePayload = true;
       expect(send(crashed, crashDraftId, "Crash task")).toEqual({ unbound: true });
@@ -1573,12 +1616,124 @@ describe("composerDraftStore project draft thread mapping", () => {
       // Every launch went out only with references storage already held for its operation.
       for (const sent of sends) expect(sent.persistedIds).toEqual(sent.attachmentIds);
       expect(dropped).toEqual({ unbound: true });
-      // Once storage takes the writes again, the retry goes out, its references stored first.
-      expect(send(crashed, crashDraftId, "Crash task")).toMatchObject({ launched: {} });
+      // Once storage takes the writes again, the retry goes out, its references stored first. Bound
+      // without a turn, it never went out, and sent unchanged it is still that operation.
+      expect(send(crashed, crashDraftId, "Crash task")).toMatchObject({
+        launched: {},
+        operation: {
+          commandId: unsent.pendingLaunch?.commandId,
+          messageId: unsent.pendingLaunch?.messageId,
+          createdAt: unsent.pendingLaunch?.createdAt,
+        },
+      });
       for (const sent of sends) expect(sent.persistedIds).toEqual(sent.attachmentIds);
+      expect(unsent.pendingLaunch?.turn).toBeUndefined();
       expect(
         [...accepted.keys()].filter((commandId) => commandId === unsent.pendingLaunch?.commandId),
       ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
+  it("recognizes an unchanged uploaded file as the same retry after a reload, and a swapped one as changed", async () => {
+    vi.stubGlobal("localStorage", createMemoryStorage());
+    vi.stubGlobal("window", new EventTarget());
+    vi.useFakeTimers();
+    vi.resetModules();
+    try {
+      const sentRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+      const before = await import("./composerDraftStore");
+      const store = before.useComposerDraftStore.getState();
+      store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+      store.setPrompt(draftId, "Review the report");
+      const report = new File(["report bytes"], "report.pdf", { type: "application/pdf" });
+      store.addFiles(draftId, [
+        {
+          type: "file",
+          id: "file-1",
+          name: report.name,
+          mimeType: report.type,
+          sizeBytes: report.size,
+          file: report,
+        },
+      ]);
+      store.setFileUpload(draftId, "file-1", TEST_ENVIRONMENT_ID, "pending-upload-file-1");
+      const operation = {
+        commandId: "command-upload",
+        messageId: "message-upload",
+        createdAt: "2026-11-18T00:00:00.000Z",
+        request: "{}",
+      };
+      const sentDraft = store.getDraftSession(draftId)!;
+      expect(before.markPromotedDraftThreadByRef(sentRef, operation)).toBe(true);
+      expect(
+        before.commitPendingLaunchPayload(sentRef, operation.commandId, {
+          environmentId: TEST_ENVIRONMENT_ID,
+          input: {
+            commandId: CommandId.make(operation.commandId),
+            threadId,
+            message: {
+              messageId: MessageId.make(operation.messageId),
+              role: "user" as const,
+              text: "Review the report",
+              attachments: [
+                {
+                  type: "file" as const,
+                  id: ChatAttachmentId.make("pending-upload-file-1"),
+                  name: report.name,
+                  mimeType: report.type,
+                  sizeBytes: report.size,
+                },
+              ],
+            },
+            modelSelection: { instanceId: CLAUDE_AGENT_INSTANCE, model: "claude-sonnet-4-6" },
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            createdAt: operation.createdAt,
+          },
+        }),
+      ).toBe(true);
+      // An uncertain launch error: the draft and its composer come back for a retry.
+      before.restoreFailedDraftThread(draftId, sentDraft, threadId, operation);
+      before.markRestoredLaunchCopy(draftId);
+      await vi.advanceTimersByTimeAsync(300);
+      vi.clearAllTimers();
+      vi.resetModules();
+      const after = await import("./composerDraftStore");
+      const reloaded = after.useComposerDraftStore.getState();
+      const decide = () =>
+        resolveDraftLaunch(
+          reloaded.getDraftSession(draftId)?.pendingLaunch,
+          "{}",
+          after.composerDraftCopySignature(
+            after.useComposerDraftStore.getState().getComposerDraft(draftId) ?? undefined,
+          ),
+        ).type;
+      // Reloaded, the file is only its upload; it is still the same retry.
+      expect(reloaded.getComposerDraft(draftId)?.files[0]).toMatchObject({
+        file: null,
+        uploadedAttachmentId: "pending-upload-file-1",
+      });
+      expect(decide()).toBe("retry");
+      // The same name, type and size with other bytes is a new attachment: a different request.
+      const swapped = new File(["REPORT BYTES"], "report.pdf", { type: "application/pdf" });
+      reloaded.removeFile(draftId, "file-1");
+      reloaded.addFiles(draftId, [
+        {
+          type: "file",
+          id: "file-2",
+          name: swapped.name,
+          mimeType: swapped.type,
+          sizeBytes: swapped.size,
+          file: swapped,
+        },
+      ]);
+      reloaded.setFileUpload(draftId, "file-2", TEST_ENVIRONMENT_ID, "pending-upload-file-2");
+      expect(swapped.size).toBe(report.size);
+      expect(decide()).toBe("changed");
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();

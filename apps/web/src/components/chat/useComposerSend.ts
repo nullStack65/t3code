@@ -72,6 +72,8 @@ import {
   markPromotedDraftThreadByRef,
   restoreFailedDraftThread,
   commitPendingLaunchPayload,
+  composerDraftCopySignature,
+  type PendingLaunchTurn,
   markRestoredLaunchCopy,
   type PendingDraftLaunch,
   checkoutPullRequestUrlToLink,
@@ -104,17 +106,13 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
-  attachmentContentIdentity,
   composerDraftContentChanged,
   draftLaunchRequest,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
-  replayLaunchAttachments,
   resolveDraftLaunch,
-  sentLaunchAttachments,
 } from "./composerSend.logic";
-import { readFileAsDataUrl } from "../../lib/imageCompression";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import {
@@ -139,6 +137,9 @@ import {
   type MultipleModelTarget,
   resolveMultipleModelTargets,
   prepareTurnAttachments,
+  clearSentComposerContent,
+  preparedFileUploads,
+  readSentComposer,
   restoreComposerDraft,
 } from "./chatViewSend";
 import type {
@@ -814,6 +815,9 @@ export function useComposerSend(input: ComposerSendInput) {
       environmentContexts: composerEnvironmentContextsSnapshot,
       messageText: messageTextForSend,
     } = sendSnapshot;
+    // What the composer held when the send read it: an edit after this is the user's, never cleared.
+    const draftBeforeSend =
+      useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) ?? null;
     const {
       missingWorktreeBaseBranch,
       baseBranchForWorktree,
@@ -874,33 +878,8 @@ export function useComposerSend(input: ComposerSendInput) {
       isLocalDraftThread && draftId
         ? useComposerDraftStore.getState().getDraftSession(draftId)
         : null;
-    // A retry must carry the same content, which only the attachments' bytes identify.
-    let attachmentContents: ReadonlyArray<string> = [];
-    if (draftSessionForSend && composerAttachmentsSnapshot.length > 0) {
-      sendInFlightRef.current = true;
-      try {
-        attachmentContents = await Promise.all(
-          composerAttachmentsSnapshot.map(attachmentContentIdentity),
-        );
-      } catch (error) {
-        setThreadError(
-          threadIdForSend,
-          error instanceof Error ? error.message : "Could not read the attachments.",
-        );
-        return;
-      } finally {
-        sendInFlightRef.current = false;
-      }
-    }
     const launchRequest = draftSessionForSend
       ? draftLaunchRequest({
-          text: outgoingMessageText,
-          attachments: composerAttachmentsSnapshot.map((attachment, index) => ({
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            content: attachmentContents[index] ?? "",
-          })),
           modelSelection: ctxSelectedModelSelection,
           runtimeMode,
           interactionMode: DEFAULT_INTERACTION_MODE,
@@ -913,7 +892,13 @@ export function useComposerSend(input: ComposerSendInput) {
       : null;
     const priorLaunch = draftSessionForSend?.pendingLaunch ?? null;
     const launchPlan =
-      launchRequest === null ? null : resolveDraftLaunch(priorLaunch, launchRequest);
+      launchRequest === null
+        ? null
+        : resolveDraftLaunch(
+            priorLaunch,
+            launchRequest,
+            composerDraftCopySignature(draftBeforeSend ?? undefined),
+          );
     if (launchPlan?.type === "changed") {
       toastManager.add(
         stackedThreadToast({
@@ -938,8 +923,6 @@ export function useComposerSend(input: ComposerSendInput) {
             messageId: messageIdForSend,
             createdAt: messageCreatedAt,
             request: launchRequest,
-            // Nothing to prepare, so nothing to commit again before it goes out.
-            ...(composerAttachmentsSnapshot.length === 0 ? { attachments: [] } : {}),
           });
 
     const readLiveAttachmentCapabilities = () => {
@@ -971,9 +954,7 @@ export function useComposerSend(input: ComposerSendInput) {
       multipleTargets.push(resolved);
     }
 
-    const draftBeforePreparation = useComposerDraftStore
-      .getState()
-      .getComposerDraft(composerDraftTarget);
+    const draftBeforePreparation = draftBeforeSend;
     const draftChangedDuringPreparation = () => {
       if (composerRef.current?.hasPendingAttachments() === true) return true;
       const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
@@ -1232,15 +1213,10 @@ export function useComposerSend(input: ComposerSendInput) {
       );
     }
 
-    // A retry sends the references its launch committed, not a new upload under the same command.
-    const turnAttachmentsPromise =
-      retriedLaunch?.attachments !== undefined
-        ? // The same wire shapes as freshly prepared ones.
-          (replayLaunchAttachments(
-            retriedLaunch.attachments,
-            composerAttachmentsSnapshot,
-            readFileAsDataUrl,
-          ) as ReturnType<typeof prepareTurnAttachments>)
+    // A retry resends the turn its launch committed, so nothing is prepared or uploaded again.
+    const turnAttachmentsPromise: ReturnType<typeof prepareTurnAttachments> =
+      retriedLaunch?.turn !== undefined
+        ? Promise.resolve([])
         : prepareTurnAttachments({
             environmentId,
             attachments: composerAttachmentsSnapshot,
@@ -1313,19 +1289,35 @@ export function useComposerSend(input: ComposerSendInput) {
     const sentDraftThreadRef = isLocalDraftThread
       ? scopeThreadRef(environmentId, threadIdForSend)
       : null;
+    // A new launch is bound with the whole composer it is sent from, image bytes included.
+    const sentComposer =
+      sentDraftThreadRef && launchOperation?.composer === undefined && draftBeforeSend
+        ? await settlePromise(() => readSentComposer(draftBeforeSend))
+        : null;
     // Keep new-thread flows from reusing this draft while attachments and worktree setup settle.
     // Its machine is committed to storage before anything launches; if that fails, nothing does.
-    const sendBound = sentDraftThreadRef
-      ? markPromotedDraftThreadByRef(sentDraftThreadRef, launchOperation)
-      : true;
+    const sendBound =
+      !sentDraftThreadRef ||
+      (sentComposer?._tag !== "Failure" &&
+        markPromotedDraftThreadByRef(
+          sentDraftThreadRef,
+          launchOperation && sentComposer?._tag === "Success"
+            ? { ...launchOperation, composer: sentComposer.value }
+            : launchOperation,
+        ));
     // Set once the launch itself goes out; failures before it sent nothing.
     let launchAttempted = false;
-    clearComposerDraftContent(composerDraftTarget);
-    // The prompt ref and cursor belong to the thread on screen, which may no longer be this one.
-    if (currentRouteThreadKeyRef.current === routeThreadKey) {
-      promptRef.current = "";
-      composerRef.current?.resetCursorState();
-    }
+    // A draft's launch clears the composer only once its turn is stored; an edit is the user's.
+    let composerCleared = false;
+    const clearSentComposer = () => {
+      composerCleared = clearSentComposerContent(composerDraftTarget, draftBeforeSend);
+      // The prompt ref and cursor belong to the thread on screen, which may no longer be this one.
+      if (composerCleared && currentRouteThreadKeyRef.current === routeThreadKey) {
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      }
+    };
+    if (!sentDraftThreadRef) clearSentComposer();
 
     const title = deriveThreadTitleSeed({
       text: messageTextForSend,
@@ -1338,8 +1330,9 @@ export function useComposerSend(input: ComposerSendInput) {
       ctxSelectedModelSelection.options,
     );
 
-    let failure: AtomCommandResult<unknown, unknown> | null = null;
-    if (!sendBound) {
+    let failure: AtomCommandResult<unknown, unknown> | null =
+      sentComposer?._tag === "Failure" ? sentComposer : null;
+    if (failure === null && !sendBound) {
       const unbound = await settlePromise(async () => {
         throw new Error(
           "This draft could not be saved before sending, so nothing was started. Free up browser storage, then send again.",
@@ -1397,17 +1390,85 @@ export function useComposerSend(input: ComposerSendInput) {
       }
     }
 
-    // The references this launch sends are committed before it goes out, or it does not go out.
+    const bootstrap =
+      isLocalDraftThread || baseBranchForWorktree
+        ? {
+            ...(isLocalDraftThread
+              ? {
+                  createThread: {
+                    projectId: activeProject.id,
+                    title,
+                    modelSelection: threadCreateModelSelection,
+                    runtimeMode,
+                    interactionMode: DEFAULT_INTERACTION_MODE,
+                    branch: activeThreadBranch,
+                    worktreePath: activeThread.worktreePath,
+                    createdAt: activeThread.createdAt,
+                  },
+                }
+              : {}),
+            ...(baseBranchForWorktree
+              ? {
+                  prepareWorktree: {
+                    projectCwd: activeProject.workspaceRoot,
+                    baseBranch: baseBranchForWorktree,
+                    ...(startFromOrigin ? { startFromOrigin: true } : {}),
+                  },
+                  runSetupScript: true,
+                }
+              : {}),
+          }
+        : undefined;
+    // Exactly what this launch sends: a retry's committed turn, or a new one built now.
+    const turnForLaunch: PendingLaunchTurn | null =
+      retriedLaunch?.turn ??
+      (turnAttachmentsResult._tag === "Success"
+        ? {
+            environmentId,
+            input: {
+              ...(launchOperation ? { commandId: CommandId.make(launchOperation.commandId) } : {}),
+              threadId: threadIdForSend,
+              message: {
+                messageId: messageIdForSend,
+                role: "user",
+                attachments: turnAttachmentsResult.value,
+                ...withMessageContext({
+                  text: outgoingMessageText,
+                  context: buildOutgoingMessageContext(
+                    boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
+                  ),
+                }),
+              },
+              modelSelection: ctxSelectedModelSelection,
+              titleSeed: title,
+              runtimeMode,
+              interactionMode: DEFAULT_INTERACTION_MODE,
+              dispatchMode: turnDispatchMode,
+              ...(freshArm === undefined ? {} : { freshContext: true }),
+              ...(bootstrap ? { bootstrap } : {}),
+              createdAt: messageCreatedAt,
+            },
+          }
+        : null);
+    // The turn is committed before it goes out, or it does not go out.
     if (
       failure === null &&
-      turnAttachmentsResult._tag === "Success" &&
+      turnForLaunch &&
       sentDraftThreadRef &&
       launchOperation &&
-      launchOperation.attachments === undefined &&
+      launchOperation.turn === undefined &&
       !commitPendingLaunchPayload(
         sentDraftThreadRef,
         launchOperation.commandId,
-        sentLaunchAttachments(turnAttachmentsResult.value),
+        turnForLaunch,
+        turnAttachmentsResult._tag === "Success"
+          ? preparedFileUploads({
+              environmentId,
+              attachments: composerAttachmentsSnapshot,
+              prepared: turnAttachmentsResult.value,
+              usesAttachmentUploads: turnUsesAttachmentUploads,
+            })
+          : [],
       )
     ) {
       const unbound = await settlePromise(async () => {
@@ -1417,39 +1478,11 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       if (unbound._tag === "Failure") failure = unbound;
     }
+    if (failure === null && turnForLaunch && sentDraftThreadRef) clearSentComposer();
 
     let backgroundDraftOpened = false;
     let turnStartSucceeded = false;
-    if (failure === null && turnAttachmentsResult._tag === "Success") {
-      const bootstrap =
-        isLocalDraftThread || baseBranchForWorktree
-          ? {
-              ...(isLocalDraftThread
-                ? {
-                    createThread: {
-                      projectId: activeProject.id,
-                      title,
-                      modelSelection: threadCreateModelSelection,
-                      runtimeMode,
-                      interactionMode: DEFAULT_INTERACTION_MODE,
-                      branch: activeThreadBranch,
-                      worktreePath: activeThread.worktreePath,
-                      createdAt: activeThread.createdAt,
-                    },
-                  }
-                : {}),
-              ...(baseBranchForWorktree
-                ? {
-                    prepareWorktree: {
-                      projectCwd: activeProject.workspaceRoot,
-                      baseBranch: baseBranchForWorktree,
-                      ...(startFromOrigin ? { startFromOrigin: true } : {}),
-                    },
-                    runSetupScript: true,
-                  }
-                : {}),
-            }
-          : undefined;
+    if (failure === null && turnForLaunch) {
       const backgroundThreadRef =
         submissionIntent === "background" && isLocalDraftThread
           ? scopeThreadRef(environmentId, threadIdForSend)
@@ -1463,32 +1496,7 @@ export function useComposerSend(input: ComposerSendInput) {
         : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
       launchAttempted = true;
-      const startPromise = startThreadTurn({
-        environmentId,
-        input: {
-          ...(launchOperation ? { commandId: CommandId.make(launchOperation.commandId) } : {}),
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            attachments: turnAttachmentsResult.value,
-            ...withMessageContext({
-              text: outgoingMessageText,
-              context: buildOutgoingMessageContext(
-                boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
-              ),
-            }),
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode: DEFAULT_INTERACTION_MODE,
-          dispatchMode: turnDispatchMode,
-          ...(freshArm === undefined ? {} : { freshContext: true }),
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
-        },
-      });
+      const startPromise = startThreadTurn(turnForLaunch);
       if (backgroundThreadRef) {
         try {
           backgroundDraftOpened = Boolean(
@@ -1585,11 +1593,11 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       // A restored draft clones its images, so the sent copies are no longer used.
       optimisticBlobPreviews.release(optimisticMessage);
-      if (
-        composerDraftHasUserContent(
-          useComposerDraftStore.getState().getComposerDraft(composerDraftTarget),
-        )
-      ) {
+      const composerAfterFailure =
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) ?? null;
+      if (!composerCleared && !composerDraftContentChanged(draftBeforeSend, composerAfterFailure)) {
+        // Never cleared, the composer still holds the message to send again.
+      } else if (composerDraftHasUserContent(composerAfterFailure)) {
         // A draft typed meanwhile keeps the composer, so the failed text stays reachable here.
         const failedText = sendSnapshot.draftText;
         const hasText = failedText.trim().length > 0;
