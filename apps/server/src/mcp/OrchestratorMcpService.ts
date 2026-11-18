@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EnvironmentId,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -71,6 +72,10 @@ import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2Pe
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import {
+  chooseThreadPlacement,
+  type ThreadPlacementDecision,
+} from "@t3tools/shared/threadPlacement";
 import { threadPullRequestUpdatedAtMs } from "@t3tools/shared/threadPullRequests";
 import {
   normalizeThreadPullRequestKey,
@@ -2224,7 +2229,69 @@ const make = Effect.gen(function* () {
     return task;
   });
 
-  return OrchestratorMcpService.of({
+  /** Where a placed task may run, or why it may not. */
+  const admitPlacement = (decision: ThreadPlacementDecision, conflict: string) =>
+    decision.accepted
+      ? Effect.succeed(EnvironmentId.make(decision.environmentId))
+      : Effect.fail(
+          failure(
+            "invalid_request",
+            decision.reason === "conflicting-locality"
+              ? conflict
+              : `No environment can take this (${decision.reason}).`,
+          ),
+        );
+
+  /** The environment bound to an auto-placed task, for the parent's model or the exact one named. */
+  const placeTask = Effect.fn("OrchestratorMcpService.placeTask")(function* (
+    callerScope: McpInvocationScope,
+    input: OrchestratorMcpDelegateTaskInput,
+    key: string,
+  ) {
+    yield* requireCapability(callerScope);
+    const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+    const target = input.target;
+    // Placement qualifies the project with this repository wherever it runs, and no other.
+    if (target?.projectId !== undefined) {
+      return yield* failure(
+        "invalid_request",
+        'With placement "auto", omit target.projectId: the task runs in the project with this repository wherever it is placed. To use another project, pass target.environmentId with it.',
+      );
+    }
+    if (target?.driverKind !== undefined && target.providerInstanceId === undefined) {
+      return yield* failure(
+        "invalid_request",
+        'With placement "auto", name target.providerInstanceId instead of driverKind; every environment matches it exactly.',
+      );
+    }
+    const inherited = parent.thread.modelSelection;
+    const instanceId = target?.providerInstanceId ?? inherited.instanceId;
+    const model =
+      target?.model ?? (instanceId === inherited.instanceId ? inherited.model : undefined);
+    if (model === undefined) {
+      return yield* failure(
+        "target_required",
+        'With placement "auto" and another providerInstanceId, pass target.model.',
+      );
+    }
+    // The parent's modes, or narrower ones asked for, are chosen with and sent explicitly,
+    // so no environment qualifies or runs the task at less than they allow.
+    const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
+    const interactionMode = yield* resolveInteractionMode(
+      parent.thread.interactionMode,
+      input.interactionMode,
+    );
+    const environmentId = yield* remoteDelegation.place(scope, {
+      key,
+      projectId: parent.thread.projectId,
+      modelSelection: { instanceId, model },
+      runtimeMode,
+      here: yield* service.capabilities(callerScope, { search: model }),
+    });
+    return { environmentId, runtimeMode, interactionMode };
+  });
+
+  const service: OrchestratorMcpServiceShape = OrchestratorMcpService.of({
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope, ["runs"]);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
@@ -2642,16 +2709,40 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
-      const environmentId =
-        input.target === undefined
-          ? undefined
-          : PeerForwarding.remoteTarget(callerScope, input.target.environmentId);
-      if (input.target !== undefined && environmentId !== undefined) {
+      // One key for the placement, the launch and the record, so a retry finds all three.
+      const clientRequestId = yield* requestKey(input.clientRequestId);
+      const named = input.target?.environmentId;
+      // A named target or the parent's checkout decides; only work needing neither is placed.
+      const automatic =
+        input.placement === "auto" && named === undefined && input.isolation === undefined
+          ? yield* placeTask(callerScope, input, clientRequestId)
+          : undefined;
+      const placed =
+        automatic !== undefined
+          ? automatic.environmentId
+          : yield* admitPlacement(
+              chooseThreadPlacement(
+                {
+                  originEnvironmentId: callerScope.environmentId,
+                  pinnedEnvironmentId: named ?? callerScope.environmentId,
+                  requiresOrigin: input.isolation === "worktree",
+                },
+                [],
+                0,
+              ),
+              'A task in a linked environment runs in that project\'s checkout; isolation "worktree" is not supported there. Omit isolation, or use t3_thread_launch with environmentId and a worktree workspaceStrategy.',
+            );
+      const environmentId = PeerForwarding.remoteTarget(callerScope, placed);
+      if (environmentId !== undefined) {
         yield* requireCapability(callerScope);
         const scope = yield* requireThreadScope(callerScope, "delegate_task");
         // The task's child runs as an ordinary thread there; this thread keeps the task.
         const { taskId } = yield* remoteDelegation.delegate(scope, {
           ...input,
+          ...(automatic === undefined
+            ? {}
+            : { runtimeMode: automatic.runtimeMode, interactionMode: automatic.interactionMode }),
+          clientRequestId,
           target: { ...input.target, environmentId },
         });
         return yield* input.mode === "wait"
@@ -2682,7 +2773,7 @@ const make = Effect.gen(function* () {
         );
       }
       const providers = yield* loadProviders;
-      const key = yield* requestKey(input.clientRequestId);
+      const key = clientRequestId;
       const commandId = stableCommandId({
         scope,
         requestKey: key,
@@ -3021,6 +3112,21 @@ const make = Effect.gen(function* () {
     createThreads: Effect.fn("OrchestratorMcpService.createThreads")(
       function* (callerScope, input) {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "create_threads");
+        // Each thread shares this thread's checkout, so another environment cannot take it.
+        for (const request of input.threads) {
+          yield* admitPlacement(
+            chooseThreadPlacement(
+              {
+                originEnvironmentId: callerScope.environmentId,
+                pinnedEnvironmentId: request.target?.environmentId,
+                requiresOrigin: true,
+              },
+              [],
+              0,
+            ),
+            "create_threads starts threads in this checkout. To start one in a linked environment, use t3_thread_launch with that environmentId.",
+          );
+        }
         const parentRun = ThreadManagementService.latestActiveRun(parent);
         if (
           parentRun === undefined ||
@@ -3604,6 +3710,7 @@ const make = Effect.gen(function* () {
       } satisfies OrchestratorMcpThreadInterruptResult;
     }),
   });
+  return service;
 });
 
 export const layer: Layer.Layer<

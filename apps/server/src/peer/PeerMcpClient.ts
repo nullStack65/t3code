@@ -47,6 +47,8 @@ export class PeerMcpClient extends Context.Service<
       readonly limits: PeerCallLimits;
       /** The thread here the call is made for, sent as `T3-Sender-Thread`. */
       readonly sender?: OrchestrationV2LinkedSender;
+      /** Sends only under this link session, refusing before contacting the peer otherwise. */
+      readonly expectedIncarnation?: string;
       readonly success: S;
     }) => Effect.Effect<S["Type"], OrchestratorMcpFailure>;
   }
@@ -169,6 +171,19 @@ const make = Effect.gen(function* () {
       const resolved = yield* links
         .resolve(input.environmentId)
         .pipe(Effect.mapError(fromLinkError));
+      // The peer names work after the session of the token sent, so work bound to one
+      // session must never go out under another.
+      if (
+        input.expectedIncarnation !== undefined &&
+        input.expectedIncarnation !== resolved.incarnation
+      ) {
+        return Result.fail(
+          new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: `${resolved.link.label} was linked again while this call was being sent, so nothing was sent.`,
+          }),
+        );
+      }
       const limitHeader = {
         [McpInvocationContext.MODE_LIMIT_HEADER]: `${input.limits.runtimeMode}/${input.limits.interactionMode}`,
       };

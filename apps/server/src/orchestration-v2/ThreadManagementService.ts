@@ -472,6 +472,19 @@ export interface ThreadManagementServiceShape {
   }) => Effect.Effect<boolean>;
   /** Receipt replays start no work; skip enablement checks with the same command id so settings cannot reject accepted retries. */
   readonly hasReceipt: (commandId: CommandId) => Effect.Effect<boolean>;
+  /** What a caller's intent was bound to, such as the environment chosen for it, if it was. */
+  readonly intentOf: (
+    commandId: CommandId,
+  ) => Effect.Effect<Option.Option<string>, CommandReceiptStore.CommandReceiptStoreV2Error>;
+  /**
+   * Binds a caller's intent to a value unless it is bound already, and returns
+   * the binding that holds: the first writer's, read back from storage.
+   */
+  readonly bindIntent: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly value: string;
+  }) => Effect.Effect<string, CommandReceiptStore.CommandReceiptStoreV2Error>;
   readonly waitForThread: (
     input: ThreadManagementWaitInput,
   ) => Effect.Effect<ThreadManagementWaitResult, ThreadManagementError>;
@@ -604,6 +617,8 @@ const FORCE_STOP_REASON = "Force stopped by user";
 const FORCE_STOP_RELEASE_WAIT = "10 seconds";
 const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 
+const INTENT_RECEIPT_TYPE = "intent.bind:";
+
 const make = Effect.gen(function* () {
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -650,6 +665,42 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => Option.none()),
       Effect.map(Option.isSome),
     );
+
+  // A binding is a receipt with no events, so it lives and is kept like every other
+  // command's; its type carries the value.
+  const intentOf: ThreadManagementServiceShape["intentOf"] = (commandId) =>
+    receipts
+      .getByCommandId(commandId)
+      .pipe(
+        Effect.map(
+          Option.flatMap((receipt) =>
+            receipt.commandType.startsWith(INTENT_RECEIPT_TYPE)
+              ? Option.some(receipt.commandType.slice(INTENT_RECEIPT_TYPE.length))
+              : Option.none(),
+          ),
+        ),
+      );
+
+  const bindIntent: ThreadManagementServiceShape["bindIntent"] = Effect.fn(
+    "orchestrationV2.threadManagement.bindIntent",
+  )(function* (input) {
+    yield* receipts.insertIfAbsent({
+      commandId: input.commandId,
+      threadId: input.threadId,
+      commandType: `${INTENT_RECEIPT_TYPE}${input.value}`,
+      acceptedAt: yield* DateTime.now,
+      resultSequence: 0,
+      status: "accepted",
+      error: null,
+    });
+    const bound = yield* intentOf(input.commandId);
+    if (Option.isNone(bound)) {
+      return yield* new CommandReceiptStore.CommandReceiptStoreReadError({
+        commandId: input.commandId,
+      });
+    }
+    return bound.value;
+  });
 
   const ensureLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
@@ -1768,6 +1819,8 @@ const make = Effect.gen(function* () {
     assertProviderInstanceEnabled,
     isProviderInstanceEnabledForProject,
     hasReceipt,
+    intentOf,
+    bindIntent,
     waitForThread,
     settleAfterRun,
     settleThread,

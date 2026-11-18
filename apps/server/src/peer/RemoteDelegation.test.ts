@@ -16,6 +16,7 @@ import {
   type Project,
   type RepositoryIdentity,
   RunId,
+  type HostResourcesSnapshot,
   type ServerProvider,
   ThreadId,
   TurnItemId,
@@ -58,6 +59,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -141,7 +143,18 @@ interface BoxThread {
   readonly sent: Ref.Ref<ReadonlyArray<string>>;
   /** Runs as the launch there is answered, before the laptop hears back. */
   readonly afterLaunch: Ref.Ref<Effect.Effect<void>>;
+  /** The box's load as its `orchestrator_capabilities` reports it. */
+  readonly resources: Ref.Ref<HostResourcesSnapshot>;
 }
+
+const GiB = 1024 ** 3;
+const loadOf = (cpuUtilization: number): HostResourcesSnapshot => ({
+  sampledAt: 0,
+  cpuUtilization,
+  cpuCount: 8,
+  availableMemoryBytes: 8 * GiB,
+  totalMemoryBytes: 16 * GiB,
+});
 
 const makeBoxThread = Effect.gen(function* () {
   return {
@@ -179,6 +192,7 @@ const makeBoxThread = Effect.gen(function* () {
     releaseStop: yield* Deferred.make<void>(),
     sent: yield* Ref.make<ReadonlyArray<string>>([]),
     afterLaunch: yield* Ref.make<Effect.Effect<void>>(Effect.void),
+    resources: yield* Ref.make(loadOf(0.1)),
   } satisfies BoxThread;
 });
 
@@ -549,7 +563,12 @@ const boxToolkitLayer = (thread: BoxThread) => {
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provide(NodeCrypto.layer),
     Layer.provide(layerBoxThreads),
-    Layer.provide(layerBoxLaunches),
+    Layer.provide(
+      Layer.merge(
+        layerBoxLaunches,
+        Layer.succeed(HostResources.HostResources, { read: Ref.get(thread.resources) }),
+      ),
+    ),
     Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
     Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
     Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
@@ -647,6 +666,13 @@ const makeLaptop = (
   kept?: Context.Context<Layer.Success<ReturnType<typeof layerLinkingEnvironment>>>,
   /** Runs as each follow attempt here starts, on its follower's fiber. */
   beforeFollow: Effect.Effect<void, Orchestrator.OrchestratorV2Error> = Effect.void,
+  /** Interleavings for delegation only: the transport keeps the real links. */
+  hooks: {
+    /** Runs once delegation has bound an intent, before it acts on it. */
+    readonly afterBindIntent?: (commandId: string) => Effect.Effect<void>;
+    /** Runs once delegation has read the link session it binds a launch to. */
+    readonly afterSession?: (session: Option.Option<string>) => Effect.Effect<void>;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const linking = kept ?? (yield* layerLinkingEnvironment(laptop).pipe(Layer.build));
@@ -684,6 +710,27 @@ const makeLaptop = (
                   ...threads,
                   getThreadEventSequence: (threadId: ThreadId) =>
                     beforeFollow.pipe(Effect.andThen(threads.getThreadEventSequence(threadId))),
+                  bindIntent: (input: Parameters<typeof threads.bindIntent>[0]) =>
+                    threads
+                      .bindIntent(input)
+                      .pipe(
+                        Effect.tap(() => hooks.afterBindIntent?.(input.commandId) ?? Effect.void),
+                      ),
+                };
+              }),
+            ),
+          ),
+          Layer.provide(
+            Layer.effect(
+              PeerLinks.PeerLinks,
+              Effect.gen(function* () {
+                const links = yield* PeerLinks.PeerLinks;
+                return {
+                  ...links,
+                  session: (environmentId: Parameters<typeof links.session>[0]) =>
+                    links
+                      .session(environmentId)
+                      .pipe(Effect.tap((session) => hooks.afterSession?.(session) ?? Effect.void)),
                 };
               }),
             ),
@@ -715,8 +762,15 @@ const makeLaptop = (
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
       Layer.provide(NodeCrypto.layer),
       Layer.provideMerge(layerThreads),
-      Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
-      Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+      // The laptop lists no provider of its own, so it never runs the box's model.
+      Layer.provide(
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      ),
+      Layer.provide(
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+      ),
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
@@ -765,6 +819,7 @@ const parentScope: McpInvocationContext.McpInvocationScope = {
 const seedParent = (
   laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
   parentModelSelection: ModelSelection = modelSelection,
+  interactionMode: "default" | "plan" = "default",
 ) =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
@@ -779,7 +834,7 @@ const seedParent = (
       title: "Laptop parent",
       modelSelection: parentModelSelection,
       runtimeMode: "full-access",
-      interactionMode: "default",
+      interactionMode,
       branch: null,
       worktreePath: null,
     });
@@ -892,6 +947,19 @@ const delegateToBox = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>)
         };
       }),
     );
+
+/** A task placed by capacity, for the box's Claude model, which the laptop does not run. */
+const autoTask = (
+  laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
+  clientRequestId: string,
+  target: Record<string, unknown> = {},
+) =>
+  laptopEnv.call("delegate_task", {
+    task: "Run the suite wherever there is room.",
+    placement: "auto",
+    target: { providerInstanceId: boxClaude.instanceId, model: "claude-sonnet-4-6", ...target },
+    clientRequestId,
+  });
 
 /** Waits until the task here has the result its thread there ended with. */
 const taskResult = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>, taskId: NodeId) =>
@@ -1338,6 +1406,240 @@ it.effect("follows an open task again after the laptop restarts", () =>
       yield* after.remote.start();
       const task = yield* taskResult(after, delegated.taskId);
       expect(task).toMatchObject({ status: "completed", result: "Finished while you were away." });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an auto-placed task keeps its environment after a lost answer and a restart", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      // Its link outlives the restart, so the box knows it as the same link session.
+      const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
+      // The box takes the launch with room to spare, but its answer never arrives.
+      yield* Ref.set(thread.afterLaunch, Effect.die("connection lost"));
+      const lost = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const before = yield* makeLaptop(database, offers, linking);
+          yield* linkTo(before.links, b, "full-access");
+          yield* seedParent(before);
+          return yield* autoTask(before, "auto-suite");
+        }),
+      );
+      expect(lost.isError).toBe(true);
+      const launchedThere = yield* Ref.get(thread.launched);
+      expect(launchedThere).not.toBeNull();
+
+      // The box fills up while the laptop restarts: choosing afresh finds nowhere.
+      yield* Ref.set(thread.resources, loadOf(0.99));
+      yield* Ref.set(thread.afterLaunch, Effect.void);
+      const after = yield* makeLaptop(database, offers, linking);
+      const fresh = yield* autoTask(after, "another-suite");
+      expect(fresh.isError).toBe(true);
+      expect(JSON.stringify(fresh.content)).toContain("no-eligible-environment");
+      expect(yield* Ref.get(thread.launched)).toBe(launchedThere);
+
+      // The retry keeps the binding: the same thread there, recorded once here.
+      const retried = yield* autoTask(after, "auto-suite");
+      expect(retried.isError, JSON.stringify(retried.content)).toBe(false);
+      expect(retried.structuredContent).toMatchObject({
+        remoteChild: { environmentId: box.environmentId, threadId: launchedThere },
+      });
+      expect((yield* Ref.get(thread.launchedWith))?.modelSelection).toEqual({
+        instanceId: boxClaude.instanceId,
+        model: "claude-sonnet-4-6",
+      });
+      expect(
+        (yield* after.orchestrator.getThreadProjection(parentThreadId)).subagents,
+      ).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a launch whose answer was lost is never started again under a new link", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      const tasks = () =>
+        a.orchestrator.getThreadProjection(parentThreadId).pipe(Effect.map((p) => p.subagents));
+
+      // The box starts the thread, but its answer is lost; then the box is linked again.
+      yield* Ref.set(thread.afterLaunch, Effect.die("connection lost"));
+      expect((yield* autoTask(a, "relinked")).isError).toBe(true);
+      const lostThere = yield* Ref.get(thread.launched);
+      expect(lostThere).not.toBeNull();
+      yield* Ref.set(thread.afterLaunch, Effect.void);
+      yield* linkTo(a.links, b, "full-access");
+      // The new session would name a new thread there, so the retry starts nothing.
+      const retried = yield* autoTask(a, "relinked");
+      expect(retried.isError).toBe(true);
+      expect(JSON.stringify(retried.content)).toContain("linked again");
+      expect(yield* Ref.get(thread.launched)).toBe(lostThere);
+      expect(yield* tasks()).toHaveLength(0);
+
+      // A task already recorded is found again after a new link, without a second launch.
+      const recorded = yield* autoTask(a, "recorded");
+      expect(recorded.isError, JSON.stringify(recorded.content)).toBe(false);
+      const recordedThere = yield* Ref.get(thread.launched);
+      yield* linkTo(a.links, b, "full-access");
+      const again = yield* autoTask(a, "recorded");
+      expect(again.isError, JSON.stringify(again.content)).toBe(false);
+      expect((again.structuredContent as { taskId: NodeId }).taskId).toBe(
+        (recorded.structuredContent as { taskId: NodeId }).taskId,
+      );
+      expect(yield* Ref.get(thread.launched)).toBe(recordedThere);
+      expect(yield* tasks()).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a link replaced between the launch check and the send starts no second child", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const relinkOnce = yield* Ref.make<Effect.Effect<void> | null>(null);
+      const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+        // The box is linked again after the launch is checked against its link, before it is sent.
+        afterBindIntent: (commandId) =>
+          commandId.includes(":remote-launch:")
+            ? Ref.getAndSet(relinkOnce, null).pipe(
+                Effect.flatMap((relink) => relink ?? Effect.void),
+              )
+            : Effect.void,
+      });
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      const tasks = () =>
+        a.orchestrator.getThreadProjection(parentThreadId).pipe(Effect.map((p) => p.subagents));
+
+      yield* Ref.set(thread.afterLaunch, Effect.die("connection lost"));
+      expect((yield* autoTask(a, "raced")).isError).toBe(true);
+      const lostThere = yield* Ref.get(thread.launched);
+      expect(lostThere).not.toBeNull();
+      yield* Ref.set(thread.afterLaunch, Effect.void);
+      yield* Ref.set(
+        relinkOnce,
+        linkTo(a.links, b, "full-access").pipe(Effect.asVoid, Effect.orDie),
+      );
+
+      // The retry passes the check under the first link, but the send would use the new one.
+      const raced = yield* autoTask(a, "raced");
+      expect(raced.isError).toBe(true);
+      expect(yield* Ref.get(thread.launched)).toBe(lostThere);
+      expect(yield* tasks()).toHaveLength(0);
+      // The key stays bound to the first link, so retrying it starts nothing either.
+      expect((yield* autoTask(a, "raced")).isError).toBe(true);
+      expect(yield* Ref.get(thread.launched)).toBe(lostThere);
+      expect(yield* tasks()).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a launch with no link to bind to starts nothing, even if a link appears", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const linkOnce = yield* Ref.make<Effect.Effect<void> | null>(null);
+      const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+        // The box is linked just after delegation finds no link to bind the launch to.
+        afterSession: (session) =>
+          Option.isNone(session)
+            ? Ref.getAndSet(linkOnce, null).pipe(Effect.flatMap((link) => link ?? Effect.void))
+            : Effect.void,
+      });
+      yield* seedParent(a);
+      yield* Ref.set(linkOnce, linkTo(a.links, b, "full-access").pipe(Effect.asVoid, Effect.orDie));
+
+      // A named project there means nothing reaches the box before the launch itself.
+      const unbound = yield* a.call("delegate_task", {
+        task: "Run the full suite on the box.",
+        target: {
+          environmentId: box.environmentId,
+          projectId: boxProject,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+        },
+        clientRequestId: "unbound",
+      });
+      expect(unbound.isError).toBe(true);
+      expect(yield* Ref.get(thread.launched)).toBeNull();
+      expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an auto-placed task runs at the parent's modes, never a narrower link's", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* seedParent(a, modelSelection, "plan");
+      // The parent runs with full access; this link allows less, so the box is not eligible.
+      yield* linkTo(a.links, b, "auto-accept-edits");
+      const narrow = yield* autoTask(a, "narrow");
+      expect(narrow.isError).toBe(true);
+      expect(JSON.stringify(narrow.content)).toContain("no-eligible-environment");
+      expect(yield* Ref.get(thread.launched)).toBeNull();
+
+      yield* linkTo(a.links, b, "full-access");
+      const wide = yield* autoTask(a, "wide");
+      expect(wide.isError, JSON.stringify(wide.content)).toBe(false);
+      expect(yield* Ref.get(thread.launchedWith)).toEqual({
+        modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+      });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an auto-placed task refuses a project placement did not choose", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      // Placement qualifies the project with this repository, not another one there.
+      const other = yield* autoTask(a, "other-project", {
+        projectId: ProjectId.make("project:box-other-3"),
+      });
+      expect(other.isError).toBe(true);
+      expect(JSON.stringify(other.content)).toContain("invalid_request");
+      expect(yield* Ref.get(thread.launched)).toBeNull();
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
