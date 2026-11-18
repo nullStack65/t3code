@@ -131,11 +131,27 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
   return inbox.attentionKind;
 }
 
-/** The chosen view, else the chosen founder's, else All so unclassified history stays visible. */
-export const effectiveInboxView = (settings: {
-  readonly founderInboxView?: InboxView | undefined;
+/**
+ * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents, else
+ * every inbox so unclassified history stays visible.
+ */
+export const effectiveInboxFilter = (settings: {
+  readonly founderInboxFilter?: ReadonlyArray<InboxChoice> | undefined;
   readonly founderInboxOwner?: Founder | undefined;
-}): InboxView => settings.founderInboxView ?? settings.founderInboxOwner ?? "all";
+}): ReadonlyArray<InboxChoice> =>
+  settings.founderInboxFilter ??
+  (settings.founderInboxOwner === undefined
+    ? InboxChoice.literals
+    : [settings.founderInboxOwner, "agents"]);
+
+/** Choosing every inbox means All, which also keeps unclassified history. */
+const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
+  InboxChoice.literals.every((choice) => filter.includes(choice));
+
+export const matchesInboxFilter = (
+  inbox: ThreadInbox | null | undefined,
+  filter: ReadonlyArray<InboxChoice>,
+) => isAllInboxes(filter) || filter.some((choice) => matchesInboxView(inbox, choice));
 
 /** New work is attributed only to a chosen founder; otherwise it stays unclassified (All). */
 export const inboxOriginFor = (settings: {
