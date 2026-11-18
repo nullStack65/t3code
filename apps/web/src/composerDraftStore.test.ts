@@ -1238,9 +1238,46 @@ describe("composerDraftStore project draft thread mapping", () => {
         threadId,
       });
 
+      // A later send of that reloaded draft fails to commit (an edit is pending, storage throws).
+      // It launches nothing and must keep the earlier, possibly accepted, binding.
+      const retriedDraft = after.useComposerDraftStore.getState().getDraftSession(draftId)!;
+      after.useComposerDraftStore.getState().setPrompt(draftId, "retry after reload");
+      storageFails = true;
+      const launchesBeforeRetry = launches;
+      send(after);
+      expect(launches).toBe(launchesBeforeRetry);
+      after.restoreFailedDraftThread(draftId, retriedDraft, threadId);
+      after.useComposerDraftStore.getState().setDraftThreadContext(draftId, {
+        projectRef: remoteProjectRef,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+      });
+      after.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+      expect(after.useComposerDraftStore.getState().getDraftSession(draftId)?.environmentId).toBe(
+        TEST_ENVIRONMENT_ID,
+      );
+      // Storage recovers and the pending write lands; a reload from it still keeps the binding.
+      storageFails = false;
+      await vi.advanceTimersByTimeAsync(300);
+      vi.clearAllTimers();
+      vi.resetModules();
+      const recovered = await import("./composerDraftStore");
+      recovered.useComposerDraftStore
+        .getState()
+        .setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+      recovered.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+      expect(recovered.useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+        environmentId: TEST_ENVIRONMENT_ID,
+        threadId,
+      });
+
       // An unconfirmed outcome keeps that binding through the next reload too.
-      const sentDraft = after.useComposerDraftStore.getState().getDraftSession(draftId)!;
-      after.restoreFailedDraftThread(draftId, sentDraft, threadId);
+      const sentDraft = recovered.useComposerDraftStore.getState().getDraftSession(draftId)!;
+      recovered.restoreFailedDraftThread(draftId, sentDraft, threadId);
       vi.clearAllTimers();
       vi.resetModules();
       const reloaded = await import("./composerDraftStore");

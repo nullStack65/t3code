@@ -4731,27 +4731,33 @@ export function usePromotingDraftThreadKeys(): ReadonlyArray<string> {
 /**
  * Marks the drafts sending as `threadRef` and commits that to storage at once, so a crash
  * after the launch cannot reload them unbound: the launch may then have started there.
- * False when storage did not take it; the caller must not launch, and nothing stays marked.
+ * False when storage did not take it; the caller must not launch, and each draft keeps the
+ * promotion it had before, which an earlier send may have committed.
  */
 export function markPromotedDraftThreadByRef(threadRef: ScopedThreadRef): boolean {
   const draftStore = useComposerDraftStore.getState();
-  const promoted: Array<string> = [];
+  const promoted = new Map<string, ScopedThreadRef | null>();
   for (const [draftId, draftThread] of Object.entries(draftStore.draftThreadsByThreadKey)) {
     if (
       draftThread.environmentId === threadRef.environmentId &&
       draftThread.threadId === threadRef.threadId
     ) {
+      promoted.set(draftId, draftThread.promotedTo ?? null);
       draftStore.markDraftThreadPromoting(DraftId.make(draftId), threadRef);
-      promoted.push(draftId);
     }
   }
-  if (promoted.length === 0 || commitsDraftThreadBinding(promoted, "promotedTo", threadRef))
+  if (
+    promoted.size === 0 ||
+    commitsDraftThreadBinding([...promoted.keys()], "promotedTo", threadRef)
+  )
     return true;
   useComposerDraftStore.setState((state) => ({
     draftThreadsByThreadKey: Object.fromEntries(
       Object.entries(state.draftThreadsByThreadKey).map(([draftId, draftThread]) => [
         draftId,
-        promoted.includes(draftId) ? { ...draftThread, promotedTo: null } : draftThread,
+        promoted.has(draftId)
+          ? { ...draftThread, promotedTo: promoted.get(draftId) ?? null }
+          : draftThread,
       ]),
     ),
   }));
