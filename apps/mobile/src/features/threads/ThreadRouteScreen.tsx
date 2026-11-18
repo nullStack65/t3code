@@ -69,7 +69,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
-import { usePendingRouteThread, useThreadSelection } from "../../state/use-thread-selection";
+import { useFollowPendingRoute, useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
 import {
   buildTerminalMenuSessions,
@@ -82,7 +82,7 @@ import {
 } from "../terminal/terminalLaunchContext";
 import type { ThreadDetailScreenProps } from "./ThreadDetailScreen";
 import { ThreadScreenBinding, ThreadScreenFallback, ThreadScreenHost } from "./ThreadScreenHost";
-import { draftRouteIdentity } from "./thread-route-state";
+import { draftRouteIdentity, threadEnvironmentDraftParams } from "./thread-route-state";
 import { NewTaskDraftRouteScreen, type NewTaskDraftRouteParams } from "./NewTaskDraftRouteScreen";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -214,13 +214,7 @@ function UnavailableThreadDraftRedirect(props: { readonly environmentId: Environ
     const project = projects.find((candidate) => candidate.environmentId === props.environmentId);
     navigation.dispatch(
       StackActions.replace("Thread", {
-        draft: project
-          ? {
-              requestId: uuidv4(),
-              environmentId: String(project.environmentId),
-              projectId: String(project.id),
-            }
-          : { requestId: uuidv4() },
+        draft: threadEnvironmentDraftParams(project, uuidv4()),
       }),
     );
   });
@@ -253,32 +247,12 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
   const { selectedThread } = useThreadSelection();
   const params = props.route.params ?? {};
   // Resolved through the pending task's binding before any scoped key or detail read.
-  const pendingRoute = usePendingRouteThread(params);
-  const environmentIdRaw = pendingRoute.environmentId;
-  const threadIdRaw = pendingRoute.threadId;
+  const {
+    environmentId: environmentIdRaw,
+    threadId: threadIdRaw,
+    routeFollowsBinding,
+  } = useFollowPendingRoute(params);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
-  const pendingMessageId = firstRouteParam(params.pendingMessageId);
-  const routeFollowsBinding =
-    pendingMessageId === null ||
-    (firstRouteParam(params.environmentId) === environmentIdRaw &&
-      firstRouteParam(params.threadId) === threadIdRaw);
-  const navigationForBinding = useNavigation();
-  const followBinding = useEffectEvent(() => {
-    const current = props.route.params ?? {};
-    // Only this route, and only while it still names the same pending task: a background
-    // completion never moves another screen.
-    if (
-      environmentIdRaw === null ||
-      threadIdRaw === null ||
-      firstRouteParam(current.pendingMessageId) !== pendingMessageId
-    )
-      return;
-    navigationForBinding.setParams({ environmentId: environmentIdRaw, threadId: threadIdRaw });
-  });
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves this route's params to the machine its pending task was bound to, so every later reader uses that thread
-  useEffect(() => {
-    if (!routeFollowsBinding) followBinding();
-  }, [routeFollowsBinding]);
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeEnvironmentShellState = useEnvironmentShellReadiness(environmentId);
   const { onReconnectEnvironment } = useRemoteConnections();

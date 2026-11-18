@@ -6,6 +6,7 @@ import "vite-plus/test/config";
 const reactTests = [
   "src/features/threads/git/GitBranchesSheet.test.tsx",
   "src/features/threads/new-task-flow-provider.test.tsx",
+  "src/features/home/pendingTaskRoute.test.tsx",
   "src/features/layout/workspace/workspace-tabs-state.test.ts",
   "src/state/use-thread-pr.demand.test.tsx",
   "src/features/threads/git/GitBranchesSheet.occupancy.test.tsx",

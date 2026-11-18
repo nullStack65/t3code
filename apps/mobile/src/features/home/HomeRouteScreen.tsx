@@ -1,4 +1,5 @@
 import { uuidv4 } from "../../lib/uuid";
+import { threadBranchDraftParams } from "../threads/thread-route-state";
 import { ThreadUndoNotice } from "./ThreadUndoNotice";
 import { use } from "react";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
@@ -79,13 +80,7 @@ export function HomeRouteScreen() {
     selectThreadRoute({ environmentId: String(thread.environmentId), threadId: String(thread.id) });
   const handleNewThreadOnBranch = (thread: EnvironmentThreadShell) => {
     selectThreadRoute({
-      draft: {
-        requestId: uuidv4(),
-        environmentId: String(thread.environmentId),
-        projectId: String(thread.projectId),
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-      },
+      draft: threadBranchDraftParams(thread, uuidv4()),
     });
   };
 

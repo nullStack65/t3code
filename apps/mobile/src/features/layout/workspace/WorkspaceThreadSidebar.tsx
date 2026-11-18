@@ -2,6 +2,7 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { threadBranchDraftParams } from "../../threads/thread-route-state";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigation, useNavigationState } from "@react-navigation/native";
 
@@ -71,13 +72,7 @@ export function WorkspaceThreadSidebar() {
       }
       onNewThreadOnBranch={(thread: EnvironmentThreadShell) =>
         selectThreadRoute({
-          draft: {
-            requestId: uuidv4(),
-            environmentId: String(thread.environmentId),
-            projectId: String(thread.projectId),
-            branch: thread.branch,
-            worktreePath: thread.worktreePath,
-          },
+          draft: threadBranchDraftParams(thread, uuidv4()),
         })
       }
       onOpenPendingTask={openPendingTask}

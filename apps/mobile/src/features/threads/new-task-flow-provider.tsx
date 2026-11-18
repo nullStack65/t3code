@@ -134,6 +134,29 @@ export function branchBadgeLabel(input: {
   return null;
 }
 
+/** Whether a project is the same repository as the reference, as the machine list matches it. */
+function hostsRepositoryOf(reference: {
+  readonly repositoryKey: string | null;
+  readonly workspaceBasename: string | null;
+  readonly title: string | null;
+}) {
+  return (project: EnvironmentProject) => {
+    if (reference.repositoryKey === null && reference.workspaceBasename === null) {
+      return true;
+    }
+    const projectKey = project.repositoryIdentity
+      ? repositoryGroupingKeyOf(project.repositoryIdentity)
+      : null;
+    if (reference.repositoryKey !== null && projectKey !== null) {
+      return projectKey === reference.repositoryKey;
+    }
+    return (
+      project.workspaceRoot.split("/").at(-1) === reference.workspaceBasename ||
+      (reference.title !== null && project.title === reference.title)
+    );
+  };
+}
+
 type NewTaskFlowContextValue = {
   readonly activeNewTask: { readonly pendingKey: string | null } | null;
   readonly projectScopes: ReadonlyArray<HomeProjectScope>;
@@ -236,6 +259,8 @@ export function NewTaskFlowProvider(
     /** Identifies the draft route this flow serves; a new key starts a fresh flow. */
     flowKey?: string;
     routeDraftId?: string;
+    /** An entry scoped to one machine: a new draft for it is pinned there from its creation. */
+    routeEntry?: { readonly environmentId: string; readonly projectId: string };
   }>,
 ) {
   const projects = useProjects();
@@ -372,21 +397,11 @@ export function NewTaskFlowProvider(
       readonly environmentId: EnvironmentId;
       readonly environmentLabel: string;
     }> = [];
-    const hostsSelectedRepository = (project: EnvironmentProject) => {
-      if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
-        return true;
-      }
-      const projectKey = project.repositoryIdentity
-        ? repositoryGroupingKeyOf(project.repositoryIdentity)
-        : null;
-      if (selectedRepositoryKey !== null && projectKey !== null) {
-        return projectKey === selectedRepositoryKey;
-      }
-      return (
-        project.workspaceRoot.split("/").at(-1) === selectedWorkspaceBasename ||
-        (selectedProjectTitle !== null && project.title === selectedProjectTitle)
-      );
-    };
+    const hostsSelectedRepository = hostsRepositoryOf({
+      repositoryKey: selectedRepositoryKey,
+      workspaceBasename: selectedWorkspaceBasename,
+      title: selectedProjectTitle,
+    });
     for (const project of projects) {
       if (!hostsSelectedRepository(project)) {
         continue;
@@ -407,6 +422,53 @@ export function NewTaskFlowProvider(
     return result;
   })();
 
+  const isRouteEntry = (project: EnvironmentProject) =>
+    props.routeEntry !== undefined &&
+    String(project.environmentId) === props.routeEntry.environmentId &&
+    String(project.id) === props.routeEntry.projectId;
+  /**
+   * A genuinely new draft's machine intent, stored once: an explicit machine entry pins its own
+   * machine; otherwise it starts as Auto when more than one connected, operable machine hosts the
+   * project now, and from then on that is its intent whatever the connections do.
+   */
+  const newDraftSelection = (
+    project: EnvironmentProject,
+    isScratch: boolean,
+  ): "auto" | "manual" | undefined => {
+    if (isRouteEntry(project)) return "manual";
+    const hosts = hostsRepositoryOf({
+      repositoryKey: project.repositoryIdentity
+        ? repositoryGroupingKeyOf(project.repositoryIdentity)
+        : null,
+      workspaceBasename: project.workspaceRoot.split("/").at(-1) || null,
+      title: project.title,
+    });
+    const candidates = new Set(
+      projects
+        .filter(
+          (candidate) =>
+            hosts(candidate) &&
+            savedConnectionsById[candidate.environmentId] !== undefined &&
+            connectedEnvironments.some(
+              (environment) =>
+                environment.environmentId === candidate.environmentId &&
+                environment.connectionState === "connected",
+            ) &&
+            readEnvironmentScope(candidate.environmentId, AuthOrchestrationOperateScope),
+        )
+        .map((candidate) => candidate.environmentId),
+    );
+    return seedsAutomaticPlacement({ isScratch, candidateCount: candidates.size })
+      ? "auto"
+      : undefined;
+  };
+  // Read at render, so changes to the entry's target, the catalog or the candidates wake creation.
+  // An explicit machine entry seeds only its own project: while that is unresolved, absent or not
+  // yet applied, no draft is created at all, never a fallback on another machine.
+  const awaitsRouteEntry =
+    props.routeEntry !== undefined && (selectedProject === null || !isRouteEntry(selectedProject));
+  const initialSelection =
+    selectedProject === null ? undefined : newDraftSelection(selectedProject, isScratchDraft);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- creates the persistent draft in the new-task flow store once a project is selected, before the composer mounts
   useEffect(() => {
     // A route that names a draft binds that draft, or returns to the picker.
@@ -414,28 +476,19 @@ export function NewTaskFlowProvider(
       props.active === false ||
       props.routeDraftId !== undefined ||
       activeDraftKey !== null ||
-      selectedProject === null
+      selectedProject === null ||
+      awaitsRouteEntry
     ) {
       return;
     }
     // Creates the persistent draft once the project selection is ready; the key must exist before the composer mounts.
-    // A genuinely new draft starts as Auto when more than one machine could take it now; from
-    // then on that is its stored intent, whatever the connections do.
-    const candidateCount = environments.filter(
-      ({ environmentId }) =>
-        connectedEnvironments.some(
-          (environment) =>
-            environment.environmentId === environmentId &&
-            environment.connectionState === "connected",
-        ) && readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),
-    ).length;
     updateNewTaskFlowState(flowKey, {
       draftKey: createNewTaskDraft(
         {
           environmentId: selectedProject.environmentId,
           projectId: selectedProject.id,
         },
-        seedsAutomaticPlacement({ isScratch: isScratchDraft, candidateCount }) ? "auto" : undefined,
+        initialSelection,
       ),
     });
   }, [
@@ -444,9 +497,8 @@ export function NewTaskFlowProvider(
     selectedProject,
     props.active,
     props.routeDraftId,
-    environments,
-    connectedEnvironments,
-    isScratchDraft,
+    awaitsRouteEntry,
+    initialSelection,
   ]);
   const activePendingKey =
     props.active === false
@@ -663,10 +715,11 @@ export function NewTaskFlowProvider(
     const target = { environmentId: project.environmentId, projectId: project.id };
     const current = readFlow().draftKey;
     if (current !== null && isNewTaskDraftKey(current)) {
+      // An existing draft keeps its intent: moving it never re-decides Auto or a pin.
       retargetNewTaskDraft(current, target, options);
       return current;
     }
-    return createNewTaskDraft(target);
+    return createNewTaskDraft(target, newDraftSelection(project, false));
   };
 
   const setProject = (project: EnvironmentProject) => {

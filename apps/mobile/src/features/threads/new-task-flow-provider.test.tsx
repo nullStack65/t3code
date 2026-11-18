@@ -117,6 +117,11 @@ vi.mock("../../state/shell", () => ({ useEnvironmentShellReadiness: () => ({}) }
 vi.mock("../../lib/clock", () => ({ useNowMinuteMs: () => 0 }));
 
 import { NewTaskFlowProvider, useNewTaskFlow } from "./new-task-flow-provider";
+import {
+  explicitDraftRouteEntry,
+  threadBranchDraftParams,
+  threadEnvironmentDraftParams,
+} from "./thread-route-state";
 
 function project(environment: string, id: string): EnvironmentProject {
   return {
@@ -253,11 +258,22 @@ function setup() {
     get current() {
       return current;
     },
-    async render(active: boolean) {
+    async render(
+      active: boolean,
+      route: {
+        readonly routeEntry?: { readonly environmentId: string; readonly projectId: string };
+        readonly routeDraftId?: string;
+      } = {},
+    ) {
       await act(async () =>
         root.render(
           <RegistryContext.Provider value={registry}>
-            <NewTaskFlowProvider active={active} flowKey="test-flow">
+            <NewTaskFlowProvider
+              active={active}
+              flowKey="test-flow"
+              routeEntry={route.routeEntry}
+              routeDraftId={route.routeDraftId}
+            >
               <Probe />
             </NewTaskFlowProvider>
           </RegistryContext.Provider>,
@@ -509,6 +525,118 @@ describe("a new task's machine choice", () => {
     // Pinned, the same draft queues fixed work there, as before.
     act(() => mocks.writeSettings(key, { environmentSelection: "manual" }));
     expect(screen.current.buildPendingTaskMessage(metadata as never)?.placement).toBeUndefined();
+  });
+
+  const metadata = {
+    threadId: "thread-1",
+    messageId: "message-1",
+    commandId: "command-1",
+    createdAt: "2026-11-18T16:00:00.000Z",
+  };
+  const readyToSend = (screen: ReturnType<typeof setup>, key: string) =>
+    act(() => {
+      mocks.writeText(key, "Fix the build");
+      mocks.writeSettings(key, {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        workspaceSelection: { mode: "worktree", branch: "main", worktreePath: null },
+      });
+    });
+
+  it("pins a fresh draft from an explicit machine entry, and queues fixed work there", async () => {
+    using screen = setup();
+    twoMachines();
+    // The unavailable-thread redirect's own params, read back as Stack reads them.
+    const entry = explicitDraftRouteEntry(
+      threadEnvironmentDraftParams(project("one", "b"), "request-1"),
+    );
+    expect(entry).toEqual({ environmentId: "one", projectId: "b" });
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).toHaveBeenCalledTimes(1);
+    expect(mocks.createDraft).toHaveBeenCalledWith(
+      { environmentId: "one", projectId: "b" },
+      "manual",
+    );
+    const key = screen.current.draftKey!;
+    expect(screen.current.routesAutomatically).toBe(false);
+    readyToSend(screen, key);
+    const queued = screen.current.buildPendingTaskMessage(metadata as never);
+    expect(queued).toMatchObject({ environmentId: "one", creation: { projectId: "b" } });
+    expect(queued?.placement).toBeUndefined();
+  });
+
+  it("waits for an explicit entry's own machine instead of seeding the default one first", async () => {
+    using screen = setup();
+    twoMachines();
+    // A thread-branch entry on machine two, while the flow still shows machine one.
+    const entry = explicitDraftRouteEntry(
+      threadBranchDraftParams(
+        { environmentId: "two", projectId: "b", branch: null, worktreePath: null },
+        "request-2",
+      ),
+    );
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    // The route's effect applies its project: the draft is created there, pinned, once.
+    await act(async () => screen.current.setProject(project("two", "b")));
+    expect(mocks.createDraft.mock.calls).toEqual([
+      [{ environmentId: "two", projectId: "b" }, "manual"],
+    ]);
+    expect(screen.current.environmentSelection).toBe("manual");
+  });
+
+  it("creates no draft for an explicit entry until its own machine's project is there", async () => {
+    using screen = setup();
+    twoMachines();
+    // Only B is loaded: the flow would fall back to it, but the entry names A.
+    mocks.projects.mockReturnValue([project("two", "b")]);
+    const entry = explicitDraftRouteEntry(
+      threadEnvironmentDraftParams(project("one", "b"), "request-3"),
+    );
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    expect(screen.current.draftKey).toBeNull();
+    // Nothing to queue or upload from a fallback draft.
+    expect(screen.current.buildPendingTaskMessage(metadata as never)).toBeNull();
+    // A arrives behind B; the route's project selection (the provider's setProject, as the
+    // draft route's effect applies it) creates the first and only draft: A, pinned.
+    mocks.projects.mockReturnValue([project("two", "b"), project("one", "b")]);
+    await screen.render(true, { routeEntry: entry });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    await act(async () => screen.current.setProject(project("one", "b")));
+    expect(mocks.createDraft.mock.calls).toEqual([
+      [{ environmentId: "one", projectId: "b" }, "manual"],
+    ]);
+    expect(screen.current.environmentSelection).toBe("manual");
+  });
+
+  it("keeps a later deliberate Auto choice when the route is applied again", async () => {
+    using screen = setup();
+    twoMachines();
+    const entry = { environmentId: "one", projectId: "b" };
+    await screen.render(true, { routeEntry: entry });
+    act(() => screen.current.setEnvironmentSelection("auto"));
+    await screen.render(true, { routeEntry: { ...entry } });
+    await act(async () => screen.current.setProject(project("one", "b")));
+    expect(screen.current.environmentSelection).toBe("auto");
+    expect(mocks.createDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores a pinned draft as pinned, and a generic project entry still starts as Auto", async () => {
+    using screen = setup();
+    twoMachines();
+    act(() => {
+      mocks.writeSettings("new-task:restored", {
+        project: { environmentId: "one", projectId: "b" },
+        environmentSelection: "manual",
+      });
+    });
+    await screen.render(true, { routeDraftId: "new-task:restored" });
+    expect(mocks.createDraft).not.toHaveBeenCalled();
+    expect(screen.current.environmentSelection).toBe("manual");
+    // A generic project entry names no machine intent: it is not an explicit entry.
+    expect(
+      explicitDraftRouteEntry({ requestId: "r", environmentId: "one", projectId: "b" }),
+    ).toBeUndefined();
   });
 
   it("leaves a new draft on its machine when only one machine could take it", async () => {

@@ -2047,7 +2047,7 @@ export function createNewTaskDraft(
     readonly projectId: ProjectId;
   },
   /** Seeded once, for a new draft only: it is the draft's intent from then on. */
-  environmentSelection?: "auto",
+  environmentSelection?: "auto" | "manual",
 ): string {
   const draftKey = newTaskDraftKey(newDraftId());
   const stamp: ComposerDraftProject = {

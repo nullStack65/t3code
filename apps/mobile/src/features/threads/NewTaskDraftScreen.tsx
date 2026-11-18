@@ -677,15 +677,7 @@ export function NewTaskDraftScreen(props: {
       return null;
     }
     promptInputRef.current?.blur();
-    navigation.dispatch(
-      CommonActions.setParams(
-        submittedThreadParams(
-          String(message.environmentId),
-          String(message.threadId),
-          message.placement ? String(message.messageId) : undefined,
-        ),
-      ),
-    );
+    navigation.dispatch(CommonActions.setParams(submittedThreadParams(message)));
     // The composer has moved to the submitted thread; a pick still converting
     // would otherwise resurrect this draft.
     abortComposerDraftOperations(draftKey);

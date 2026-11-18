@@ -11,6 +11,7 @@ import {
   releaseEditingQueuedMessage,
 } from "../../state/use-thread-outbox";
 import { withThreadDismissal } from "./thread-dismissal";
+import { queuedTaskRouteParams } from "../threads/thread-route-state";
 
 export function usePendingTaskListActions(
   selectThreadRoute: (params: ReactNavigation.RootParamList["Thread"]) => void,
@@ -22,10 +23,8 @@ export function usePendingTaskListActions(
     (pendingTask: PendingNewTask) => {
       selectThreadRoute(
         pendingTask.kind === "pending"
-          ? {
-              environmentId: String(pendingTask.environmentId),
-              threadId: String(pendingTask.message.threadId),
-            }
+          ? // Reopened as Send opened it: a placed task follows its message to its bound machine.
+            queuedTaskRouteParams(pendingTask.message)
           : {
               draft: {
                 environmentId: String(pendingTask.environmentId),

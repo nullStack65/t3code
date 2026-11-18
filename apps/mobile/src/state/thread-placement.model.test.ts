@@ -167,11 +167,17 @@ describe("a submitted placed task's route", () => {
   const routeRef = { environmentId: "laptop", threadId: "thread-1" };
 
   it("carries its message id", () => {
-    expect(submittedThreadParams("laptop", "thread-1", "message-1")).toEqual({
+    expect(submittedThreadParams(placed)).toEqual({
       draft: undefined,
       environmentId: "laptop",
       threadId: "thread-1",
       pendingMessageId: "message-1",
+    });
+    // A fixed task's route is unchanged: environment and thread only.
+    expect(submittedThreadParams(fixed)).toEqual({
+      draft: undefined,
+      environmentId: "laptop",
+      threadId: "thread-1",
     });
   });
 

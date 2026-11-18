@@ -182,6 +182,7 @@ jobs:
             src/lib/projectThreadStartTurn.test.ts \
             src/features/threads/thread-route-state.test.ts \
             src/features/threads/new-task-flow-provider.test.tsx \
+            src/features/home/pendingTaskRoute.test.tsx \
             src/features/threads/NewTaskDraftRouteScreen.test.tsx
 
       - name: Build native T3 server
