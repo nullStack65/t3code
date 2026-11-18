@@ -71,6 +71,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -1901,6 +1902,13 @@ describe("OrchestratorMcpService provider resolution", () => {
           }),
           forkShadow,
         ];
+        const hostSnapshot = {
+          sampledAt: 1_700_000_000_000,
+          cpuUtilization: 0.25,
+          cpuCount: 8,
+          availableMemoryBytes: 8 * 1024 ** 3,
+          totalMemoryBytes: 16 * 1024 ** 3,
+        };
         const layerDependencies = Layer.mergeAll(
           NodeServices.layer,
           NodeCrypto.layer,
@@ -1945,11 +1953,14 @@ describe("OrchestratorMcpService provider resolution", () => {
           Layer.mock(SecretRequests.SecretRequests)({}),
           Layer.mock(RemoteDelegation.RemoteDelegation)({}),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          Layer.mock(HostResources.HostResources)({ read: Effect.succeed(hostSnapshot) }),
         );
 
         yield* Effect.gen(function* () {
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
           const capabilities = yield* service.capabilities(scope);
+          // Linked environments read this for placement.
+          assert.deepEqual(capabilities.hostResources, hostSnapshot);
           const byId = new Map(
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );

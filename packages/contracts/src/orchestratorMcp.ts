@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
@@ -706,6 +707,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     scheduledTasks: Schema.Boolean,
     maxBatchThreads: Schema.Number,
   }),
+  /** This machine's load when answered; placement reads it from linked environments. */
+  hostResources: Schema.optional(HostResourcesSnapshot),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
