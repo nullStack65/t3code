@@ -203,6 +203,7 @@ import {
   resolveSidebarSweepKeys,
   resolveSidebarDropTarget,
   resolveSidebarDropVerb,
+  resolveSidebarShelf,
   resolveSidebarThreadSection,
   resolveSidebarReorderableThreadKeys,
   searchSidebarThreads,
@@ -673,18 +674,23 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
           : { ...projected, snoozedAt: thread.snoozedAt, snoozedUntil: thread.snoozedUntil },
       );
     } else {
-      const section = resolveSidebarThreadSection({
-        snoozed: configLoaded && effectiveSnoozed(thread, { now: preciseNow }),
-        settled: configLoaded && thread.settledOverride === "settled",
-        pinned: thread.pinnedAt != null,
-      });
+      const section = resolveSidebarShelf(
+        resolveSidebarThreadSection({
+          snoozed: configLoaded && effectiveSnoozed(thread, { now: preciseNow }),
+          settled: configLoaded && thread.settledOverride === "settled",
+          pinned: thread.pinnedAt != null,
+        }),
+        workingShelfEnabled && inboxObservation.isWorking(thread),
+      );
       (section === "snoozed"
         ? snoozed
         : section === "settled"
           ? settled
           : section === "pinned"
             ? pinned
-            : inbox(thread)
+            : section === "working"
+              ? working
+              : active
       ).push(thread);
     }
   }

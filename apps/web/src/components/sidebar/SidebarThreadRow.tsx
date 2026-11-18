@@ -800,13 +800,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           }
         : status === "approval"
           ? {
-              label: "Approval",
+              label: "Needs you",
               icon: "approval" as const,
               className: "text-warning-foreground",
             }
           : status === "input"
             ? {
-                label: "Input",
+                label: "Needs you",
                 icon: "input" as const,
                 className: "text-indigo-600 dark:text-indigo-300",
               }
