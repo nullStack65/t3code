@@ -148,8 +148,10 @@ export const routeThreadInbox = (
   routing: ThreadInboxRoutingPatch,
 ): ThreadInbox => {
   const { reason, ...fields } = routing;
+  // A move ends any open ask: it would otherwise keep the thread in the asked founder's lane.
+  const { decisionRequest: _ask, ...current } = inbox;
   const { reason: _previous, ...routed } = {
-    ...inbox,
+    ...current,
     ...fields,
     ...(fields.assignee?.kind === "human"
       ? {
@@ -174,7 +176,7 @@ export function agentInboxRoutingError(
   routing: ThreadInboxRoutingPatch | undefined,
 ): string | null {
   if (routing?.reason !== undefined || !inboxReachesFounders(result)) return null;
-  return "Agent work files into the Agents inbox and reports one final result there. Put a thread in a founder's or the shared inbox only when they will converse in it, review, decide or approve: pass inboxRouting.reason ('conversation', 'review', 'decision', 'approval' or 'fyi'). To ask a founder something on a thread, use t3_thread_update action:'request_decision'.";
+  return "Agent work files into the Agents inbox and reports one final result there. Put a thread in a founder's or the shared inbox only when they will converse in it, review, decide or approve: pass inboxRouting.reason ('conversation', 'review', 'decision', 'approval' or 'fyi'). To ask a founder something on a thread, use t3_thread_update action:'request_decision' and also write the question in the thread, where they read it. If the answer reaches you another way, such as a relayed approval, call action:'resolve_decision'.";
 }
 
 /** The rejection for an agent launch filed by `agentLaunchInboxRouting`, or null. */

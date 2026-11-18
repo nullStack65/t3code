@@ -147,6 +147,11 @@ describe("shared fleet organizational inbox", () => {
     const project = (latestHumanMessageAt: string | null, pendingHumanRequest = false) =>
       projectThreadInbox(asked, { latestHumanMessageAt, pendingHumanRequest });
     expect(lanes(project(null))).toEqual(["action", "hidden"]);
+    // Moving the thread ends the ask, so it leaves the asked founder's lane.
+    const toAgents = routeThreadInbox(asked, agentLaunchInboxRouting({}));
+    expect([toAgents.decisionRequest, ...lanes(toAgents)]).toEqual([undefined, "hidden", "hidden"]);
+    const toJeff = routeThreadInbox(asked, { assignee: { kind: "human", id: "jeff" } });
+    expect([toJeff.decisionRequest, ...lanes(toJeff)]).toEqual([undefined, "hidden", "action"]);
     expect(lanes(project("2026-11-18T20:59:00.000Z"))).toEqual(["action", "hidden"]);
     const answered = project("2026-11-18T21:01:00.000Z");
     expect(answered.decisionRequest).toBeUndefined();
