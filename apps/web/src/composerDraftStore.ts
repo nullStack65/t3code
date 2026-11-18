@@ -428,6 +428,14 @@ const PersistedDraftThreadState = Schema.Struct({
       }),
     ),
   ),
+  sentTo: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        environmentId: Schema.String,
+        threadId: Schema.String,
+      }),
+    ),
+  ),
 });
 type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
 
@@ -519,6 +527,8 @@ export interface DraftSessionState {
   /** Linked to the thread when the draft is sent on this branch. */
   checkoutPullRequest?: DraftCheckoutPullRequest;
   promotedTo?: ScopedThreadRef | null;
+  /** A send whose outcome was not confirmed: that machine may have started this thread id. */
+  sentTo?: ScopedThreadRef | null;
 }
 
 export type DraftThreadState = DraftSessionState;
@@ -1752,6 +1762,9 @@ function createDraftThreadState(
     startFromOrigin: nextStartFromOrigin,
     ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
     promotedTo: null,
+    ...(existingThread?.sentTo && existingThread.threadId === threadId
+      ? { sentTo: existingThread.sentTo }
+      : {}),
   };
 }
 
@@ -1770,6 +1783,32 @@ function checkoutPullRequestsEqual(
   right: DraftCheckoutPullRequest | undefined,
 ): boolean {
   return left === right || (left?.url === right?.url && left?.branch === right?.branch);
+}
+
+function storedThreadRef(candidate: unknown): ScopedThreadRef | null {
+  const record =
+    candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>) : null;
+  return record &&
+    typeof record.environmentId === "string" &&
+    record.environmentId.length > 0 &&
+    typeof record.threadId === "string" &&
+    record.threadId.length > 0
+    ? scopeThreadRef(record.environmentId as EnvironmentId, record.threadId as ThreadId)
+    : null;
+}
+
+/**
+ * A thread id a machine may have started stays on that machine: a draft holding one
+ * never moves elsewhere under it, though a new id (a new intent) may go anywhere.
+ */
+function staysOnSentMachine(
+  existing: DraftThreadState | undefined,
+  next: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId },
+): boolean {
+  const sentTo = existing?.sentTo;
+  return (
+    !!sentTo && sentTo.threadId === next.threadId && sentTo.environmentId !== next.environmentId
+  );
 }
 
 function scopedThreadRefsEqual(
@@ -1803,7 +1842,8 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
     checkoutPullRequestsEqual(left.checkoutPullRequest, right.checkoutPullRequest) &&
-    scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
+    scopedThreadRefsEqual(left.promotedTo, right.promotedTo) &&
+    scopedThreadRefsEqual(left.sentTo, right.sentTo)
   );
 }
 
@@ -1918,22 +1958,8 @@ function normalizePersistedDraftThreads(
       const checkoutPullRequest = normalizePersistedCheckoutPullRequest(
         candidateDraftThread.checkoutPullRequest,
       );
-      const promotedToCandidate = candidateDraftThread.promotedTo;
-      const promotedToRecord =
-        promotedToCandidate && typeof promotedToCandidate === "object"
-          ? (promotedToCandidate as Record<string, unknown>)
-          : null;
-      const promotedTo =
-        promotedToRecord &&
-        typeof promotedToRecord.environmentId === "string" &&
-        promotedToRecord.environmentId.length > 0 &&
-        typeof promotedToRecord.threadId === "string" &&
-        promotedToRecord.threadId.length > 0
-          ? scopeThreadRef(
-              promotedToRecord.environmentId as EnvironmentId,
-              promotedToRecord.threadId as ThreadId,
-            )
-          : null;
+      const promotedTo = storedThreadRef(candidateDraftThread.promotedTo);
+      const sentTo = storedThreadRef(candidateDraftThread.sentTo);
       if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
         continue;
       }
@@ -1977,6 +2003,7 @@ function normalizePersistedDraftThreads(
             : {}),
         ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
         promotedTo,
+        ...(sentTo ? { sentTo } : {}),
       };
     }
   }
@@ -2762,6 +2789,14 @@ function toHydratedDraftThreadState(
           persistedDraftThread.promotedTo.threadId as ThreadId,
         )
       : null,
+    ...(persistedDraftThread.sentTo
+      ? {
+          sentTo: scopeThreadRef(
+            persistedDraftThread.sentTo.environmentId as EnvironmentId,
+            persistedDraftThread.sentTo.threadId as ThreadId,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -2886,6 +2921,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               existingThread,
               options,
             );
+            if (staysOnSentMachine(existingThread, nextDraftThread)) return state;
             const hasSameLogicalMapping = previousThreadKeyForLogicalProject === draftId;
             const hasNoStaleMappingsForDraft = Object.entries(
               state.logicalProjectDraftThreadKeyByLogicalProjectKey,
@@ -2987,7 +3023,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
             if (
               nextProjectRef.projectId.length === 0 ||
-              nextProjectRef.environmentId.length === 0
+              nextProjectRef.environmentId.length === 0 ||
+              staysOnSentMachine(existing, {
+                environmentId: nextProjectRef.environmentId,
+                threadId: existing.threadId,
+              })
             ) {
               return state;
             }
@@ -3045,6 +3085,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               startFromOrigin: nextStartFromOrigin,
               ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
               promotedTo: existing.promotedTo ?? null,
+              ...(existing.sentTo ? { sentTo: existing.sentTo } : {}),
             };
             const isUnchanged =
               nextDraftThread.environmentId === existing.environmentId &&
@@ -4703,17 +4744,28 @@ export function restoreFailedDraftThread(
   draftThread: DraftThreadState,
   threadId: ThreadId,
 ): void {
-  useComposerDraftStore.setState((state) => ({
-    draftThreadsByThreadKey: {
-      ...state.draftThreadsByThreadKey,
-      [draftId]: {
-        ...(state.draftThreadsByThreadKey[draftId] ?? draftThread),
-        threadId,
-        ...(threadId !== draftThread.threadId ? { createdAt: new Date().toISOString() } : {}),
-        promotedTo: null,
+  useComposerDraftStore.setState((state) => {
+    const current = state.draftThreadsByThreadKey[draftId] ?? draftThread;
+    // The send recorded its machine before it went out; the same id stays bound there.
+    const sentTo =
+      threadId === draftThread.threadId
+        ? (current.promotedTo ??
+          current.sentTo ??
+          scopeThreadRef(draftThread.environmentId, draftThread.threadId))
+        : null;
+    return {
+      draftThreadsByThreadKey: {
+        ...state.draftThreadsByThreadKey,
+        [draftId]: {
+          ...current,
+          threadId,
+          ...(threadId !== draftThread.threadId ? { createdAt: new Date().toISOString() } : {}),
+          promotedTo: null,
+          sentTo,
+        },
       },
-    },
-  }));
+    };
+  });
 }
 
 export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {

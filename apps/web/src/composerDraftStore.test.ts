@@ -1133,6 +1133,52 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
   });
 
+  it("keeps a draft whose send failed on the machine it was sent to, across a reload", () => {
+    const store = useComposerDraftStore.getState();
+    const remoteProjectRef = scopeProjectRef(OTHER_TEST_ENVIRONMENT_ID, projectRef.projectId);
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: TEST_ENVIRONMENT_ID,
+    });
+    const sentDraft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    markPromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
+    // The answer never came: the machine may have started this thread, so its id stays there.
+    restoreFailedDraftThread(draftId, sentDraft, threadId);
+    // A reload keeps that, as the send's promotion itself was kept.
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    useComposerDraftStore.setState(
+      merge(
+        JSON.parse(
+          JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+        ),
+        useComposerDraftStore.getInitialState(),
+      ),
+    );
+    const sentTo = () => useComposerDraftStore.getState().getDraftSession(draftId);
+
+    // Neither automatic balancing nor a manual switch moves it to another machine.
+    useComposerDraftStore.getState().setDraftThreadContext(draftId, {
+      projectRef: remoteProjectRef,
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+    });
+    useComposerDraftStore
+      .getState()
+      .setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+    expect(sentTo()).toMatchObject({ environmentId: TEST_ENVIRONMENT_ID, threadId });
+    // Its own machine's settings still change.
+    useComposerDraftStore.getState().setDraftThreadContext(draftId, { branch: "retry-base" });
+    expect(sentTo()?.branch).toBe("retry-base");
+
+    // A send the machine refused for good restores under a new id, which may go anywhere.
+    restoreFailedDraftThread(draftId, sentDraft, ThreadId.make("new-intent"));
+    useComposerDraftStore
+      .getState()
+      .setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+    expect(sentTo()?.environmentId).toBe(OTHER_TEST_ENVIRONMENT_ID);
+  });
+
   it("restores a failed draft without changing the fresh draft", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
