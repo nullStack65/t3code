@@ -13,7 +13,7 @@ MARKERS = {
     "assemblyai_word_boost": ("server", "word_boost"),
     "assemblyai_settings": ("web", "assemblyai"),
     "founder_inbox_settings": ("web", "founderInboxFilter"),
-    "founder_inbox_filter_menu": ("web", ", the last one shown, so it stays checked"),
+    "founder_inbox_filter_menu": ("web", "Filter threads by inbox, sender and environment"),
     "public_relay_url": ("server", "relay.t3.codes"),
     "public_relay_url_web": ("web", "relay.t3.codes"),
 }
