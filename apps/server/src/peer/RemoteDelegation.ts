@@ -524,53 +524,58 @@ const make = Effect.gen(function* () {
             }),
         ),
       );
-      // Without a link the launch itself is refused, so there is nothing to bind.
-      if (linkSession !== undefined) {
-        const session = `${target.environmentId}@${linkSession}`;
-        const launchedUnder = yield* threads
-          .bindIntent({
-            commandId: keyed("remote-launch"),
-            threadId: parent.thread.id,
-            value: session,
-          })
-          .pipe(
-            Effect.mapError(
-              () =>
-                new OrchestratorMcpFailure({
-                  code: "orchestration_error",
-                  message:
-                    "Unable to record the launch there, so nothing was started. Retry with the same clientRequestId.",
-                }),
-            ),
-          );
-        if (launchedUnder !== session) {
-          const childThere = yield* threads.intentOf(childId).pipe(
-            Effect.map(Option.getOrUndefined),
-            Effect.orElseSucceed(() => undefined),
-          );
-          const recordedTask =
-            childThere === undefined
-              ? undefined
-              : yield* threads.getThreadRecords(scope.thread.threadId, ["subagents"]).pipe(
-                  Effect.map(({ subagents }) =>
-                    subagents.find(
-                      (task) =>
-                        task.remoteChild?.environmentId === target.environmentId &&
-                        task.remoteChild.threadId === childThere,
-                    ),
+      // A launch is only sent bound to the link session it goes out under; with no link
+      // there is none, and one appearing before the send must not carry it unbound.
+      if (linkSession === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `This environment is not linked to ${label}, so nothing was started. t3_environment_links lists the linked ones.`,
+        });
+      }
+      const session = `${target.environmentId}@${linkSession}`;
+      const launchedUnder = yield* threads
+        .bindIntent({
+          commandId: keyed("remote-launch"),
+          threadId: parent.thread.id,
+          value: session,
+        })
+        .pipe(
+          Effect.mapError(
+            () =>
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message:
+                  "Unable to record the launch there, so nothing was started. Retry with the same clientRequestId.",
+              }),
+          ),
+        );
+      if (launchedUnder !== session) {
+        const childThere = yield* threads.intentOf(childId).pipe(
+          Effect.map(Option.getOrUndefined),
+          Effect.orElseSucceed(() => undefined),
+        );
+        const recordedTask =
+          childThere === undefined
+            ? undefined
+            : yield* threads.getThreadRecords(scope.thread.threadId, ["subagents"]).pipe(
+                Effect.map(({ subagents }) =>
+                  subagents.find(
+                    (task) =>
+                      task.remoteChild?.environmentId === target.environmentId &&
+                      task.remoteChild.threadId === childThere,
                   ),
-                  Effect.orElseSucceed(() => undefined),
-                );
-          if (recordedTask !== undefined) return { taskId: recordedTask.id };
-          return yield* new OrchestratorMcpFailure({
-            code: "orchestration_error",
-            message: `${label} was linked again after an earlier attempt with this clientRequestId launched the task there, and the new link cannot find that thread. Nothing new was started. ${
-              childThere === undefined
-                ? "t3_thread_list with this environmentId finds it: it names this thread as its parent."
-                : `Its thread there is ${childThere}.`
-            } To start the task again, use a new clientRequestId.`,
-          });
-        }
+                ),
+                Effect.orElseSucceed(() => undefined),
+              );
+        if (recordedTask !== undefined) return { taskId: recordedTask.id };
+        return yield* new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: `${label} was linked again after an earlier attempt with this clientRequestId launched the task there, and the new link cannot find that thread. Nothing new was started. ${
+            childThere === undefined
+              ? "t3_thread_list with this environmentId finds it: it names this thread as its parent."
+              : `Its thread there is ${childThere}.`
+          } This clientRequestId stays bound to the earlier link. Check that thread there before deciding the work still needs doing.`,
+        });
       }
       const task = taskPrompt(input);
       const title = input.title ?? parent.thread.title;
@@ -593,6 +598,8 @@ const make = Effect.gen(function* () {
             title: parent.thread.title,
           },
         },
+        // Sent only under the session bound above, never one linked since.
+        { expectedIncarnation: linkSession },
       );
       // Losing this only makes a retry after linking again refuse instead of finding the task.
       yield* threads
