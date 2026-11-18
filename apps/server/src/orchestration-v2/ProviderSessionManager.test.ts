@@ -2281,6 +2281,49 @@ it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops",
   }),
 );
 
+it.effect("ProviderSessionManagerV2 fails a subscription made after its provider died", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-session-manager-late-subscriber");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      // A run holds the runtime it got at turn start and subscribes later.
+      const early = yield* runtime.subscribeEvents!;
+      const earlyExit = yield* early.events.pipe(Stream.runDrain, Effect.exit, Effect.forkScoped);
+      const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(adapterQueue);
+      yield* Queue.end(adapterQueue!);
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(earlyExit)));
+
+      const late = yield* runtime.subscribeEvents!;
+      const lateExit = yield* late.events.pipe(Stream.runDrain, Effect.exit);
+      assert.isTrue(Exit.isFailure(lateExit));
+      if (Exit.isFailure(lateExit)) {
+        const error = Cause.squash(lateExit.cause);
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterEventStreamError);
+      }
+    });
+
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 fails a turn whose provider retry never resumes", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
