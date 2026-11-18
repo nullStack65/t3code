@@ -1785,12 +1785,12 @@ const make = Effect.gen(function* () {
           : runStatus === "queued" || runStatus === "starting"
             ? runStatus
             : "running";
-    const derivedResult =
-      task.result !== null
-        ? task.result
-        : taskResultRun !== undefined && isTerminalTaskStatus(status)
-          ? subagentResultForRun(childProjection, taskResultRun).text
-          : null;
+    const derived =
+      task.result === null && taskResultRun !== undefined && isTerminalTaskStatus(status)
+        ? subagentResultForRun(childProjection, taskResultRun)
+        : undefined;
+    const derivedResult = task.result ?? derived?.text ?? null;
+    const workerAlert = task.result === null ? derived?.workerAlert : task.workerAlert;
     const resultTransfers = childControls.contextTransfers.filter(
       (transfer) =>
         transfer.type === "subagent_result" &&
@@ -1839,6 +1839,7 @@ const make = Effect.gen(function* () {
       providerInstanceId: modelSelection.instanceId,
       model: modelSelection.model,
       executedModel: runExecutedModel(childControls, executionRun),
+      ...(workerAlert === undefined ? {} : { workerAlert }),
       options: modelSelection.options ?? [],
       summary: derivedResult,
       resultContextTransferId,
@@ -2034,6 +2035,7 @@ const make = Effect.gen(function* () {
       providerInstanceId: task.providerInstanceId,
       model: task.model,
       executedModel: task.executedModel ?? null,
+      ...(task.workerAlert === undefined ? {} : { workerAlert: task.workerAlert }),
       summary: task.result,
       resultContextTransferId: null,
       latestTerminalRunId: null,
@@ -3451,10 +3453,34 @@ const make = Effect.gen(function* () {
           input.beforePosition === undefined &&
           input.itemId === undefined,
       );
-      const recentRuns = target.runs
+      const runs = target.runs
         .toSorted((left, right) => right.ordinal - left.ordinal)
-        .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
-        .map((run) => threadRun(target, run));
+        .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT);
+      // Only an agent-created thread's latest run is judged, so a read loads one run's replies and notices.
+      const latestRun = runs[0];
+      const latestAlert =
+        latestRun === undefined ||
+        target.thread.createdBy !== "agent" ||
+        !ThreadManagementService.isTerminalRunStatus(latestRun.status)
+          ? undefined
+          : subagentResultForRun(
+              {
+                ...target,
+                ...(yield* threadManagement
+                  .getThreadRecords(input.threadId, ["messages", "turnItems"], {
+                    messageRoles: ["assistant"],
+                    messageRunIds: [latestRun.id],
+                    turnItemRunId: latestRun.id,
+                    turnItemTypes: ["assistant_message", "error", "system_notice"],
+                  })
+                  .pipe(Effect.mapError(threadManagementFailure))),
+              },
+              latestRun,
+            ).workerAlert;
+      const recentRuns = runs.map((run) => ({
+        ...threadRun(target, run),
+        ...(run === latestRun && latestAlert !== undefined ? { workerAlert: latestAlert } : {}),
+      }));
       const { items, start } = timelineItemsWithinBudget(
         { thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null },
         timeline.items.map((row) => ({

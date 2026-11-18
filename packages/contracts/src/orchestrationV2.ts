@@ -920,6 +920,20 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
 });
 export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
 
+/** Why a delegated worker's run ended unfit for its task, so its parent can replace it. */
+export const OrchestrationV2WorkerAlertReason = Schema.Literals([
+  "model_substituted",
+  "provider_fallback",
+  "usage_limit",
+  "withheld_task",
+]);
+export type OrchestrationV2WorkerAlertReason = typeof OrchestrationV2WorkerAlertReason.Type;
+export const OrchestrationV2WorkerAlert = Schema.Struct({
+  reasons: Schema.NonEmptyArray(OrchestrationV2WorkerAlertReason),
+  notice: Schema.String,
+});
+export type OrchestrationV2WorkerAlert = typeof OrchestrationV2WorkerAlert.Type;
+
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -938,6 +952,8 @@ export const OrchestrationV2Subagent = Schema.Struct({
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
   executedModel: Schema.optional(Schema.String),
+  /** Set from the run that produced `result`; informs the parent and takes no action. */
+  workerAlert: Schema.optional(OrchestrationV2WorkerAlert),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   // The run whose unfinished task was cancelled, committed with its Stop.
@@ -1841,6 +1857,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     type: Schema.Literal("system_notice"),
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
+    /** A provider safeguard moved the turn to this model. */
+    fallbackModel: Schema.optional(Schema.String),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2723,6 +2741,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     type: Schema.Literal("system_notice"),
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
+    /** A provider safeguard moved the turn to this model. */
+    fallbackModel: Schema.optional(Schema.String),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -3700,6 +3720,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     status: Schema.Literals(["completed", "failed", "cancelled", "interrupted"]),
     result: Schema.String,
     executedModel: Schema.optional(Schema.String),
+    workerAlert: Schema.optional(OrchestrationV2WorkerAlert),
     /**
      * `ran-out`: the run there ended by itself; `stopped`: a stop from here reached it. Either
      * sets `remoteChild.stoppedThere` on a task this report completes. On a task already

@@ -42,6 +42,7 @@ import {
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2WorkerAlert,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
@@ -218,6 +219,11 @@ const OrchestratorMcpExecutedModel = Schema.NullOr(Schema.String).annotate({
     "Model the provider reported running, or null when unavailable. Can differ from the requested `model`.",
 });
 
+const OrchestratorMcpWorkerAlert = OrchestrationV2WorkerAlert.annotate({
+  description:
+    "Present when the run ran another model, hit a provider safeguard fallback or usage limit, or withheld the task. Consider replacing the worker; nothing acts on it.",
+});
+
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
   /** Null for a task that runs in a linked environment; see `remoteChild`. */
@@ -242,6 +248,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
   executedModel: Schema.optional(OrchestratorMcpExecutedModel),
+  workerAlert: Schema.optional(OrchestratorMcpWorkerAlert),
   options: Schema.optional(Schema.Array(ProviderOptionSelection)),
   summary: Schema.NullOr(Schema.String),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
@@ -522,6 +529,7 @@ export const OrchestratorMcpThreadRun = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
   executedModel: Schema.optional(OrchestratorMcpExecutedModel),
+  workerAlert: Schema.optional(OrchestratorMcpWorkerAlert),
   requestedAt: IsoDateTime,
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),

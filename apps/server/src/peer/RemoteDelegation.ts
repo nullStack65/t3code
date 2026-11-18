@@ -15,6 +15,7 @@ import {
   type OrchestratorMcpThreadTimelineItem,
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2Subagent,
+  type OrchestrationV2WorkerAlert,
   type PeerLink,
   OrchestrationV2ThreadPlacementAdmitError,
   type ProviderInteractionMode,
@@ -44,7 +45,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Tool from "effect/ai/Tool";
-import { withExecutedModelNote } from "@t3tools/provider-core/server/subagentProjection";
+import { workerAlert } from "@t3tools/provider-core/server/subagentProjection";
 
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
@@ -1119,6 +1120,7 @@ const make = Effect.gen(function* () {
     stoppedThere: "ran-out" | "stopped" | undefined,
     stopCount?: number,
     executedModel?: string,
+    alert?: OrchestrationV2WorkerAlert,
   ) {
     const attempt = yield* random.uuidV4();
     yield* threads
@@ -1132,6 +1134,7 @@ const make = Effect.gen(function* () {
         ...(stoppedThere === undefined ? {} : { stoppedThere }),
         ...(stopCount === undefined ? {} : { stopCount }),
         ...(executedModel === undefined ? {} : { executedModel }),
+        ...(alert === undefined ? {} : { workerAlert: alert }),
       })
       .pipe(
         Effect.catch((error) =>
@@ -1187,7 +1190,7 @@ const make = Effect.gen(function* () {
    * The last reply `runId` gave on the task's thread there, which is its
    * result, read whole however long it is. A failed run prefers its error
    * from the activity view over an earlier reply, without taking another run's.
-   * Led by a note when its provider reported running another model than it asked for.
+   * Led by a worker alert when the run ran another model or withheld the task.
    */
   const lastReply = Effect.fn("RemoteDelegation.lastReply")(function* (
     scope: ThreadScope,
@@ -1224,7 +1227,14 @@ const make = Effect.gen(function* () {
     }
     reply = error ?? reply;
     const executedModel = run?.executedModel ?? undefined;
-    if (reply === undefined) return { text: undefined, executedModel };
+    // Peers that predate `workerAlert` report only the model, so judge the run here.
+    const alertFor = (finalText: string | undefined) =>
+      run === undefined
+        ? undefined
+        : (run.workerAlert ??
+          workerAlert({ requestedModel: run.model, executedModel: run.executedModel, finalText }));
+    if (reply === undefined)
+      return { text: undefined, executedModel, workerAlert: alertFor(undefined) };
     let text = reply.text ?? "";
     let textOffset = reply.textTruncated ? (reply.nextTextOffset ?? null) : null;
     while (textOffset !== null) {
@@ -1239,9 +1249,11 @@ const make = Effect.gen(function* () {
       text += part.text ?? "";
       textOffset = part.textTruncated ? (part.nextTextOffset ?? null) : null;
     }
+    const alert = alertFor(error === undefined ? text : undefined);
     return {
-      text: run === undefined ? text : withExecutedModelNote(text, run.model, run.executedModel),
+      text: alert === undefined ? text : `${alert.notice}\n\n${text}`,
       executedModel,
+      workerAlert: alert,
     };
   });
 
@@ -1449,6 +1461,7 @@ const make = Effect.gen(function* () {
       "ran-out",
       undefined,
       result.executedModel,
+      result.workerAlert,
     );
     return yield* settled(parentThreadId, taskId);
   });

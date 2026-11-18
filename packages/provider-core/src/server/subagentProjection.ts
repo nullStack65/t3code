@@ -12,6 +12,8 @@ import type {
   OrchestrationV2Run,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
+  OrchestrationV2WorkerAlert,
+  OrchestrationV2WorkerAlertReason,
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
@@ -190,15 +192,70 @@ export function makeSubagentConversationArtifacts(input: {
   return { message, turnItem };
 }
 
-/** A delegated result, led by a note when the provider reported running another model than requested. */
-export function withExecutedModelNote(
-  result: string,
-  requestedModel: string,
-  executedModel: string | null | undefined,
-): string {
-  return executedModel == null || executedModel === requestedModel
-    ? result
-    : `Requested model ${requestedModel}; the provider reported running ${executedModel}.\n\n${result}`;
+// Small on purpose: a match only flags the worker for its parent, which decides what to do.
+const WITHHELD_TASK_PATTERNS: ReadonlyArray<RegExp> = [
+  /\b(?:i am|i'm|i will keep|i'll keep|i'm keeping|keeping)\s+(?:this\s+|it\s+|the task\s+)?(?:on hold|holding)\b/i,
+  /\bholding\s+(?:off|here)\b/i,
+  /\bdirect(?:ly)?\s+(?:confirmation|approval|go-ahead)\b/i,
+  /\bconfirm\s+(?:directly|with me)\b/i,
+  /\b(?:i need|i'd need|i would need|i require)\s+(?:(?:your|explicit|written)\s+)*(?:confirmation|approval|go-ahead|authori[sz]ation)\b/i,
+  /\bi\s+(?:won't|will not|can't|cannot|can not)\s+(?:proceed|continue|help with|carry out|do this)\b/i,
+];
+
+// A held or refused task ends in a short reply; a long report that asks for a decision did the work.
+const WITHHELD_TASK_MAX_LENGTH = 800;
+
+/** True when a worker's short final message holds, refuses, or asks for confirmation instead of reporting work. */
+export function withholdsTask(text: string): boolean {
+  const reply = text.trim();
+  return (
+    reply.length <= WITHHELD_TASK_MAX_LENGTH &&
+    WITHHELD_TASK_PATTERNS.some((pattern) => pattern.test(reply.replaceAll("\u2019", "'")))
+  );
+}
+
+// Context-window and similar suffixes, such as `[1m]`, name the same model.
+const baseModel = (model: string) => model.replace(/\[[^\]]*\]$/, "");
+
+/** What made a worker's run unfit for its task, or undefined when nothing did. */
+export function workerAlert(input: {
+  readonly requestedModel: string | null | undefined;
+  readonly executedModel: string | null | undefined;
+  readonly fallbackModels?: ReadonlyArray<string> | undefined;
+  readonly usageLimited?: boolean | undefined;
+  readonly finalText: string | null | undefined;
+}): OrchestrationV2WorkerAlert | undefined {
+  const reasons: Array<OrchestrationV2WorkerAlertReason> = [];
+  const parts: Array<string> = [];
+  const { requestedModel, executedModel } = input;
+  if (
+    requestedModel != null &&
+    executedModel != null &&
+    baseModel(executedModel) !== baseModel(requestedModel)
+  ) {
+    reasons.push("model_substituted");
+    parts.push(`it ran ${executedModel} instead of ${requestedModel}`);
+  }
+  const fallbacks = [...new Set(input.fallbackModels)];
+  if (fallbacks.length > 0) {
+    reasons.push("provider_fallback");
+    parts.push(`a provider safeguard switched it to ${fallbacks.join(", ")}`);
+  }
+  if (input.usageLimited === true) {
+    reasons.push("usage_limit");
+    parts.push("it hit a provider usage limit");
+  }
+  if (input.finalText != null && withholdsTask(input.finalText)) {
+    reasons.push("withheld_task");
+    parts.push("its final message withholds the task");
+  }
+  const [first, ...rest] = reasons;
+  return first === undefined
+    ? undefined
+    : {
+        reasons: [first, ...rest],
+        notice: `Worker alert: ${parts.join("; ")}. Replace the worker if it cannot do the task.`,
+      };
 }
 
 /** Run signal of the notice that carries a provider's stop reason on a completed run. */
@@ -221,6 +278,7 @@ export function subagentResultForRun(
   readonly text: string;
   readonly messageId: OrchestrationV2ConversationMessage["id"] | null;
   readonly turnItemId: OrchestrationV2TurnItem["id"] | null;
+  readonly workerAlert: OrchestrationV2WorkerAlert | undefined;
 } {
   const turnItem =
     projection.turnItems
@@ -273,13 +331,22 @@ export function subagentResultForRun(
     projection.providerTurns,
     run.activeAttemptId,
   )?.model;
+  const alert = workerAlert({
+    requestedModel: executedModel === undefined ? undefined : run.modelSelection.model,
+    executedModel,
+    fallbackModels: projection.turnItems.flatMap((item) =>
+      item.runId === run.id && item.type === "system_notice" && item.fallbackModel !== undefined
+        ? [item.fallbackModel]
+        : [],
+    ),
+    usageLimited: failure?.type === "error" && failure.failure.class === "usage_limit",
+    finalText: message?.text ?? turnItem?.text,
+  });
   return {
-    text:
-      executedModel === undefined
-        ? text
-        : withExecutedModelNote(text, run.modelSelection.model, executedModel),
+    text: alert === undefined ? text : `${alert.notice}\n\n${text}`,
     messageId: failure === undefined ? (message?.id ?? turnItem?.messageId ?? null) : null,
     turnItemId: failure?.id ?? turnItem?.id ?? null,
+    workerAlert: alert,
   };
 }
 
