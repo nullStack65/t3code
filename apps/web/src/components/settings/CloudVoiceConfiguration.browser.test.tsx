@@ -22,7 +22,7 @@ vi.mock("../../state/environments", async (importOriginal) => ({
       {
         environmentId: "voice-host",
         label: "Laptop",
-        connection: { phase: "available" },
+        connection: { phase: "connected" },
         serverConfig: {
           secretReferences: true,
           settings: {

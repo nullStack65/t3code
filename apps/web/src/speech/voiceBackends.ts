@@ -21,6 +21,27 @@ export interface VoiceEnvironmentCandidate {
     | undefined;
 }
 
+/** An environment as the voice settings see it; only a `connected` phase means it is live. */
+export interface VoiceEnvironmentSource {
+  readonly environmentId: EnvironmentId;
+  readonly connection: { readonly phase: string };
+  readonly serverConfig?:
+    | { readonly environment: { readonly capabilities?: VoiceEnvironmentCandidate["capabilities"] } }
+    | null
+    | undefined;
+}
+
+export function voiceEnvironmentCandidates<E extends VoiceEnvironmentSource>(
+  environments: ReadonlyArray<E>,
+) {
+  return environments.map((environment) => ({
+    environment,
+    environmentId: environment.environmentId,
+    connected: environment.connection.phase === "connected",
+    capabilities: environment.serverConfig?.environment.capabilities,
+  }));
+}
+
 export function voiceBackendEnvironments<E extends VoiceEnvironmentCandidate>(
   backend: VoiceBackend,
   environments: ReadonlyArray<E>,

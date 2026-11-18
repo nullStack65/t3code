@@ -1,6 +1,10 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
-import { defaultVoiceEnvironment, voiceBackendEnvironments } from "./voiceBackends";
+import {
+  defaultVoiceEnvironment,
+  voiceBackendEnvironments,
+  voiceEnvironmentCandidates,
+} from "./voiceBackends";
 
 const laptop = EnvironmentId.make("laptop");
 const server = EnvironmentId.make("server");
@@ -38,4 +42,16 @@ it("an offline primary environment yields to a connected one", () => {
     server,
   );
   expect(defaultVoiceEnvironment("openai", [], { current: null, primary: laptop })).toBeNull();
+});
+
+it("only a connected phase counts as live, so a known but unconnected primary yields", () => {
+  const cloud = { environment: { capabilities: { cloudVoiceTranscription: true } } };
+  const candidates = voiceEnvironmentCandidates([
+    { environmentId: laptop, connection: { phase: "available" }, serverConfig: cloud },
+    { environmentId: server, connection: { phase: "connected" }, serverConfig: cloud },
+  ]);
+  expect(candidates.map((candidate) => candidate.connected)).toEqual([false, true]);
+  expect(defaultVoiceEnvironment("assemblyai", candidates, { current: null, primary: laptop })).toBe(
+    server,
+  );
 });

@@ -74,6 +74,7 @@ import {
 } from "../../speech/voiceConsent";
 import {
   defaultVoiceEnvironment,
+  voiceEnvironmentCandidates,
   RECOMMENDED_VOICE_BACKEND,
   VOICE_BACKENDS,
   voiceBackendEnvironments,
@@ -1234,12 +1235,7 @@ export function VoiceSettingsPanel() {
   const [offerRecommended, setOfferRecommended] = useState(
     () => hash === "voice-transcription-destination",
   );
-  const candidates = environments.map((environment) => ({
-    environment,
-    environmentId: environment.environmentId,
-    connected: environment.connection.phase === "available",
-    capabilities: environment.serverConfig?.environment.capabilities,
-  }));
+  const candidates = voiceEnvironmentCandidates(environments);
   const defaultEnvironment = (backend: VoiceBackend) =>
     defaultVoiceEnvironment(backend, candidates, {
       current: destination.environmentId,
