@@ -46,6 +46,7 @@ const QuotaEntry = Schema.Struct({
 });
 const QuotasResponse = Schema.Struct({ data: Schema.Array(QuotaEntry) });
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+const isUsageLimitSourceError = Schema.is(UsageLimitSourceError);
 export type MagpieQuotaEntry = typeof QuotaEntry.Type;
 
 const MINUTES: Record<string, number> = {
@@ -204,21 +205,30 @@ export const makeMagpieApi = Effect.gen(function* () {
     const request = HttpClientRequest.get(`${origin}/v1/magpie/quotas`).pipe(
       config.managementKey ? HttpClientRequest.bearerToken(config.managementKey) : (r) => r,
     );
-    const response = yield* client.execute(request).pipe(
-      Effect.timeout("5 seconds"),
-      Effect.mapError(
-        () => new UsageLimitSourceError({ detail: "The Magpie gateway did not answer." }),
+    // One deadline covers headers and body: a stalled body must not hold the refresh lock.
+    const body = yield* client.execute(request).pipe(
+      Effect.flatMap((response) =>
+        response.status === 401 || response.status === 403
+          ? Effect.fail(
+              new UsageLimitSourceError({
+                detail: "The Magpie gateway refused the key. Add the gateway key to this source.",
+              }),
+            )
+          : HttpClientResponse.filterStatusOk(response).pipe(
+              Effect.flatMap(HttpClientResponse.schemaBodyJson(QuotasResponse)),
+              Effect.mapError(
+                () =>
+                  new UsageLimitSourceError({
+                    detail: "The Magpie gateway did not report quotas.",
+                  }),
+              ),
+            ),
       ),
-    );
-    if (response.status === 401 || response.status === 403) {
-      return yield* new UsageLimitSourceError({
-        detail: "The Magpie gateway refused the key. Add the gateway key to this source.",
-      });
-    }
-    const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(QuotasResponse)),
-      Effect.mapError(
-        () => new UsageLimitSourceError({ detail: "The Magpie gateway did not report quotas." }),
+      Effect.timeout("5 seconds"),
+      Effect.mapError((error) =>
+        isUsageLimitSourceError(error)
+          ? error
+          : new UsageLimitSourceError({ detail: "The Magpie gateway did not answer." }),
       ),
     );
     return magpieQuotasToAccounts(body.data, DateTime.formatIso(yield* DateTime.now));
@@ -260,7 +270,7 @@ export function isPrivateOrigin(origin: string): boolean {
 /** The selected provider's `base_url` in a Codex `config.toml`, or a `-c model_provider=` override. */
 export function codexBaseUrl(toml: string, launchArgs: string | undefined): string | undefined {
   const override = /model_provider\s*=\s*"?([\w.-]+)"?/.exec(launchArgs ?? "")?.[1];
-  const provider = override ?? /^\s*model_provider\s*=\s*"([^"]+)"/m.exec(toml)?.[1];
+  const provider = override ?? /^\s*model_provider\s*=\s*["']([^"']+)["']/m.exec(toml)?.[1];
   if (!provider) return undefined;
   let inSection = false;
   for (const line of toml.split(/\r?\n/)) {
@@ -270,7 +280,7 @@ export function codexBaseUrl(toml: string, launchArgs: string | undefined): stri
       continue;
     }
     if (!inSection) continue;
-    const value = /^\s*base_url\s*=\s*"([^"]+)"/.exec(line)?.[1];
+    const value = /^\s*base_url\s*=\s*["']([^"']+)["']/.exec(line)?.[1];
     if (value) return value;
   }
   return undefined;

@@ -478,12 +478,22 @@ export function collectNotApplicable(
   for (const presentation of presentations.values()) {
     const environmentLabel = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
+      // Only an explicit "Not applicable:" reason: other unsupported messages
+      // (a sign-in prompt, a sharing notice shown as a link) ask for action.
       const unavailable = provider.usageLimits?.unavailable;
-      if (unavailable?.reason !== "unsupported" || !unavailable.message) continue;
+      if (
+        unavailable?.reason !== "unsupported" ||
+        !unavailable.message?.startsWith(NOT_APPLICABLE_PREFIX) ||
+        provider.usageLimits?.externalUsage
+      ) {
+        continue;
+      }
       const name = provider.displayName?.trim() || String(provider.driver);
       entries.set(label(environmentLabel, name), unavailable.message);
     }
     for (const source of presentation.serverConfig?.usageLimitSources ?? []) {
+      // Magpie maps only standing vendor refusals to unsupported.
+      if (source.kind !== "magpie") continue;
       for (const account of source.accounts) {
         const unavailable = account.usageLimits.unavailable;
         if (unavailable?.reason !== "unsupported") continue;
@@ -498,6 +508,8 @@ export function collectNotApplicable(
 }
 
 export const UNASSIGNED_OWNER = "Unassigned";
+
+const NOT_APPLICABLE_PREFIX = "Not applicable:";
 
 /** `owner@example.com · Team` and `Owner@Example.com` look up the same owner. */
 function ownerLookupKey(email: string): string {

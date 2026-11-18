@@ -138,7 +138,7 @@ export const codexRoutesSpendNativeQuota = (
 
 /** Shown when a custom model provider serves the instance; its gateway reports the accounts. */
 export const CODEX_CUSTOM_PROVIDER_USAGE_MESSAGE =
-  "Not applicable: this instance routes through its model provider, which reports usage itself.";
+  "Not applicable: this instance routes through a custom model provider, not OpenAI quota.";
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_CATALOG_REFRESH_TIMEOUT_MS = 3_000;

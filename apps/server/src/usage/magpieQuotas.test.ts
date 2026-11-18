@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, type ServerSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as FileSystem from "effect/FileSystem";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
@@ -131,6 +133,12 @@ describe("gateway discovery", () => {
     expect(codexBaseUrl(toml, "")).toBe("http://127.0.0.1:13425/v1");
     expect(codexBaseUrl(toml, "-c model_provider=openai")).toBe("https://api.openai.com/v1");
     expect(codexBaseUrl("model = 'x'", undefined)).toBeUndefined();
+    expect(
+      codexBaseUrl(
+        "model_provider = 'm'\n[model_providers.m]\nbase_url = 'http://127.0.0.1:1/v1'",
+        "",
+      ),
+    ).toBe("http://127.0.0.1:1/v1");
   });
 
   it("reads OpenCode provider base URLs from JSONC", () => {
@@ -232,6 +240,32 @@ describe("makeMagpieApi", () => {
       expect(result._tag === "Success" && result.success.map((account) => account.id)).toEqual([
         "claude:first@example.com",
       ]);
+    }),
+  );
+
+  it.effect("gives up on a gateway whose body never finishes", () =>
+    Effect.gen(function* () {
+      const http = HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response(new ReadableStream({ start() {} }), {
+              headers: { "content-type": "application/json" },
+            }),
+          ),
+        ),
+      );
+      const fiber = yield* makeMagpieApi.pipe(
+        Effect.flatMap((api) =>
+          api.readAccounts({ url: "http://127.0.0.1:3425", managementKey: "" }),
+        ),
+        Effect.result,
+        Effect.provideService(HttpClient.HttpClient, http),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust("5 seconds");
+      const result = yield* Fiber.join(fiber);
+      expect(result._tag === "Failure" && result.failure.detail).toMatch(/did not answer/);
     }),
   );
 

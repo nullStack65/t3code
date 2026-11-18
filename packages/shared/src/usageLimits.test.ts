@@ -1887,6 +1887,17 @@ describe("owners and not-applicable usage", () => {
       unavailable: { reason: "unsupported", message: "Not applicable: gateway reports it." },
     },
   });
+  // Unsupported, but asking the user to act: never "not applicable".
+  const signIn = provider({
+    instanceId: ProviderInstanceId.make("antigravity"),
+    driver: ProviderDriverKind.make("antigravity"),
+    displayName: "Antigravity",
+    usageLimits: {
+      checkedAt,
+      windows: [],
+      unavailable: { reason: "unsupported", message: "Sign in with Google to see limits." },
+    },
+  });
   const presentations = (owners?: Record<string, string>) =>
     new Map([
       [
@@ -1894,7 +1905,7 @@ describe("owners and not-applicable usage", () => {
         {
           entry: { target: { label: "Crown" } },
           serverConfig: {
-            providers: [routed],
+            providers: [routed, signIn],
             usageLimitSources: [magpie],
             ...(owners ? { settings: { usageAccountOwners: owners } } : {}),
           },
