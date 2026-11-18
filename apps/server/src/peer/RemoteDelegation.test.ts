@@ -3280,11 +3280,30 @@ it.effect(
         expect(Result.isSuccess(pending) && pending.success.environmentId).toBe(
           laptop.environmentId,
         );
-        // Its thread exists here: that launch was accepted.
-        const accepted = yield* admitHere("local-accepted", parentThreadId);
+        // Admitted here, then actually launched here as itself: `thread.create` under the same
+        // command id for the same thread, through the real orchestrator and its receipt.
+        const acceptedThread = ThreadId.make("thread:local-accepted");
+        const accepted = yield* admitHere("local-accepted", acceptedThread);
         expect(Result.isSuccess(accepted) && accepted.success.environmentId).toBe(
           laptop.environmentId,
         );
+        const launched = yield* laptopEnv.orchestrator
+          .dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("local-accepted"),
+            threadId: acceptedThread,
+            projectId: ProjectId.make("project:laptop"),
+            title: "Placed here",
+            modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          })
+          .pipe(Effect.result);
+        expect(Result.isSuccess(launched)).toBe(true);
         expect(yield* placeHere("mcp-local-pending")).toEqual(Result.succeed(laptop.environmentId));
 
         yield* laptopEnv.settings.updateSettings({
@@ -3301,15 +3320,18 @@ it.effect(
           environmentId: laptop.environmentId,
           resumed: true,
         });
-        // Launched here already: its accepted result still reconciles.
+        // Launched here already: that exact accepted result still reconciles past the exclusion.
         yield* laptopEnv.settings.updateSettings({
           automaticPlacementExcludedEnvironmentIds: [laptop.environmentId],
         });
-        const replayed = yield* admitHere("local-accepted", parentThreadId);
+        const replayed = yield* admitHere("local-accepted", acceptedThread);
         expect(Result.isSuccess(replayed) && replayed.success).toMatchObject({
           environmentId: laptop.environmentId,
           resumed: true,
         });
+        // Named with an unrelated thread that exists here, the same command proves nothing.
+        const unrelated = yield* admitHere("local-accepted", parentThreadId);
+        expect(Result.isFailure(unrelated) && unrelated.failure.reason).toBe("excluded");
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
