@@ -68,6 +68,10 @@ describe("shared fleet organizational inbox", () => {
     const filedToKameron = makeThreadInbox({ actor: bot, routing: inboxRoutingFor("kameron") });
     expect(matchesInboxFilter(filedToKameron, ["kameron"])).toBe(true);
     expect(matchesInboxFilter(filedToKameron, ["agents"])).toBe(false);
+    expect(effectiveInboxFilter({ founderInboxOwner: "jeff", founderInboxFilter: [] })).toEqual([
+      "jeff",
+      "agents",
+    ]);
     // Every inbox is All, which keeps unclassified history.
     const every = ["shared", "jeff", "agents", "kameron"] as const;
     expect(matchesInboxFilter(undefined, every)).toBe(true);

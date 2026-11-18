@@ -1,10 +1,10 @@
 import {
   effectiveInboxFilter,
+  Founder,
   InboxChoice,
   matchesInboxFilter,
   primaryInbox,
   type EnvironmentId,
-  type Founder,
   type ThreadInbox,
 } from "@t3tools/contracts";
 import type { ClientSettings } from "@t3tools/contracts/settings";
@@ -45,12 +45,29 @@ export const matchesThreadListFilter = (thread: FilterableThread, filter: Thread
 
 /** The chosen founder's inbox first, then Agents, so the common pair sits together. */
 export const inboxMenuOrder = (owner: Founder | undefined): ReadonlyArray<InboxChoice> => {
-  const founders = InboxChoice.literals.filter(
-    (choice): choice is Founder => choice === "kameron" || choice === "jeff",
-  );
-  const first = owner ?? founders[0]!;
-  return [first, "agents", ...founders.filter((founder) => founder !== first), "shared"];
+  const first = owner ?? Founder.literals[0];
+  return [first, "agents", ...Founder.literals.filter((founder) => founder !== first), "shared"];
 };
+
+/**
+ * The hidden environments after showing or hiding one. Hidden ids of environments this
+ * client has not loaded yet (startup, an offline machine) stay hidden.
+ */
+export function toggleHiddenEnvironment(
+  hidden: ReadonlyArray<EnvironmentId>,
+  environmentId: EnvironmentId,
+  knownEnvironmentIds: ReadonlyArray<EnvironmentId>,
+): ReadonlyArray<EnvironmentId> {
+  const shown = toggleFilterOption(
+    knownEnvironmentIds.filter((id) => !hidden.includes(id)),
+    environmentId,
+    knownEnvironmentIds,
+  );
+  return [
+    ...hidden.filter((id) => !knownEnvironmentIds.includes(id)),
+    ...knownEnvironmentIds.filter((id) => !shown.includes(id)),
+  ];
+}
 
 const sameMembers = <A>(left: ReadonlyArray<A>, right: ReadonlyArray<A>) =>
   left.length === right.length && left.every((value) => right.includes(value));

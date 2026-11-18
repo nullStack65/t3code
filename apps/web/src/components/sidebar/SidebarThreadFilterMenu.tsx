@@ -27,6 +27,7 @@ import {
   threadListFilterCounts,
   threadListFilterOf,
   toggleFilterOption,
+  toggleHiddenEnvironment,
   type ThreadListFilter,
 } from "./threadListFilter.logic";
 
@@ -38,6 +39,7 @@ const INBOX_LABELS: Record<InboxChoice, string> = {
 };
 
 type CountedThreads = Parameters<typeof threadListFilterCounts>[0];
+const LAST_OPTION_NOTE = ", the last one shown, so it stays checked";
 
 /** Chooses which inboxes and environments the thread list shows. Search still finds every thread. */
 export function SidebarThreadFilterMenu({
@@ -115,13 +117,14 @@ function SidebarThreadFilterOptions({
         <MenuGroupLabel>Inbox</MenuGroupLabel>
         {inboxOrder.map((inbox) => {
           const checked = filter.inboxes.includes(inbox);
+          const isLast = checked && filter.inboxes.length === 1;
           const count = counts.inboxes.get(inbox) ?? 0;
           return (
             <MenuCheckboxItem
               key={inbox}
               checked={checked}
-              disabled={checked && filter.inboxes.length === 1}
-              aria-label={`${INBOX_LABELS[inbox]}, ${count} active`}
+              disabled={isLast}
+              aria-label={`${INBOX_LABELS[inbox]}, ${count} active${isLast ? LAST_OPTION_NOTE : ""}`}
               onCheckedChange={() =>
                 void updateClientSettings({
                   founderInboxFilter: toggleFilterOption(filter.inboxes, inbox, inboxOrder),
@@ -140,26 +143,24 @@ function SidebarThreadFilterOptions({
             <MenuGroupLabel>Environments</MenuGroupLabel>
             {environments.map((environment) => {
               const checked = shownEnvironmentIds.includes(environment.environmentId);
+              const isLast = checked && shownEnvironmentIds.length === 1;
               const connected = connectedEnvironmentIds.includes(environment.environmentId);
               const count = counts.environments.get(environment.environmentId) ?? 0;
               return (
                 <MenuCheckboxItem
                   key={environment.environmentId}
                   checked={checked}
-                  disabled={checked && shownEnvironmentIds.length === 1}
-                  aria-label={`${environment.label}, ${connected ? "connected" : "not connected"}, ${count} active`}
-                  onCheckedChange={() => {
-                    const shown = toggleFilterOption(
-                      shownEnvironmentIds,
-                      environment.environmentId,
-                      environmentIds,
-                    );
+                  disabled={isLast}
+                  aria-label={`${environment.label}, ${connected ? "connected" : "not connected"}, ${count} active${isLast ? LAST_OPTION_NOTE : ""}`}
+                  onCheckedChange={() =>
                     void updateClientSettings({
-                      sidebarHiddenEnvironmentIds: environmentIds.filter(
-                        (id) => !shown.includes(id),
+                      sidebarHiddenEnvironmentIds: toggleHiddenEnvironment(
+                        filter.hiddenEnvironmentIds,
+                        environment.environmentId,
+                        environmentIds,
                       ),
-                    });
-                  }}
+                    })
+                  }
                 >
                   <FilterOptionRow
                     label={environment.label}

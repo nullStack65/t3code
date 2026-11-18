@@ -8,6 +8,7 @@ import {
   threadListFilterCounts,
   threadListFilterOf,
   toggleFilterOption,
+  toggleHiddenEnvironment,
 } from "./threadListFilter.logic";
 
 const laptop = EnvironmentId.make("laptop");
@@ -82,5 +83,10 @@ describe("thread list filter", () => {
     expect(toggleFilterOption(["agents"], "jeff", order)).toEqual(["jeff", "agents"]);
     expect(toggleFilterOption(["jeff", "agents"], "jeff", order)).toEqual(["agents"]);
     expect(toggleFilterOption(["agents"], "agents", order)).toEqual(["agents"]);
+    // An environment that has not loaded yet stays hidden when another one is toggled.
+    const offline = EnvironmentId.make("offline");
+    expect(toggleHiddenEnvironment([offline], crown, [laptop, crown])).toEqual([offline, crown]);
+    expect(toggleHiddenEnvironment([offline, crown], crown, [laptop, crown])).toEqual([offline]);
+    expect(toggleHiddenEnvironment([crown], laptop, [laptop, crown])).toEqual([crown]);
   });
 });

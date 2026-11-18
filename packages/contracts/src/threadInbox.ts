@@ -139,10 +139,12 @@ export const effectiveInboxFilter = (settings: {
   readonly founderInboxFilter?: ReadonlyArray<InboxChoice> | undefined;
   readonly founderInboxOwner?: Founder | undefined;
 }): ReadonlyArray<InboxChoice> =>
-  settings.founderInboxFilter ??
-  (settings.founderInboxOwner === undefined
-    ? InboxChoice.literals
-    : [settings.founderInboxOwner, "agents"]);
+  // An empty choice, from another client or a hand edit, would blank the list; treat it as unset.
+  settings.founderInboxFilter !== undefined && settings.founderInboxFilter.length > 0
+    ? settings.founderInboxFilter
+    : settings.founderInboxOwner === undefined
+      ? InboxChoice.literals
+      : [settings.founderInboxOwner, "agents"];
 
 /** Choosing every inbox means All, which also keeps unclassified history. */
 const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
