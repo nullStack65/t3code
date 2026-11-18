@@ -1,5 +1,5 @@
-import { effectiveInboxView, matchesInboxView } from "@t3tools/contracts";
-import { SidebarInboxBar } from "./sidebar/SidebarInboxBar";
+import { SidebarThreadFilterMenu } from "./sidebar/SidebarThreadFilterMenu";
+import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
 import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
@@ -1103,13 +1103,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
   const threads = useQuietThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
-  const inboxView = useClientSettings(effectiveInboxView);
-  const inboxThreads = threads.filter(
-    (thread) =>
-      threadSearchQuery.trim().length > 0 ||
-      matchesInboxView(thread.source.inbox, inboxView) ||
-      (inboxView === "agents" && thread.source.createdBy === "agent"),
-  );
+  const threadListFilter = useClientSettings(threadListFilterOf);
+  // Search always looks across every inbox and environment.
+  const inboxThreads =
+    threadSearchQuery.trim().length > 0
+      ? threads
+      : threads.filter((thread) => matchesThreadListFilter(thread, threadListFilter));
   const listedThreads =
     promotingDraftThreadKeys.length === 0
       ? inboxThreads
@@ -2992,6 +2991,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           <SidebarGroup className="z-[1]">
             <SidebarThreadHeader
               hasProjects={projectGroups.length > 0}
+              threadFilter={
+                <SidebarThreadFilterMenu
+                  countedThreads={() =>
+                    filterSidebarV2VisibleThreads(
+                      threads,
+                      scopedProjectKeys,
+                      delegatedUnderParent,
+                    ).filter((thread) => thread.settledOverride !== "settled")
+                  }
+                />
+              }
               projectScope={
                 <Combobox
                   items={projectScopeItems}
@@ -3217,7 +3227,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               activeSearchResultIndex={activeSearchResultIndex}
               onClearSearch={clearThreadSearch}
             />
-            <SidebarInboxBar />
           </SidebarGroup>
         }
       >

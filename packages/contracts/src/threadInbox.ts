@@ -131,11 +131,43 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
   return inbox.attentionKind;
 }
 
-/** The chosen view, else the chosen founder's, else All so unclassified history stays visible. */
-export const effectiveInboxView = (settings: {
-  readonly founderInboxView?: InboxView | undefined;
+/**
+ * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents, else
+ * every inbox so unclassified history stays visible.
+ */
+export const effectiveInboxFilter = (settings: {
+  readonly founderInboxFilter?: ReadonlyArray<InboxChoice> | undefined;
   readonly founderInboxOwner?: Founder | undefined;
-}): InboxView => settings.founderInboxView ?? settings.founderInboxOwner ?? "all";
+}): ReadonlyArray<InboxChoice> =>
+  // An empty choice, from another client or a hand edit, would blank the list; treat it as unset.
+  settings.founderInboxFilter !== undefined && settings.founderInboxFilter.length > 0
+    ? settings.founderInboxFilter
+    : settings.founderInboxOwner === undefined
+      ? InboxChoice.literals
+      : [settings.founderInboxOwner, "agents"];
+
+/** Choosing every inbox means All, which also keeps unclassified history. */
+const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
+  InboxChoice.literals.every((choice) => filter.includes(choice));
+
+/**
+ * The one inbox a thread is filtered under, so unchecking an inbox hides all of its threads:
+ * Shared, else the founder it is filed to, else Agents. Null is unclassified history.
+ */
+export function primaryInbox(inbox: ThreadInbox | null | undefined): InboxChoice | null {
+  if (matchesInboxView(inbox, "shared")) return "shared";
+  for (const founder of Founder.literals) if (matchesInboxView(inbox, founder)) return founder;
+  return matchesInboxView(inbox, "agents") ? "agents" : null;
+}
+
+export const matchesInboxFilter = (
+  inbox: ThreadInbox | null | undefined,
+  filter: ReadonlyArray<InboxChoice>,
+) => {
+  if (isAllInboxes(filter)) return true;
+  const primary = primaryInbox(inbox);
+  return primary !== null && filter.includes(primary);
+};
 
 /** New work is attributed only to a chosen founder; otherwise it stays unclassified (All). */
 export const inboxOriginFor = (settings: {

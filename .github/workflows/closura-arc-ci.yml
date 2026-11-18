@@ -116,7 +116,8 @@ jobs:
             'packages/contracts/src/speech.ts': ['assemblyai'],
             'apps/web/src/components/settings/CloudVoiceConfiguration.tsx': ['assemblyai'],
             'packages/contracts/src/threadInbox.ts': ['matchesInboxView', 'agent-only'],
-            'apps/web/src/components/sidebar/SidebarInboxBar.tsx': ['All threads', 'Jeff', 'Kameron'],
+            'apps/web/src/components/sidebar/SidebarThreadFilterMenu.tsx': ['Kameron', 'Jeff', 'Agents', 'Environments'],
+            'apps/web/src/components/sidebar/threadListFilter.logic.ts': ['matchesInboxFilter', 'hiddenEnvironmentIds'],
           };
           for (const [file, needles] of Object.entries(required)) {
             const source = readFileSync(file, 'utf8');
@@ -147,6 +148,7 @@ jobs:
             packages/contracts/src/threadInbox.test.ts \
             packages/contracts/src/threadMetadataMcp.test.ts \
             apps/web/src/components/threadActionMenu.logic.test.ts \
+            apps/web/src/components/sidebar/threadListFilter.logic.test.ts \
             apps/server/src/orchestration-v2/ThreadLaunchService.test.ts \
             apps/server/src/orchestration-v2/SubagentProjection.test.ts \
             packages/shared/src/threadPlacement.test.ts \
