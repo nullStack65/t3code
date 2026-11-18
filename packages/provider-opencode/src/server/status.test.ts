@@ -326,9 +326,13 @@ it.effect("does not read local credentials for external or disabled OpenCode ins
 
 it.effect("keeps Go entitlement absence distinct from failed or malformed usage responses", () =>
   Effect.gen(function* () {
+    // A refused key is a standing "not applicable"; a server error or an
+    // unreadable body is a failed probe worth a warning.
     for (const [status, reason] of [
       [403, "unsupported"],
-      [401, "probeFailed"],
+      [402, "unsupported"],
+      [401, "unsupported"],
+      [500, "probeFailed"],
       [200, "probeFailed"],
     ] as const) {
       const limits = yield* readOpenCodeGoUsageLimits({
@@ -353,6 +357,10 @@ it.effect("keeps Go entitlement absence distinct from failed or malformed usage 
         Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
       NodeAssert.equal(limits.unavailable?.reason, reason);
+      NodeAssert.equal(
+        limits.unavailable?.message?.startsWith("Not applicable") ?? false,
+        reason === "unsupported",
+      );
       NodeAssert.equal(limits.credentialFingerprint, undefined);
       NodeAssert.deepEqual(limits.windows, []);
     }

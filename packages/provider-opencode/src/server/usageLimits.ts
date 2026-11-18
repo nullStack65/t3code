@@ -91,6 +91,8 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
 }) {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const unsupported = makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
+  const notApplicable = (message: string) =>
+    makeUnavailableUsageLimits({ checkedAt, reason: "unsupported", message });
   if (!input.enabled || input.serverUrl.trim()) return unsupported;
 
   return yield* Effect.gen(function* () {
@@ -131,7 +133,7 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
           ];
     const keys = [...new Set([...storedKeys, goKey].filter((key): key is string => Boolean(key)))];
     let apiKey = keys[0];
-    if (!apiKey) return unsupported;
+    if (!apiKey) return notApplicable("Not applicable: no OpenCode Go key on this host.");
 
     const client = yield* HttpClient.HttpClient;
     const readUsage = (key: string) =>
@@ -146,8 +148,14 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
       apiKey = key;
       response = yield* readUsage(apiKey);
     }
-    // A valid Zen key can exist without a Go subscription.
-    if (response.status === 403) return unsupported;
+    // A refused key (no Go subscription, or a key Go does not know) is a
+    // standing state, not a probe to retry.
+    if (response.status === 401) {
+      return notApplicable("Not applicable: OpenCode Go does not accept this key.");
+    }
+    if (response.status === 402 || response.status === 403 || response.status === 404) {
+      return notApplicable("Not applicable: no active OpenCode Go subscription on this key.");
+    }
     const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
       Effect.flatMap(HttpClientResponse.schemaBodyJson(UsageResponse)),
     );
