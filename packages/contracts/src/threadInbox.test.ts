@@ -345,7 +345,9 @@ describe("staysActiveWhileWorking", () => {
   it("keeps a thread waiting on a shown founder in the active list", () => {
     expect(founderInboxLane(actionForKameron, "kameron")).toBe("action");
     expect(staysActiveWhileWorking(actionForKameron, ["kameron", "agents"])).toBe(true);
-    expect(staysActiveWhileWorking(actionForKameron, ["kameron", "jeff", "shared", "agents"])).toBe(true);
+    expect(staysActiveWhileWorking(actionForKameron, ["kameron", "jeff", "shared", "agents"])).toBe(
+      true,
+    );
   });
 
   it("leaves it on the Working shelf when that founder's inbox is not shown", () => {
