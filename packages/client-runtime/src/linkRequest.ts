@@ -1,6 +1,9 @@
 import {
+  type AppConnectionReport,
   type AuthMcpClientAccess,
   type EnvironmentId,
+  type KnownEnvironment,
+  type KnownEnvironmentAction,
   type EnvironmentMachineKind,
   type OrchestrationV2TurnItem,
   type PeerLinkRequestAnswerInput,
@@ -97,6 +100,127 @@ const isLoopbackUrl = (url: string) => {
   return hostname !== undefined && isLocalLoopbackHost(hostname);
 };
 
+/** Where another machine can reach a saved environment: what it reports, its routes, then Connect. */
+const clientUrls = (environment: EnvironmentPresentation, connectUrl: string | undefined) =>
+  [
+    ...new Set([
+      ...(environment.serverConfig?.directEndpoints ?? []).map((endpoint) => endpoint.httpBaseUrl),
+      ...connectionRoutes(environment.entry).flatMap((route) => {
+        const url = route.target._tag === "RelayConnectionTarget" ? null : routeHttpBaseUrl(route);
+        return url === null ? [] : [url];
+      }),
+      ...(connectUrl === undefined ? [] : [connectUrl]),
+    ]),
+  ].filter((url) => !isLoopbackUrl(url));
+
+/**
+ * What this app tells an environment about the connections it holds: where each answers and
+ * what it runs. Never a credential.
+ */
+export function appConnectionReports(
+  environments: ReadonlyArray<EnvironmentPresentation & { readonly environmentId: EnvironmentId }>,
+): ReadonlyArray<AppConnectionReport> {
+  return environments.map((environment) => {
+    const capabilities = environment.serverConfig?.environment.capabilities;
+    return {
+      environmentId: environment.environmentId,
+      label: environment.entry.target.label,
+      urls: clientUrls(environment, undefined),
+      serverVersion: environment.serverConfig?.environment.serverVersion ?? null,
+      keepsLinkLimits:
+        capabilities === undefined
+          ? null
+          : capabilities.mcpModeLimitHeader === true && capabilities.linkFence === true,
+    };
+  });
+}
+
+/**
+ * Whether this client reaches `host` at its own loopback, so the host's loopback addresses,
+ * such as a link's local forward, are this client's too. Relay and SSH routes say no.
+ */
+export const reachesOverLoopback = (host: Pick<EnvironmentPresentation, "entry">): boolean =>
+  connectionRoutes(host.entry).some((route) => {
+    const url = route.target._tag === "RelayConnectionTarget" ? null : routeHttpBaseUrl(route);
+    return url !== null && isLoopbackUrl(url);
+  });
+
+/**
+ * Where this client can add a linked machine: the link's own address, in its order. A
+ * loopback one names the host's machine, so it counts only when this client is on it.
+ */
+export const appPairingAddress = (
+  urls: ReadonlyArray<string>,
+  onHostMachine: boolean,
+): string | null => urls.find((url) => onHostMachine || !isLoopbackUrl(url)) ?? null;
+
+/** An environment the app's server knows, with what this client can see and do about it. */
+export interface KnownEnvironmentRow extends KnownEnvironment {
+  /** This client holds a connection to it and is connected now. */
+  readonly connected: boolean;
+  /** This client holds a connection to it, connected or not. */
+  readonly inThisApp: boolean;
+  readonly reachability: "reachable" | "unreachable" | "expired" | "unknown";
+  readonly linkAccess: AuthMcpClientAccess | null;
+  /** The issue's action, when this client can take it: only the app holding a machine links it. */
+  readonly action: KnownEnvironmentAction | null;
+  /** Where this client would add the linked machine, or null when it reaches none of its addresses. */
+  readonly appAddress: string | null;
+}
+
+/**
+ * The server's environment list, as this client sees it. Linking needs this
+ * client's own session there; adding needs this client not to hold it yet.
+ */
+export function knownEnvironmentRows(
+  known: ReadonlyArray<KnownEnvironment>,
+  environments: ReadonlyArray<
+    Pick<EnvironmentPresentation, "connection"> & { readonly environmentId: EnvironmentId }
+  >,
+  host: { readonly label: string; readonly onHostMachine: boolean },
+): ReadonlyArray<KnownEnvironmentRow> {
+  const held = new Map(environments.map((environment) => [environment.environmentId, environment]));
+  return known.map((environment) => {
+    const here = held.get(environment.environmentId);
+    const connected = here?.connection.phase === "connected";
+    const wanted = environment.issue?.action ?? null;
+    const appAddress =
+      environment.link === null
+        ? null
+        : appPairingAddress(environment.link.urls, host.onHostMachine);
+    const unreachableHere = wanted === "add-to-app" && here === undefined && appAddress === null;
+    const action =
+      wanted === "add-to-app"
+        ? here === undefined && appAddress !== null
+          ? wanted
+          : null
+        : wanted === "link"
+          ? connected
+            ? wanted
+            : null
+          : wanted;
+    return {
+      ...environment,
+      // This app's own view wins over a report that has not arrived yet.
+      issue:
+        wanted === "add-to-app" && here !== undefined
+          ? null
+          : unreachableHere
+            ? {
+                action: "add-to-app",
+                message: `${host.label} reaches ${environment.label} only at its own local address, which this device cannot open. Add it from the app on ${host.label}.`,
+              }
+            : environment.issue,
+      appAddress,
+      connected,
+      inThisApp: here !== undefined,
+      reachability: environment.link?.status ?? (connected ? "reachable" : "unknown"),
+      linkAccess: environment.link?.access ?? null,
+      action,
+    };
+  });
+}
+
 /**
  * The catalog's machines other than the thread's own, in catalog order, then those only T3
  * Connect knows. `links` are the thread environment's; an expired one no longer counts as
@@ -117,13 +241,6 @@ export function linkableMachines(input: {
   const saved = input.environments
     .filter((environment) => environment.environmentId !== input.threadEnvironmentId)
     .map((environment) => {
-      const reported = (environment.serverConfig?.directEndpoints ?? []).map(
-        (endpoint) => endpoint.httpBaseUrl,
-      );
-      const routes = connectionRoutes(environment.entry).flatMap((route) => {
-        const url = route.target._tag === "RelayConnectionTarget" ? null : routeHttpBaseUrl(route);
-        return url === null ? [] : [url];
-      });
       const connect = input.connect.get(environment.environmentId)?.environment.endpoint;
       return {
         environmentId: environment.environmentId,
@@ -132,13 +249,7 @@ export function linkableMachines(input: {
         connected: environment.connection.phase === "connected",
         connectOnly: false,
         linked: linkedIds.has(environment.environmentId),
-        urls: [
-          ...new Set([
-            ...reported,
-            ...routes,
-            ...(connect === undefined ? [] : [connect.httpBaseUrl]),
-          ]),
-        ].filter((url) => !isLoopbackUrl(url)),
+        urls: clientUrls(environment, connect?.httpBaseUrl),
       };
     });
   const savedIds = new Set<string>(saved.map((machine) => machine.environmentId));

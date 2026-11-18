@@ -45,7 +45,7 @@ import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
-import { usePeerLinkHosts } from "~/state/peerLinks";
+import { hostsLinking, peerLinkEnvironment, usePeerLinkHosts } from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
@@ -257,6 +257,7 @@ function ConnectionsSettingsContent({
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const peerLinkHosts = usePeerLinkHosts();
+  const unlinkEnvironment = useAtomCommand(peerLinkEnvironment.unlink, { reportFailure: false });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
@@ -683,9 +684,12 @@ function ConnectionsSettingsContent({
     const environmentId = environment.environmentId;
     setRemovingSavedEnvironmentId(environmentId);
     setSavedBackendError(null);
+    // Read before removing: the lists are this app's, and removal changes what it reports.
+    const linkingHosts = hostsLinking(peerLinkHosts, environmentId);
     const result = await removeEnvironment(environmentId);
     setRemovingSavedEnvironmentId(null);
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+    if (result._tag === "Failure") {
+      if (isAtomCommandInterrupted(result)) return;
       const error = squashAtomCommandFailure(result);
       const message = error instanceof Error ? error.message : "Failed to remove backend.";
       setSavedBackendError(message);
@@ -696,6 +700,26 @@ function ConnectionsSettingsContent({
           description: message,
         }),
       );
+      return;
+    }
+    // The way back out of a link: agents there keep it unless the user forgets it too.
+    for (const hostId of linkingHosts) {
+      const host = peerLinkHosts.find((candidate) => candidate.environmentId === hostId);
+      const alsoUnlink = await (requestConfirmDialog(
+        `Also forget the link from ${host?.label ?? "this environment"} to ${environment.label}? Agents there stop working on ${environment.label}.`,
+        { variant: "destructive" },
+      ) ?? Promise.resolve(false));
+      if (!alsoUnlink) continue;
+      const unlinked = await unlinkEnvironment({ environmentId: hostId, input: { environmentId } });
+      if (unlinked._tag === "Failure" && !isAtomCommandInterrupted(unlinked)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not forget the link",
+            description: String(squashAtomCommandFailure(unlinked)),
+          }),
+        );
+      }
     }
   };
 

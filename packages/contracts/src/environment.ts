@@ -184,6 +184,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       (`linkOrigin`). Another environment links to this one only when it is
       set, since without it that work could change the user's own threads. */
   linkFence: Schema.optionalKey(Schema.Boolean),
+  /** An environment linked to this one can add it to its own client app, at no more than the link's access. */
+  linkedAppPairing: Schema.optionalKey(Schema.Boolean),
   /** Mints pairing codes that approve one agent sign-in at a set level (`AUTO-…`). */
   mcpApprovalCodes: Schema.optionalKey(Schema.Boolean),
   /** Agent sign-ins on its T3 Connect address are approved on the hosted app, without a code. */

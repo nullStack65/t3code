@@ -22,7 +22,7 @@ const vmLink: PeerLinkSummary = {
   status: "reachable",
 };
 
-// What the host's `peerLinks.list` answers. The CLI and agents link machines without this client.
+// What the host's `peerLinks.environments` answers. The CLI and agents link machines without this client.
 const server = vi.hoisted(() => ({
   links: [] as Array<PeerLinkSummary>,
   started: 0,
@@ -46,7 +46,17 @@ vi.mock(import("~/state/peerLinks"), async (original) => {
     EffectModule.gen(function* () {
       server.started += 1;
       yield* EffectModule.promise(() => server.answer);
-      return { links: [...server.links] };
+      return {
+        environments: server.links.map((link) => ({
+          environmentId: link.environmentId,
+          label: link.label,
+          urls: link.urls,
+          serverVersion: null,
+          link,
+          inApp: false,
+          issue: null,
+        })),
+      };
     }).pipe(
       EffectModule.onInterrupt(() =>
         EffectModule.sync(() => {
@@ -60,30 +70,33 @@ vi.mock(import("~/state/peerLinks"), async (original) => {
     ...actual,
     peerLinkEnvironment: {
       ...actual.peerLinkEnvironment,
-      list: (() => list) as never,
+      environments: (() => list) as never,
       link: { ...actual.peerLinkEnvironment.link, permissionAtom: () => denied },
       unlink: { ...actual.peerLinkEnvironment.unlink, permissionAtom: () => denied },
+      addToApp: { ...actual.peerLinkEnvironment.addToApp, permissionAtom: () => denied },
     },
   };
 });
 
-/** Stands in for the chat composer, which reads the same list while a thread is open. */
-function ComposerReader() {
-  const result = useAtomValue(peerLinkEnvironment.list({ environmentId: hostId, input: {} }));
-  return AsyncResult.isSuccess(result) ? <p>Composer loaded</p> : null;
+/** Stands in for the sidebar, which keeps the same list loaded while Settings is closed. */
+function SidebarReader() {
+  const result = useAtomValue(
+    peerLinkEnvironment.environments({ environmentId: hostId, input: {} }),
+  );
+  return AsyncResult.isSuccess(result) ? <p>Sidebar loaded</p> : null;
 }
 
 describe("LinkedEnvironmentsSettings", () => {
-  it("shows a link made elsewhere while the composer keeps the list loaded", async () => {
+  it("shows a link made elsewhere while the sidebar keeps the list loaded", async () => {
     setup();
     const registry = AtomRegistry.make();
     using _registry = { [Symbol.dispose]: () => registry.dispose() };
-    await using composer = await render(
+    await using sidebar = await render(
       <RegistryContext.Provider value={registry}>
-        <ComposerReader />
+        <SidebarReader />
       </RegistryContext.Provider>,
     );
-    await expect.element(composer.getByText("Composer loaded")).toBeVisible();
+    await expect.element(sidebar.getByText("Sidebar loaded")).toBeVisible();
 
     server.links = [vmLink];
     await using screen = await render(

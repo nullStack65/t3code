@@ -77,6 +77,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
   [WS_METHODS.peerLinksLink]: AuthAccessWriteScope,
   [WS_METHODS.peerLinksUnlink]: AuthAccessWriteScope,
+  // Hands this client a pairing credential for the linked environment.
+  [WS_METHODS.peerLinksAddToApp]: AuthAccessWriteScope,
+  // Agents here read what the app reports, so only a client that may link reports it.
+  [WS_METHODS.peerLinksReportAppConnections]: AuthAccessWriteScope,
   // A link lets every agent here reach the other environment: Settings' bar.
   [WS_METHODS.peerLinksAnswerRequest]: AuthAccessWriteScope,
 } as const;

@@ -29,6 +29,14 @@ export type PeerLinkStatus = typeof PeerLinkStatus.Type;
 export const PeerLinkSummary = Schema.Struct({
   ...PeerLink.fields,
   status: PeerLinkStatus,
+  /**
+   * Whether the peer, as it answered this listing, can add itself to this
+   * environment's client app (`peerLinks.addToApp`). Absent when it did not
+   * answer, and from servers from before the feature.
+   */
+  appPairing: Schema.optionalKey(Schema.Boolean),
+  /** The peer's T3 Code version, as it answered this listing. */
+  serverVersion: Schema.optionalKey(Schema.String),
 });
 export type PeerLinkSummary = typeof PeerLinkSummary.Type;
 
@@ -55,6 +63,87 @@ export type PeerLinkRemoveInput = typeof PeerLinkRemoveInput.Type;
 
 export const PeerLinkRemoveResult = Schema.Struct({ removed: Schema.Boolean });
 export type PeerLinkRemoveResult = typeof PeerLinkRemoveResult.Type;
+
+export const PeerLinkAddToAppInput = Schema.Struct({ environmentId: EnvironmentId });
+export type PeerLinkAddToAppInput = typeof PeerLinkAddToAppInput.Type;
+
+/**
+ * The access a client added through a link gets there. A client session has
+ * no runtime-mode ceiling, so only a full-access link adds a client that can
+ * act; every other link adds a read-only one.
+ */
+export const PeerLinkAppAccess = Schema.Literals(["read-only", "full-access"]);
+export type PeerLinkAppAccess = typeof PeerLinkAppAccess.Type;
+
+/**
+ * A one-time pairing credential the peer minted over the link, for this
+ * server's own client to add the peer as a normal connection. The peer lists
+ * the client under its Authorized clients, where it can be revoked.
+ */
+export const PeerLinkAppPairing = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  /** Where the peer answered this server, the one that answered first. */
+  urls: Schema.NonEmptyArray(TrimmedNonEmptyString),
+  credential: TrimmedNonEmptyString,
+  expiresAt: Schema.DateTimeUtc,
+  access: PeerLinkAppAccess,
+});
+export type PeerLinkAppPairing = typeof PeerLinkAppPairing.Type;
+
+/**
+ * A connection a client of this environment holds, as the client reports it:
+ * where it answers and what it runs, never its credential.
+ */
+export const AppConnectionReport = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  urls: Schema.Array(TrimmedNonEmptyString),
+  serverVersion: Schema.NullOr(Schema.String),
+  /**
+   * It holds a linked agent to its limits (`mcpModeLimitHeader` and `linkFence`), so it can be
+   * linked. Null when the client has not reached it yet and cannot tell.
+   */
+  keepsLinkLimits: Schema.NullOr(Schema.Boolean),
+});
+export type AppConnectionReport = typeof AppConnectionReport.Type;
+
+export const AppConnectionsReportInput = Schema.Struct({
+  connections: Schema.Array(AppConnectionReport),
+});
+export type AppConnectionsReportInput = typeof AppConnectionsReportInput.Type;
+
+/** The one action that brings an environment's two sides back together. */
+export const KnownEnvironmentAction = Schema.Literals([
+  "link",
+  "add-to-app",
+  "update",
+  "relink",
+  "add-address",
+]);
+export type KnownEnvironmentAction = typeof KnownEnvironmentAction.Type;
+
+export const KnownEnvironmentIssue = Schema.Struct({
+  message: Schema.String,
+  action: Schema.NullOr(KnownEnvironmentAction),
+});
+export type KnownEnvironmentIssue = typeof KnownEnvironmentIssue.Type;
+
+/**
+ * An environment this one knows: linked here for its agents, held by one of
+ * its clients' apps, or both. `issue` says why a side is missing, if one is.
+ */
+export const KnownEnvironment = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  urls: Schema.Array(TrimmedNonEmptyString),
+  serverVersion: Schema.NullOr(Schema.String),
+  link: Schema.NullOr(PeerLinkSummary),
+  /** A client of this environment reported holding a connection to it. */
+  inApp: Schema.Boolean,
+  issue: Schema.NullOr(KnownEnvironmentIssue),
+});
+export type KnownEnvironment = typeof KnownEnvironment.Type;
 
 /** Why linking or calling a peer failed, in words a user can act on. */
 export class PeerLinkError extends Schema.TaggedError<PeerLinkError>()("PeerLinkError", {

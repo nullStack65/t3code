@@ -107,6 +107,20 @@ export const clientModeCeiling = (client: McpClientCaller | undefined): ClientMo
 };
 
 /**
+ * The access a client app added through a link gets (`t3_link_app_pairing`). A
+ * client session has no runtime-mode ceiling, so it may act only when the link
+ * may act in any mode: full access, not narrowed. Anything else reads.
+ */
+export const linkedAppAccess = (client: McpClientCaller): "read-only" | "full-access" => {
+  const ceiling = clientModeCeiling(client);
+  return client.access === "full-access" &&
+    ceiling.runtimeMode === "full-access" &&
+    ceiling.interactionMode === "default"
+    ? "full-access"
+    : "read-only";
+};
+
+/**
  * A client approved above an administrator's runtime-mode ceiling acts as if it had narrowed
  * itself to the ceiling, so what it starts and schedules is not refused for a mode it never chose.
  */
@@ -256,3 +270,10 @@ export const requireThreadScope = (scope: McpInvocationScope, operation: string)
   scope.thread === undefined
     ? Effect.fail(threadCallerRequired(operation))
     : Effect.succeed(scope as McpThreadInvocationScope);
+
+/** `McpSchema.EnabledWhen` for tools only another environment's link may call. */
+export const onlyForLinks = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.client?.linked === true && scope.linkedEnvironments !== false;
+};
