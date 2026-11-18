@@ -1344,9 +1344,25 @@ describe("composerDraftStore project draft thread mapping", () => {
       // After accepting, the host can still fail the call (a read after its commit), so the
       // client gets a launch error for a launch that exists.
       let failsAfterAccepting = false;
-      // Every launch's attachment references, as sent.
-      const sends: Array<{ commandId: string; attachmentIds: ReadonlyArray<string> }> = [];
+      // Every launch's attachment references as sent, and as storage held them at that moment.
+      const sends: Array<{
+        commandId: string;
+        attachmentIds: ReadonlyArray<string>;
+        persistedIds: ReadonlyArray<string> | null;
+      }> = [];
+      const persistedAttachmentIds = (draftKey: DraftId) => {
+        const raw = memory.getItem(COMPOSER_DRAFT_STORAGE_KEY) as string | null;
+        const launch = raw
+          ? JSON.parse(raw).state.draftThreadsByThreadKey[draftKey]?.pendingLaunch
+          : undefined;
+        return launch?.attachments === undefined
+          ? null
+          : (launch.attachments as Array<{ attachment: { id: string } }>).map(
+              ({ attachment }) => attachment.id,
+            );
+      };
       const launchThere = (
+        draftKey: DraftId,
         operation: { commandId: string; messageId: string },
         sent: ThreadId,
         attachments: ReadonlyArray<{ id: string }>,
@@ -1354,6 +1370,7 @@ describe("composerDraftStore project draft thread mapping", () => {
         sends.push({
           commandId: operation.commandId,
           attachmentIds: attachments.map((attachment) => attachment.id),
+          persistedIds: persistedAttachmentIds(draftKey),
         });
         const replayed = accepted.get(operation.commandId);
         if (replayed) return replayed;
@@ -1381,11 +1398,14 @@ describe("composerDraftStore project draft thread mapping", () => {
           sizeBytes: 4,
         },
       ];
-      // The composer's send: the draft's own pending operation, or new ids; committed, then launched.
+      // The composer's send, in its order: bind the operation, clear the composer, prepare the
+      // attachments, commit their references, launch; any failure restores the draft with the
+      // launch still unknown (the one sent, or before sending, the one pending before).
       const send = (
         tab: typeof import("./composerDraftStore"),
         draftKey: DraftId,
         text: string,
+        crashBeforePayload = false,
       ) => {
         const store = tab.useComposerDraftStore.getState();
         const draft = store.getDraftSession(draftKey)!;
@@ -1394,18 +1414,33 @@ describe("composerDraftStore project draft thread mapping", () => {
           model: "claude-sonnet-4-6",
           runtimeMode: "full-access",
         });
-        const pending = draft.pendingLaunch;
-        if (pending && pending.request !== request) return { changed: true } as const;
+        const priorLaunch = draft.pendingLaunch ?? null;
+        if (priorLaunch && priorLaunch.request !== request) return { changed: true } as const;
         allocated += 1;
-        const operation = pending ?? {
+        const operation = priorLaunch ?? {
           commandId: `command-${allocated}`,
           messageId: `message-${allocated}`,
           createdAt: "2026-11-18T00:00:00.000Z",
           request,
         };
         const sentRef = scopeThreadRef(draft.environmentId, draft.threadId);
-        if (tab.markPromotedDraftThreadByRef(sentRef, operation) === false)
+        const fail = (launchAttempted: boolean) => {
+          tab.restoreFailedDraftThread(
+            draftKey,
+            draft,
+            draft.threadId,
+            launchAttempted ? operation : priorLaunch,
+          );
+          tab.useComposerDraftStore.getState().setPrompt(draftKey, text);
+          tab.markRestoredLaunchCopy(draftKey);
+        };
+        const bound = tab.markPromotedDraftThreadByRef(sentRef, operation);
+        store.clearComposerContent(draftKey);
+        if (!bound) {
+          fail(false);
           return { unbound: true } as const;
+        }
+        if (crashBeforePayload) return { crashed: true } as const;
         // A retry sends the references its launch committed; a first send commits them first.
         const attachments = operation.attachments?.map(({ attachment }) => attachment) ?? prepare();
         if (storageFailsBeforePayload) storageFails = true;
@@ -1417,17 +1452,16 @@ describe("composerDraftStore project draft thread mapping", () => {
             operation.commandId,
             attachments.map((attachment) => ({ attachment, inline: false })),
           )
-        )
+        ) {
+          fail(false);
           return { unbound: true } as const;
-        store.clearComposerContent(draftKey);
-        const answer = launchThere(operation, draft.threadId, attachments);
+        }
+        const answer = launchThere(draftKey, operation, draft.threadId, attachments);
         if ("runId" in answer) {
           tab.finalizePromotedDraftThreadByRef(sentRef);
           return { launched: answer, operation } as const;
         }
-        tab.restoreFailedDraftThread(draftKey, draft, draft.threadId, operation);
-        tab.useComposerDraftStore.getState().setPrompt(draftKey, text);
-        tab.markRestoredLaunchCopy(draftKey);
+        fail(true);
         return { failed: answer, operation } as const;
       };
 
@@ -1467,8 +1501,16 @@ describe("composerDraftStore project draft thread mapping", () => {
       expect(accepted.size).toBe(1);
       // Both sends of that operation carried the same upload, though a new one was available.
       expect(sends.filter((sent) => sent.commandId === "command-1")).toEqual([
-        { commandId: "command-1", attachmentIds: ["pending-upload-1"] },
-        { commandId: "command-1", attachmentIds: ["pending-upload-1"] },
+        {
+          commandId: "command-1",
+          attachmentIds: ["pending-upload-1"],
+          persistedIds: ["pending-upload-1"],
+        },
+        {
+          commandId: "command-1",
+          attachmentIds: ["pending-upload-1"],
+          persistedIds: ["pending-upload-1"],
+        },
       ]);
       // Settled into its thread, the accepted message is not left to be sent again.
       expect(after.useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
@@ -1499,6 +1541,44 @@ describe("composerDraftStore project draft thread mapping", () => {
       storageDropsBeforePayload = true;
       expect(send(after, otherDraftId, "Another task")).toEqual({ unbound: true });
       expect(sends.length).toBe(sendsBefore);
+      storageDrops = false;
+      storageDropsBeforePayload = false;
+
+      // The renderer dies after binding a launch, before its attachments were prepared, so its
+      // operation is stored without references. After the reload the draft comes back unsent.
+      const crashDraftId = DraftId.make("draft-crash");
+      const crashThreadId = ThreadId.make("thread-crash");
+      after.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(projectRef, crashDraftId, { threadId: crashThreadId });
+      after.useComposerDraftStore.getState().setPrompt(crashDraftId, "Crash task");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(send(after, crashDraftId, "Crash task", true)).toEqual({ crashed: true });
+      vi.clearAllTimers();
+      vi.resetModules();
+      const crashed = await import("./composerDraftStore");
+      const unsent = crashed.useComposerDraftStore.getState().getDraftSession(crashDraftId)!;
+      crashed.restoreFailedDraftThread(crashDraftId, unsent, crashThreadId, unsent.pendingLaunch);
+      crashed.useComposerDraftStore.getState().setPrompt(crashDraftId, "Crash task");
+      crashed.markRestoredLaunchCopy(crashDraftId);
+      // A retry commits its binding, then cannot commit its references, nor the restore after.
+      storageFailsBeforePayload = true;
+      expect(send(crashed, crashDraftId, "Crash task")).toEqual({ unbound: true });
+      storageFails = false;
+      storageFailsBeforePayload = false;
+      // The next retry's binding write is dropped silently, while the stored binding still matches.
+      storageDrops = true;
+      const dropped = send(crashed, crashDraftId, "Crash task");
+      storageDrops = false;
+      // Every launch went out only with references storage already held for its operation.
+      for (const sent of sends) expect(sent.persistedIds).toEqual(sent.attachmentIds);
+      expect(dropped).toEqual({ unbound: true });
+      // Once storage takes the writes again, the retry goes out, its references stored first.
+      expect(send(crashed, crashDraftId, "Crash task")).toMatchObject({ launched: {} });
+      for (const sent of sends) expect(sent.persistedIds).toEqual(sent.attachmentIds);
+      expect(
+        [...accepted.keys()].filter((commandId) => commandId === unsent.pendingLaunch?.commandId),
+      ).toHaveLength(1);
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();

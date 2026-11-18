@@ -152,7 +152,8 @@ jobs:
             apps/server/src/peer/RemoteDelegation.test.ts \
             apps/server/src/mcp/OrchestratorMcpService.test.ts \
             apps/server/src/cli/thread.test.ts \
-            apps/web/src/composerDraftStore.test.ts
+            apps/web/src/composerDraftStore.test.ts \
+            apps/web/src/components/chat/composerSend.logic.test.ts
 
       - name: Build native T3 server
         shell: bash

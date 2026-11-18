@@ -4877,13 +4877,18 @@ export function markPromotedDraftThreadByRef(
   return false;
 }
 
-/** The stored bytes hold `launch` for each draft; read after the flush that committed it. */
+/**
+ * The stored bytes hold all of `launch` for each draft, references included; read after the
+ * flush that committed it. A matching command id alone is not the operation about to go out.
+ */
 function commitsPendingLaunch(draftIds: ReadonlyArray<string>, launch: PendingDraftLaunch) {
   try {
     const stored = readStoredComposerDraftState();
-    return draftIds.every(
-      (draftId) =>
-        stored?.draftThreadsByThreadKey[draftId]?.pendingLaunch?.commandId === launch.commandId,
+    return draftIds.every((draftId) =>
+      pendingLaunchesEqual(
+        storedPendingLaunch(stored?.draftThreadsByThreadKey[draftId]?.pendingLaunch),
+        launch,
+      ),
     );
   } catch {
     return false;
@@ -5008,19 +5013,41 @@ export function commitPendingLaunchPayload(
     )
     .map(([draftId]) => draftId);
   if (draftIds.length === 0) return false;
-  useComposerDraftStore.setState((state) => ({
-    draftThreadsByThreadKey: Object.fromEntries(
-      Object.entries(state.draftThreadsByThreadKey).map(([draftId, draftThread]) => [
-        draftId,
-        draftIds.includes(draftId) && draftThread.pendingLaunch
-          ? {
+  const prior = new Map(
+    draftIds.map((draftId) => [
+      draftId,
+      useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.pendingLaunch?.attachments,
+    ]),
+  );
+  const setAttachments = (pick: (draftId: string) => SentLaunchAttachment[] | undefined) =>
+    useComposerDraftStore.setState((state) => ({
+      draftThreadsByThreadKey: Object.fromEntries(
+        Object.entries(state.draftThreadsByThreadKey).map(([draftId, draftThread]) => {
+          if (!draftIds.includes(draftId) || !draftThread.pendingLaunch)
+            return [draftId, draftThread];
+          const { attachments: _replaced, ...launch } = draftThread.pendingLaunch;
+          const next = pick(draftId);
+          return [
+            draftId,
+            {
               ...draftThread,
-              pendingLaunch: { ...draftThread.pendingLaunch, attachments: [...attachments] },
-            }
-          : draftThread,
-      ]),
-    ),
-  }));
+              pendingLaunch: next === undefined ? launch : { ...launch, attachments: next },
+            },
+          ];
+        }),
+      ),
+    }));
+  setAttachments(() => [...attachments]);
+  // Uncommitted references never stay behind to pass as sent: each draft keeps what it had.
+  const committed = commitsLaunchAttachments(draftIds, attachments);
+  if (!committed) setAttachments((draftId) => prior.get(draftId));
+  return committed;
+}
+
+function commitsLaunchAttachments(
+  draftIds: ReadonlyArray<string>,
+  attachments: ReadonlyArray<SentLaunchAttachment>,
+): boolean {
   try {
     composerDebouncedStorage.flush();
     const stored = readStoredComposerDraftState();
