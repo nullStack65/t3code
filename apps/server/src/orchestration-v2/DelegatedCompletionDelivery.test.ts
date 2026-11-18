@@ -4865,7 +4865,7 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       );
       assert.equal(
         wake?.text,
-        `Delegated task ${child.taskId} [completed] raised a worker alert (child <t3-thread://v1/${child.childThreadId}>):\n${notice}\n\n${reply}`,
+        `Delegated task ${child.taskId} [completed] (child <t3-thread://v1/${child.childThreadId}>):\n${notice}\n\n${reply}`,
       );
     }),
   );

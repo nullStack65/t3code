@@ -32,6 +32,7 @@ import {
   endRunlessRootTurns,
   PROVIDER_STOP_REASON_SIGNAL,
   withholdsTask,
+  workerAlert,
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
@@ -595,8 +596,20 @@ it.each([
   ["The PR is open and awaiting review.", false],
   ["Added a test for the holding-pattern parser.", false],
   ["Fixed the bug where the queue kept holding stale entries.", false],
+  ["The review quotes the old message: holding until the cache warms.", false],
+  [`${"Implemented and tested the change. ".repeat(30)}I need your approval to merge.`, false],
 ])("withholdsTask(%j) is %s", (text, expected) => {
   assert.equal(withholdsTask(text), expected);
+});
+
+it("ignores a context-window suffix when comparing models", () => {
+  assert.isUndefined(
+    workerAlert({
+      requestedModel: "claude-opus-5-5[1m]",
+      executedModel: "claude-opus-5-5",
+      finalText: "Done.",
+    }),
+  );
 });
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>

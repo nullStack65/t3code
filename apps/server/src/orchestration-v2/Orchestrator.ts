@@ -939,7 +939,9 @@ function delegatedCompletionWakeDetail(
       const alert =
         task?.workerAlert === undefined
           ? ""
-          : ` raised a worker alert${child === undefined ? "" : ` (child ${formatThreadLink(child, task.title ?? undefined)})`}`;
+          : child === undefined
+            ? ""
+            : ` (child ${formatThreadLink(child, task.title ?? undefined)})`;
       const label = `Delegated task ${taskId}${task?.title == null ? "" : ` (${task.title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}${alert}`;
       if (task?.result != null) {
         const detail = `${label}:\n${task.result}`;

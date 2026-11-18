@@ -3456,10 +3456,12 @@ const make = Effect.gen(function* () {
       const runs = target.runs
         .toSorted((left, right) => right.ordinal - left.ordinal)
         .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT);
-      // Only the latest run is judged, so a read loads one run's replies and notices.
+      // Only an agent-created thread's latest run is judged, so a read loads one run's replies and notices.
       const latestRun = runs[0];
       const latestAlert =
-        latestRun === undefined || !ThreadManagementService.isTerminalRunStatus(latestRun.status)
+        latestRun === undefined ||
+        target.thread.createdBy !== "agent" ||
+        !ThreadManagementService.isTerminalRunStatus(latestRun.status)
           ? undefined
           : subagentResultForRun(
               {

@@ -195,17 +195,27 @@ export function makeSubagentConversationArtifacts(input: {
 // Small on purpose: a match only flags the worker for its parent, which decides what to do.
 const WITHHELD_TASK_PATTERNS: ReadonlyArray<RegExp> = [
   /\b(?:i am|i'm|i will keep|i'll keep|i'm keeping|keeping)\s+(?:this\s+|it\s+|the task\s+)?(?:on hold|holding)\b/i,
-  /\bholding\s+(?:off|here|until|for|pending)\b/i,
+  /\bholding\s+(?:off|here)\b/i,
   /\bdirect(?:ly)?\s+(?:confirmation|approval|go-ahead)\b/i,
   /\bconfirm\s+(?:directly|with me)\b/i,
   /\b(?:i need|i'd need|i would need|i require)\s+(?:(?:your|explicit|written)\s+)*(?:confirmation|approval|go-ahead|authori[sz]ation)\b/i,
   /\bi\s+(?:won't|will not|can't|cannot|can not)\s+(?:proceed|continue|help with|carry out|do this)\b/i,
 ];
 
-/** True when a worker's final message holds, refuses, or asks for confirmation instead of reporting work. */
+// A held or refused task ends in a short reply; a long report that asks for a decision did the work.
+const WITHHELD_TASK_MAX_LENGTH = 800;
+
+/** True when a worker's short final message holds, refuses, or asks for confirmation instead of reporting work. */
 export function withholdsTask(text: string): boolean {
-  return WITHHELD_TASK_PATTERNS.some((pattern) => pattern.test(text.replaceAll("\u2019", "'")));
+  const reply = text.trim();
+  return (
+    reply.length <= WITHHELD_TASK_MAX_LENGTH &&
+    WITHHELD_TASK_PATTERNS.some((pattern) => pattern.test(reply.replaceAll("\u2019", "'")))
+  );
 }
+
+// Context-window and similar suffixes, such as `[1m]`, name the same model.
+const baseModel = (model: string) => model.replace(/\[[^\]]*\]$/, "");
 
 /** What made a worker's run unfit for its task, or undefined when nothing did. */
 export function workerAlert(input: {
@@ -218,7 +228,11 @@ export function workerAlert(input: {
   const reasons: Array<OrchestrationV2WorkerAlertReason> = [];
   const parts: Array<string> = [];
   const { requestedModel, executedModel } = input;
-  if (requestedModel != null && executedModel != null && executedModel !== requestedModel) {
+  if (
+    requestedModel != null &&
+    executedModel != null &&
+    baseModel(executedModel) !== baseModel(requestedModel)
+  ) {
     reasons.push("model_substituted");
     parts.push(`it ran ${executedModel} instead of ${requestedModel}`);
   }
