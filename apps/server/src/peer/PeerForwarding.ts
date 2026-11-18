@@ -348,37 +348,17 @@ const make = Effect.gen(function* () {
     function* (scope) {
       yield* forwardingCaller(scope);
       yield* requireEnabled;
-      // The same list Settings shows, so agents and the app never disagree on what exists.
-      const known = yield* links.environments.pipe(Effect.mapError(linkStorageFailure));
-      const inAppOnly = known.flatMap((environment) =>
-        environment.link === null && environment.issue !== null
-          ? [
-              {
-                environmentId: environment.environmentId,
-                label: environment.label,
-                serverVersion: environment.serverVersion,
-                why: environment.issue.message,
-              },
-            ]
-          : [],
-      );
+      const listed = yield* links.list.pipe(Effect.mapError(linkStorageFailure));
       return {
         environmentId: scope.environmentId,
-        links: known.flatMap(({ link }) =>
-          link === null
-            ? []
-            : [
-                {
-                  environmentId: link.environmentId,
-                  label: link.label,
-                  status: link.status,
-                  access: link.access,
-                  expiresAt: DateTime.formatIso(link.expiresAt),
-                  lastError: link.lastError,
-                },
-              ],
-        ),
-        ...(inAppOnly.length === 0 ? {} : { inAppOnly }),
+        links: listed.map((link) => ({
+          environmentId: link.environmentId,
+          label: link.label,
+          status: link.status,
+          access: link.access,
+          expiresAt: DateTime.formatIso(link.expiresAt),
+          lastError: link.lastError,
+        })),
         notListed: NOT_LISTED,
       };
     },

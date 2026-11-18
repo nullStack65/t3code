@@ -118,7 +118,7 @@ export class PeerLinks extends Context.Service<
     ) => Effect.Effect<void>;
     /**
      * Every environment this one knows, links and app connections in one list,
-     * each saying why it is on one side only. Settings and agents both read it.
+     * each saying why it is on one side only. Settings reads it over client RPC; agents never see it.
      */
     readonly environments: Effect.Effect<ReadonlyArray<KnownEnvironment>, PeerLinkError>;
     /**
