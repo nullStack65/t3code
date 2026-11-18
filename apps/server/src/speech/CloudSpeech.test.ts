@@ -1,3 +1,4 @@
+// @effect-diagnostics processEnvInEffect:off - checks that the host key leaves the live environment.
 import { it } from "@effect/vitest";
 import {
   DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
@@ -5,6 +6,7 @@ import {
   type SpeechTranscriptionOptions,
 } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -300,5 +302,55 @@ it.effect(
       yield* service.setKey("assemblyai", null);
       expect((yield* service.configured).assemblyai).toBe(false);
       expect(yield* Effect.flip(transcribe(1600))).toMatchObject({ reason: "missing-key" });
+    }),
+);
+
+it.effect(
+  "a host-injected AssemblyAI key works without settings and never outranks a saved key",
+  () =>
+    Effect.gen(function* () {
+      const upstream = vi.fn<typeof fetch>(async () => Response.json({ text: "hello" }));
+      process.env.ASSEMBLYAI_API_KEY = "host-fixture";
+      const service = yield* CloudSpeech.CloudSpeech.pipe(
+        Effect.provide(
+          CloudSpeech.layer.pipe(
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
+            Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+            Layer.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { ASSEMBLYAI_API_KEY: " host-fixture\n" } }),
+              ),
+            ),
+          ),
+        ),
+      );
+      // Agent subprocesses must not inherit the key.
+      expect(process.env.ASSEMBLYAI_API_KEY).toBeUndefined();
+      const authorization = () =>
+        new Headers(upstream.mock.calls.at(-1)![1]?.headers).get("authorization");
+      const transcribe = () =>
+        service
+          .transcribe("assemblyai", new Uint8Array(new Float32Array(1600).buffer), {
+            ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
+          })
+          .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream));
+      expect(yield* service.configured).toEqual({
+        openai: false,
+        xai: false,
+        openrouter: false,
+        assemblyai: true,
+        hostManaged: ["assemblyai"],
+      });
+      expect(yield* transcribe()).toBe("hello");
+      expect(authorization()).toBe("host-fixture");
+      yield* service.setKey("assemblyai", Redacted.make("saved-fixture"));
+      expect((yield* service.configured).hostManaged).toBeUndefined();
+      yield* transcribe();
+      expect(authorization()).toBe("saved-fixture");
+      yield* service.setKey("assemblyai", null);
+      expect((yield* service.configured).hostManaged).toEqual(["assemblyai"]);
+      yield* transcribe();
+      expect(authorization()).toBe("host-fixture");
     }),
 );

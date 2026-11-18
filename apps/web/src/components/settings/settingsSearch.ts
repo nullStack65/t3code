@@ -544,7 +544,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Transcribe with",
     to: "/settings/voice",
     searchTerms: [
-      "send microphone audio dictation destination speech voice stt transcription environment machine consent privacy cloud OpenAI Grok OpenRouter",
+      "send microphone audio dictation destination speech voice stt transcription backend environment machine consent privacy cloud AssemblyAI OpenAI Grok OpenRouter",
     ],
   },
   {

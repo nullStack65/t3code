@@ -46,6 +46,7 @@ const grantKey = "t3code:voice-audio-grant:v1";
 async function withVoicePanel(
   route: (url: URL, request: RequestInfo | URL, init?: RequestInit) => Promise<Response> | null,
   body: (screen: Awaited<ReturnType<typeof render>>) => Promise<void>,
+  { connected = true, path = "/" }: { connected?: boolean; path?: string } = {},
 ) {
   const target = new PrimaryConnectionTarget({
     environmentId: id,
@@ -53,12 +54,13 @@ async function withVoicePanel(
     httpBaseUrl: window.location.origin,
     wsBaseUrl: "ws://localhost",
   });
-  const prepared = Option.some({
+  const connection = Option.some({
     ...target,
     target,
     socketUrl: target.wsBaseUrl,
     httpAuthorization: null,
   });
+  const prepared = connected ? connection : Option.none();
   using cleanup = new DisposableStack();
   cleanup.defer(() => chooseAudioDestination(null));
   const fetch = globalThis.fetch;
@@ -76,6 +78,7 @@ async function withVoicePanel(
             <SettingsScopeProvider search={{}} onChange={() => {}}>
               <VoiceSettingsPanel />
             </SettingsScopeProvider>,
+            { router: path },
           );
           await body(screen);
         },
@@ -99,13 +102,13 @@ it("cancelling a provider's setup keeps the current destination and writes nothi
     },
     async (screen) => {
       const destination = screen.getByRole("combobox", { name: "Transcribe with" });
-      await expect.element(destination).toHaveTextContent("Laptop");
+      await expect.element(destination).toHaveTextContent("Local model");
       await destination.click();
-      await page.getByRole("option", { name: "OpenAI via Laptop" }).click();
+      await page.getByRole("option", { name: "OpenAI" }).click();
       const dialog = page.getByRole("dialog");
       await dialog.getByRole("button", { name: "Cancel" }).click();
       await expect.element(dialog).not.toBeInTheDocument();
-      await expect.element(destination).toHaveTextContent("Laptop");
+      await expect.element(destination).toHaveTextContent("Local model");
       expect(writes).toEqual([]);
     },
   );
@@ -132,7 +135,7 @@ it("enables the chosen provider only after a successful setup", async () => {
     async (screen) => {
       const destination = screen.getByRole("combobox", { name: "Transcribe with" });
       await destination.click();
-      await page.getByRole("option", { name: "OpenAI via Laptop" }).click();
+      await page.getByRole("option", { name: "OpenAI" }).click();
       const dialog = page.getByRole("dialog");
       await dialog.getByRole("combobox", { name: "OpenAI API key source" }).click();
       await page.getByRole("option", { name: "Work vault" }).click();
@@ -144,7 +147,7 @@ it("enables the chosen provider only after a successful setup", async () => {
       await dialog.getByLabelText("OpenAI API key reference").click();
       await userEvent.keyboard("{Enter}");
       await expect.element(dialog).not.toBeInTheDocument();
-      await expect.element(destination).toHaveTextContent("OpenAI via Laptop");
+      await expect.element(destination).toHaveTextContent("OpenAI");
       expect(writes).toEqual([{ key: { provider: "work", reference: "op://Work/Voice/key" } }]);
     },
   );
@@ -186,12 +189,12 @@ it("uses a provider's saved key without writing it, and turns dictation off", as
     async (screen) => {
       const destination = screen.getByRole("combobox", { name: "Transcribe with" });
       await destination.click();
-      await page.getByRole("option", { name: "Grok Voice Transcribe via Laptop" }).click();
+      await page.getByRole("option", { name: "Grok Voice Transcribe" }).click();
       await page
         .getByRole("dialog")
         .getByRole("button", { name: "Use Grok Voice Transcribe" })
         .click();
-      await expect.element(destination).toHaveTextContent("Grok Voice Transcribe via Laptop");
+      await expect.element(destination).toHaveTextContent("Grok Voice Transcribe");
       await destination.click();
       await page.getByRole("option", { name: "Off", exact: true }).click();
       await expect.element(destination).toHaveTextContent("Off");
@@ -230,7 +233,7 @@ it("OpenRouter needs an exact model, and changing it writes no credential", asyn
     async (screen) => {
       const destination = screen.getByRole("combobox", { name: "Transcribe with" });
       await destination.click();
-      await page.getByRole("option", { name: "OpenRouter via Laptop" }).click();
+      await page.getByRole("option", { name: "OpenRouter" }).click();
       const dialog = page.getByRole("dialog");
       const save = dialog.getByRole("button", { name: "Save and enable" });
       await expect.element(save).toBeDisabled();
@@ -246,7 +249,7 @@ it("OpenRouter needs an exact model, and changing it writes no credential", asyn
       await key.fill("");
       await save.click();
       await expect.element(dialog).not.toBeInTheDocument();
-      await expect.element(destination).toHaveTextContent("OpenRouter via Laptop");
+      await expect.element(destination).toHaveTextContent("OpenRouter");
       expect(grantModel()).toBe("other/listen-2");
       expect(writes).toEqual([]);
       await screen.getByRole("button", { name: "Manage OpenRouter" }).click();
@@ -256,9 +259,89 @@ it("OpenRouter needs an exact model, and changing it writes no credential", asyn
       await page.getByRole("option", { name: /Acme: Transcribe 1/ }).click();
       await dialog.getByRole("button", { name: "Save" }).click();
       await expect.element(dialog).not.toBeInTheDocument();
-      await expect.element(destination).toHaveTextContent("OpenRouter via Laptop");
+      await expect.element(destination).toHaveTextContent("OpenRouter");
       expect(grantModel()).toBe("acme/transcribe-1");
       expect(writes).toEqual([]);
     },
+  );
+});
+
+/** Every step either offers a real next action or names nothing the user can't find. */
+function expectNoDeadEnd(dialog: ReturnType<typeof page.getByRole>) {
+  const element = dialog.element();
+  const buttons = [...element.querySelectorAll("button")].map((button) =>
+    button.textContent.trim(),
+  );
+  const forward = buttons.filter((label) => label && !["Cancel", "Close"].includes(label));
+  expect(forward.length).toBeGreaterThan(0);
+  for (const [, name] of element.textContent.matchAll(
+    /\b(?:press|click|tap|hit|open)\s+([A-Z][\w ]*?)(?=[ .,]|$)/g,
+  ))
+    expect(buttons.some((label) => label.includes(name!))).toBe(true);
+  if (/\bcontinue\b/i.test(element.textContent)) expect(buttons).toContain("Continue");
+}
+
+it("a backend on a disconnected environment points to a real control, never a missing Continue", async () => {
+  chooseAudioDestination(null);
+  await withVoicePanel(
+    () => null,
+    async (screen) => {
+      await screen.getByRole("combobox", { name: "Transcribe with" }).click();
+      await page.getByRole("option", { name: /AssemblyAI/ }).click();
+      const dialog = page.getByRole("dialog");
+      await expect
+        .element(dialog.getByText("Laptop isn’t connected.", { exact: false }))
+        .toBeVisible();
+      expectNoDeadEnd(dialog);
+      await dialog.getByRole("button", { name: "Open Environments" }).click();
+      await expect.element(dialog).not.toBeInTheDocument();
+      expect(screen.router?.state.location.pathname).toBe("/settings/connections");
+    },
+    { connected: false },
+  );
+});
+
+it("AssemblyAI with a host-provided key enables in one step, with nothing to type or remove", async () => {
+  // Never chosen, unlike an explicit Off.
+  window.localStorage.removeItem(grantKey);
+  const writes: unknown[] = [];
+  await withVoicePanel(
+    (url) => {
+      if (url.pathname === "/api/voice/cloud/keys")
+        return Promise.resolve(
+          Response.json({
+            openai: false,
+            xai: false,
+            assemblyai: true,
+            hostManaged: ["assemblyai"],
+          }),
+        );
+      if (url.pathname.endsWith("/key")) writes.push(url.pathname);
+      return null;
+    },
+    async (screen) => {
+      // The composer's mic sends first-time users here; the recommended backend is offered at once.
+      const dialog = page.getByRole("dialog");
+      await expect.element(dialog.getByText("Use AssemblyAI for dictation?")).toBeVisible();
+      await expect
+        .element(
+          dialog.getByText("was started with, so there’s nothing to enter", { exact: false }),
+        )
+        .toBeVisible();
+      expect(dialog.element().querySelector("input")).toBeNull();
+      expectNoDeadEnd(dialog);
+      await dialog.getByRole("button", { name: "Use AssemblyAI" }).click();
+      await expect.element(dialog).not.toBeInTheDocument();
+      const destination = screen.getByRole("combobox", { name: "Transcribe with" });
+      await expect.element(destination).toHaveTextContent("AssemblyAI");
+      await screen.getByRole("button", { name: "Manage key" }).click();
+      await expect.element(dialog).toBeVisible();
+      expect(dialog.element().querySelector("input")).toBeNull();
+      await expect
+        .element(dialog.getByRole("button", { name: "Remove key…" }))
+        .not.toBeInTheDocument();
+      expect(writes).toEqual([]);
+    },
+    { path: "/settings/voice#voice-transcription-destination" },
   );
 });
