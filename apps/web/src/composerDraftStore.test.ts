@@ -1133,6 +1133,191 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
   });
 
+  it("keeps a draft whose send failed on the machine it was sent to, across a reload", () => {
+    const store = useComposerDraftStore.getState();
+    const remoteProjectRef = scopeProjectRef(OTHER_TEST_ENVIRONMENT_ID, projectRef.projectId);
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: TEST_ENVIRONMENT_ID,
+    });
+    const sentDraft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    markPromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, threadId));
+    // The answer never came: the machine may have started this thread, so its id stays there.
+    restoreFailedDraftThread(draftId, sentDraft, threadId);
+    // A reload keeps that, as the send's promotion itself was kept.
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    useComposerDraftStore.setState(
+      merge(
+        JSON.parse(
+          JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+        ),
+        useComposerDraftStore.getInitialState(),
+      ),
+    );
+    const sentTo = () => useComposerDraftStore.getState().getDraftSession(draftId);
+
+    // Neither automatic balancing nor a manual switch moves it to another machine.
+    useComposerDraftStore.getState().setDraftThreadContext(draftId, {
+      projectRef: remoteProjectRef,
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+    });
+    useComposerDraftStore
+      .getState()
+      .setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+    expect(sentTo()).toMatchObject({ environmentId: TEST_ENVIRONMENT_ID, threadId });
+    // Its own machine's settings still change.
+    useComposerDraftStore.getState().setDraftThreadContext(draftId, { branch: "retry-base" });
+    expect(sentTo()?.branch).toBe("retry-base");
+
+    // A send the machine refused for good restores under a new id, which may go anywhere.
+    restoreFailedDraftThread(draftId, sentDraft, ThreadId.make("new-intent"));
+    useComposerDraftStore
+      .getState()
+      .setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+    expect(sentTo()?.environmentId).toBe(OTHER_TEST_ENVIRONMENT_ID);
+  });
+
+  it("commits a send's machine to storage before its launch, and launches nothing when it cannot", async () => {
+    let storageFails = false;
+    let storageDrops = false;
+    const memory = createMemoryStorage();
+    const sharedStorage = {
+      getItem: (name: string) => memory.getItem(name),
+      removeItem: (name: string) => memory.removeItem(name),
+      setItem: (name: string, value: string) => {
+        if (storageFails) throw new Error("QuotaExceededError");
+        if (storageDrops) return;
+        memory.setItem(name, value);
+      },
+    };
+    vi.stubGlobal("localStorage", sharedStorage);
+    vi.stubGlobal("window", new EventTarget());
+    vi.useFakeTimers();
+    vi.resetModules();
+    try {
+      const remoteProjectRef = scopeProjectRef(OTHER_TEST_ENVIRONMENT_ID, projectRef.projectId);
+      const sentRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+      const committedDraft = () =>
+        JSON.parse(sharedStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) as string).state
+          .draftThreadsByThreadKey[draftId];
+      let launches = 0;
+      // The composer launches only once the send's machine is committed.
+      const send = (tab: typeof import("./composerDraftStore")) => {
+        if (tab.markPromotedDraftThreadByRef(sentRef) === false) return;
+        launches += 1;
+      };
+      const before = await import("./composerDraftStore");
+      before.useComposerDraftStore.getState().setProjectDraftThreadId(projectRef, draftId, {
+        threadId,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: TEST_ENVIRONMENT_ID,
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(committedDraft()?.promotedTo ?? null).toBeNull();
+
+      // At the launch, with the deferred write still pending, storage already holds the machine.
+      send(before);
+      expect(launches).toBe(1);
+      expect(committedDraft()?.promotedTo).toEqual(sentRef);
+
+      // The renderer dies with its pending writes; the reload reads only what was committed.
+      vi.clearAllTimers();
+      vi.resetModules();
+      const after = await import("./composerDraftStore");
+      const store = after.useComposerDraftStore.getState();
+      store.setDraftThreadContext(draftId, {
+        projectRef: remoteProjectRef,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+      });
+      store.setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+      expect(after.useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+        environmentId: TEST_ENVIRONMENT_ID,
+        threadId,
+      });
+
+      // A later send of that reloaded draft fails to commit (an edit is pending, storage throws).
+      // It launches nothing and must keep the earlier, possibly accepted, binding.
+      const retriedDraft = after.useComposerDraftStore.getState().getDraftSession(draftId)!;
+      after.useComposerDraftStore.getState().setPrompt(draftId, "retry after reload");
+      storageFails = true;
+      const launchesBeforeRetry = launches;
+      send(after);
+      expect(launches).toBe(launchesBeforeRetry);
+      after.restoreFailedDraftThread(draftId, retriedDraft, threadId);
+      after.useComposerDraftStore.getState().setDraftThreadContext(draftId, {
+        projectRef: remoteProjectRef,
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+      });
+      after.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+      expect(after.useComposerDraftStore.getState().getDraftSession(draftId)?.environmentId).toBe(
+        TEST_ENVIRONMENT_ID,
+      );
+      // Storage recovers and the pending write lands; a reload from it still keeps the binding.
+      storageFails = false;
+      await vi.advanceTimersByTimeAsync(300);
+      vi.clearAllTimers();
+      vi.resetModules();
+      const recovered = await import("./composerDraftStore");
+      recovered.useComposerDraftStore
+        .getState()
+        .setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+      recovered.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(remoteProjectRef, draftId, { environmentSelection: "manual" });
+      expect(recovered.useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+        environmentId: TEST_ENVIRONMENT_ID,
+        threadId,
+      });
+
+      // An unconfirmed outcome keeps that binding through the next reload too.
+      const sentDraft = recovered.useComposerDraftStore.getState().getDraftSession(draftId)!;
+      recovered.restoreFailedDraftThread(draftId, sentDraft, threadId);
+      vi.clearAllTimers();
+      vi.resetModules();
+      const reloaded = await import("./composerDraftStore");
+      reloaded.useComposerDraftStore
+        .getState()
+        .setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+      expect(
+        reloaded.useComposerDraftStore.getState().getDraftSession(draftId)?.environmentId,
+      ).toBe(TEST_ENVIRONMENT_ID);
+
+      // When storage cannot commit the machine, nothing launches.
+      reloaded.useComposerDraftStore
+        .getState()
+        .setProjectDraftThreadId(projectRef, otherDraftId, { threadId: otherThreadId });
+      await vi.advanceTimersByTimeAsync(300);
+      storageFails = true;
+      const failedLaunches = launches;
+      if (
+        reloaded.markPromotedDraftThreadByRef(
+          scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId),
+        ) !== false
+      )
+        launches += 1;
+      expect(launches).toBe(failedLaunches);
+      // Nor when storage drops the write without saying so: only the stored bytes count.
+      storageFails = false;
+      storageDrops = true;
+      expect(
+        reloaded.markPromotedDraftThreadByRef(scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId)),
+      ).toBe(false);
+      expect(
+        reloaded.useComposerDraftStore.getState().getDraftSession(otherDraftId)?.promotedTo,
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
   it("restores a failed draft without changing the fresh draft", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });

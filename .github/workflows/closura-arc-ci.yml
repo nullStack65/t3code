@@ -151,7 +151,8 @@ jobs:
             packages/shared/src/threadPlacement.test.ts \
             apps/server/src/peer/RemoteDelegation.test.ts \
             apps/server/src/mcp/OrchestratorMcpService.test.ts \
-            apps/server/src/cli/thread.test.ts
+            apps/server/src/cli/thread.test.ts \
+            apps/web/src/composerDraftStore.test.ts
 
       - name: Build native T3 server
         shell: bash

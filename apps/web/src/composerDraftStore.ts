@@ -428,6 +428,14 @@ const PersistedDraftThreadState = Schema.Struct({
       }),
     ),
   ),
+  sentTo: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        environmentId: Schema.String,
+        threadId: Schema.String,
+      }),
+    ),
+  ),
 });
 type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
 
@@ -519,6 +527,8 @@ export interface DraftSessionState {
   /** Linked to the thread when the draft is sent on this branch. */
   checkoutPullRequest?: DraftCheckoutPullRequest;
   promotedTo?: ScopedThreadRef | null;
+  /** A send whose outcome was not confirmed: that machine may have started this thread id. */
+  sentTo?: ScopedThreadRef | null;
 }
 
 export type DraftThreadState = DraftSessionState;
@@ -1752,6 +1762,9 @@ function createDraftThreadState(
     startFromOrigin: nextStartFromOrigin,
     ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
     promotedTo: null,
+    ...(existingThread?.sentTo && existingThread.threadId === threadId
+      ? { sentTo: existingThread.sentTo }
+      : {}),
   };
 }
 
@@ -1770,6 +1783,33 @@ function checkoutPullRequestsEqual(
   right: DraftCheckoutPullRequest | undefined,
 ): boolean {
   return left === right || (left?.url === right?.url && left?.branch === right?.branch);
+}
+
+function storedThreadRef(candidate: unknown): ScopedThreadRef | null {
+  const record =
+    candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>) : null;
+  return record &&
+    typeof record.environmentId === "string" &&
+    record.environmentId.length > 0 &&
+    typeof record.threadId === "string" &&
+    record.threadId.length > 0
+    ? scopeThreadRef(record.environmentId as EnvironmentId, record.threadId as ThreadId)
+    : null;
+}
+
+/**
+ * A thread id a machine may have started stays on that machine: a draft holding one
+ * never moves elsewhere under it, though a new id (a new intent) may go anywhere.
+ */
+function staysOnSentMachine(
+  existing: DraftThreadState | undefined,
+  next: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId },
+): boolean {
+  // A promotion is committed before its launch, so it binds the id too.
+  const sentTo = existing?.sentTo ?? existing?.promotedTo;
+  return (
+    !!sentTo && sentTo.threadId === next.threadId && sentTo.environmentId !== next.environmentId
+  );
 }
 
 function scopedThreadRefsEqual(
@@ -1803,7 +1843,8 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
     checkoutPullRequestsEqual(left.checkoutPullRequest, right.checkoutPullRequest) &&
-    scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
+    scopedThreadRefsEqual(left.promotedTo, right.promotedTo) &&
+    scopedThreadRefsEqual(left.sentTo, right.sentTo)
   );
 }
 
@@ -1918,22 +1959,8 @@ function normalizePersistedDraftThreads(
       const checkoutPullRequest = normalizePersistedCheckoutPullRequest(
         candidateDraftThread.checkoutPullRequest,
       );
-      const promotedToCandidate = candidateDraftThread.promotedTo;
-      const promotedToRecord =
-        promotedToCandidate && typeof promotedToCandidate === "object"
-          ? (promotedToCandidate as Record<string, unknown>)
-          : null;
-      const promotedTo =
-        promotedToRecord &&
-        typeof promotedToRecord.environmentId === "string" &&
-        promotedToRecord.environmentId.length > 0 &&
-        typeof promotedToRecord.threadId === "string" &&
-        promotedToRecord.threadId.length > 0
-          ? scopeThreadRef(
-              promotedToRecord.environmentId as EnvironmentId,
-              promotedToRecord.threadId as ThreadId,
-            )
-          : null;
+      const promotedTo = storedThreadRef(candidateDraftThread.promotedTo);
+      const sentTo = storedThreadRef(candidateDraftThread.sentTo);
       if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
         continue;
       }
@@ -1977,6 +2004,7 @@ function normalizePersistedDraftThreads(
             : {}),
         ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
         promotedTo,
+        ...(sentTo ? { sentTo } : {}),
       };
     }
   }
@@ -2762,6 +2790,14 @@ function toHydratedDraftThreadState(
           persistedDraftThread.promotedTo.threadId as ThreadId,
         )
       : null,
+    ...(persistedDraftThread.sentTo
+      ? {
+          sentTo: scopeThreadRef(
+            persistedDraftThread.sentTo.environmentId as EnvironmentId,
+            persistedDraftThread.sentTo.threadId as ThreadId,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -2886,6 +2922,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               existingThread,
               options,
             );
+            if (staysOnSentMachine(existingThread, nextDraftThread)) return state;
             const hasSameLogicalMapping = previousThreadKeyForLogicalProject === draftId;
             const hasNoStaleMappingsForDraft = Object.entries(
               state.logicalProjectDraftThreadKeyByLogicalProjectKey,
@@ -2987,7 +3024,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
             if (
               nextProjectRef.projectId.length === 0 ||
-              nextProjectRef.environmentId.length === 0
+              nextProjectRef.environmentId.length === 0 ||
+              staysOnSentMachine(existing, {
+                environmentId: nextProjectRef.environmentId,
+                threadId: existing.threadId,
+              })
             ) {
               return state;
             }
@@ -3045,6 +3086,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               startFromOrigin: nextStartFromOrigin,
               ...(checkoutPullRequest ? { checkoutPullRequest } : {}),
               promotedTo: existing.promotedTo ?? null,
+              ...(existing.sentTo ? { sentTo: existing.sentTo } : {}),
             };
             const isUnchanged =
               nextDraftThread.environmentId === existing.environmentId &&
@@ -4686,15 +4728,59 @@ export function usePromotingDraftThreadKeys(): ReadonlyArray<string> {
   );
 }
 
-export function markPromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {
+/**
+ * Marks the drafts sending as `threadRef` and commits that to storage at once, so a crash
+ * after the launch cannot reload them unbound: the launch may then have started there.
+ * False when storage did not take it; the caller must not launch, and each draft keeps the
+ * promotion it had before, which an earlier send may have committed.
+ */
+export function markPromotedDraftThreadByRef(threadRef: ScopedThreadRef): boolean {
   const draftStore = useComposerDraftStore.getState();
+  const promoted = new Map<string, ScopedThreadRef | null>();
   for (const [draftId, draftThread] of Object.entries(draftStore.draftThreadsByThreadKey)) {
     if (
       draftThread.environmentId === threadRef.environmentId &&
       draftThread.threadId === threadRef.threadId
     ) {
+      promoted.set(draftId, draftThread.promotedTo ?? null);
       draftStore.markDraftThreadPromoting(DraftId.make(draftId), threadRef);
     }
+  }
+  if (
+    promoted.size === 0 ||
+    commitsDraftThreadBinding([...promoted.keys()], "promotedTo", threadRef)
+  )
+    return true;
+  useComposerDraftStore.setState((state) => ({
+    draftThreadsByThreadKey: Object.fromEntries(
+      Object.entries(state.draftThreadsByThreadKey).map(([draftId, draftThread]) => [
+        draftId,
+        promoted.has(draftId)
+          ? { ...draftThread, promotedTo: promoted.get(draftId) ?? null }
+          : draftThread,
+      ]),
+    ),
+  }));
+  return false;
+}
+
+/** Writes pending draft state now and checks the stored bytes hold `field` for each draft. */
+function commitsDraftThreadBinding(
+  draftIds: ReadonlyArray<string>,
+  field: "promotedTo" | "sentTo",
+  threadRef: ScopedThreadRef,
+): boolean {
+  try {
+    composerDebouncedStorage.flush();
+    const stored = readStoredComposerDraftState();
+    return draftIds.every((draftId) => {
+      const bound = stored?.draftThreadsByThreadKey[draftId]?.[field];
+      return (
+        bound?.environmentId === threadRef.environmentId && bound.threadId === threadRef.threadId
+      );
+    });
+  } catch {
+    return false;
   }
 }
 
@@ -4703,17 +4789,27 @@ export function restoreFailedDraftThread(
   draftThread: DraftThreadState,
   threadId: ThreadId,
 ): void {
-  useComposerDraftStore.setState((state) => ({
-    draftThreadsByThreadKey: {
-      ...state.draftThreadsByThreadKey,
-      [draftId]: {
-        ...(state.draftThreadsByThreadKey[draftId] ?? draftThread),
-        threadId,
-        ...(threadId !== draftThread.threadId ? { createdAt: new Date().toISOString() } : {}),
-        promotedTo: null,
+  useComposerDraftStore.setState((state) => {
+    const current = state.draftThreadsByThreadKey[draftId] ?? draftThread;
+    // The send recorded its machine before it went out; the same id stays bound there.
+    const sentTo =
+      threadId === draftThread.threadId ? (current.promotedTo ?? current.sentTo ?? null) : null;
+    return {
+      draftThreadsByThreadKey: {
+        ...state.draftThreadsByThreadKey,
+        [draftId]: {
+          ...current,
+          threadId,
+          ...(threadId !== draftThread.threadId ? { createdAt: new Date().toISOString() } : {}),
+          promotedTo: null,
+          sentTo,
+        },
       },
-    },
-  }));
+    };
+  });
+  // Best effort: until this lands, the committed promotion still binds the id there.
+  const sentTo = useComposerDraftStore.getState().draftThreadsByThreadKey[draftId]?.sentTo;
+  if (sentTo) commitsDraftThreadBinding([draftId], "sentTo", sentTo);
 }
 
 export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {

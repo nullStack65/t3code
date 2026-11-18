@@ -226,8 +226,22 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     getDraftSession,
     setDraftThreadContext,
   ]);
+  // A send that may have started there keeps the draft's thread id on that machine.
+  const refuseMoveAfterUnconfirmedSend = () => {
+    const sentTo = draftId ? getDraftSession(draftId)?.sentTo : null;
+    if (!sentTo) return false;
+    toastManager.add({
+      type: "warning",
+      id: "draft-sent-machine",
+      title: "This draft stays on the machine it was sent to",
+      description:
+        "Its earlier send may have started the thread there. Send it again to reach that thread, or start a new draft to run it elsewhere.",
+    });
+    return true;
+  };
   const onAutoEnvironment = () => {
     if (envLocked || !draftId || sendInFlightRef.current) return;
+    if (refuseMoveAfterUnconfirmedSend()) return;
     if (composerHasAttachments) {
       toastManager.add({
         type: "warning",
@@ -300,6 +314,12 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
       (env) => env.environmentId === nextEnvironmentId,
     );
     if (!target) return;
+    if (
+      originalDraft.sentTo &&
+      target.environmentId !== originalDraft.sentTo.environmentId &&
+      refuseMoveAfterUnconfirmedSend()
+    )
+      return;
     const request = { environmentId: target.environmentId, scope: environmentChangeScope };
     environmentChangeRef.current = request;
     setBusyEnvironmentChange(null);
