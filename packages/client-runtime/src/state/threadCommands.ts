@@ -52,6 +52,7 @@ import {
   reorderPinnedThread,
   reorderActiveThread,
   setThreadAutoSettle,
+  setThreadStanding,
   settleThread,
   snoozeThread,
   startThreadTurn,
@@ -248,6 +249,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     setAutoSettle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:set-auto-settle",
       execute: setThreadAutoSettle,
+      scheduler,
+      concurrency,
+    }),
+    setStanding: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:set-standing",
+      execute: setThreadStanding,
       scheduler,
       concurrency,
     }),

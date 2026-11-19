@@ -225,6 +225,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      compositor updates discrete frames instead of every vsync. */
   --animate-status-pulse: status-pulse 2s infinite;
   --animate-status-ping: status-ping 2s infinite;
+  /* A running bot blinks once every 4s: two discrete frames, nothing in between. */
+  --animate-bot-blink: bot-blink 4s step-end infinite;
   /* Stash pulses hold a highlight for 1.2s; the row then eases back over 200ms, the count snaps.
      The row alternates two identical keyframes so each stash restarts it without a remount. */
   --animate-stash-pulse-row: stash-pulse-row 1400ms;
@@ -327,6 +329,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     from,
     85.7% {
       color: var(--color-primary);
+    }
+  }
+  @keyframes bot-blink {
+    0%,
+    94% {
+      transform: scaleY(1);
+    }
+    95%,
+    98% {
+      transform: scaleY(0.15);
     }
   }
   @keyframes status-pulse {

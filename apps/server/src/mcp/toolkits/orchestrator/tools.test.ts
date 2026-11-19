@@ -27,3 +27,24 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
     true,
   );
 });
+
+it("takes a bot persona, or null, only with set_standing", () => {
+  const decode = Schema.decodeUnknownExit(
+    OrchestratorToolkit.tools.t3_thread_update.parametersSchema,
+  );
+  const standing = { name: "Synthetic Bot", avatarId: "visor", accent: "teal" };
+  expect(Exit.isSuccess(decode({ action: "set_standing", standing }))).toBe(true);
+  expect(Exit.isSuccess(decode({ action: "set_standing", standing: null }))).toBe(true);
+  expect(Exit.isFailure(decode({ action: "set_standing" }))).toBe(true);
+  expect(Exit.isFailure(decode({ action: "rename", title: "New", standing }))).toBe(true);
+  expect(
+    Exit.isFailure(
+      decode({ action: "set_standing", standing: { ...standing, avatarId: "grok" } }),
+    ),
+  ).toBe(true);
+  expect(
+    Exit.isFailure(
+      decode({ action: "set_standing", standing: { ...standing, name: "two\nlines" } }),
+    ),
+  ).toBe(true);
+});

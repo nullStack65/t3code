@@ -9,6 +9,7 @@ import {
 } from "./baseSchemas.ts";
 import { ThreadDecisionAsk, ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
+import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 
 export function hasOnlyPairedSurrogates(value: string): boolean {
@@ -47,6 +48,7 @@ export const ThreadMetadataMcpAction = Schema.Literals([
   "route",
   "request_decision",
   "resolve_decision",
+  "set_standing",
 ]);
 export type ThreadMetadataMcpAction = typeof ThreadMetadataMcpAction.Type;
 
@@ -56,14 +58,21 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
   title: Schema.optional(ThreadMetadataTitle),
   inboxRouting: Schema.optional(ThreadInboxRoutingPatch),
   decision: Schema.optional(ThreadDecisionAsk),
+  standing: Schema.optional(
+    Schema.NullOr(ThreadStanding).annotate({
+      description:
+        "Required only when action is set_standing: a bot persona ({name, role?, avatarId, accent}) makes this a standing bot thread; null makes it an ordinary thread. Independent of pinning.",
+    }),
+  ),
   clientRequestId: Schema.optional(ThreadMetadataClientRequestId),
 }).check(
   Schema.makeFilter((input) =>
     (input.action === "rename") === (input.title !== undefined) &&
     (input.action === "route") === (input.inboxRouting !== undefined) &&
-    (input.action === "request_decision") === (input.decision !== undefined)
+    (input.action === "request_decision") === (input.decision !== undefined) &&
+    (input.action === "set_standing") === (input.standing !== undefined)
       ? true
-      : "rename requires title; route requires inboxRouting; request_decision requires decision; other actions reject those fields.",
+      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; other actions reject those fields.",
   ),
 );
 export type ThreadMetadataMcpUpdateInput = typeof ThreadMetadataMcpUpdateInput.Type;
@@ -77,6 +86,7 @@ export const ThreadMetadataMcpUpdateResult = Schema.Struct({
   titleRegeneration: Schema.NullOr(ThreadTitleRegeneration),
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   inbox: Schema.optionalKey(ThreadInbox),
+  standing: Schema.optionalKey(StoredThreadStanding),
   updatedAt: IsoDateTime,
 });
 export type ThreadMetadataMcpUpdateResult = typeof ThreadMetadataMcpUpdateResult.Type;

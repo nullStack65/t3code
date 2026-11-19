@@ -3749,6 +3749,35 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         DateTime.toEpochMillis(untaggedShell.updatedAt),
       );
 
+      assert.isUndefined(taggedShell.standing ?? undefined);
+      const persona = {
+        name: "Synthetic Bot",
+        role: "Watches the demo lane",
+        avatarId: "visor",
+        accent: "teal",
+      } as const;
+      yield* orchestrator.dispatch({
+        type: "thread.standing.set",
+        commandId: CommandId.make("runtime-layer-lifecycle-standing-set"),
+        threadId,
+        standing: persona,
+      });
+      const standingShell = shellOf(yield* orchestrator.getShellSnapshot());
+      assert.deepEqual(standingShell.standing, persona);
+      assert.deepEqual((yield* orchestrator.getThreadProjection(threadId)).thread.standing, persona);
+      // Standing is identity, not activity: the thread keeps its place.
+      assert.equal(
+        DateTime.toEpochMillis(standingShell.updatedAt),
+        DateTime.toEpochMillis(untaggedShell.updatedAt),
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.standing.set",
+        commandId: CommandId.make("runtime-layer-lifecycle-standing-clear"),
+        threadId,
+        standing: null,
+      });
+      assert.isUndefined(shellOf(yield* orchestrator.getShellSnapshot()).standing ?? undefined);
+
       const preAutoProjection = yield* orchestrator.getThreadProjection(threadId);
       const staleAutoSettle = yield* orchestrator
         .dispatch({

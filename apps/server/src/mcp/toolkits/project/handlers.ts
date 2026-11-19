@@ -483,6 +483,26 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           }),
         );
         const thread = result.projection.thread;
+        // Derived from the launch command, so a retry replays rather than repeats it. The thread
+        // is already running, so a failure here is reported, not turned into a failed launch.
+        const standingApplied =
+          input.standing === undefined
+            ? undefined
+            : yield* context.threads
+                .dispatch({
+                  type: "thread.standing.set",
+                  commandId: CommandId.make(`${commandId}:standing`),
+                  threadId: thread.id,
+                  standing: input.standing,
+                })
+                .pipe(
+                  Effect.as(true),
+                  Effect.catch((error) =>
+                    Effect.logWarning("mcp.thread_launch.standing_failed", error).pipe(
+                      Effect.as(false),
+                    ),
+                  ),
+                );
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
         return {
           threadId: thread.id,
@@ -491,6 +511,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
           status: run?.status ?? null,
+          ...(standingApplied === undefined ? {} : { standingApplied }),
         };
       }),
     // The launched thread carries the caller's link, if it has one.

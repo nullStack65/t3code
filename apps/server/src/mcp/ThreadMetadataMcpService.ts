@@ -66,8 +66,18 @@ function metadataCommand(input: {
   readonly commandId: CommandId;
   readonly threadId: ThreadId;
   readonly update: ThreadMetadataMcpUpdateInput;
-}): Extract<OrchestrationV2Command, { readonly type: "thread.metadata.update" }> {
+}): Extract<
+  OrchestrationV2Command,
+  { readonly type: "thread.metadata.update" | "thread.standing.set" }
+> {
   switch (input.update.action) {
+    case "set_standing":
+      return {
+        type: "thread.standing.set",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        standing: input.update.standing ?? null,
+      };
     case "route":
       return {
         type: "thread.metadata.update",
@@ -112,11 +122,12 @@ function resultFromThread(input: {
   readonly sequence: number;
   readonly thread: Pick<
     OrchestrationV2AppThread,
-    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt" | "inbox"
+    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt" | "inbox" | "standing"
   >;
 }): ThreadMetadataMcpUpdateResult {
   return {
     ...(input.thread.inbox === undefined ? {} : { inbox: input.thread.inbox }),
+    ...(input.thread.standing === undefined ? {} : { standing: input.thread.standing }),
     threadId: input.thread.id,
     action: input.action,
     commandId: input.commandId,
@@ -207,11 +218,14 @@ const make = Effect.gen(function* () {
         ),
       );
     const metadataEvent = dispatched.storedEvents.find(
-      (stored) => stored.event.type === "thread.metadata-updated",
+      (stored) =>
+        stored.event.type === "thread.metadata-updated" ||
+        stored.event.type === "thread.standing-updated",
     );
     // Retries may find stored events compacted away; answer from the projection.
     const thread =
-      metadataEvent?.event.type === "thread.metadata-updated"
+      metadataEvent?.event.type === "thread.metadata-updated" ||
+      metadataEvent?.event.type === "thread.standing-updated"
         ? metadataEvent.event.payload
         : yield* threadManagement
             .getThreadShell(threadId)
