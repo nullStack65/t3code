@@ -15,6 +15,9 @@ export type ThreadActionMenuId =
   | "project-settings"
   | "pin"
   | "unpin"
+  | "make-bot"
+  | "edit-bot"
+  | "make-ordinary"
   | "settle"
   | "unsettle"
   | "auto-settle"
@@ -82,6 +85,8 @@ export interface ThreadActionMenuState {
     readonly isActive: boolean;
   } | null;
   readonly isPinned: boolean;
+  /** A standing bot thread; independent of pinning. */
+  readonly isStanding?: boolean;
   readonly isSettled: boolean;
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
@@ -95,6 +100,7 @@ export interface ThreadActionMenuState {
     readonly autoSettleOptOut: boolean;
     readonly snooze: boolean;
     readonly pinning: boolean;
+    readonly standing?: boolean;
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
@@ -165,6 +171,14 @@ export function buildThreadActionMenuItems(
             ? { id: "unpin" as const, label: "Unpin thread", icon: "pin-off" }
             : { id: "pin" as const, label: "Pin thread", icon: "pin" },
         ]
+      : []),
+    ...(state.supports.standing
+      ? state.isStanding
+        ? [
+            { id: "edit-bot" as const, label: "Edit bot persona…", icon: "bot" },
+            { id: "make-ordinary" as const, label: "Make ordinary thread", icon: "message-square" },
+          ]
+        : [{ id: "make-bot" as const, label: "Make standing bot…", icon: "bot" }]
       : []),
     ...(state.supports.settlement
       ? [

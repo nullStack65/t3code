@@ -1,6 +1,21 @@
 {
   "customNotices": [
     {
+      "bundles": ["desktop", "web"],
+      "license": "MIT",
+      "name": "Standing bot avatars",
+      "sourceUrl": "https://github.com/nullStack65/t3code/blob/main/apps/web/src/components/bots/BotAvatar.tsx",
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2026 T3 Tools Inc."],
+          "preamble": [
+            "The standing bot avatars in apps/web/src/components/bots/BotAvatar.tsx are original line drawings made for this project. They copy no third-party avatar set, icon pack or character art, and ship under this repository's MIT license."
+          ]
+        }
+      ]
+    },
+    {
       "name": "opencode Office viewers",
       "bundles": ["web"],
       "license": "MIT",

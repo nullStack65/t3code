@@ -31,6 +31,7 @@ import { readEnvironmentScope } from "../state/session";
 import {
   readEnvironmentServerConfigLoaded,
   readEnvironmentSupportsAutoSettleOptOut,
+  readEnvironmentSupportsThreadStanding,
   readThreadShell,
   useProjects,
 } from "../state/entities";
@@ -48,6 +49,7 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { canTurnThreadIntoProject, useThreadActions } from "./useThreadActions";
+import { runBotMenuAction } from "../components/bots/botMenuActions";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -84,6 +86,7 @@ export function useThreadActionMenu(input: {
     pinThread,
     confirmAndUnpinThread,
     setThreadAutoSettle,
+    setThreadStanding,
     archiveThread,
     deleteThread,
     markThreadUnread,
@@ -124,6 +127,7 @@ export function useThreadActionMenu(input: {
         autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
         snooze: configLoaded,
         pinning: configLoaded,
+        standing: readEnvironmentSupportsThreadStanding(threadRef.environmentId),
         titleRegeneration: configLoaded,
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
@@ -134,6 +138,7 @@ export function useThreadActionMenu(input: {
         branch: thread.branch ?? null,
         projectFilter: null,
         isPinned: thread.pinnedAt != null,
+        isStanding: thread.standing !== null,
         isSettled: supports.settlement && thread.settledOverride === "settled",
         autoSettleEnabled: thread.autoSettleDisabledAt == null,
         isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
@@ -184,6 +189,16 @@ export function useThreadActionMenu(input: {
           failureToast(title, squashAtomCommandFailure(result));
         }
       };
+      if (
+        await runBotMenuAction({
+          action,
+          threadRef,
+          thread,
+          setThreadStanding,
+          report: reportFailure,
+        })
+      )
+        return;
       switch (action) {
         case "find":
           onFind?.(threadRef);

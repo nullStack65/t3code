@@ -1789,8 +1789,16 @@ export default function ChatView(props: ChatViewProps) {
           providerSubagentModels,
           reportedModelSelection,
         );
+  const activeStanding = activeThreadShell?.standing ?? null;
+  const [botDetailsOpenKey, setBotDetailsOpenKey] = useState<string | null>(null);
+  const botDetailsOpen = activeStanding !== null && botDetailsOpenKey === activeThreadKey;
+  const toggleBotDetailsStable = useStableCallback(() =>
+    setBotDetailsOpenKey((current) => (current === activeThreadKey ? null : activeThreadKey)),
+  );
+  // A standing bot keeps branch, worktree and PR behind its header's Details toggle.
   const showComposerContextStrip =
     !embedded &&
+    (activeStanding === null || botDetailsOpen) &&
     shouldShowComposerContextStrip({
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
@@ -3385,6 +3393,9 @@ export default function ChatView(props: ChatViewProps) {
                 ? { onOpenProjectSettings: handleOpenDraftProjectSettingsStable }
                 : {})}
               {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
+              standing={activeStanding}
+              botDetailsOpen={botDetailsOpen}
+              onToggleBotDetails={toggleBotDetailsStable}
             />
           </header>
         )}

@@ -105,3 +105,27 @@ it("offers inbox routing only on capable environments and retains ordinary opera
   expect(threadRoutingUpdateFromMenuAction("attention:FYI")).toEqual({ attentionKind: "FYI" });
   expect(threadRoutingUpdateFromMenuAction("rename")).toBeNull();
 });
+
+describe("standing bot menu items", () => {
+  const ids = (state: ThreadActionMenuState) =>
+    buildThreadActionMenuItems(state).map((item) => item.id);
+
+  it("offers Make standing bot only when the environment supports it", () => {
+    expect(ids(baseState)).not.toContain("make-bot");
+    const supported = { ...baseState, supports: { ...baseState.supports, standing: true } };
+    expect(ids(supported)).toContain("make-bot");
+    expect(ids(supported)).not.toContain("make-ordinary");
+  });
+
+  it("offers editing and reverting on a bot, independent of pinning", () => {
+    const bot = {
+      ...baseState,
+      isPinned: true,
+      isStanding: true,
+      supports: { ...baseState.supports, standing: true },
+    };
+    const items = ids(bot);
+    expect(items).toEqual(expect.arrayContaining(["unpin", "edit-bot", "make-ordinary"]));
+    expect(items).not.toContain("make-bot");
+  });
+});

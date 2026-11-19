@@ -190,6 +190,9 @@ import {
 } from "../threadRoutes";
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { runBotMenuAction } from "./bots/botMenuActions";
+import { sortBotThreads } from "./bots/botPresence";
+import { SidebarBotsGroup } from "./sidebar/SidebarBotsGroup";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { ProjectRowActions } from "./ProjectComboboxRow";
@@ -521,8 +524,14 @@ function useSidebarThreads(input: {
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
 
-  const { pinnedThreads, activeThreads, workingThreads, snoozedThreads, settledThreads } =
-    partition;
+  const {
+    botThreads,
+    pinnedThreads,
+    activeThreads,
+    workingThreads,
+    snoozedThreads,
+    settledThreads,
+  } = partition;
   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
   const olderSettledShelf = useOlderSettledShelf({
     scopes: olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
@@ -581,6 +590,7 @@ function useSidebarThreads(input: {
           };
         });
   const orderedThreads = [
+    ...botThreads,
     ...pinnedThreads,
     ...(projectFolders === null
       ? activeThreads
@@ -604,6 +614,7 @@ function useSidebarThreads(input: {
     threads,
     workingShelfEnabled,
     searchableThreads: [
+      ...botThreads,
       ...pinnedThreads,
       ...activeThreads,
       ...workingThreads,
@@ -667,6 +678,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const preciseNow = new Date().toISOString();
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
+  const bots: EnvironmentThreadShell[] = [];
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
   const working: EnvironmentThreadShell[] = [];
@@ -684,6 +696,11 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     connectedEnvironmentIds: input.connectedEnvironmentIds,
   });
   for (const thread of visible) {
+    // Standing bots live in their own group whatever their pin, settle or snooze state.
+    if (thread.standing !== null) {
+      bots.push(thread);
+      continue;
+    }
     const configLoaded = serverConfigs.has(thread.environmentId);
     const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     if (optimisticDrop?.key === threadKey) {
@@ -732,6 +749,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
       ? sortInboxThreadsByReturn(active, inboxObservation.returnedAt)
       : sortThreadsForSidebar(active);
   return {
+    botThreads: sortBotThreads(bots),
     pinnedThreads:
       optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
         ? sortedPinned
@@ -975,6 +993,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     unpinThread,
     confirmAndUnpinThread,
     setThreadAutoSettle,
+    setThreadStanding,
     turnThreadIntoProject,
     reorderPinnedThread,
     reorderActiveThread,
@@ -1377,6 +1396,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
 
   const {
     workingShelfEnabled,
+    botThreads,
     pinnedThreads,
     draggableThreadKeys,
     activeReorderableThreadKeys,
@@ -2745,8 +2765,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: configLoaded,
                 pinning: configLoaded,
+                standing:
+                  serverConfigs.get(thread.environmentId)?.environment.capabilities
+                    .threadStanding === true,
                 titleRegeneration: configLoaded,
               },
+              isStanding: thread.standing !== null,
               snoozePresets,
             }),
             position,
@@ -2763,6 +2787,28 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           });
           return;
         }
+        if (
+          await runBotMenuAction({
+            action: clicked.value,
+            threadRef,
+            thread,
+            setThreadStanding,
+            report: async (title, run) => {
+              const result = await run();
+              if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                const error = squashAtomCommandFailure(result);
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title,
+                    description: error instanceof Error ? error.message : "An error occurred.",
+                  }),
+                );
+              }
+            },
+          })
+        )
+          return;
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -3388,7 +3434,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           {!isSearchingThreads &&
           !hasProjectFolders &&
           visibleDraftSessionCount === 0 &&
-          pinnedThreads.length +
+          botThreads.length +
+            pinnedThreads.length +
             activeThreads.length +
             workingThreads.length +
             snoozedThreads.length ===
@@ -3428,6 +3475,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 "No threads yet"
               )}
             </div>
+          ) : null}
+          {!isSearchingThreads ? (
+            <SidebarBotsGroup
+              threads={botThreads}
+              activeThreadKey={routeRowThreadKey}
+              onThreadClick={handleThreadClick}
+              onThreadActivate={navigateToThread}
+              onContextMenu={handleThreadContextMenu}
+            />
           ) : null}
           {!isSearchingThreads ? (
             <TooltipProvider

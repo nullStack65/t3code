@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type ScopedThreadRef,
   type ThreadId,
+  type ThreadStanding,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -10,7 +11,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, PanelTopOpenIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -43,6 +44,7 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
+import { BotAvatar } from "../bots/BotAvatar";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -57,6 +59,10 @@ interface ChatHeaderProps {
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
+  /** A standing bot shows who it is instead of the project/thread breadcrumb. */
+  standing?: ThreadStanding | null | undefined;
+  botDetailsOpen?: boolean | undefined;
+  onToggleBotDetails?: (() => void) | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -82,6 +88,9 @@ export const ChatHeader = memo(function ChatHeader({
   onNewThreadInProject,
   onOpenProjectSettings,
   onFindInThread,
+  standing,
+  botDetailsOpen,
+  onToggleBotDetails,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -246,6 +255,51 @@ export const ChatHeader = memo(function ChatHeader({
       setRenaming(null);
     }
   };
+  if (standing && renamingTitle === null) {
+    return (
+      <div
+        className={cn("flex min-w-0 flex-1 items-center gap-2", rightPanelOpen ? "pr-10" : "pr-24")}
+        data-testid="bot-thread-header"
+        onContextMenu={handleHeaderContextMenu}
+      >
+        <BotAvatar avatarId={standing.avatarId} accent={standing.accent} size="md" />
+        <button
+          type="button"
+          aria-label={`Bot actions for ${standing.name}`}
+          aria-haspopup="menu"
+          onClick={openMenuFromTitle}
+          className="group/thread-title inline-flex min-w-0 shrink cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <h2 className="truncate text-sm font-medium text-foreground" dir="auto">
+            {standing.name}
+          </h2>
+          <ChevronDownIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/thread-title:opacity-100 group-focus-visible/thread-title:opacity-100"
+          />
+        </button>
+        {standing.role ? (
+          <span className="min-w-0 truncate text-xs text-muted-foreground" dir="auto">
+            {standing.role}
+          </span>
+        ) : null}
+        <span className="flex-1" />
+        {onToggleBotDetails ? (
+          <button
+            type="button"
+            aria-expanded={botDetailsOpen === true}
+            aria-label={botDetailsOpen ? "Hide thread details" : "Show thread details"}
+            onClick={onToggleBotDetails}
+            className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          >
+            <PanelTopOpenIcon aria-hidden className="size-3.5" />
+            Details
+          </button>
+        ) : null}
+        {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
+      </div>
+    );
+  }
   return (
     <div
       ref={breadcrumbContainerRef}
