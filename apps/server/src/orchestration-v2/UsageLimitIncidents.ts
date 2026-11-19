@@ -1,4 +1,5 @@
 import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 /**
@@ -89,16 +90,28 @@ export function alertIsStale(
   return shell.activeRunId !== null || LIVE_OR_DONE.has(shell.status);
 }
 
+type SiblingShell = Pick<
+  OrchestrationV2ThreadShell,
+  "title" | "status" | "activeRunId" | "archivedAt" | "deletedAt"
+>;
+
 /**
  * A delegated child its parent replaced: a later sibling carries the same title, which is how
- * delegate_task names the task. The replacement's own failure is its own alert.
+ * delegate_task names the task, and is itself running or finished. A sibling that also failed, or
+ * is gone, replaces nothing: templated prompts share a title and each still needs its alert.
  */
 export function replacedBySibling(
   child: { readonly title: string },
-  later: ReadonlyArray<{ readonly title: string }>,
+  later: ReadonlyArray<SiblingShell>,
 ): boolean {
   const title = child.title.trim().toLowerCase();
-  return later.some((sibling) => sibling.title.trim().toLowerCase() === title);
+  return later.some(
+    (sibling) =>
+      sibling.title.trim().toLowerCase() === title &&
+      sibling.archivedAt === null &&
+      sibling.deletedAt === null &&
+      (sibling.activeRunId !== null || LIVE_OR_DONE.has(sibling.status)),
+  );
 }
 
 /** Whether the server will resume a thread by itself when its limit resets. */
@@ -108,17 +121,28 @@ export function expectsAutoResume(input: {
   readonly runWasResume: boolean;
   readonly shell: Pick<
     OrchestrationV2ThreadShell,
-    "usageLimitResetAt" | "archivedAt" | "settledOverride" | "pendingRuntimeRequest"
+    | "usageLimitResetAt"
+    | "archivedAt"
+    | "settledOverride"
+    | "pendingRuntimeRequest"
+    | "snoozedUntil"
   > | null;
+  /** The recovery worker never arms a delegated child whose parent is settled, archived or gone. */
+  readonly parentClosed?: boolean;
   readonly nowMs: number;
+  /** How long past the reset the thread may stay stopped before it counts as not resumed. */
+  readonly graceMs?: number;
 }): boolean {
   const { shell } = input;
   if (!input.autoResumeEnabled || input.runWasResume || shell === null) return false;
   if (shell.archivedAt !== null || shell.settledOverride === "settled") return false;
-  if (shell.pendingRuntimeRequest !== null) return false;
+  if (shell.pendingRuntimeRequest !== null || input.parentClosed === true) return false;
   const resetMs =
     shell.usageLimitResetAt == null ? Number.NaN : Date.parse(shell.usageLimitResetAt);
-  return Number.isFinite(resetMs) && resetMs > input.nowMs - 60_000;
+  if (!Number.isFinite(resetMs) || resetMs <= input.nowMs - 60_000) return false;
+  // The worker waits out a snooze, so one that outlasts the grace period means no resume in time.
+  const snoozedMs = shell.snoozedUntil == null ? null : DateTime.toEpochMillis(shell.snoozedUntil);
+  return snoozedMs === null || snoozedMs <= resetMs + (input.graceMs ?? 0);
 }
 
 const MAX_LISTED = 25;

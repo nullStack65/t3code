@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId, type OrchestrationV2Run, ThreadId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 import {
@@ -454,6 +455,8 @@ it("members joining while a digest is sent wait for the next one, and stragglers
   assert.equal(later.outbox.length, 1);
   assert.equal(later.outbox[0]!.nextAttemptAt, 41_000 + INCIDENT_GROUP_INTERVAL_MS);
   assert.notEqual(later.outbox[0]!.alert.id, sent.alert.id);
+  // The leftover digest has its own id, so its delivery key is not a replay of the first.
+  assert.notEqual(rest.alert.id, sent.alert.id);
 });
 
 it("a held item waits without failing, and a dropped one leaves without counting as sent", () => {
@@ -465,8 +468,16 @@ it("a held item waits without failing, and a dropped one leaves without counting
   const merged = recordUsageLimit(held, limitInput(5), ["watcher"], 70_000).state;
   assert.equal(merged.outbox.length, 1);
   assert.equal(merged.outbox[0]!.nextAttemptAt, 999_000);
-  const dropped = afterDrop(merged, entry);
-  assert.equal(dropped.outbox.length, 0);
+  // The snapshot was judged stale, but a thread joined after it: that one still reaches Lead.
+  const dropped = afterDrop(merged, entry, 80_000);
+  assert.equal(dropped.outbox.length, 1);
+  const rest = dropped.outbox[0]!.alert;
+  assert.deepEqual(
+    rest.type === "usage-limit-incident" && rest.members.map((member) => member.threadId),
+    ["thread:5"],
+  );
+  assert.notEqual(rest.id, entry.alert.id);
+  assert.equal(afterDrop(held, entry, 80_000).outbox.length, 0);
   assert.deepEqual(dropped.incidentSentAt, {});
 });
 
@@ -505,6 +516,7 @@ it("auto-resume is expected only for a first limit on a resumable thread with a 
     archivedAt: null,
     settledOverride: null,
     pendingRuntimeRequest: null,
+    snoozedUntil: null,
   } as never;
   const nowMs = Date.parse("2026-11-19T04:00:00.000Z");
   const expects = (overrides: object) =>
@@ -514,6 +526,14 @@ it("auto-resume is expected only for a first limit on a resumable thread with a 
   assert.equal(expects({ runWasResume: true }), false);
   assert.equal(expects({ shell: { ...(shell as object), usageLimitResetAt: null } }), false);
   assert.equal(expects({ shell: { ...(shell as object), settledOverride: "settled" } }), false);
+  // The worker skips a child of a closed parent and waits out a snooze, so neither resumes in time.
+  assert.equal(expects({ parentClosed: true }), false);
+  const snoozedTo = (iso: string) => ({
+    shell: { ...(shell as object), snoozedUntil: DateTime.makeUnsafe(iso) },
+    graceMs: RESUME_GRACE_MS,
+  });
+  assert.equal(expects(snoozedTo("2026-11-19T09:10:00.000Z")), true);
+  assert.equal(expects(snoozedTo("2026-11-19T12:00:00.000Z")), false);
 });
 
 it.effect("delivers a 20-thread storm to Lead as one message", () =>
@@ -567,9 +587,22 @@ it("a model alert is stale once its thread is settled or runs on another provide
 });
 
 it("a delegated child is replaced when its parent started a later one with the same task title", () => {
-  assert.equal(replacedBySibling({ title: "Review PR 98" }, [{ title: " review pr 98 " }]), true);
-  assert.equal(replacedBySibling({ title: "Review PR 98" }, [{ title: "Build ASUS" }]), false);
-  assert.equal(replacedBySibling({ title: "Review PR 98" }, []), false);
+  const sibling = (overrides: object) =>
+    ({
+      title: " review pr 98 ",
+      status: "running",
+      activeRunId: "run:2",
+      archivedAt: null,
+      deletedAt: null,
+      ...overrides,
+    }) as never;
+  const child = { title: "Review PR 98" };
+  assert.equal(replacedBySibling(child, [sibling({})]), true);
+  assert.equal(replacedBySibling(child, [sibling({ title: "Build ASUS" })]), false);
+  assert.equal(replacedBySibling(child, []), false);
+  // Templated siblings that also failed, or are gone, replace nothing.
+  assert.equal(replacedBySibling(child, [sibling({ status: "failed", activeRunId: null })]), false);
+  assert.equal(replacedBySibling(child, [sibling({ archivedAt: "x" })]), false);
 });
 
 it("a provider out of usage is tracked until its reset, and a healthy run clears it", () => {

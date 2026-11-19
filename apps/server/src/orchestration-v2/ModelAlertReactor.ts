@@ -379,7 +379,12 @@ export function afterDeliveryAttempt(
             return [
               {
                 ...candidate,
-                alert: { ...candidate.alert, members: late },
+                // A new id: the delivery key hashes it, and a second digest must not replay the first.
+                alert: {
+                  ...candidate.alert,
+                  id: `${candidate.alert.groupKey}:${nowMs}`,
+                  members: late,
+                },
                 attempts: 0,
                 nextAttemptAt: nowMs + INCIDENT_GROUP_INTERVAL_MS,
               },
@@ -400,10 +405,38 @@ export function afterDeliveryAttempt(
   };
 }
 
-/** An entry nobody needs any more leaves without counting as sent. */
-export const afterDrop = (state: ModelAlertState, entry: Delivery): ModelAlertState => ({
+/**
+ * An entry nobody needs any more leaves without counting as sent. An incident keeps the members
+ * that joined after the snapshot was judged, under a new id.
+ */
+export const afterDrop = (
+  state: ModelAlertState,
+  entry: Delivery,
+  nowMs: number,
+): ModelAlertState => ({
   ...state,
-  outbox: state.outbox.filter((candidate) => !sameDelivery(candidate, entry)),
+  outbox: state.outbox.flatMap((candidate) => {
+    if (!sameDelivery(candidate, entry)) return [candidate];
+    if (
+      candidate.alert.type !== "usage-limit-incident" ||
+      entry.alert.type !== "usage-limit-incident"
+    ) {
+      return [];
+    }
+    const late = lateMembers(candidate.alert, entry.alert);
+    return late.length === 0
+      ? []
+      : [
+          {
+            ...candidate,
+            alert: {
+              ...candidate.alert,
+              id: `${candidate.alert.groupKey}:${nowMs}`,
+              members: late,
+            },
+          },
+        ];
+  }),
 });
 
 /** An entry held back, not failed: it waits for `untilMs` without counting an attempt. */
@@ -750,6 +783,8 @@ export const make = Effect.gen(function* () {
         shell.lastErrorClass === "usage_limit";
       resetAt = shell?.usageLimitResetAt ?? resetAt;
     } else {
+      // The read result carries no error class, so a remote watcher counts as down only while
+      // the reset this alert reports is still ahead.
       down = yield* peers
         .call({
           environmentId: watcher.environmentId,
@@ -768,9 +803,10 @@ export const make = Effect.gen(function* () {
         );
     }
     if (!down) return null;
+    // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
     const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
-    const recheck = nowMs + HOLD_RECHECK_MS;
-    return Number.isFinite(resetMs) && resetMs > nowMs ? Math.min(resetMs, recheck) : recheck;
+    if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
+    return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
   });
 
   type DeliveryResult =
@@ -827,7 +863,7 @@ export const make = Effect.gen(function* () {
               : result._tag === "held"
                 ? afterHold(current, entry, result.until)
                 : result._tag === "dropped"
-                  ? afterDrop(current, entry)
+                  ? afterDrop(current, entry, attemptedAt)
                   : afterDeliveryAttempt(current, entry, true, attemptedAt),
           ]);
         }),
@@ -850,11 +886,20 @@ export const make = Effect.gen(function* () {
     if (Number.isFinite(resetMs) && resetMs > nowMs) {
       ProviderExhaustion.mark(alert.providerInstanceId, resetMs);
     }
+    const parentId = shell?.lineage.parentThreadId ?? null;
+    const parent =
+      parentId !== null && shell?.lineage.relationshipToParent === "subagent"
+        ? yield* projections.getThreadShell(parentId)
+        : undefined;
     const willResume = expectsAutoResume({
       autoResumeEnabled: current.autoResumeLimitedThreads,
       runWasResume: resumeFailed,
       shell,
+      parentClosed:
+        parent !== undefined &&
+        (parent === null || parent.archivedAt !== null || parent.settledOverride === "settled"),
       nowMs,
+      graceMs: RESUME_GRACE_MS,
     });
     const here = yield* environment.getEnvironmentId;
     const destinations = modelAlertDestinations({
