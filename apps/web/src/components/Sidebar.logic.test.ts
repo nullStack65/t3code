@@ -1049,9 +1049,11 @@ describe("Working shelf (beta)", () => {
     ).toBe(false);
   });
 
-  it("lists a pinned thread that waits on its own agents under Working until it finishes", () => {
-    // A pinned parent waiting on a delegated child reads Waiting; it belongs in Working.
-    const shelf = (thread: typeof waiting | typeof idle, placement: { pinned?: boolean } = {}) =>
+  it("keeps a pinned thread in Pinned whatever it is doing, and unpinned work in Working", () => {
+    const shelf = (
+      thread: Parameters<typeof isSidebarThreadWorking>[0],
+      placement: { pinned?: boolean } = {},
+    ) =>
       resolveSidebarShelf(
         resolveSidebarThreadSection({
           snoozed: false,
@@ -1060,15 +1062,23 @@ describe("Working shelf (beta)", () => {
         }),
         isSidebarThreadWorking(thread),
       );
-    expect(shelf(waiting, { pinned: true })).toBe("working");
+    const statuses = {
+      running: { ...idle, runtime },
+      "waiting on its own agents": waiting,
+      "needs approval": { ...waiting, hasPendingApprovals: true },
+      "needs input": { ...waiting, hasPendingUserInput: true },
+      failed: { ...waiting, runtime: { ...runtime, status: "failed" as const, lastError: "boom" } },
+      idle,
+    };
+    for (const [status, thread] of Object.entries(statuses)) {
+      expect(shelf(thread, { pinned: true }), status).toBe("pinned");
+    }
+    expect(shelf(statuses.running)).toBe("working");
     expect(shelf(waiting)).toBe("working");
-    expect(shelf(idle, { pinned: true })).toBe("pinned");
     expect(shelf(idle)).toBe("active");
     // Settled and snoozed threads stay in their own groups even while working.
     expect(resolveSidebarShelf("settled", true)).toBe("settled");
     expect(resolveSidebarShelf("snoozed", true)).toBe("snoozed");
-    // A thread waiting on a person is not Working, pinned or not.
-    expect(shelf({ ...waiting, hasPendingApprovals: true }, { pinned: true })).toBe("pinned");
   });
 
   it("keeps a ready plan in the inbox while background work runs", () => {
@@ -1159,6 +1169,29 @@ describe("Working shelf (beta)", () => {
         activeOrder: ["a1", "a2", "p1"],
       });
       expect(resolveSidebarDropVerb("active", "working")).toBeNull();
+    });
+
+    it("lets a pinned thread reorder, unpin and refuse the Working shelf like any pin", () => {
+      const pinnedItems: readonly SidebarListItem[] = [
+        marker("pinned-header"),
+        row("p1", "pinned"),
+        row("p2", "pinned"),
+        marker("pinned-divider"),
+        row("a1", "active"),
+        marker("working-header"),
+        row("w1", "working"),
+      ];
+      expect(resolveSidebarDropTarget(pinnedItems, "p1", "w1")).toBeNull();
+      expect(resolveSidebarDropTarget(pinnedItems, "p1", "p2")).toEqual({
+        section: "pinned",
+        pinnedOrder: ["p2", "p1"],
+        activeOrder: ["a1"],
+      });
+      expect(resolveSidebarDropTarget(pinnedItems, "p1", "a1")).toEqual({
+        section: "active",
+        pinnedOrder: ["p2"],
+        activeOrder: ["a1", "p1"],
+      });
     });
 
     it.each([
