@@ -326,6 +326,45 @@ export function threadEventAlert(input: {
   };
 }
 
+/** The trigger that judges each kind again at delivery: any trigger whose kinds include it. */
+export const REJUDGE_TRIGGER: Record<ThreadEventKind, ThreadEventTrigger> = {
+  "lane-ended": "run-ended",
+  "promise-without-wake": "settled",
+  stuck: "sweep",
+  "needs-person": "request",
+};
+
+/**
+ * Whether a queued thread event is still true of the thread as it stands now, judged at the time it
+ * fired so the recent-run window does not expire while delivery waits. A lane that restarted,
+ * settled, registered a wait, merged its pull request or got its answer since then is no news.
+ */
+export function threadEventStillHolds(input: {
+  readonly alert: ThreadEventAlert;
+  readonly shell: WatchedShell;
+  readonly stuckMinutes: number;
+  readonly remoteTaskCount?: number;
+  readonly childActivityMs?: number | null;
+}): boolean {
+  const { alert } = input;
+  const firedMs = Date.parse(alert.occurredAt);
+  if (!Number.isFinite(firedMs)) return true;
+  const { findings } = judgeThread({
+    shell: input.shell,
+    trigger: REJUDGE_TRIGGER[alert.kind],
+    nowMs: firedMs,
+    stuckMinutes: input.stuckMinutes,
+    ...(input.remoteTaskCount === undefined ? {} : { remoteTaskCount: input.remoteTaskCount }),
+    ...(input.childActivityMs === undefined ? {} : { childActivityMs: input.childActivityMs }),
+  });
+  const prefix = `${alert.environmentId}:${alert.threadId}:${alert.kind}:`;
+  return findings.some(
+    (finding) =>
+      finding.kind === alert.kind &&
+      alert.id === `${prefix}${finding.signature}:${alert.occurredAt}`,
+  );
+}
+
 const NEXT_STEP: Record<ThreadEventKind, string> = {
   "lane-ended":
     "Check the thread: restart, repair or replace it, or settle it if its work is done. It sends no further alert for this run.",

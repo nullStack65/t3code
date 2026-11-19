@@ -7,6 +7,9 @@ import {
   afterDeliveryAttempt,
   afterDrop,
   afterHold,
+  BUSY_WATCHER_MAX_HOLD_MS,
+  BUSY_WATCHER_RECHECK_MS,
+  busyWatcherHold,
   deliverAlertToWatcher,
   INCIDENT_GROUP_INTERVAL_MS,
   INCIDENT_GROUP_WAIT_MS,
@@ -481,6 +484,20 @@ it("a held item waits without failing, and a dropped one leaves without counting
   assert.notEqual(rest.id, entry.alert.id);
   assert.equal(afterDrop(held, entry, 80_000).outbox.length, 0);
   assert.deepEqual(dropped.incidentSentAt, {});
+});
+
+it.each([
+  ["an idle watcher", "idle", 0, null],
+  ["a watcher that cannot be read", null, 0, null],
+  ["a watcher mid-turn", "running", 0, BUSY_WATCHER_RECHECK_MS],
+  ["a watcher with a queued turn", "queued", 0, BUSY_WATCHER_RECHECK_MS],
+  ["a watcher waiting on its own background work", "waiting", 0, BUSY_WATCHER_RECHECK_MS],
+  ["a watcher busy near the cap", "running", BUSY_WATCHER_MAX_HOLD_MS - 1_000, 1_000],
+  ["a watcher busy past the cap", "running", BUSY_WATCHER_MAX_HOLD_MS, null],
+] as const)("busy watcher hold: %s", (_name, status, ageMs, waitMs) => {
+  const createdAt = 1_000_000;
+  const nowMs = createdAt + ageMs;
+  assert.equal(busyWatcherHold(status, createdAt, nowMs), waitMs === null ? null : nowMs + waitMs);
 });
 
 it("a model alert survives a newer run that fell back too, unlike a thread event", () => {
