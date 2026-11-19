@@ -20,7 +20,14 @@ const devElectronCommand =
   NodeOS.platform() === "win32"
     ? "node scripts/dev-electron.mjs"
     : "exec node scripts/dev-electron.mjs";
+// The exact source commit this build was made from, so the staged-update channel can tell
+// whether a staged build is the one already running. Same variable as the server build.
+const buildCommit = process.env.T3CODE_BUILD_COMMIT?.trim().toLowerCase() ?? "";
+if (buildCommit !== "" && !/^[0-9a-f]{40}$/.test(buildCommit)) {
+  throw new Error(`T3CODE_BUILD_COMMIT must be a 40-character hex commit, got "${buildCommit}".`);
+}
 const publicConfigDefine = {
+  __T3CODE_BUILD_COMMIT__: JSON.stringify(buildCommit),
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),

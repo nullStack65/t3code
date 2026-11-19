@@ -292,6 +292,12 @@ export interface DesktopUpdateState {
   notAppliedVersion?: string;
   /** Off only because a managed policy rules out this channel; switching channels turns it on. */
   channelBlockedByPolicy?: true;
+  /** A complete build staged on this machine by a deployment tool; restarting runs it. */
+  stagedBuild?: DesktopStagedBuild;
+}
+
+export interface DesktopStagedBuild {
+  commit: string;
 }
 
 export interface DesktopUpdateReleaseNote {
@@ -336,6 +342,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   canRetry: Schema.Boolean,
   notAppliedVersion: Schema.optionalKey(Schema.String),
   channelBlockedByPolicy: Schema.optionalKey(Schema.Literal(true)),
+  stagedBuild: Schema.optionalKey(Schema.Struct({ commit: Schema.String })),
 });
 
 export const DesktopCliCommandStateSchema = Schema.Struct({

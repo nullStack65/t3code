@@ -23,6 +23,8 @@ function desktopReleaseRepositoryUrl(repository: string | undefined): string {
 
 /** The download RPC can beat the updater's downloadedVersion event; fall back to the requested version. */
 export function getDesktopUpdateDownloadedVersion(state: DesktopUpdateState): string | null {
+  // A staged build is a commit on this machine, not a published release with notes.
+  if (state.stagedBuild !== undefined) return null;
   return state.downloadedVersion ?? state.availableVersion;
 }
 
@@ -86,7 +88,12 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
   return "This Mac has Apple Silicon, but T3 Code is still running the Intel build under Rosetta. The next app update will replace it with the native Apple Silicon build.";
 }
 
+export const STAGED_BUILD_READY_LABEL = "New version ready. Click to restart.";
+
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+  if (state.stagedBuild !== undefined && state.status === "downloaded") {
+    return STAGED_BUILD_READY_LABEL;
+  }
   if (
     state.notAppliedVersion !== undefined &&
     (state.status === "available" || state.status === "downloaded") &&
@@ -125,8 +132,11 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
 }
 
 export function getDesktopUpdateInstallConfirmationMessage(
-  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
+  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion" | "stagedBuild">,
 ): string {
+  if (state.stagedBuild !== undefined) {
+    return `Restart T3 Code on the new version (${state.stagedBuild.commit.slice(0, 8)})?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
+  }
   const version = state.downloadedVersion ?? state.availableVersion;
   return `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
 }

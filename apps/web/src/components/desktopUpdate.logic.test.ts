@@ -4,6 +4,8 @@ import type { DesktopUpdateState } from "@t3tools/contracts";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateDownloadedVersion,
+  getDesktopUpdateInstallConfirmationMessage,
   getDesktopUpdateReleaseHistoryUrl,
   getDesktopUpdateReleaseUrl,
   resolveDesktopUpdateButtonAction,
@@ -77,6 +79,22 @@ describe("desktop update button state", () => {
       downloadPercent: 100,
     };
     expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
+  });
+});
+
+describe("staged build", () => {
+  const staged: DesktopUpdateState = {
+    ...baseState,
+    status: "downloaded",
+    downloadedVersion: "4f4c0fbb",
+    stagedBuild: { commit: "4f4c0fbb936f12b27d7d97f05dd9b2e0a9732cb1" },
+  };
+
+  it("offers a restart without a release-notes version", () => {
+    expect(resolveDesktopUpdateButtonAction(staged)).toBe("install");
+    expect(getDesktopUpdateButtonTooltip(staged)).toBe("New version ready. Click to restart.");
+    expect(getDesktopUpdateDownloadedVersion(staged)).toBeNull();
+    expect(getDesktopUpdateInstallConfirmationMessage(staged)).toContain("new version (4f4c0fbb)");
   });
 });
 

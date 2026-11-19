@@ -141,6 +141,8 @@ jobs:
           vp run --filter @t3tools/client-runtime typecheck
           vp run --filter @t3tools/provider-core typecheck
           vp run --filter t3 typecheck
+          vp run --filter @t3tools/desktop typecheck
+          vp run --filter @t3tools/web typecheck
           vp run --filter @t3tools/mobile typecheck
 
       - name: Test AssemblyAI dictation, native inbox and thread placement behavior
@@ -168,7 +170,19 @@ jobs:
             apps/web/src/components/chat/draftAttachmentUploads.test.ts \
             apps/web/src/components/chat/draftUploadReconcile.test.ts \
             apps/web/src/lib/attachmentUploadQueue.test.ts \
-            apps/server/src/ws.test.ts
+            apps/server/src/ws.test.ts \
+            packages/contracts/src/environment.test.ts \
+            apps/web/src/components/desktopUpdate.logic.test.ts
+
+      - name: Test the staged desktop build channel
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          vp test run \
+            src/updates/stagedUpdate.test.ts \
+            src/updates/DesktopUpdates.test.ts \
+            src/updates/DesktopRemoteUpdates.test.ts
 
       - name: Test mobile new-task placement, outbox and uploads
         shell: bash

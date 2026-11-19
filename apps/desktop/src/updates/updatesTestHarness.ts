@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -136,6 +137,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     }),
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
+
+  const layerElectronApp = Layer.mock(ElectronApp.ElectronApp, {
+    quit: Effect.sync(() => {
+      installSteps.push("quitApp");
+    }),
+  });
 
   const layerSshEnvironment = Layer.mock(DesktopSshEnvironment.DesktopSshEnvironment, {
     closeAllTunnels: Effect.sync(() => {
@@ -297,6 +304,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     Layer.provideMerge(layerWindow),
     Layer.provideMerge(layerBackend),
     Layer.provideMerge(layerSshEnvironment),
+    Layer.provideMerge(layerElectronApp),
     Layer.provideMerge(DesktopState.layer),
     Layer.provideMerge(layerSettings),
     Layer.provideMerge(

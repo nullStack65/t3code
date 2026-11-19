@@ -33,12 +33,26 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
+import { desktopBuildCommit } from "./desktopBuildCommit.ts";
+import {
+  decodeStagedDesktopUpdate,
+  isOfferableStagedUpdate,
+  overlayStagedUpdate,
+  STAGED_UPDATE_DIR_SEGMENTS,
+  STAGED_UPDATE_FILE,
+  stagedRelaunchCommand,
+  stagedUpdateApplies,
+  stagedUpdateVersionLabel,
+  type StagedDesktopUpdate,
+} from "./stagedUpdate.ts";
+import { sha256OfFile, spawnDetachedRelaunch, watchDirectory } from "./stagedUpdateNative.ts";
 import {
   normalizeDesktopUpdateReleaseNotes,
   releaseNotesOfOfferedVersion,
@@ -379,6 +393,7 @@ export const make = Effect.gen(function* () {
   const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
   const desktopState = yield* DesktopState.DesktopState;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
+  const electronApp = yield* ElectronApp.ElectronApp;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -422,7 +437,13 @@ export const make = Effect.gen(function* () {
   // Serialize writes and publishes against subscription so snapshots cannot overlap the first change.
   const stateMutex = yield* Semaphore.make(1);
 
+  // A build staged on this machine (see stagedUpdate.ts), shown through the downloaded-update UI.
+  const stagedUpdateRef = yield* Ref.make<StagedDesktopUpdate | null>(null);
+  const presentState = (state: DesktopUpdateState) =>
+    Ref.get(stagedUpdateRef).pipe(Effect.map((staged) => overlayStagedUpdate(state, staged)));
+
   const emitState = Ref.get(updateStateRef).pipe(
+    Effect.flatMap(presentState),
     Effect.flatMap((state) => electronWindow.sendAll(IpcChannels.UPDATE_STATE_CHANNEL, state)),
   );
 
@@ -1235,8 +1256,133 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const stagedUpdateDir = environment.path.join(
+    environment.homeDirectory,
+    ...STAGED_UPDATE_DIR_SEGMENTS,
+  );
+
+  // Missing, malformed or unreadable records, and builds already running, offer nothing.
+  const readStagedUpdate = Effect.gen(function* () {
+    const text = yield* fileSystem.readFileString(
+      environment.path.join(stagedUpdateDir, STAGED_UPDATE_FILE),
+    );
+    const staged = decodeStagedDesktopUpdate(text);
+    if (staged === null) return null;
+    const artifactExists = yield* fileSystem.exists(staged.artifact);
+    return isOfferableStagedUpdate(staged, desktopBuildCommit, artifactExists) ? staged : null;
+  }).pipe(Effect.catchCause(() => Effect.succeed(null)));
+
+  const refreshStagedUpdate = Effect.gen(function* () {
+    const next = yield* readStagedUpdate;
+    const previous = yield* Ref.getAndSet(stagedUpdateRef, next);
+    if (previous?.commit === next?.commit && previous?.artifact === next?.artifact) return;
+    if (next !== null) {
+      yield* logUpdaterInfo("staged build ready", {
+        commit: next.commit,
+        sourceRef: next.sourceRef,
+        stagedAt: next.stagedAt,
+      });
+    }
+    // Republish the stock state so subscribers and windows see the staged build change.
+    yield* setState(yield* Ref.get(updateStateRef));
+  });
+
+  const watchStagedUpdates = Effect.gen(function* () {
+    const context = yield* Effect.context<never>();
+    yield* refreshStagedUpdate;
+    if (!(yield* fileSystem.exists(stagedUpdateDir).pipe(Effect.orElseSucceed(() => false)))) {
+      return;
+    }
+    // Watch the directory: the deployment tool replaces pending.json by atomic rename.
+    yield* watchDirectory(stagedUpdateDir, (name) => {
+      if (name === null || name === STAGED_UPDATE_FILE) {
+        void Effect.runPromiseWith(context)(refreshStagedUpdate);
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        logUpdaterWarning("Staged build watch unavailable; it is read at startup only.", {
+          cause: describeUpdateErrorCause(cause),
+        }),
+      ),
+    );
+  });
+
+  // The person's Restart click: check the staged file, stop what the stock install stops, then
+  // hand off to a detached shell that starts the staged build once this process has exited.
+  const refuseStagedRestart = Effect.fn("desktop.updates.refuseStagedRestart")(function* (
+    staged: StagedDesktopUpdate,
+    message: string,
+  ) {
+    yield* logUpdaterWarning(message, { commit: staged.commit });
+    const state = { ...(yield* presentState(yield* Ref.get(updateStateRef))), message };
+    return { accepted: false, completed: false, failed: true, state };
+  });
+
+  const restartIntoStagedUpdate = Effect.fn("desktop.updates.restartIntoStaged")(function* (
+    staged: StagedDesktopUpdate,
+  ) {
+    if (yield* Ref.get(desktopState.quitting)) {
+      return { accepted: false, completed: false, failed: false, state: yield* getState };
+    }
+    const digest = yield* sha256OfFile(staged.artifact).pipe(Effect.option);
+    if (Option.isNone(digest) || digest.value !== staged.sha256) {
+      return yield* refuseStagedRestart(
+        staged,
+        "The staged build does not match its recorded checksum.",
+      );
+    }
+    const relaunch = stagedRelaunchCommand({
+      platform: environment.platform,
+      pid: process.pid,
+      artifact: staged.artifact,
+      switches: process.argv.slice(1),
+      env: process.env,
+    });
+    if (relaunch === null) {
+      return yield* refuseStagedRestart(
+        staged,
+        "Staged builds are not supported on this platform.",
+      );
+    }
+    yield* Ref.set(desktopState.quitting, true);
+    const instances = yield* pool.list;
+    yield* Effect.all(
+      [
+        Effect.forEach(
+          instances,
+          (instance) => instance.stop({ timeout: DesktopBackendManager.BACKEND_QUIT_STOP_TIMEOUT }),
+          { concurrency: "unbounded" },
+        ),
+        sshEnvironment.closeAllTunnels,
+      ],
+      { concurrency: "unbounded" },
+    );
+    yield* spawnDetachedRelaunch(relaunch).pipe(
+      Effect.tapError(() => Ref.set(desktopState.quitting, false)),
+      Effect.orDie,
+    );
+    yield* logUpdaterInfo("restarting into staged build", { commit: staged.commit });
+    yield* electronApp.quit;
+    return { accepted: true, completed: false, failed: false, state: yield* getState };
+  });
+
+  const getState = Ref.get(updateStateRef).pipe(Effect.flatMap(presentState));
+
+  /** Some(result) when the staged build owns the restart button for this request. */
+  const installStagedUpdate = Effect.fn("desktop.updates.installStaged")(function* (
+    expectedVersion?: string,
+  ) {
+    const staged = yield* Ref.get(stagedUpdateRef);
+    const stock = yield* Ref.get(updateStateRef);
+    if (!stagedUpdateApplies(stock, staged)) return Option.none();
+    if (expectedVersion !== undefined && expectedVersion !== stagedUpdateVersionLabel(staged)) {
+      return Option.none();
+    }
+    return Option.some(yield* restartIntoStagedUpdate(staged));
+  });
+
   return DesktopUpdates.of({
-    getState: Ref.get(updateStateRef),
+    getState,
     isActionActive: activeUpdateAction.pipe(Effect.map(Option.isSome)),
     isInstallActive: activeUpdateAction.pipe(
       Effect.map((action) => Option.isSome(action) && action.value === "install"),
@@ -1244,8 +1390,11 @@ export const make = Effect.gen(function* () {
     subscribe: stateMutex.withPermits(1)(
       Effect.gen(function* () {
         const subscription = yield* PubSub.subscribe(stateChanges);
-        const latest = yield* Ref.get(updateStateRef);
-        return { latest, changes: Stream.fromSubscription(subscription) };
+        const latest = yield* presentState(yield* Ref.get(updateStateRef));
+        return {
+          latest,
+          changes: Stream.fromSubscription(subscription).pipe(Stream.mapEffect(presentState)),
+        };
       }),
     ),
     emitState,
@@ -1253,6 +1402,8 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((state) => resolveStateDisabledReason(state.channel)),
     ),
     configure: Effect.gen(function* () {
+      // Independent of the stock updater: staged builds are offered even when it is disabled.
+      yield* watchStagedUpdates;
       const context = yield* Effect.context<never>();
       // Runs synchronously up to the first await, so a check's outcome is applied before the
       // check's promise resolves and wakes the actions waiting on it.
@@ -1430,11 +1581,24 @@ export const make = Effect.gen(function* () {
         state: yield* Ref.get(updateStateRef),
       };
     }).pipe(Effect.withSpan("desktop.updates.download")),
-    install: installWithExpectedVersion().pipe(
+    install: installStagedUpdate().pipe(
+      Effect.flatMap(
+        Option.match({
+          onSome: Effect.succeed,
+          onNone: () => installWithExpectedVersion(),
+        }),
+      ),
       Effect.map(({ accepted, completed, state }) => ({ accepted, completed, state })),
     ),
     installPrepared: Effect.fn("DesktopUpdates.installPrepared")(function (expectedVersion) {
-      return installWithExpectedVersion(expectedVersion);
+      return installStagedUpdate(expectedVersion).pipe(
+        Effect.flatMap(
+          Option.match({
+            onSome: Effect.succeed,
+            onNone: () => installWithExpectedVersion(expectedVersion),
+          }),
+        ),
+      );
     }),
   });
 });
