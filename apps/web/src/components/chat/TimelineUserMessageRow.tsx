@@ -1,8 +1,5 @@
 import { InlineAudioPreview } from "../files/InlineAudioPreview";
-import {
-  messageSenderLabel,
-  resolveMessageSender,
-} from "@t3tools/client-runtime/message-sender";
+import { messageSenderLabel, resolveMessageSender } from "@t3tools/client-runtime/message-sender";
 import { MessageSenderLine } from "./MessageSenderLine";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import {
@@ -473,9 +470,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const userMessage = resolveUserMessagePresentation(row.message);
   const sender = resolveMessageSender(row.message);
   // Name a person's message where the sender changes; agents, guests and T3 Code name themselves.
-  const showSender = sender.kind === "person" && !row.groupedWithPrevious;
-  const personHeading =
-    sender.kind === "person" && sender.sentBy !== null ? messageSenderLabel(sender) : "You";
+  // A message still on its way has no server stamp yet (no createdBy); it is the user's own.
+  const unsent = row.message.createdBy === undefined && row.message.sentBy === undefined;
+  const showSender = sender.kind === "person" && !row.groupedWithPrevious && !unsent;
+  const personHeading = sender.kind === "person" && !unsent ? messageSenderLabel(sender) : "You";
   // Messages from other agents fold to one line so the user's own messages stay easy to find.
   const folded = userMessage.attribution === "agent";
   const [expanded, setExpanded] = useState(false);

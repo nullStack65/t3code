@@ -75,6 +75,11 @@ export function resolveMessageSender(
     return { kind: "guest", name: presentation.guestName ?? "Guest" };
   }
   if (message.idleCompaction !== undefined) return { kind: "system" };
+  // The server's stamp of a person's client outranks rules read from client-chosen text or ids,
+  // so a person cannot dress a message up as an automation or T3 Code.
+  if (message.sentBy !== undefined && message.createdBy !== "agent") {
+    return { kind: "person", sentBy: message.sentBy };
+  }
   if (presentation.attribution === "automation") {
     return { kind: "automation", scheduledTaskId: presentation.scheduledTaskId ?? null };
   }

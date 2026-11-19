@@ -137,7 +137,9 @@ export function failEnvironmentScopeRequired(requiredScope: AuthEnvironmentScope
   );
 }
 
-function failEnvironmentOperationForbidden(reason: "current_session_revoke_not_allowed") {
+function failEnvironmentOperationForbidden(
+  reason: "current_session_revoke_not_allowed" | "current_session_founder_not_allowed",
+) {
   return currentEnvironmentTraceId.pipe(
     Effect.flatMap((traceId) =>
       Effect.fail(
@@ -543,13 +545,18 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.setClientFounder")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
             const updated = yield* serverAuth.setClientSessionFounder(
+              session.sessionId,
               args.payload.sessionId,
               args.payload.founder,
             );
             return { updated };
           },
+          Effect.catchTags({
+            ServerAuthForbiddenOperationError: () =>
+              failEnvironmentOperationForbidden("current_session_founder_not_allowed"),
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("client_session_founder_failed", error),
           ),

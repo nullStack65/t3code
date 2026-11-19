@@ -224,8 +224,8 @@ export function buildSearchSnippet(text: string, matchStart: number): string {
 /**
  * Whether the message aliased `messages` is from `sender`, sorted as `resolveMessageSender` in
  * client-runtime sorts it. Only stored fields count, so an old message names no person: it is
- * among "people" but never Kameron's or Jeff's. A legacy scheduled-task prompt whose only mark is
- * its text prefix stays with people here, where the client calls it an automation.
+ * among "people" but never Kameron's or Jeff's. A legacy scheduled-task prompt is known by its
+ * server-made id; a message the server stamped with a person's client is a person's regardless.
  */
 export const messageSenderCondition = (
   sql: SqlClient.SqlClient,
@@ -240,6 +240,8 @@ export const messageSenderCondition = (
   const person = sql`(NOT ${guest}
     AND ${field("$.idleCompaction")} IS NULL
     AND ${field("$.scheduledTaskId")} IS NULL
+    AND (${field("$.sentBy")} IS NOT NULL
+      OR ${field("$.id")} NOT LIKE 'scheduled-task-message:%')
     AND ${field("$.senderThreadId")} IS NULL
     AND ${field("$.linkedSender")} IS NULL)`;
   switch (sender) {
@@ -685,15 +687,16 @@ export const make = Effect.gen(function* () {
       ]),
     );
     // A sender filter is about messages, so titles neither match nor take slots.
-    const titleHits: ThreadSearchHit[] = (input.sender === undefined
-      ? rankSearchItems(candidates, (row, options) =>
-      // An agent's search has no use for the user's palette picks.
-      scoreThreadSearch(normalizedQuery, subjectById.get(row.thread.id)!, now, {
-        ...options,
-        picks: false,
-      }),
-        )
-      : []
+    const titleHits: ThreadSearchHit[] = (
+      input.sender === undefined
+        ? rankSearchItems(candidates, (row, options) =>
+            // An agent's search has no use for the user's palette picks.
+            scoreThreadSearch(normalizedQuery, subjectById.get(row.thread.id)!, now, {
+              ...options,
+              picks: false,
+            }),
+          )
+        : []
     )
       .slice(0, limit)
       .map(({ item }) => ({

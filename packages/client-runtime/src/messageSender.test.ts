@@ -78,6 +78,17 @@ describe("resolveMessageSender", () => {
     expect(messageSenderLabel(automation)).toBe("Automation");
     expect(messageSenderMatches(automation, "agents")).toBe(true);
 
+    // A person's stamp wins over a client-supplied automation id: a client cannot hide as one.
+    const disguised = resolveMessageSender({
+      role: "user",
+      text: "looks scheduled",
+      createdBy: "user",
+      scheduledTaskId: ScheduledTaskId.make("task:nightly"),
+      sentBy: sentBy("jeff"),
+    });
+    expect(messageSenderLabel(disguised)).toBe("Jeff");
+    expect(messageSenderMatches(disguised, "agents")).toBe(false);
+
     const notice = resolveMessageSender({ role: "user", text: "x", createdBy: "system" });
     expect(messageSenderLabel(notice)).toBe("T3 Code");
     expect(messageSenderMatches(notice, "system")).toBe(true);

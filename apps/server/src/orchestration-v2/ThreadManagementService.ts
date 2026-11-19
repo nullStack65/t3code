@@ -113,6 +113,19 @@ export function withCreationProvenance(
       const { sentBy, ...actor } = provenance;
       return { ...rest, ...actor, ...(sentBy === undefined ? {} : { sentBy }) };
     }
+    case "queued-run.edit": {
+      // The editor's own stamp replaces the original sender's, since the words are now theirs.
+      const { sentBy: _sentBy, ...rest } = command;
+      return provenance.sentBy === undefined ? rest : { ...rest, sentBy: provenance.sentBy };
+    }
+    case "runtime-request.respond": {
+      const { sentBy: _sentBy, createdBy: _createdBy, ...rest } = command;
+      return {
+        ...rest,
+        createdBy: provenance.createdBy,
+        ...(provenance.sentBy === undefined ? {} : { sentBy: provenance.sentBy }),
+      };
+    }
     case "thread.fork":
     case "thread.merge_back":
     case "delegated_task.request": {

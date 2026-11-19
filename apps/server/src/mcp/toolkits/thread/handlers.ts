@@ -276,6 +276,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             commandId: yield* newCommandId(),
             requestId,
             answers,
+            // An agent's answer is an agent's message, never a person's.
+            createdBy: "agent",
           })
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence };

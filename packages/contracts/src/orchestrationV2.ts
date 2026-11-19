@@ -3573,6 +3573,8 @@ export const OrchestrationV2Command = Schema.Union([
     text: Schema.String,
     // Replaces all attachments; absent preserves them for older clients editing text.
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
+    /** Who edited it, stamped by the server; an edit with none no longer names a person. */
+    sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),
@@ -3583,6 +3585,9 @@ export const OrchestrationV2Command = Schema.Union([
     feedback: Schema.optional(Schema.String),
     answers: Schema.optional(ProviderUserInputAnswers),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
+    /** Who answered, stamped by the server: a person's client, or an agent through its tools. */
+    createdBy: Schema.optional(OrchestrationV2Actor),
+    sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.user-input.dismiss"),

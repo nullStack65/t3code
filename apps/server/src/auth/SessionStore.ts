@@ -1116,8 +1116,9 @@ const make = Effect.gen(function* () {
 
   const setFounder: SessionStore["Service"]["setFounder"] = Effect.fn("SessionStore.setFounder")(
     function* (sessionId, founder) {
+      const now = yield* DateTime.now;
       const updated = yield* authSessions
-        .setFounder({ sessionId, founder })
+        .setFounder({ sessionId, founder, now })
         .pipe(Effect.mapError((cause) => new SessionFounderUpdateError({ sessionId, cause })));
       if (updated) {
         const session = yield* loadActiveSession(sessionId).pipe(
@@ -1132,13 +1133,11 @@ const make = Effect.gen(function* () {
   const senderOf: SessionStore["Service"]["senderOf"] = (sessionId) =>
     authSessions.getById({ sessionId }).pipe(
       Effect.map(
-        Option.map(
-          (row): AuthSessionSender => ({
-            label: row.client.label,
-            deviceType: row.client.deviceType,
-            founder: row.founder,
-          }),
-        ),
+        Option.map((row): AuthSessionSender => ({
+          label: row.client.label,
+          deviceType: row.client.deviceType,
+          founder: row.founder,
+        })),
       ),
       Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
     );

@@ -3046,9 +3046,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(queuedMessage.linkedSender === undefined
             ? {}
             : { linkedSender: queuedMessage.linkedSender }),
-          ...(queuedMessage.sentBy === undefined
-            ? {}
-            : { sentBy: queuedMessage.sentBy }),
+          ...(queuedMessage.sentBy === undefined ? {} : { sentBy: queuedMessage.sentBy }),
           ...(queuedMessage.idleCompaction === undefined
             ? {}
             : { idleCompaction: queuedMessage.idleCompaction }),
@@ -11030,8 +11028,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             text: command.feedback,
             attachments: [],
             streaming: false,
-            createdBy: "user",
+            createdBy: command.createdBy ?? "user",
             creationSource: "server",
+            ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
             createdAt: now,
             updatedAt: now,
           },
@@ -11187,8 +11186,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           messageId: MessageId.make(`async-answer:${command.requestId}`),
           text: replies.join("\n\n"),
           attachments: [],
-          createdBy: "user" as const,
+          createdBy: command.createdBy ?? ("user" as const),
           creationSource: "server" as const,
+          ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
           dispatchMode,
         };
         yield* dispatchMessage(answer, events, effects);
@@ -11580,9 +11580,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(queuedMessage.linkedSender === undefined
         ? {}
         : { linkedSender: queuedMessage.linkedSender }),
-      ...(queuedMessage.sentBy === undefined
-        ? {}
-        : { sentBy: queuedMessage.sentBy }),
+      ...(queuedMessage.sentBy === undefined ? {} : { sentBy: queuedMessage.sentBy }),
       ...(queuedMessage.idleCompaction === undefined
         ? {}
         : { idleCompaction: queuedMessage.idleCompaction }),
@@ -11801,6 +11799,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const emitEvent = emit(events, command);
     const editedAttachments =
       command.attachments === undefined ? {} : { attachments: command.attachments };
+    // The edited words are the editor's: a person's client stamps itself, and an agent's edit
+    // drops the old stamp rather than leave someone else's name on text they did not write.
+    const withEditor = <
+      T extends { readonly sentBy?: OrchestrationV2ConversationMessage["sentBy"] },
+    >(
+      item: T,
+    ): T => {
+      const { sentBy: _previous, ...rest } = item;
+      return (command.sentBy === undefined ? rest : { ...rest, sentBy: command.sentBy }) as T;
+    };
     yield* emitEvent({
       type: "message.updated",
       threadId: command.threadId,
@@ -11809,7 +11817,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: queuedRun.providerInstanceId,
       occurredAt: now,
       payload: withoutGuestAttribution({
-        ...queuedMessage,
+        ...withEditor(queuedMessage),
         text: command.text,
         ...editedAttachments,
         ...(command.context ? { context: command.context } : {}),
@@ -11825,7 +11833,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerInstanceId: queuedRun.providerInstanceId,
         occurredAt: now,
         payload: withoutGuestAttribution({
-          ...queuedTurnItem,
+          ...withEditor(queuedTurnItem),
           text: command.text,
           ...editedAttachments,
           ...(command.context ? { context: command.context } : {}),

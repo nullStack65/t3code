@@ -606,17 +606,24 @@ export class EnvironmentAuth extends Context.Service<
     readonly revokeOtherClientSessions: (
       currentSessionId: AuthSessionId,
     ) => Effect.Effect<number, ServerAuthInternalError>;
-    /** Records who uses a client session, or clears it with null; false when it is not live. */
+    /**
+     * Records who uses another client session, or clears it with null; false when that session is
+     * not live or is a bot. A client may not name itself, so who sent a message is always set by a
+     * different trusted client than the one that sends it.
+     */
     readonly setClientSessionFounder: (
+      currentSessionId: AuthSessionId,
       targetSessionId: AuthSessionId,
       founder: Founder | null,
-    ) => Effect.Effect<boolean, ServerAuthInternalError>;
+    ) => Effect.Effect<boolean, ServerAuthForbiddenOperationError | ServerAuthInternalError>;
     /**
      * Who sent a message on this session, read from the server's own record of it. A session it
      * cannot read still names itself by id with no person, so a message never claims one it lacks
      * and is never refused for want of a label.
      */
-    readonly messageSenderOf: (sessionId: AuthSessionId) => Effect.Effect<OrchestrationV2MessageSentBy>;
+    readonly messageSenderOf: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<OrchestrationV2MessageSentBy>;
     readonly authenticateHttpRequest: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
@@ -1450,34 +1457,43 @@ export const make = Effect.gen(function* () {
     return yield* revokeSession(targetSessionId);
   });
 
-  const setClientSessionFounder: EnvironmentAuth["Service"]["setClientSessionFounder"] = (
-    targetSessionId,
-    founder,
-  ) =>
-    sessions.setFounder(targetSessionId, founder).pipe(
-      Effect.mapError((cause) => new ServerAuthSessionFounderError({ cause })),
-      Effect.withSpan("EnvironmentAuth.setClientSessionFounder"),
-    );
+  const setClientSessionFounder: EnvironmentAuth["Service"]["setClientSessionFounder"] = Effect.fn(
+    "EnvironmentAuth.setClientSessionFounder",
+  )(function* (currentSessionId, targetSessionId, founder) {
+    if (currentSessionId === targetSessionId) {
+      return yield* new ServerAuthForbiddenOperationError({});
+    }
+    // Another session on the caller's own device key is the same device naming itself.
+    const toFounderError = (cause: unknown) => new ServerAuthSessionFounderError({ cause });
+    const [currentKey, targetKey] = yield* Effect.all([
+      sessions.proofKeyThumbprintOf(currentSessionId),
+      sessions.proofKeyThumbprintOf(targetSessionId),
+    ]).pipe(Effect.mapError(toFounderError));
+    if (Option.isSome(currentKey) && Option.getOrUndefined(targetKey) === currentKey.value) {
+      return yield* new ServerAuthForbiddenOperationError({});
+    }
+    return yield* sessions
+      .setFounder(targetSessionId, founder)
+      .pipe(Effect.mapError(toFounderError));
+  });
 
   const messageSenderOf: EnvironmentAuth["Service"]["messageSenderOf"] = (sessionId) =>
     sessions.senderOf(sessionId).pipe(
-      Effect.map(
-        (sender): OrchestrationV2MessageSentBy => ({
-          sessionId,
-          device: Option.match(sender, {
-            onNone: () => "",
-            onSome: (value) => value.label ?? "",
-          }),
-          deviceType: Option.match(sender, {
-            onNone: () => "unknown" as const,
-            onSome: (value) => value.deviceType,
-          }),
-          founder: Option.match(sender, {
-            onNone: () => null,
-            onSome: (value) => value.founder,
-          }),
+      Effect.map((sender): OrchestrationV2MessageSentBy => ({
+        sessionId,
+        device: Option.match(sender, {
+          onNone: () => "",
+          onSome: (value) => value.label ?? "",
         }),
-      ),
+        deviceType: Option.match(sender, {
+          onNone: () => "unknown" as const,
+          onSome: (value) => value.deviceType,
+        }),
+        founder: Option.match(sender, {
+          onNone: () => null,
+          onSome: (value) => value.founder,
+        }),
+      })),
       Effect.catchCause((cause) =>
         Effect.logWarning("Could not read who uses a client; its message names no person.").pipe(
           Effect.annotateLogs({ sessionId, cause: Cause.pretty(cause) }),

@@ -290,6 +290,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
       }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
     );
 
+    it.effect("lets a client name another client's person but never its own", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sessions = yield* SessionStore.SessionStore;
+        const desktop = (label: string) =>
+          sessions.issue({
+            subject: "browser-pairing",
+            method: "browser-session-cookie",
+            client: { label, deviceType: "desktop" },
+          });
+        const admin = yield* desktop("Owner");
+        const laptop = yield* desktop("Work laptop");
+        const bot = yield* serverAuth.issueSession({ label: "Bot" });
+
+        expect(
+          yield* serverAuth.setClientSessionFounder(admin.sessionId, laptop.sessionId, "jeff"),
+        ).toBe(true);
+        expect((yield* serverAuth.messageSenderOf(laptop.sessionId)).founder).toBe("jeff");
+
+        const selfAssign = yield* Effect.flip(
+          serverAuth.setClientSessionFounder(laptop.sessionId, laptop.sessionId, "kameron"),
+        );
+        expect(selfAssign._tag).toBe("ServerAuthForbiddenOperationError");
+        expect((yield* serverAuth.messageSenderOf(laptop.sessionId)).founder).toBe("jeff");
+        // A bot is never a person.
+        expect(
+          yield* serverAuth.setClientSessionFounder(admin.sessionId, bot.sessionId, "jeff"),
+        ).toBe(false);
+      }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
+    );
+
     it.effect("prefers a bearer token over an empty primary cookie", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

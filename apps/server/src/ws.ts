@@ -2053,7 +2053,9 @@ export const layerWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : (command.type === "message.dispatch"
+                    : (command.type === "message.dispatch" ||
+                      command.type === "queued-run.edit" ||
+                      command.type === "runtime-request.respond"
                         ? serverAuth.messageSenderOf(currentSessionId).pipe(Effect.asSome)
                         : Effect.succeed(Option.none<OrchestrationV2MessageSentBy>())
                       ).pipe(
