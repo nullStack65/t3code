@@ -120,6 +120,8 @@ it("keeps focus in the search box when a click picks a search result", async () 
           projectDisplayName={null}
           environmentLabel={null}
           environmentMachine="server"
+          senderLabel={null}
+          senderByAgent={false}
           providerEntryByInstanceId={new Map()}
           isHighlighted={false}
           isRouteActive={false}

@@ -7,6 +7,7 @@ import {
   resolveAccessEnvironmentId,
   resolveTailscaleServeBaseUrl,
   selectQrEndpointOption,
+  tailscaleHttpsRow,
   togglePairingScopeSelection,
 } from "./ConnectionsSettings.logic";
 
@@ -70,6 +71,39 @@ describe("resolveTailscaleServeBaseUrl", () => {
     ["not a URL", 443, true],
   ] as const)("preserves %s when port %i cannot be previewed", (httpBaseUrl, port, isPortValid) => {
     expect(resolveTailscaleServeBaseUrl({ httpBaseUrl }, port, isPortValid)).toBe(httpBaseUrl);
+  });
+});
+
+describe("tailscaleHttpsRow", () => {
+  const url = "https://laptop.tail.ts.net";
+  const on = { mode: "local-only", tailscaleServeEnabled: true } as const;
+  const off = { mode: "local-only", tailscaleServeEnabled: false } as const;
+
+  it("keeps the switch on while Serve is on, even before Tailscale answers or exists", () => {
+    expect([
+      tailscaleHttpsRow(on, { status: "available", httpBaseUrl: url }),
+      tailscaleHttpsRow(on, { status: "unavailable", httpBaseUrl: url }),
+      tailscaleHttpsRow(on, null),
+    ]).toEqual([
+      { checked: true, showsSwitch: true, description: `On at ${url}` },
+      {
+        checked: true,
+        showsSwitch: true,
+        description: `On. Waiting for Tailscale Serve to answer at ${url}`,
+      },
+      {
+        checked: true,
+        showsSwitch: true,
+        description: "On. Starts once Tailscale is installed and signed in on this machine.",
+      },
+    ]);
+  });
+
+  it("offers turning on only with a MagicDNS name to serve", () => {
+    expect(tailscaleHttpsRow(off, { status: "unavailable", httpBaseUrl: url }).showsSwitch).toBe(
+      true,
+    );
+    expect(tailscaleHttpsRow(off, null).showsSwitch).toBe(false);
   });
 });
 

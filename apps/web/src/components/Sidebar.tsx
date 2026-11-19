@@ -1,9 +1,11 @@
 import { SidebarThreadFilterMenu } from "./sidebar/SidebarThreadFilterMenu";
 import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
 import {
+  launchingThreadIdOf,
   resolveMachineOwners,
   resolveThreadAttributions,
   threadAttributionKey,
+  threadSenderLine,
 } from "@t3tools/client-runtime/state/thread-attribution";
 import {
   matchesOlderSettledGroup,
@@ -1138,6 +1140,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const threadAttributions = resolveThreadAttributions(threads, machineOwners);
   const attributionOf = (thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) =>
     threadAttributions.get(threadAttributionKey(thread)) ?? "unknown";
+  // Ids are unique across machines, and an agent often launches work on another one.
+  const threadTitleById = new Map<string, string>(
+    threads.map((thread) => [thread.id, thread.title]),
+  );
+  const senderLineOf = (thread: EnvironmentThreadShell) => {
+    const attribution = threadAttributions.get(threadAttributionKey(thread));
+    if (attribution === undefined) return null;
+    const launcherId = launchingThreadIdOf(thread);
+    return threadSenderLine(
+      attribution,
+      launcherId === null ? null : (threadTitleById.get(launcherId) ?? null),
+    );
+  };
   // Search always looks across every inbox, sender and environment.
   const listFilterApplies = threadSearchQuery.trim().length === 0;
   const inboxThreads = listFilterApplies
@@ -3304,6 +3319,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       const threadKey = scopedThreadKey(
                         scopeThreadRef(thread.environmentId, thread.id),
                       );
+                      const senderLine = senderLineOf(thread);
                       return (
                         <SidebarSearchResultRow
                           isSettled={settledThreadKeys.has(threadKey)}
@@ -3318,6 +3334,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             ) ?? null
                           }
                           environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
+                          senderLabel={senderLine?.label ?? null}
+                          senderByAgent={senderLine?.byAgent ?? false}
                           environmentMachine={
                             environmentMachineById.get(thread.environmentId) ?? "server"
                           }
@@ -3452,6 +3470,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           : isCard
                             ? "card"
                             : "slim";
+                        const senderLine = senderLineOf(thread);
                         return (
                           <SortableThreadRow
                             key={threadKey}
@@ -3513,6 +3532,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             }
                             currentEnvironmentId={primaryEnvironmentId}
                             attribution={attributionOf(thread)}
+                            senderLabel={senderLine?.label ?? null}
+                            senderByAgent={senderLine?.byAgent ?? false}
                             environmentLabel={
                               environmentLabelById.get(thread.environmentId) ?? null
                             }

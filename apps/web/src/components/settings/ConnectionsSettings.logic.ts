@@ -61,14 +61,36 @@ export function isQrShareableEndpoint(endpoint: AdvertisedEndpoint): boolean {
   return endpoint.status !== "unavailable" && endpoint.reachability !== "loopback";
 }
 
-/** Desktop skips Tailscale probing until network/Serve is enabled to avoid macOS prompts; absence then
- * means unchecked. */
-export function missingTailscaleEndpointDescription(
+/**
+ * The Tailscale HTTPS switch and its status line. Serve is on by default and does nothing until
+ * Tailscale runs and is signed in. Turning it on needs the MagicDNS name, so off needs one to show
+ * the switch. Desktop skips Tailscale probing while Serve and network access are off to avoid
+ * macOS prompts, so no endpoint then says nothing about Tailscale.
+ */
+export function tailscaleHttpsRow(
   state: Pick<DesktopServerExposureState, "mode" | "tailscaleServeEnabled"> | null,
-): string {
-  return state && state.mode !== "network-accessible" && !state.tailscaleServeEnabled
-    ? "Turn on Network access to detect Tailscale."
-    : "Start Tailscale to set up HTTPS access through MagicDNS.";
+  endpoint: Pick<AdvertisedEndpoint, "status" | "httpBaseUrl"> | null,
+): { readonly checked: boolean; readonly showsSwitch: boolean; readonly description: string } {
+  if (state?.tailscaleServeEnabled) {
+    return {
+      checked: true,
+      showsSwitch: true,
+      description: !endpoint
+        ? "On. Starts once Tailscale is installed and signed in on this machine."
+        : endpoint.status === "available"
+          ? `On at ${endpoint.httpBaseUrl}`
+          : `On. Waiting for Tailscale Serve to answer at ${endpoint.httpBaseUrl}`,
+    };
+  }
+  return {
+    checked: false,
+    showsSwitch: endpoint !== null,
+    description: endpoint
+      ? `Off. Turn on to serve this backend at ${endpoint.httpBaseUrl}`
+      : state && state.mode !== "network-accessible"
+        ? "Off. Turn on Network access to detect Tailscale."
+        : "Off. Start Tailscale to set up HTTPS access through MagicDNS.",
+  };
 }
 
 export function resolveTailscaleServeBaseUrl(

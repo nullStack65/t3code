@@ -195,8 +195,10 @@ Mobile keeps its manual environment selection.
 
 ### Tailscale HTTPS
 
-Join both devices to the same tailnet. In the desktop app, enable **Tailscale
-HTTPS** in **Settings → Sharing & access**. Turn it off there to remove that route.
+Join both devices to the same tailnet. The desktop app turns on **Tailscale
+HTTPS** by default, and **Settings → Sharing & access** shows its status. It does
+nothing until Tailscale is installed and signed in. Turn it off there to remove
+that route; the app keeps that choice.
 
 Your tailnet needs MagicDNS and HTTPS certificates enabled; see
 [Tailscale's HTTPS setup](https://tailscale.com/docs/how-to/set-up-https-certificates).

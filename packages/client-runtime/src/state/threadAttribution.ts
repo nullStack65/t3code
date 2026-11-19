@@ -107,3 +107,27 @@ export function resolveThreadAttributions(
   }
   return resolved;
 }
+
+/** The thread an agent launched this one from: the agent origin's thread, else its parent. */
+export function launchingThreadIdOf(thread: AttributableThread): string | null {
+  const origin = thread.source.inbox?.origin;
+  // Launches without a calling thread record the bare id "agent".
+  if (origin?.kind === "agent" && origin.id !== "agent") return origin.id;
+  return origin?.kind === "agent" || thread.source.createdBy === "agent"
+    ? thread.lineage.parentThreadId
+    : null;
+}
+
+/** The sentence form of an attribution, naming the launching thread for agent work. */
+export function threadSenderLine(
+  attribution: ThreadAttribution,
+  launcherTitle: string | null,
+): { readonly label: string; readonly byAgent: boolean } {
+  const from = launcherTitle ? `, from “${launcherTitle}”` : "";
+  if (attribution === "unknown")
+    return launcherTitle
+      ? { label: `An agent${from}`, byAgent: true }
+      : { label: "Sender unknown", byAgent: false };
+  const byAgent = attribution.endsWith("-agents");
+  return { label: `${THREAD_ATTRIBUTION_LABELS[attribution]}${byAgent ? from : ""}`, byAgent };
+}

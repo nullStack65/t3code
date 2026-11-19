@@ -31,7 +31,7 @@ import {
   applyWslEnableSelection,
   connectDeviceName,
   isWslSettingsRowVisible,
-  missingTailscaleEndpointDescription,
+  tailscaleHttpsRow,
   resolveLocalVersionStatusLabel,
   resolveTailscaleServeBaseUrl,
 } from "./ConnectionsSettings.logic";
@@ -1097,35 +1097,32 @@ function ConnectionsSettingsContent({
     );
   };
 
-  const renderTailscaleRow = () => (
-    <SettingsRow
-      title={searchableSetting("tailscale-https").title}
-      description={
-        tailscaleHttpsEndpoint
-          ? tailscaleHttpsEndpoint.status === "available"
-            ? tailscaleHttpsEndpoint.httpBaseUrl
-            : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
-          : missingTailscaleEndpointDescription(desktopServerExposureState)
-      }
-      control={
-        tailscaleHttpsEndpoint ? (
-          <Switch
-            checked={tailscaleHttpsEndpoint.status === "available"}
-            disabled={isUpdatingTailscaleServe}
-            onCheckedChange={(checked) => {
-              if (checked) {
-                handleStartTailscaleServeSetup(tailscaleHttpsEndpoint);
-                return;
-              }
-              handleStartTailscaleServeDisable(tailscaleHttpsEndpoint);
-            }}
-            aria-label="Enable Tailscale HTTPS"
-          />
-        ) : null
-      }
-      managed={tailscaleHttpsEndpoint?.status === "available" ? undefined : remoteClientsDenial}
-    />
-  );
+  const renderTailscaleRow = () => {
+    const row = tailscaleHttpsRow(desktopServerExposureState, tailscaleHttpsEndpoint);
+    return (
+      <SettingsRow
+        title={searchableSetting("tailscale-https").title}
+        description={row.description}
+        control={
+          row.showsSwitch ? (
+            <Switch
+              checked={row.checked}
+              disabled={isUpdatingTailscaleServe}
+              onCheckedChange={(checked) => {
+                if (!checked) {
+                  setDisableTailscaleServeDialogOpen(true);
+                  return;
+                }
+                if (tailscaleHttpsEndpoint) handleStartTailscaleServeSetup(tailscaleHttpsEndpoint);
+              }}
+              aria-label="Enable Tailscale HTTPS"
+            />
+          ) : null
+        }
+        managed={row.checked ? undefined : remoteClientsDenial}
+      />
+    );
+  };
   const newestPairingLink = visibleDesktopPairingLinks.find(
     (pairingLink) => pairingLink.id === newestPairingLinkId,
   );
