@@ -243,6 +243,8 @@ function SidebarThreadTooltip({
   projectDisplayName,
   environmentLabel,
   environmentMachine,
+  senderLabel,
+  senderByAgent,
   providerEntry,
   providerEntryByInstanceId,
   showInstanceBadge,
@@ -257,6 +259,8 @@ function SidebarThreadTooltip({
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
+  senderLabel: string | null;
+  senderByAgent: boolean;
   providerEntry: SidebarProviderEntry | null;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   showInstanceBadge: boolean;
@@ -299,6 +303,16 @@ function SidebarThreadTooltip({
               className="size-3 shrink-0 stroke-muted-foreground"
             />
             <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
+          </div>
+        ) : null}
+        {senderLabel ? (
+          <div className="flex min-w-0 items-center gap-2">
+            {senderByAgent ? (
+              <BotIcon aria-hidden className="size-3 shrink-0 stroke-muted-foreground" />
+            ) : (
+              <UserRoundIcon aria-hidden className="size-3 shrink-0 stroke-muted-foreground" />
+            )}
+            <div className="min-w-0 truncate text-foreground/75">{senderLabel}</div>
           </div>
         ) : null}
         {thread.branch ? (
@@ -602,6 +616,9 @@ type SidebarThreadRowProps = {
   jumpLabel: string | null;
   currentEnvironmentId: string | null;
   attribution: ThreadAttribution;
+  /** The hover card's sender line; null when this client hasn't resolved the thread. */
+  senderLabel: string | null;
+  senderByAgent: boolean;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
   scratchMachineLabel: string | null;
@@ -873,6 +890,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       projectDisplayName={props.projectDisplayName}
       environmentLabel={props.environmentLabel}
       environmentMachine={props.environmentMachine}
+      senderLabel={props.senderLabel}
+      senderByAgent={props.senderByAgent}
       providerEntry={providerEntry}
       providerEntryByInstanceId={props.providerEntryByInstanceId}
       showInstanceBadge={showInstanceBadge}
@@ -1684,6 +1703,8 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   projectDisplayName: string | null;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
+  senderLabel: string | null;
+  senderByAgent: boolean;
   providerEntryByInstanceId: ReadonlyMap<string, SidebarProviderEntry>;
   isHighlighted: boolean;
   isRouteActive: boolean;
@@ -1862,6 +1883,8 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           projectDisplayName={props.projectDisplayName}
           environmentLabel={props.environmentLabel}
           environmentMachine={props.environmentMachine}
+          senderLabel={props.senderLabel}
+          senderByAgent={props.senderByAgent}
           providerEntry={providerEntry}
           providerEntryByInstanceId={props.providerEntryByInstanceId}
           showInstanceBadge={showInstanceBadge}

@@ -1,7 +1,12 @@
 import { EnvironmentId, makeThreadInbox, ThreadId, type ThreadInbox } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveThreadAttributions, type AttributableThread } from "./threadAttribution.ts";
+import {
+  launchingThreadIdOf,
+  resolveThreadAttributions,
+  threadSenderLine,
+  type AttributableThread,
+} from "./threadAttribution.ts";
 
 const asus = EnvironmentId.make("asus");
 const air = EnvironmentId.make("air");
@@ -83,5 +88,31 @@ describe("thread attribution", () => {
       a: "unknown",
       b: "unknown",
     });
+  });
+
+  it("names the launching thread for agent work, and says plainly when the sender is unknown", () => {
+    const launched = (
+      inbox: ThreadInbox | null,
+      options: { parent?: string; createdBy?: string },
+    ) => launchingThreadIdOf(thread("t", inbox, options));
+    expect([
+      launched(makeThreadInbox({ actor: bot }), { parent: "p" }),
+      launched(makeThreadInbox({ actor: { kind: "agent", id: "agent" } }), { parent: "p" }),
+      launched(null, { parent: "p", createdBy: "agent" }),
+      launched(makeThreadInbox({ actor: kameron }), { parent: "p" }),
+    ]).toEqual(["lead", "p", "p", null]);
+    expect([
+      threadSenderLine("kameron", "Fleet rollout"),
+      threadSenderLine("jeff-agents", "Fleet rollout"),
+      threadSenderLine("jeff-agents", null),
+      threadSenderLine("unknown", "Fleet rollout"),
+      threadSenderLine("unknown", null),
+    ]).toEqual([
+      { label: "Kameron", byAgent: false },
+      { label: "Jeff's agents, from “Fleet rollout”", byAgent: true },
+      { label: "Jeff's agents", byAgent: true },
+      { label: "An agent, from “Fleet rollout”", byAgent: true },
+      { label: "Sender unknown", byAgent: false },
+    ]);
   });
 });

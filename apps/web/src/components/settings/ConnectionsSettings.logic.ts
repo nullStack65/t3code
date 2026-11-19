@@ -61,14 +61,31 @@ export function isQrShareableEndpoint(endpoint: AdvertisedEndpoint): boolean {
   return endpoint.status !== "unavailable" && endpoint.reachability !== "loopback";
 }
 
-/** Desktop skips Tailscale probing until network/Serve is enabled to avoid macOS prompts; absence then
- * means unchecked. */
-export function missingTailscaleEndpointDescription(
-  state: Pick<DesktopServerExposureState, "mode" | "tailscaleServeEnabled"> | null,
-): string {
-  return state && state.mode !== "network-accessible" && !state.tailscaleServeEnabled
-    ? "Turn on Network access to detect Tailscale."
-    : "Start Tailscale to set up HTTPS access through MagicDNS.";
+/**
+ * The Tailscale HTTPS switch and its status line. Serve is on by default and does nothing until
+ * Tailscale runs here, signed in with MagicDNS. Desktop skips Tailscale probing while Serve and
+ * network access are off to avoid macOS prompts, so no endpoint then says nothing about Tailscale.
+ */
+export function tailscaleHttpsRow(
+  state: Pick<DesktopServerExposureState, "tailscaleServeEnabled"> | null,
+  endpoint: Pick<AdvertisedEndpoint, "status" | "httpBaseUrl"> | null,
+): { readonly checked: boolean; readonly description: string } {
+  if (!state?.tailscaleServeEnabled) {
+    return {
+      checked: false,
+      description: endpoint
+        ? `Off. Turn on to serve this backend at ${endpoint.httpBaseUrl}`
+        : "Off. Turn on to serve this backend over Tailscale HTTPS.",
+    };
+  }
+  return {
+    checked: true,
+    description: !endpoint
+      ? "On. Inactive until Tailscale runs here, signed in with MagicDNS."
+      : endpoint.status === "available"
+        ? `On at ${endpoint.httpBaseUrl}`
+        : `On, but ${endpoint.httpBaseUrl} doesn't answer. Tailscale Serve needs HTTPS certificates on the tailnet and its port free.`,
+  };
 }
 
 export function resolveTailscaleServeBaseUrl(

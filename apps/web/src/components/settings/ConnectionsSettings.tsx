@@ -31,7 +31,7 @@ import {
   applyWslEnableSelection,
   connectDeviceName,
   isWslSettingsRowVisible,
-  missingTailscaleEndpointDescription,
+  tailscaleHttpsRow,
   resolveLocalVersionStatusLabel,
   resolveTailscaleServeBaseUrl,
 } from "./ConnectionsSettings.logic";
@@ -370,8 +370,10 @@ function ConnectionsSettingsContent({
     | { readonly kind: "wsl-only"; readonly nextValue: boolean };
   const [pendingWslChange, setPendingWslChange] = useState<PendingWslChange | null>(null);
   const isWslConfirmDialogOpen = pendingWslChange !== null;
-  const [pendingTailscaleServeEndpoint, setPendingTailscaleServeEndpoint] =
-    useState<AdvertisedEndpoint | null>(null);
+  // Setup can start before Tailscale reports a MagicDNS name, so the endpoint may be null.
+  const [pendingTailscaleServeSetup, setPendingTailscaleServeSetup] = useState<{
+    readonly endpoint: AdvertisedEndpoint | null;
+  } | null>(null);
   const [disableTailscaleServeDialogOpen, setDisableTailscaleServeDialogOpen] = useState(false);
   const [tailscaleServePortInput, setTailscaleServePortInput] = useState(
     String(DEFAULT_TAILSCALE_SERVE_PORT),
@@ -469,7 +471,7 @@ function ConnectionsSettingsContent({
     parsedTailscaleServePort <= 65_535;
 
   const pendingTailscaleServeBaseUrl = resolveTailscaleServeBaseUrl(
-    pendingTailscaleServeEndpoint,
+    pendingTailscaleServeSetup?.endpoint ?? null,
     parsedTailscaleServePort,
     isTailscaleServePortValid,
   );
@@ -525,7 +527,7 @@ function ConnectionsSettingsContent({
         port: parsedTailscaleServePort,
       });
       refreshDesktopNetworkAccessState();
-      setPendingTailscaleServeEndpoint(null);
+      setPendingTailscaleServeSetup(null);
     });
     if (settled._tag === "Failure") {
       const error = Cause.squash(settled.cause);
@@ -543,11 +545,11 @@ function ConnectionsSettingsContent({
     setIsUpdatingTailscaleServe(false);
   };
 
-  const handleStartTailscaleServeSetup = (endpoint: AdvertisedEndpoint) => {
+  const handleStartTailscaleServeSetup = (endpoint: AdvertisedEndpoint | null) => {
     setTailscaleServePortInput(
       String(desktopServerExposureState?.tailscaleServePort ?? DEFAULT_TAILSCALE_SERVE_PORT),
     );
-    setPendingTailscaleServeEndpoint(endpoint);
+    setPendingTailscaleServeSetup({ endpoint });
   };
 
   const handleConfirmTailscaleServeDisable = async () => {
@@ -1097,35 +1099,27 @@ function ConnectionsSettingsContent({
     );
   };
 
-  const renderTailscaleRow = () => (
-    <SettingsRow
-      title={searchableSetting("tailscale-https").title}
-      description={
-        tailscaleHttpsEndpoint
-          ? tailscaleHttpsEndpoint.status === "available"
-            ? tailscaleHttpsEndpoint.httpBaseUrl
-            : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
-          : missingTailscaleEndpointDescription(desktopServerExposureState)
-      }
-      control={
-        tailscaleHttpsEndpoint ? (
+  const renderTailscaleRow = () => {
+    const row = tailscaleHttpsRow(desktopServerExposureState, tailscaleHttpsEndpoint);
+    return (
+      <SettingsRow
+        title={searchableSetting("tailscale-https").title}
+        description={row.description}
+        control={
           <Switch
-            checked={tailscaleHttpsEndpoint.status === "available"}
+            checked={row.checked}
             disabled={isUpdatingTailscaleServe}
             onCheckedChange={(checked) => {
-              if (checked) {
-                handleStartTailscaleServeSetup(tailscaleHttpsEndpoint);
-                return;
-              }
-              handleStartTailscaleServeDisable(tailscaleHttpsEndpoint);
+              if (checked) handleStartTailscaleServeSetup(tailscaleHttpsEndpoint);
+              else setDisableTailscaleServeDialogOpen(true);
             }}
             aria-label="Enable Tailscale HTTPS"
           />
-        ) : null
-      }
-      managed={tailscaleHttpsEndpoint?.status === "available" ? undefined : remoteClientsDenial}
-    />
-  );
+        }
+        managed={row.checked ? undefined : remoteClientsDenial}
+      />
+    );
+  };
   const newestPairingLink = visibleDesktopPairingLinks.find(
     (pairingLink) => pairingLink.id === newestPairingLinkId,
   );
@@ -1624,10 +1618,10 @@ function ConnectionsSettingsContent({
             </AlertDialogPopup>
           </AlertDialog>
           <Dialog
-            open={pendingTailscaleServeEndpoint !== null}
+            open={pendingTailscaleServeSetup !== null}
             onOpenChange={(open) => {
               if (isUpdatingTailscaleServe) return;
-              if (!open) setPendingTailscaleServeEndpoint(null);
+              if (!open) setPendingTailscaleServeSetup(null);
             }}
           >
             <DialogPopup className="max-w-md">

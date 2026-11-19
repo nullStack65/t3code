@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
@@ -295,6 +296,7 @@ describe("DesktopSettings", () => {
 
         yield* settings.setMainWindowBounds({ x: -1200, y: 40, width: 400, height: 360 }, true);
         yield* settings.setServerExposureMode("network-accessible");
+        yield* settings.setTailscaleServe({ enabled: false, port: Option.none() });
 
         const persisted = yield* decodeDesktopSettingsPatch(
           yield* fileSystem.readFileString(environment.desktopSettingsPath),
@@ -303,6 +305,7 @@ describe("DesktopSettings", () => {
           mainWindowBounds: { x: -1200, y: 40, width: 400, height: 360 },
           mainWindowMaximized: true,
           serverExposureMode: "network-accessible",
+          tailscaleServeEnabled: false,
         } satisfies typeof DesktopSettingsPatch.Type);
 
         const restored = yield* Effect.gen(function* () {
@@ -311,6 +314,7 @@ describe("DesktopSettings", () => {
         }).pipe(Effect.provide(DesktopAppSettings.layer));
         assert.deepEqual(restored.mainWindowBounds, persisted.mainWindowBounds);
         assert.isTrue(restored.mainWindowMaximized);
+        assert.isFalse(restored.tailscaleServeEnabled);
       }),
     ),
   );
@@ -381,7 +385,8 @@ describe("DesktopSettings", () => {
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
-          tailscaleServeEnabled: false,
+          // A missing key reads as on; an off saved before it became the default left no key.
+          tailscaleServeEnabled: true,
           tailscaleServePort: 443,
           updateChannel: "nightly",
           updateChannelConfiguredByUser: false,
@@ -410,7 +415,8 @@ describe("DesktopSettings", () => {
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
-          tailscaleServeEnabled: false,
+          // A missing key reads as on; an off saved before it became the default left no key.
+          tailscaleServeEnabled: true,
           tailscaleServePort: 443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,

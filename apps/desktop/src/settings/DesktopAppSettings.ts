@@ -74,7 +74,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   mainWindowBounds: null,
   mainWindowMaximized: false,
   serverExposureMode: "local-only",
-  tailscaleServeEnabled: false,
+  // Closura fleet default. Only an explicit off is stored; Serve stays inert without Tailscale.
+  tailscaleServeEnabled: true,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
@@ -231,7 +232,7 @@ function normalizeDesktopSettingsDocument(
     mainWindowMaximized: mainWindowBounds !== null && parsed.mainWindowMaximized === true,
     serverExposureMode:
       parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
-    tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
+    tailscaleServeEnabled: parsed.tailscaleServeEnabled ?? defaultSettings.tailscaleServeEnabled,
     tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
     updateChannel: updateChannelConfiguredByUser
       ? Option.getOrElse(parsedUpdateChannel, () => defaultSettings.updateChannel)

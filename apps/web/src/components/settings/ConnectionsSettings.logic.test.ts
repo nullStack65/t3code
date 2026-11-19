@@ -7,6 +7,7 @@ import {
   resolveAccessEnvironmentId,
   resolveTailscaleServeBaseUrl,
   selectQrEndpointOption,
+  tailscaleHttpsRow,
   togglePairingScopeSelection,
 } from "./ConnectionsSettings.logic";
 
@@ -70,6 +71,24 @@ describe("resolveTailscaleServeBaseUrl", () => {
     ["not a URL", 443, true],
   ] as const)("preserves %s when port %i cannot be previewed", (httpBaseUrl, port, isPortValid) => {
     expect(resolveTailscaleServeBaseUrl({ httpBaseUrl }, port, isPortValid)).toBe(httpBaseUrl);
+  });
+});
+
+describe("tailscaleHttpsRow", () => {
+  const url = "https://laptop.tail.ts.net";
+  const on = { tailscaleServeEnabled: true } as const;
+  const off = { tailscaleServeEnabled: false } as const;
+
+  it("follows the saved setting, not whether Serve answers", () => {
+    expect(
+      [
+        tailscaleHttpsRow(on, { status: "available", httpBaseUrl: url }),
+        tailscaleHttpsRow(on, { status: "unavailable", httpBaseUrl: url }),
+        tailscaleHttpsRow(on, null),
+        tailscaleHttpsRow(off, { status: "available", httpBaseUrl: url }),
+        tailscaleHttpsRow(off, null),
+      ].map((row) => row.checked),
+    ).toEqual([true, true, true, false, false]);
   });
 });
 
