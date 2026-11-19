@@ -81,13 +81,7 @@ export function SidebarThreadFilterMenu<T extends CountedThread>({
   return (
     <Menu>
       <MenuTrigger render={<SidebarHeaderIconButton label={label} />}>
-        <SlidersHorizontalIcon className="size-4" />
-        {summary.length > 0 ? (
-          <span
-            aria-hidden
-            className="pointer-events-none absolute top-1 right-1 size-1.5 rounded-full bg-primary"
-          />
-        ) : null}
+        <SlidersHorizontalIcon className={cn("size-4", summary.length > 0 && "text-primary")} />
       </MenuTrigger>
       <MenuPopup align="end" className="w-[min(16rem,var(--available-width))]">
         <SidebarThreadFilterOptions
