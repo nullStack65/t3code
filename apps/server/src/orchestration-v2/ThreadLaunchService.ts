@@ -1218,6 +1218,7 @@ const make = Effect.gen(function* () {
         projectId: input.projectId,
         commandId: input.commandId,
         instanceId: input.modelSelection.instanceId,
+        launch: true,
       });
       return yield* Effect.gen(function* () {
         // Recover ids from accepted launch receipts before allocating; retries have no client id and new ids collide with receipts.
