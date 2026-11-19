@@ -1521,6 +1521,7 @@ const make = Effect.gen(function* () {
         projectId: parent.thread.projectId,
         commandId,
         instanceId: target.modelSelection.instanceId,
+        launch: true,
       })
       .pipe(Effect.mapError(threadManagementFailure));
 

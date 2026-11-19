@@ -61,6 +61,7 @@ import * as Stream from "effect/Stream";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
@@ -341,10 +342,14 @@ export class ThreadManagementProviderInstanceDisabledError extends Schema.Tagged
   {
     projectId: ProjectId,
     instanceId: ProviderInstanceId,
+    /** Set when the instance is enabled but out of usage until then. */
+    exhaustedUntil: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    return `Provider instance "${this.instanceId}" is disabled for project ${this.projectId}.`;
+    return this.exhaustedUntil === undefined
+      ? `Provider instance "${this.instanceId}" is disabled for project ${this.projectId}.`
+      : `Provider "${this.instanceId}" is out of usage until ${this.exhaustedUntil}; pick another provider.`;
   }
 }
 
@@ -465,6 +470,8 @@ export interface ThreadManagementServiceShape {
     readonly projectId: ProjectId;
     readonly commandId: CommandId;
     readonly instanceId: ProviderInstanceId;
+    /** New work (a launch or a delegated task) is also refused while the provider is out of usage. */
+    readonly launch?: boolean;
   }) => Effect.Effect<void, ThreadManagementProviderInstanceDisabledError>;
   readonly isProviderInstanceEnabledForProject: (input: {
     readonly projectId: ProjectId;
@@ -644,12 +651,26 @@ const make = Effect.gen(function* () {
             : serverSettings.getSettings.pipe(
                 Effect.orDie,
                 Effect.flatMap((current) =>
-                  resolveProjectProviderInstanceEnabled(current, input.projectId, input.instanceId)
-                    ? Effect.void
-                    : new ThreadManagementProviderInstanceDisabledError({
+                  !resolveProjectProviderInstanceEnabled(current, input.projectId, input.instanceId)
+                    ? new ThreadManagementProviderInstanceDisabledError({
                         projectId: input.projectId,
                         instanceId: input.instanceId,
-                      }),
+                      })
+                    : Effect.sync(() =>
+                        input.launch === true
+                          ? ProviderExhaustion.until(input.instanceId, Date.now())
+                          : null,
+                      ).pipe(
+                        Effect.flatMap((until) =>
+                          until === null
+                            ? Effect.void
+                            : new ThreadManagementProviderInstanceDisabledError({
+                                projectId: input.projectId,
+                                instanceId: input.instanceId,
+                                exhaustedUntil: new Date(until).toISOString(),
+                              }),
+                        ),
+                      ),
                 ),
               ),
         ),
@@ -852,6 +873,7 @@ const make = Effect.gen(function* () {
               projectId: parent.thread.projectId,
               commandId: command.commandId,
               instanceId: command.modelSelection.instanceId,
+              launch: true,
             }),
           ),
         );

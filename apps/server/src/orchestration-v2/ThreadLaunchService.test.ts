@@ -65,6 +65,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { OrchestratorProjectionError } from "./Orchestrator.ts";
@@ -1648,6 +1649,47 @@ it.effect("names the missing base branch when a worktree cannot be created from 
     ),
   ),
 );
+
+it.effect("refuses 6 launches on a provider that is out of usage, and starts no thread", () => {
+  const harness = makeHarness({});
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const before = (yield* threads.listProjectThreads({ projectId, includeSubagents: true }))
+      .length;
+    ProviderExhaustion.mark(modelSelection.instanceId, Date.now() + 60 * 60 * 1000);
+    const refusals = yield* Effect.forEach([1, 2, 3, 4, 5, 6], (index) =>
+      launches
+        .launch(
+          launchInput({
+            command: `command:launch:exhausted:${index}`,
+            thread: `thread:launch:exhausted:${index}`,
+            message: `Helper ${index}`,
+          }),
+        )
+        .pipe(Effect.flip),
+    );
+    for (const error of refusals) {
+      assert.equal(error._tag, "ThreadManagementProviderInstanceDisabledError");
+      assert.match(error.message, /is out of usage until .*; pick another provider/);
+    }
+    const after = (yield* threads.listProjectThreads({ projectId, includeSubagents: true })).length;
+    assert.equal(after, before);
+    // Once the provider is usable again the same launch goes through.
+    ProviderExhaustion.clear(modelSelection.instanceId);
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:exhausted:after",
+        thread: "thread:launch:exhausted:after",
+        message: "Helper again",
+      }),
+    );
+    assert.equal(launched.threadId, ThreadId.make("thread:launch:exhausted:after"));
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => ProviderExhaustion.clear())),
+    Effect.provide(harness.layer),
+  );
+});
 
 it.effect("rejects a preparation retry after the project disables its provider", () => {
   let fetchAttempts = 0;
