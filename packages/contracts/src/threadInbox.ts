@@ -119,7 +119,15 @@ export function makeThreadInbox(input: {
     routing?.assignee !== undefined
       ? routing.assignee
       : (input.parent?.assignee ?? (owner ? { kind: "human" as const, id: owner } : actor));
-  const audience = routing?.audience ?? target ?? input.parent?.audience ?? owner ?? "agent-only";
+  // An agent's child work reports in Agents, so it never inherits a founder audience from its
+  // parent: with no reason, that would be indistinguishable from a lane filed before reasons.
+  const audience =
+    routing?.audience ??
+    target ??
+    (actor?.kind === "agent" && input.parent ? "agent-only" : undefined) ??
+    input.parent?.audience ??
+    owner ??
+    "agent-only";
   return {
     owner,
     assignee,
@@ -211,7 +219,8 @@ export function projectThreadInbox(
 /**
  * A founder's lane holds only threads waiting on them: an open decision request for them, a
  * pending runtime request on a thread they own, or a thread they own that a person filed or an
- * agent filed with a reason. Other agent work stays in Agents.
+ * agent filed with a reason, or an agent lane routed to them before reasons existed (FYI).
+ * Other agent work stays in Agents.
  */
 export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder: Founder) {
   if (!inbox) return "unknown";
@@ -220,7 +229,10 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
   const assigned = inbox.assignee?.kind === "human" ? inbox.assignee.id : inbox.owner;
   if (inbox.audience === "agent-only" && inbox.assignee?.kind !== "human") return "hidden";
   if (assigned !== founder) return "hidden";
-  if (inbox.origin?.kind === "agent" && inbox.reason === undefined) return "hidden";
+  if (inbox.origin?.kind === "agent" && inbox.reason === undefined)
+    // Lanes filed before `reason` existed carry none. Routed to this founder they stay visible as
+    // FYI; agent work that merely names them as owner (audience elsewhere) stays in Agents.
+    return inbox.audience === founder ? "FYI" : "hidden";
   return inbox.reason === "fyi" && inbox.attentionKind === "action" ? "FYI" : inbox.attentionKind;
 }
 
@@ -250,7 +262,8 @@ const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
 export function primaryInbox(inbox: ThreadInbox | null | undefined): InboxChoice | null {
   if (matchesInboxView(inbox, "shared")) return "shared";
   for (const founder of Founder.literals) if (matchesInboxView(inbox, founder)) return founder;
-  return matchesInboxView(inbox, "agents") ? "agents" : null;
+  // Anything else classified, such as background work filed to a founder, reports in Agents.
+  return inbox ? "agents" : null;
 }
 
 /** `matchesInboxFilter` for a thread already reduced to its `primaryInbox`. */
@@ -279,7 +292,8 @@ export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: In
     return (
       inbox?.origin?.kind === "agent" ||
       inbox?.assignee?.kind === "agent" ||
-      inbox?.audience === "agent-only"
+      inbox?.audience === "agent-only" ||
+      (inbox != null && primaryInbox(inbox) === "agents")
     );
   if (view === "shared") return inbox?.audience === "shared";
   const lane = founderInboxLane(inbox, view);
