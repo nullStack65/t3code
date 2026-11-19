@@ -1,6 +1,7 @@
 import {
   agentLaunchInboxError,
   agentLaunchInboxRouting,
+  withLegacyPeerInboxReason,
   CommandId,
   type EnvironmentId,
   MessageId,
@@ -261,6 +262,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
         const { caller } = context;
+        // An older linked environment cannot send a reason; file its launch as FYI, not a dead end.
+        const filed = withLegacyPeerInboxReason(
+          input,
+          McpInvocationContext.isLegacyInboxPeer(scope),
+        );
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
         // command it already accepted.
@@ -271,7 +277,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
-        const inboxError = agentLaunchInboxError(input);
+        const inboxError = agentLaunchInboxError(filed);
         if (inboxError !== null)
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
@@ -434,7 +440,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         const result = yield* ThreadMessageIntake.launchThread({
           inboxOrigin: { kind: "agent", id: caller?.id ?? "agent" },
-          inboxRouting: agentLaunchInboxRouting(input),
+          inboxRouting: agentLaunchInboxRouting(filed),
           commandId,
           threadId,
           projectId,

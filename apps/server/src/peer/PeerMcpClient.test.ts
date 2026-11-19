@@ -150,6 +150,58 @@ it.effect("tells the peer which thread a call is made for", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+const featuresToolkit = Toolkit.make(
+  Tool.make("features", {
+    description: "Returns what the calling peer says it supports.",
+    success: Schema.Struct({ legacy: Schema.Boolean, features: Schema.Array(Schema.String) }),
+    dependencies: [McpInvocationContext.McpInvocationContext],
+  }),
+);
+
+it.effect("announces this release's peer features, so the peer can tell it from an older one", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const handlers = McpToolAccess.toLayer(featuresToolkit, {
+        features: McpToolAccess.reads(() =>
+          McpInvocationContext.McpInvocationContext.pipe(
+            Effect.map((scope) => ({
+              legacy: McpInvocationContext.isLegacyInboxPeer(scope),
+              features: [...(scope.client?.peerFeatures ?? [])],
+            })),
+          ),
+        ),
+      });
+      const box = descriptorOf("environment-box", "Box");
+      const b = yield* servePeer(box, McpHttpServer.toolkitRegistration(featuresToolkit, handlers));
+      const context = yield* Layer.build(
+        layerLinkingEnvironment(descriptorOf("environment-a", "A")),
+      );
+      const links = Context.get(context, PeerLinks.PeerLinks);
+      const client = Context.get(context, PeerMcpClient.PeerMcpClient);
+      yield* linkTo(links, b);
+      const seen = yield* client.call({
+        environmentId: box.environmentId,
+        tool: "features",
+        arguments: {},
+        limits: { runtimeMode: "full-access", interactionMode: "default" },
+        success: Schema.Struct({ legacy: Schema.Boolean, features: Schema.Array(Schema.String) }),
+      });
+      // A current peer must still give inboxRouting.reason; only one without the header is legacy.
+      expect(seen).toEqual({ legacy: false, features: ["inbox-reason"] });
+      expect(
+        McpInvocationContext.isLegacyInboxPeer({
+          client: { sessionId: "s", label: "old desktop", access: "full-access", linked: true },
+        }),
+      ).toBe(true);
+      expect(
+        McpInvocationContext.isLegacyInboxPeer({
+          client: { sessionId: "s", label: "browser", access: "full-access" },
+        }),
+      ).toBe(false);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect.each([false, true])(
   "reuses an initialized session before its first call finishes (cancelled: %s)",
   (cancelFirst) =>

@@ -215,6 +215,8 @@ const make = Effect.gen(function* () {
           {
             ...limitHeader,
             ...senderHeader,
+            [McpInvocationContext.PEER_FEATURES_HEADER]:
+              McpInvocationContext.PEER_FEATURES.join(","),
             "mcp-session-id": sessionId,
             "mcp-protocol-version": PROTOCOL_VERSION,
           },

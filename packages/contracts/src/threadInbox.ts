@@ -187,6 +187,30 @@ export function agentInboxRoutingError(
   return "Agent work files into the Agents inbox and reports one final result there. Put a thread in a founder's or the shared inbox only when they will converse in it, review, decide or approve: pass inboxRouting.reason ('conversation', 'review', 'decision', 'approval' or 'fyi'). To ask a founder something on a thread, use t3_thread_update action:'request_decision' and also write the question in the thread, where they read it. If the answer reaches you another way, such as a relayed approval, call action:'resolve_decision'.";
 }
 
+/**
+ * What a linked environment sends in `T3-Peer-Features` once its tools forward
+ * `inboxRouting.reason`. Releases before it have no such field in their tool schema, so their
+ * agents cannot give a reason at all.
+ */
+export const PEER_FEATURE_INBOX_REASON = "inbox-reason" as const;
+
+/**
+ * Files a reason-less route from an older linked environment as `fyi` instead of rejecting it:
+ * that agent's tools cannot send a reason, so the rejection would be a dead end. `fyi` is what
+ * lanes filed before reasons existed already show as (see `founderInboxLane`). Routes that
+ * carry a reason, and routes that touch no inbox, are returned unchanged.
+ */
+export function withLegacyPeerInboxReason<
+  T extends {
+    readonly inbox?: InboxChoice | undefined;
+    readonly inboxRouting?: ThreadInboxRoutingPatch | undefined;
+  },
+>(input: T, legacyPeer: boolean): T {
+  if (!legacyPeer || input.inboxRouting?.reason !== undefined) return input;
+  if (input.inbox === undefined && input.inboxRouting === undefined) return input;
+  return { ...input, inboxRouting: { ...input.inboxRouting, reason: "fyi" } };
+}
+
 /** The rejection for an agent launch filed by `agentLaunchInboxRouting`, or null. */
 export const agentLaunchInboxError = (input: Parameters<typeof agentLaunchInboxRouting>[0]) => {
   const routing = agentLaunchInboxRouting(input);

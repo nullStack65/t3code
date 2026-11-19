@@ -18,6 +18,7 @@ import {
   projectThreadInbox,
   inboxRoutingFor,
   primaryInbox,
+  withLegacyPeerInboxReason,
   type ThreadInboxRoutingPatch,
 } from "./threadInbox.ts";
 const kameron = { kind: "human", id: "kameron" } as const;
@@ -145,6 +146,42 @@ describe("shared fleet organizational inbox", () => {
     const quieter = launched({ inbox: "kameron", inboxRouting: { reason: "fyi" } });
     expect(visibleIn(quieter)).toEqual(["kameron", "agents"]);
     expect(founderInboxLane(quieter, "kameron")).toBe("FYI");
+  });
+
+  it("files an older linked environment's reason-less founder routes as FYI instead of failing", () => {
+    // A peer from before `inboxRouting.reason` has no such field in its tools: rejecting the
+    // route for a missing reason left its agent no way to succeed.
+    const toKameron = { assignee: kameron } as const;
+    const routed = (routing: ThreadInboxRoutingPatch) =>
+      routeThreadInbox(makeThreadInbox({ actor: bot }), routing);
+    expect(agentInboxRoutingError(routed(toKameron), toKameron)).toContain("inboxRouting.reason");
+
+    const legacy = withLegacyPeerInboxReason({ inboxRouting: toKameron }, true);
+    expect(legacy.inboxRouting).toEqual({ assignee: kameron, reason: "fyi" });
+    expect(agentInboxRoutingError(routed(legacy.inboxRouting), legacy.inboxRouting)).toBeNull();
+    expect(founderInboxLane(routed(legacy.inboxRouting), "kameron")).toBe("FYI");
+
+    const launch = withLegacyPeerInboxReason({ inbox: "kameron" as const }, true);
+    expect(agentLaunchInboxError(launch)).toBeNull();
+    expect(
+      founderInboxLane(
+        makeThreadInbox({ actor: bot, routing: agentLaunchInboxRouting(launch) }),
+        "kameron",
+      ),
+    ).toBe("FYI");
+
+    // A current peer announces the feature and still must give a reason.
+    expect(withLegacyPeerInboxReason({ inboxRouting: toKameron }, false).inboxRouting).toEqual(
+      toKameron,
+    );
+    expect(
+      agentLaunchInboxError(withLegacyPeerInboxReason({ inbox: "kameron" as const }, false)),
+    ).toContain("inboxRouting.reason");
+    // A reason the older peer did send, and a launch that names no inbox, are left alone.
+    const reviewed = { inboxRouting: { assignee: kameron, reason: "review" as const } };
+    expect(withLegacyPeerInboxReason(reviewed, true)).toBe(reviewed);
+    const plain = { title: "x", inboxRouting: undefined };
+    expect(withLegacyPeerInboxReason(plain, true)).toBe(plain);
   });
   it("shows reason-less agent lanes only to the founder they were routed to, as FYI", () => {
     const people = [null, kameron, jeff] as const;
