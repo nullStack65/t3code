@@ -1,0 +1,52 @@
+name: Closura deploy line
+
+# Every pull request into the native release branch names where it must end up
+# running, so "merged" is never mistaken for "live". The private fleet
+# configuration holds the authoritative host list; this only checks the line's
+# shape. Reads the body from the event payload; no token, checkout or code run.
+on:
+  pull_request:
+    branches: [release/native-0.1.10]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: closura-deploy-line-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-line:
+    if: >-
+      ${{
+        github.repository == 'nullStack65/t3code' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor)
+      }}
+    name: Deploy line declared
+    runs-on: t3code-ci-arc
+    timeout-minutes: 5
+    steps:
+      - name: Require "Deploy: none" or "Deploy: <host>, <host>"
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' | grep -E '^[[:space:]]*Deploy:' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          if test "$count" -ne 1; then
+            echo "::error::Add exactly one 'Deploy:' line to the PR body: 'Deploy: none' or 'Deploy: <host>, <host>' (found $count)."
+            exit 1
+          fi
+          value="$(printf '%s' "$lines" | sed -E 's/^[[:space:]]*Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$value" = none; then
+            echo "Deploy: none"
+            exit 0
+          fi
+          if ! printf '%s' "$value" | grep -Eq '^[a-z0-9][a-z0-9-]*([[:space:]]*,[[:space:]]*[a-z0-9][a-z0-9-]*)*$'; then
+            echo "::error::'Deploy: $value' must be 'none' or comma-separated lowercase host ids."
+            exit 1
+          fi
+          echo "Deploy targets: $value"

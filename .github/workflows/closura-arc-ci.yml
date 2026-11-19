@@ -4,7 +4,9 @@ name: T3 fork ARC CI
 # macOS/Windows runners, new controller or deployment side effects.
 on:
   push:
-    branches: [feat/assemblyai-current]
+    # Every merged head of the native release branch gets a check run on its
+    # exact commit; the private fleet rollout builds only commits that passed.
+    branches: [feat/assemblyai-current, release/native-0.1.10]
   pull_request:
     branches: [feat/assemblyai-current, release/native-0.1.10]
   workflow_dispatch:
@@ -20,7 +22,7 @@ jobs:
   voice-and-inbox:
     # This is a public fork. Never run untrusted PR code on the private ARC LAN.
     # Same-repo PR + trusted human author/actor only; push and manual runs
-    # require an authorized actor and the exact native release branch.
+    # require an authorized actor and one of the two exact branches above.
     if: >-
       ${{
         github.repository == 'nullStack65/t3code' &&
@@ -32,7 +34,8 @@ jobs:
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
           ||
           (github.event_name != 'pull_request' &&
-           github.ref == 'refs/heads/feat/assemblyai-current' &&
+           (github.ref == 'refs/heads/feat/assemblyai-current' ||
+            github.ref == 'refs/heads/release/native-0.1.10') &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor))
         )
       }}
