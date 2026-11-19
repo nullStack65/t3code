@@ -441,6 +441,9 @@ const DismissedFallbackWindowSchema = Schema.NullOr(Schema.String);
 
 const ignoreComposerFocus = () => {};
 
+/** Bot threads whose details card this session already folded once. */
+const botDetailsFoldedKeys = new Set<string>();
+
 export default function ChatView(props: ChatViewProps) {
   const {
     environmentId,
@@ -1790,12 +1793,22 @@ export default function ChatView(props: ChatViewProps) {
           reportedModelSelection,
         );
   const activeStanding = activeThreadShell?.standing ?? null;
-  const [botDetailsOpenKey, setBotDetailsOpenKey] = useState<string | null>(null);
-  const botDetailsOpen = activeStanding !== null && botDetailsOpenKey === activeThreadKey;
-  const toggleBotDetailsStable = useStableCallback(() =>
-    setBotDetailsOpenKey((current) => (current === activeThreadKey ? null : activeThreadKey)),
+  const botDetailsOpen = useRightPanelStore(
+    (state) =>
+      activeStanding !== null &&
+      selectThreadPanelOpen(state.threadPanelVisibilityByThreadKey, activeThreadRef, "inline"),
   );
-  // A standing bot keeps branch, worktree and PR behind its header's Details toggle.
+  const isStandingBot = activeStanding !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- folds a bot's details card (branch, worktree, PR) the first time this session shows that bot; the panel toggle reopens it
+  useEffect(() => {
+    if (!isStandingBot || !activeThreadRef || !activeThreadKey) return;
+    if (botDetailsFoldedKeys.has(activeThreadKey)) return;
+    botDetailsFoldedKeys.add(activeThreadKey);
+    const store = useRightPanelStore.getState();
+    store.setThreadPanelOpen(activeThreadRef, "inline", false);
+    store.setThreadPanelOpen(activeThreadRef, "popover", false);
+  }, [isStandingBot, activeThreadKey, activeThreadRef]);
+  // A standing bot keeps branch, worktree and PR folded with its details card.
   const showComposerContextStrip =
     !embedded &&
     (activeStanding === null || botDetailsOpen) &&
@@ -3394,8 +3407,6 @@ export default function ChatView(props: ChatViewProps) {
                 : {})}
               {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
               standing={activeStanding}
-              botDetailsOpen={botDetailsOpen}
-              onToggleBotDetails={toggleBotDetailsStable}
             />
           </header>
         )}

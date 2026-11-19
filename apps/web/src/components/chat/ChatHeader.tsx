@@ -11,7 +11,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon, PanelTopOpenIcon } from "lucide-react";
+import { ChevronDownIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -61,8 +61,6 @@ interface ChatHeaderProps {
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
   /** A standing bot shows who it is instead of the project/thread breadcrumb. */
   standing?: ThreadStanding | null | undefined;
-  botDetailsOpen?: boolean | undefined;
-  onToggleBotDetails?: (() => void) | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -89,8 +87,6 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenProjectSettings,
   onFindInThread,
   standing,
-  botDetailsOpen,
-  onToggleBotDetails,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -284,18 +280,6 @@ export const ChatHeader = memo(function ChatHeader({
           </span>
         ) : null}
         <span className="flex-1" />
-        {onToggleBotDetails ? (
-          <button
-            type="button"
-            aria-expanded={botDetailsOpen === true}
-            aria-label={botDetailsOpen ? "Hide thread details" : "Show thread details"}
-            onClick={onToggleBotDetails}
-            className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-          >
-            <PanelTopOpenIcon aria-hidden className="size-3.5" />
-            Details
-          </button>
-        ) : null}
         {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
       </div>
     );
