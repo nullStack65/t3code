@@ -23,6 +23,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -86,7 +87,7 @@ const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RETRY_BASE_MS = 15_000;
 const RETRY_MAX_MS = 15 * 60 * 1000;
 
-/** A run's model alert, or whether it shows the thread healthy again. Runs with no signal are neither. */
+/** A run's model alert, or whether it finished cleanly and so shows the thread healthy again. */
 export function modelAlertFor(input: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
@@ -100,10 +101,7 @@ export function modelAlertFor(input: {
   // The task-withholding heuristic is for a parent judging its worker, not for a model alert.
   const reasons = workerAlert({ ...signals, finalText: undefined })?.reasons;
   if (reasons === undefined) {
-    return {
-      alert: undefined,
-      healthy: run.status === "completed" && signals.executedModel !== undefined,
-    };
+    return { alert: undefined, healthy: run.status === "completed" };
   }
   return {
     healthy: false,
@@ -129,6 +127,27 @@ export function modelAlertFor(input: {
       occurredAt: input.occurredAt,
     },
   };
+}
+
+/** Where a thread's alert goes. A delegated child's parent hears it with its result already. */
+export function modelAlertDestinations(input: {
+  readonly watcher: ModelAlertWatcher | null;
+  readonly webhookUrl: string;
+  readonly here: EnvironmentId;
+  readonly lineage: Pick<
+    OrchestrationV2ThreadProjection["thread"]["lineage"],
+    "parentThreadId" | "relationshipToParent"
+  >;
+}): ReadonlyArray<Destination> {
+  const { watcher, lineage } = input;
+  const watcherIsParent =
+    watcher?.environmentId === input.here &&
+    lineage.relationshipToParent === "subagent" &&
+    watcher.threadId === lineage.parentThreadId;
+  return [
+    ...(watcher === null || watcherIsParent ? [] : (["watcher"] as const)),
+    ...(input.webhookUrl.trim() === "" ? [] : (["webhook"] as const)),
+  ];
 }
 
 const signature = (alert: ModelAlert) =>
@@ -297,8 +316,9 @@ export const make = Effect.gen(function* () {
   ) {
     const message = modelAlertMessage(alert);
     // Run ids can be long; a retry key must stay under the 256 characters the peer accepts.
+    const identity = `${alert.id}\n${watcher.environmentId}\n${watcher.threadId}`;
     const digest = yield* crypto
-      .digest(Digest.sha256, new TextEncoder().encode(alert.id))
+      .digest(Digest.sha256, new TextEncoder().encode(identity))
       .pipe(Effect.orDie);
     const key = `model-alert:${Hex.encode(digest)}`;
     if (watcher.environmentId === here) {
@@ -330,9 +350,11 @@ export const make = Effect.gen(function* () {
     if (entry.destination === "webhook") {
       const url = current.modelAlertWebhookUrl.trim();
       if (url === "") return;
-      yield* http.execute(
-        HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(entry.alert)),
-      );
+      // A webhook URL can embed a credential, so its failure names only the host.
+      const host = URL.canParse(url) ? new URL(url).host : "an unparsable URL";
+      yield* http
+        .execute(HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(entry.alert)))
+        .pipe(Effect.catchCause(() => Effect.fail(`model alert webhook POST to ${host} failed`)));
       return;
     }
     const watcher = current.modelAlertWatcher;
@@ -343,25 +365,30 @@ export const make = Effect.gen(function* () {
   const flush: ModelAlertReactor["Service"]["flush"] = Effect.gen(function* () {
     const nowMs = yield* Clock.currentTimeMillis;
     const due = (yield* Ref.get(state)).outbox.filter((entry) => entry.nextAttemptAt <= nowMs);
-    for (const entry of due) {
-      const delivered = yield* deliver(entry).pipe(
-        Effect.timeout("30 seconds"),
-        Effect.as(true),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("delivering a model alert failed; it will be retried", {
-            alertId: entry.alert.id,
-            destination: entry.destination,
-            attempts: entry.attempts + 1,
-            cause,
-          }).pipe(Effect.as(false)),
-        ),
-      );
-      const attemptedAt = yield* Clock.currentTimeMillis;
-      yield* update((current) => [
-        undefined,
-        afterDeliveryAttempt(current, entry, delivered, attemptedAt),
-      ]);
-    }
+    yield* Effect.forEach(
+      due,
+      (entry) =>
+        Effect.gen(function* () {
+          const delivered = yield* deliver(entry).pipe(
+            Effect.timeout("30 seconds"),
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("delivering a model alert failed; it will be retried", {
+                alertId: entry.alert.id,
+                destination: entry.destination,
+                attempts: entry.attempts + 1,
+                cause,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+          const attemptedAt = yield* Clock.currentTimeMillis;
+          yield* update((current) => [
+            undefined,
+            afterDeliveryAttempt(current, entry, delivered, attemptedAt),
+          ]);
+        }),
+      { concurrency: 4, discard: true },
+    );
   });
 
   const handle: ModelAlertReactor["Service"]["handle"] = Effect.fnUntraced(
@@ -379,30 +406,33 @@ export const make = Effect.gen(function* () {
           turnItemTypes: ["system_notice", "error"],
         },
       );
-      const descriptor = yield* environment.getDescriptor;
-      const outcome = modelAlertFor({
-        environmentId: descriptor.environmentId,
-        environmentLabel: descriptor.label,
+      const here = yield* environment.getEnvironmentId;
+      const judged = modelAlertFor({
+        environmentId: here,
+        environmentLabel: "",
         thread: records.thread,
         run,
         projection: records,
         occurredAt: DateTime.formatIso(yield* DateTime.now),
       });
-      if (outcome.alert === undefined && !outcome.healthy) return;
+      if (judged.alert === undefined && !judged.healthy) return;
+      const outcome =
+        judged.alert === undefined
+          ? judged
+          : {
+              ...judged,
+              alert: {
+                ...judged.alert,
+                environmentLabel: (yield* environment.getDescriptor).label,
+              },
+            };
       const current = yield* settings.getSettings;
-      const watcher = current.modelAlertWatcher;
-      const destinations: Array<Destination> = [];
-      // A delegated child's parent already hears this with its result; don't tell it twice.
-      if (
-        watcher !== null &&
-        !(
-          watcher.environmentId === descriptor.environmentId &&
-          watcher.threadId === records.thread.lineage.parentThreadId
-        )
-      ) {
-        destinations.push("watcher");
-      }
-      if (current.modelAlertWebhookUrl.trim() !== "") destinations.push("webhook");
+      const destinations = modelAlertDestinations({
+        watcher: current.modelAlertWatcher,
+        webhookUrl: current.modelAlertWebhookUrl,
+        here,
+        lineage: records.thread.lineage,
+      });
       const nowMs = yield* Clock.currentTimeMillis;
       const enqueued = yield* update((current) => {
         const result = recordModelAlert(
@@ -430,9 +460,10 @@ export const make = Effect.gen(function* () {
     function* () {
       yield* forkParked(
         Stream.runForEach(engine.streamDomainEvents, handle).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("model alert event stream failed", { cause }),
+          Effect.tapCause((cause) =>
+            Effect.logWarning("model alert event stream failed; resubscribing", { cause }),
           ),
+          Effect.retry(Schedule.spaced("5 seconds")),
         ),
       );
       // Retries wait out a sleeping or restarting watcher machine; a new alert goes at once.

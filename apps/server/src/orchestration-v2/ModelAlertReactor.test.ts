@@ -1,9 +1,12 @@
 import { assert, it } from "@effect/vitest";
+import { EnvironmentId, type OrchestrationV2Run, ThreadId } from "@t3tools/contracts";
 
 import {
   afterDeliveryAttempt,
   EMPTY_MODEL_ALERT_STATE,
   type ModelAlert,
+  modelAlertDestinations,
+  modelAlertFor,
   recordModelAlert,
 } from "./ModelAlertReactor.ts";
 
@@ -92,5 +95,57 @@ it("keeps a failed delivery with a growing delay and drops a delivered one", () 
   assert.deepEqual(
     afterDeliveryAttempt(delivered, webhook!, true, 8 * 24 * 60 * 60 * 1000).outbox,
     [],
+  );
+});
+
+it.each([
+  ["completed", true],
+  ["failed", false],
+  ["interrupted", false],
+] as const)("a %s run with no model report is healthy: %s", (status, healthy) => {
+  const outcome = modelAlertFor({
+    environmentId: EnvironmentId.make("env"),
+    environmentLabel: "box",
+    thread: {
+      id: ThreadId.make("thread:codex"),
+      title: "Codex",
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: null },
+    } as never,
+    run: {
+      id: "run:codex",
+      status,
+      activeAttemptId: null,
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    } as unknown as OrchestrationV2Run,
+    projection: { turnItems: [], providerTurns: [] },
+    occurredAt: "2026-11-19T03:00:00.000Z",
+  });
+  assert.deepEqual(outcome, { alert: undefined, healthy });
+});
+
+it.each([
+  ["a top-level thread", null, null, "", ["watcher"]],
+  ["a delegated child of the watcher", "subagent", "thread:lead", "", []],
+  ["a fork of the watcher", "fork", "thread:lead", "", ["watcher"]],
+  [
+    "a child of another thread",
+    "subagent",
+    "thread:other",
+    "https://hooks.example/x",
+    ["watcher", "webhook"],
+  ],
+] as const)("%s alerts %j", (_name, relationshipToParent, parentThreadId, webhookUrl, expected) => {
+  const here = EnvironmentId.make("env");
+  assert.deepEqual(
+    modelAlertDestinations({
+      watcher: { environmentId: here, threadId: ThreadId.make("thread:lead") },
+      webhookUrl,
+      here,
+      lineage: {
+        relationshipToParent,
+        parentThreadId: parentThreadId === null ? null : ThreadId.make(parentThreadId),
+      },
+    }),
+    expected,
   );
 });
