@@ -127,4 +127,31 @@ describe("UsageLimitsPooled quiet states", () => {
       .toBeVisible();
     expect(screen.container.querySelectorAll("details li")).toHaveLength(1);
   });
+
+  it("names the machine when only one of several in view has the instance", async () => {
+    const presentations = new Map([
+      [
+        EnvironmentId.make("primary-r720"),
+        {
+          entry: { target: { label: "primary-r720" } },
+          serverConfig: { providers: [routedCodex()] },
+        },
+      ],
+      [
+        EnvironmentId.make("primary-asus"),
+        {
+          entry: { target: { label: "primary-asus" } },
+          serverConfig: { providers: [managedChatGpt("codex", "Codex")] },
+        },
+      ],
+    ]);
+    await using screen = await render(
+      <UsageLimitsPooled presentations={presentations} now={Date.parse(checkedAt)} />,
+    );
+
+    const summary = screen.getByText("1 instance has no quota to read");
+    await expect.element(summary).toBeVisible();
+    await summary.click();
+    await expect.element(screen.getByText("(primary-r720)")).toBeVisible();
+  });
 });

@@ -742,7 +742,7 @@ export function UsageLimitsPooled({
       ))}
       <LimitNotices notices={notices} />
       <OfflineEnvironments environments={offline} now={now} />
-      <NotApplicableSummary entries={notApplicable} />
+      <NotApplicableSummary entries={notApplicable} machineCount={presentations.size} />
     </div>
   );
 }
@@ -781,13 +781,15 @@ function OfflineEnvironments({
  */
 function NotApplicableSummary({
   entries,
+  machineCount,
 }: {
   readonly entries: ReturnType<typeof collectNotApplicable>;
+  readonly machineCount: number;
 }) {
   if (entries.length === 0) return null;
   const groups = groupNotApplicable(entries);
   // With one machine in view, naming it on every row is noise.
-  const nameMachines = new Set(entries.map((entry) => entry.environment)).size > 1;
+  const nameMachines = machineCount > 1;
   return (
     <details className="group text-xs text-muted-foreground">
       <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-sm outline-none select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&::-webkit-details-marker]:hidden">

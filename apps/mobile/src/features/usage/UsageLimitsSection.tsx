@@ -332,8 +332,13 @@ export function useRefreshLimits(
   const failedIds = new Set(
     useAtomValue(limitsRefreshFailuresAtom(environmentIdsKey(selected.map(([id]) => id)))),
   );
+  // A failure is only reset by a later refresh, which runs only while connected;
+  // a dropped machine shows its offline line instead.
   const failedLabels = selected
-    .filter(([environmentId]) => failedIds.has(environmentId))
+    .filter(
+      ([environmentId, presentation]) =>
+        failedIds.has(environmentId) && presentation.connection.phase === "connected",
+    )
     .map(([, presentation]) => presentation.entry.target.label);
 
   const refresh = () =>
