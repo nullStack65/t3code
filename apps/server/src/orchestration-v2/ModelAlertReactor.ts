@@ -728,7 +728,7 @@ export const make = Effect.gen(function* () {
   /**
    * The alert as it stands now: threads that moved on leave it, and null means nothing is left to
    * say. A thread moved on when it has a newer run that runs or finished, is settled, archived or
-   * on another provider, or its parent replaced it.
+   * on another provider, or its parent replaced it. A model alert ignores newer runs.
    */
   const currentAlert = Effect.fnUntraced(function* (alert: WatcherAlert) {
     const stillCurrent = Effect.fnUntraced(function* (
@@ -749,11 +749,13 @@ export const make = Effect.gen(function* () {
       if (fresh.length === 0) return null;
       return fresh.length === alert.members.length ? alert : { ...alert, members: fresh };
     }
-    const about =
-      alert.type === "model-degraded"
-        ? { providerInstanceId: alert.providerInstanceId }
-        : undefined;
-    return (yield* stillCurrent(alert.threadId, alert.runId, about)) ? alert : null;
+    if (alert.type === "model-degraded") {
+      // A newer run does not answer a model alert: a run with the same problem stays quiet by
+      // design (recordModelAlert), so dropping this one would mean the watcher never hears it.
+      const about = { providerInstanceId: alert.providerInstanceId };
+      return (yield* stillCurrent(alert.threadId, null, about)) ? alert : null;
+    }
+    return (yield* stillCurrent(alert.threadId, alert.runId, undefined)) ? alert : null;
   });
 
   /**
