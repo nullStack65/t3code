@@ -1,4 +1,5 @@
 import {
+  agentLaunchInboxError,
   agentLaunchInboxRouting,
   CommandId,
   type EnvironmentId,
@@ -270,6 +271,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
+        const inboxError = agentLaunchInboxError(input);
+        if (inboxError !== null)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: inboxError,
+          });
         if (attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment)))
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",

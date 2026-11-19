@@ -21,6 +21,7 @@ import {
   type PullRequestSummary,
   type ServerSettings as ContractServerSettings,
   type ServerSettingsPatch,
+  makeThreadInbox,
 } from "@t3tools/contracts";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -167,6 +168,24 @@ describe("isAutoSettlementCandidate", () => {
         NOW_MS,
       ),
     ).toBe(false);
+    // An unanswered founder ask holds the thread the same way. Candidates carry the projected
+    // inbox, which drops the ask once a person answers, so an answered thread settles normally.
+    const asked = shell({
+      inbox: {
+        ...makeThreadInbox({ actor: { kind: "agent", id: "agent" } }),
+        decisionRequest: {
+          founder: "kameron",
+          kind: "decision",
+          question: "Ship it?",
+          requestedAt: DateTime.formatIso(at(-60_000)),
+        },
+      },
+    });
+    expect(ThreadSettlementService.isAutoSettlementCandidate(asked, NOW_MS)).toBe(false);
+    const { decisionRequest: _answered, ...answeredInbox } = asked.inbox!;
+    expect(
+      ThreadSettlementService.isAutoSettlementCandidate({ ...asked, inbox: answeredInbox }, NOW_MS),
+    ).toBe(true);
     const snoozed = shell({
       snoozedUntil: at(60 * 60 * 1_000),
       snoozedAt: at(-60 * 60 * 1_000),

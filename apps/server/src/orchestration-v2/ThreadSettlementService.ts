@@ -167,6 +167,8 @@ export function isAutoSettlementCandidate(
   if (thread.pendingRuntimeRequest !== null) return false;
   // A guest is waiting on the owner; settling would hide the Request.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return false;
+  // A founder has not answered an open ask; settling would close it before they see it.
+  if (thread.inbox?.decisionRequest !== undefined) return false;
   if (thread.activityRunStatus != null) return false;
   const pendingTasks = thread.pendingBackgroundTasks ?? [];
   if (backgroundWorkHoldsCompletion(pendingTasks)) return false;

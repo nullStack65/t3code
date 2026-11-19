@@ -7,7 +7,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
+import { ThreadDecisionAsk, ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 
@@ -41,7 +41,13 @@ const ThreadMetadataClientRequestId = TrimmedNonEmptyString.check(Schema.isMaxLe
   )
   .annotate({ description: "Stable idempotency key to reuse when retrying this mutation." });
 
-export const ThreadMetadataMcpAction = Schema.Literals(["rename", "regenerate_title", "route"]);
+export const ThreadMetadataMcpAction = Schema.Literals([
+  "rename",
+  "regenerate_title",
+  "route",
+  "request_decision",
+  "resolve_decision",
+]);
 export type ThreadMetadataMcpAction = typeof ThreadMetadataMcpAction.Type;
 
 export const ThreadMetadataMcpUpdateInput = Schema.Struct({
@@ -49,13 +55,15 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
   action: ThreadMetadataMcpAction,
   title: Schema.optional(ThreadMetadataTitle),
   inboxRouting: Schema.optional(ThreadInboxRoutingPatch),
+  decision: Schema.optional(ThreadDecisionAsk),
   clientRequestId: Schema.optional(ThreadMetadataClientRequestId),
 }).check(
   Schema.makeFilter((input) =>
     (input.action === "rename") === (input.title !== undefined) &&
-    (input.action === "route") === (input.inboxRouting !== undefined)
+    (input.action === "route") === (input.inboxRouting !== undefined) &&
+    (input.action === "request_decision") === (input.decision !== undefined)
       ? true
-      : "rename requires title; route requires inboxRouting; other actions reject those fields.",
+      : "rename requires title; route requires inboxRouting; request_decision requires decision; other actions reject those fields.",
   ),
 );
 export type ThreadMetadataMcpUpdateInput = typeof ThreadMetadataMcpUpdateInput.Type;

@@ -66,6 +66,7 @@ import {
   latestProviderTurnForAttempt,
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
+  agentLaunchInboxError,
   agentLaunchInboxRouting,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
@@ -989,7 +990,7 @@ function threadDetail(
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
   return {
-    ...(projection.thread.inbox === undefined ? {} : { inbox: projection.thread.inbox }),
+    ...(shell.inbox === undefined ? {} : { inbox: shell.inbox }),
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
@@ -3124,6 +3125,10 @@ const make = Effect.gen(function* () {
     createThreads: Effect.fn("OrchestratorMcpService.createThreads")(
       function* (callerScope, input) {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "create_threads");
+        for (const request of input.threads) {
+          const inboxError = agentLaunchInboxError(request);
+          if (inboxError !== null) return yield* failure("invalid_request", inboxError);
+        }
         // Each thread shares this thread's checkout, so another environment cannot take it.
         for (const request of input.threads) {
           yield* admitPlacement(
