@@ -82,8 +82,34 @@ export const ModelAlert = Schema.Struct({
 });
 export type ModelAlert = typeof ModelAlert.Type;
 
-/** Everything the watcher thread hears: model alerts, thread events and usage limit incidents. */
-export const WatcherAlert = Schema.Union([ModelAlert, ThreadEventAlert, UsageLimitIncident]);
+/** A link from this environment that could not renew its credential, so it will stop working. */
+export const PeerLinkRenewalAlert = Schema.Struct({
+  type: Schema.Literal("peer-link-renewal"),
+  id: Schema.String,
+  environmentId: Schema.String,
+  environmentLabel: Schema.String,
+  linkedEnvironmentId: Schema.String,
+  linkedLabel: Schema.String,
+  /**
+   * Names the link's session here (its secret store entry, never the credential), so linking
+   * again starts a fresh alert rather than inheriting the old link's.
+   */
+  linkSession: Schema.String,
+  /** When the link stops working, or stopped. */
+  expiresAt: Schema.String,
+  /** Why the last renewal failed. */
+  detail: Schema.String,
+  occurredAt: Schema.String,
+});
+export type PeerLinkRenewalAlert = typeof PeerLinkRenewalAlert.Type;
+
+/** Everything the watcher thread hears: model alerts, thread events, usage limit incidents and links. */
+export const WatcherAlert = Schema.Union([
+  ModelAlert,
+  ThreadEventAlert,
+  UsageLimitIncident,
+  PeerLinkRenewalAlert,
+]);
 export type WatcherAlert = typeof WatcherAlert.Type;
 
 const Destination = Schema.Literals(["watcher", "webhook"]);
@@ -329,6 +355,75 @@ export function recordThreadEvents(
   return { state: { ...state, reported, outbox }, enqueued };
 }
 
+const linkReportedPrefix = (linkedEnvironmentId: string) => `peer-link\n${linkedEnvironmentId}\n`;
+const linkReportedKey = (alert: PeerLinkRenewalAlert) =>
+  `${linkReportedPrefix(alert.linkedEnvironmentId)}${alert.linkSession}`;
+/** A link alert's `reported` entry once some destination received it. */
+const linkDelivered = (id: string) => `delivered:${id}`;
+
+/**
+ * Records a link's renewal outcome. A failing link alerts once and stays quiet through every
+ * later failure while that alert is queued or once it was delivered. A renewal, or linking
+ * again, lets the next failure alert again, and so does an alert that expired from the outbox
+ * undelivered. Nothing counts as reported until something was queued.
+ */
+export function recordLinkRenewal(
+  state: ModelAlertState,
+  outcome:
+    | { readonly _tag: "renewed"; readonly linkedEnvironmentId: string }
+    | { readonly _tag: "failed"; readonly alert: PeerLinkRenewalAlert },
+  destinations: ReadonlyArray<Destination>,
+  nowMs: number,
+): { readonly state: ModelAlertState; readonly enqueued: boolean } {
+  if (outcome._tag === "renewed") {
+    const prefix = linkReportedPrefix(outcome.linkedEnvironmentId);
+    const reported = Object.fromEntries(
+      Object.entries(state.reported).filter(([key]) => !key.startsWith(prefix)),
+    );
+    if (Object.keys(reported).length === Object.keys(state.reported).length) {
+      return { state, enqueued: false };
+    }
+    return { state: { ...state, reported }, enqueued: false };
+  }
+  const { alert } = outcome;
+  const key = linkReportedKey(alert);
+  const previous = state.reported[key];
+  if (previous !== undefined) {
+    const delivered = previous.startsWith(linkDelivered(""));
+    const queued = pruneOutbox(state.outbox, nowMs).some((entry) => entry.alert.id === previous);
+    if (delivered || queued) return { state, enqueued: false };
+  }
+  const queued = enqueueAlert(state.outbox, alert, destinations, nowMs);
+  if (!queued.enqueued) return { state, enqueued: false };
+  return {
+    state: {
+      ...state,
+      reported: {
+        ...Object.fromEntries(
+          Object.entries(state.reported)
+            .filter(([existing]) => existing !== key)
+            .slice(-(MAX_REPORTED - 1)),
+        ),
+        [key]: alert.id,
+      },
+      outbox: queued.outbox,
+    },
+    enqueued: true,
+  };
+}
+
+/** Marks a delivered link alert, so its link stays quiet until it renews or is linked again. */
+const markLinkDelivered = (
+  reported: ModelAlertState["reported"],
+  entry: Delivery,
+): ModelAlertState["reported"] => {
+  if (entry.alert.type !== "peer-link-renewal") return reported;
+  const key = linkReportedKey(entry.alert);
+  return reported[key] === entry.alert.id
+    ? { ...reported, [key]: linkDelivered(entry.alert.id) }
+    : reported;
+};
+
 const pruneOutbox = (outbox: ReadonlyArray<Delivery>, nowMs: number) =>
   outbox.filter((entry) => nowMs - entry.createdAt < OUTBOX_TTL_MS);
 
@@ -367,6 +462,7 @@ export function afterDeliveryAttempt(
   return {
     ...state,
     incidentSentAt,
+    reported: delivered ? markLinkDelivered(state.reported, entry) : state.reported,
     outbox: pruneOutbox(state.outbox, nowMs).flatMap((candidate) => {
       if (!sameDelivery(candidate, entry)) return [candidate];
       if (delivered) {
@@ -574,8 +670,18 @@ function modelAlertMessage(alert: ModelAlert): string {
   ].join("\n\n");
 }
 
+function linkRenewalMessage(alert: PeerLinkRenewalAlert): string {
+  return [
+    `Link alert from ${alert.environmentLabel} (environment ${alert.environmentId}): its link to ${alert.linkedLabel} (environment ${alert.linkedEnvironmentId}) could not renew its credential. It stops working at ${alert.expiresAt}, and then delegation and the shared inbox between the two machines stop.`,
+    `Last failure: ${alert.detail}`,
+    `Fix it: make sure ${alert.linkedLabel} is on, reachable and on a T3 Code build that renews links; ${alert.environmentLabel} retries every hour by itself. If its session there was revoked, link again. This link sends no further alert until it renews.`,
+  ].join("\n\n");
+}
+
 export const watcherAlertMessage = (alert: WatcherAlert) => {
   switch (alert.type) {
+    case "peer-link-renewal":
+      return linkRenewalMessage(alert);
     case "thread-event":
       return threadEventMessage(alert);
     case "usage-limit-incident":
@@ -640,6 +746,12 @@ export class ModelAlertReactor extends Context.Service<
     readonly flush: Effect.Effect<void>;
     /** Judges every live lane for the time-based events: stuck. */
     readonly sweep: Effect.Effect<void>;
+    /** A link here renewed, or could not: a failing link tells the watcher once until it renews. */
+    readonly linkRenewal: (
+      outcome:
+        | { readonly _tag: "renewed"; readonly linkedEnvironmentId: string }
+        | { readonly _tag: "failed"; readonly alert: PeerLinkRenewalAlert },
+    ) => Effect.Effect<void>;
   }
 >()("t3/orchestration-v2/ModelAlertReactor") {}
 
@@ -731,6 +843,11 @@ export const make = Effect.gen(function* () {
    * on another provider, or its parent replaced it.
    */
   const currentAlert = Effect.fnUntraced(function* (alert: WatcherAlert) {
+    // A link that renewed while its alert waited has nothing left to say.
+    if (alert.type === "peer-link-renewal") {
+      const reported = (yield* Ref.get(state)).reported[linkReportedKey(alert)];
+      return reported === alert.id || reported === linkDelivered(alert.id) ? alert : null;
+    }
     const stillCurrent = Effect.fnUntraced(function* (
       threadId: string,
       runId: string | null,
@@ -1228,6 +1345,27 @@ export const make = Effect.gen(function* () {
     );
   }).pipe(Effect.catchCause((cause) => Effect.logWarning("watcher sweep failed", { cause })));
 
+  const linkRenewal: ModelAlertReactor["Service"]["linkRenewal"] = Effect.fn(
+    "ModelAlertReactor.linkRenewal",
+  )(
+    function* (outcome) {
+      const current = yield* settings.getSettings;
+      const destinations = modelAlertDestinations({
+        watcher: current.modelAlertWatcher,
+        webhookUrl: current.modelAlertWebhookUrl,
+        here: yield* environment.getEnvironmentId,
+        lineage: { parentThreadId: null, relationshipToParent: null },
+      });
+      const nowMs = yield* Clock.currentTimeMillis;
+      const enqueued = yield* update((state) => {
+        const result = recordLinkRenewal(state, outcome, destinations, nowMs);
+        return [result.enqueued, result.state];
+      });
+      if (enqueued) yield* Queue.offer(wake, undefined);
+    },
+    Effect.catchCause((cause) => Effect.logWarning("recording a link renewal failed", { cause })),
+  );
+
   const start: ModelAlertReactor["Service"]["start"] = Effect.fn("ModelAlertReactor.start")(
     function* () {
       yield* forkParked(
@@ -1253,7 +1391,7 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  return ModelAlertReactor.of({ start, handle, flush, sweep });
+  return ModelAlertReactor.of({ start, handle, flush, sweep, linkRenewal });
 });
 
 export const layer = Layer.effect(ModelAlertReactor, make);

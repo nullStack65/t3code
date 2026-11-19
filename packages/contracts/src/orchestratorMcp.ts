@@ -955,6 +955,13 @@ export const OrchestratorMcpLinkAppPairingResult = Schema.Struct({
 });
 export type OrchestratorMcpLinkAppPairingResult = typeof OrchestratorMcpLinkAppPairingResult.Type;
 
+/** The same link session there, signed again with a later expiry. */
+export const OrchestratorMcpLinkRenewResult = Schema.Struct({
+  accessToken: TrimmedNonEmptyString,
+  expiresAt: Schema.String,
+});
+export type OrchestratorMcpLinkRenewResult = typeof OrchestratorMcpLinkRenewResult.Type;
+
 export const OrchestratorMcpDeleteScheduledTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   scheduledTaskId: ScheduledTaskId,

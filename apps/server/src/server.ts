@@ -89,6 +89,7 @@ import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
+import * as PeerLinkRenewal from "./peer/PeerLinkRenewal.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -867,12 +868,17 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     ModelAlertReactor.ModelAlertReactor.pipe(Effect.flatMap((reactor) => reactor.start())),
   ),
+  // Renews links from here before their 30-day credentials expire; a link that cannot alerts once.
+  Layer.effectDiscard(
+    PeerLinkRenewal.PeerLinkRenewal.pipe(Effect.flatMap((renewal) => renewal.start())),
+  ),
 ).pipe(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
   ),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
+  Layer.provide(PeerLinkRenewal.layer),
   Layer.provide(ModelAlertReactor.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
   Layer.provide(PeerLinkRequests.layer),

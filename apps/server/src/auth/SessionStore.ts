@@ -399,6 +399,20 @@ export class SessionStore extends Context.Service<
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+    /**
+     * Signs a live bearer session again with a later expiry, keeping its id, so everything bound
+     * to the session stays bound. None when it is revoked, expired, unknown or not a bearer session.
+     * The claims a row does not hold (`rtc`, `plk`) come from the caller's verified session.
+     */
+    readonly renew: (input: {
+      readonly sessionId: AuthSessionId;
+      readonly ttl: Duration.Duration;
+      readonly runtimeModeCeiling?: RuntimeMode;
+      readonly peerLink?: boolean;
+    }) => Effect.Effect<
+      Option.Option<{ readonly token: string; readonly expiresAt: DateTime.Utc }>,
+      SessionCredentialInternalError
+    >;
     readonly issueWebSocketToken: (
       sessionId: AuthSessionId,
       input?: {
@@ -767,6 +781,49 @@ const make = Effect.gen(function* () {
         scopes: claims.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
       } satisfies IssuedSession;
+    },
+  );
+
+  const renew: SessionStore["Service"]["renew"] = Effect.fn("SessionStore.renew")(
+    function* (input) {
+      const { sessionId } = input;
+      const issueError = (cause: unknown) => new SessionCredentialIssueError({ sessionId, cause });
+      const row = yield* authSessions.getById({ sessionId }).pipe(Effect.mapError(issueError));
+      // A DPoP session's key binding is not re-signed here; only bearer sessions renew.
+      if (
+        Option.isNone(row) ||
+        row.value.revokedAt !== null ||
+        row.value.method !== "bearer-access-token"
+      ) {
+        return Option.none();
+      }
+      const now = yield* DateTime.now;
+      const expiresAt = DateTime.add(now, { milliseconds: Duration.toMillis(input.ttl) });
+      const claims: SessionClaims = {
+        v: 1,
+        kind: "session",
+        sid: sessionId,
+        sub: row.value.subject,
+        scopes: row.value.scopes,
+        method: row.value.method,
+        ...(input.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
+        ...(input.peerLink === true ? { plk: 1 as const } : {}),
+        iat: now.epochMilliseconds,
+        exp: expiresAt.epochMilliseconds,
+      };
+      const encodedPayload = yield* encodeClaims(claims).pipe(
+        Effect.map(base64UrlEncode),
+        Effect.mapError(issueError),
+      );
+      const signature = yield* signer.sign(encodedPayload);
+      // Only a session still live here moves; a revocation between the read and now wins.
+      const extended = yield* authSessions
+        .extend({ sessionId, expiresAt, now })
+        .pipe(Effect.mapError(issueError));
+      if (!extended) return Option.none();
+      const session = yield* loadActiveSession(sessionId).pipe(Effect.orElseSucceed(Option.none));
+      if (Option.isSome(session)) yield* emitUpsert(session.value);
+      return Option.some({ token: `${encodedPayload}.${signature}`, expiresAt });
     },
   );
 
@@ -1145,6 +1202,7 @@ const make = Effect.gen(function* () {
     legacyCookieName,
     issue,
     verify,
+    renew,
     issueWebSocketToken,
     verifyWebSocketToken,
     listActive,

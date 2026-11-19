@@ -103,6 +103,16 @@ Unlinking on the linking side only forgets the token.
   [`linkRequestTarget`](../../packages/client-runtime/src/linkRequest.ts) names
   a machine for it only when the client already reaches exactly one machine
   there. An address alone never moves an unexpired link to another address.
+- **A link renews its session in place.** The linking side's hourly
+  [`PeerLinkRenewal`](../../apps/server/src/peer/PeerLinkRenewal.ts) sweep calls
+  the link-only `t3_link_renew` tool once 20 days or fewer are left. The peer
+  signs the same session again with a new 30-day expiry and extends its row, so
+  the session id that names linked work, its idempotency keys and the linking
+  side's incarnation all stay the same. Only peer-link bearer sessions renew,
+  and revoking the session there still ends the link. A failure that retrying
+  can fix (the peer is off or unreachable) alerts only in the link's last
+  week; anything else alerts at once. Each link sends one watcher alert until
+  it renews again.
 - **All callers on one side share the link's single session on the other**,
   so idempotency keys are hashed with the caller's namespace before they
   leave. Without that, two agents reusing a key would collide on the far side.
