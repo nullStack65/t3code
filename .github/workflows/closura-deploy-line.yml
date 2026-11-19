@@ -28,7 +28,7 @@ jobs:
     runs-on: t3code-ci-arc
     timeout-minutes: 5
     steps:
-      - name: Require "Deploy: none" or "Deploy: <host>, <host>"
+      - name: 'Require one Deploy line (none, or comma-separated targets)'
         shell: bash
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
