@@ -14,6 +14,12 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("keeps the optional build commit, absent on unstamped and older servers", () => {
+    expect(decodeDescriptor(descriptor).buildCommit).toBeUndefined();
+    const buildCommit = "4f4c0fbb936f12b27d7d97f05dd9b2e0a9732cb1";
+    expect(decodeDescriptor({ ...descriptor, buildCommit }).buildCommit).toBe(buildCommit);
+  });
+
   it("decodes old, recognized and future manual installation descriptors", () => {
     expect(decodeDescriptor(descriptor).capabilities.serverInstallation).toBeUndefined();
     for (const installation of [
