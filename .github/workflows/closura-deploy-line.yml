@@ -1,9 +1,11 @@
 name: Closura deploy line
 
-# Every pull request into the native release branch names where it must end up
-# running, so "merged" is never mistaken for "live". The private fleet
-# configuration holds the authoritative host list; this only checks the line's
-# shape. Reads the body from the event payload; no token, checkout or code run.
+# Every pull request into the native release branch says whether it changes
+# what runs, so "merged" is never mistaken for "live". The value is opaque on
+# purpose: "fleet" means the private deployment config decides where it runs,
+# and no host names are published here. This job reads only the event payload:
+# no checkout, no token and no repository code, so it runs on a hosted runner
+# and needs no actor guard.
 on:
   pull_request:
     branches: [release/native-0.1.10]
@@ -17,36 +19,30 @@ concurrency:
 
 jobs:
   deploy-line:
-    if: >-
-      ${{
-        github.repository == 'nullStack65/t3code' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
-        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor)
-      }}
+    if: ${{ github.repository == 'nullStack65/t3code' }}
     name: Deploy line declared
-    runs-on: t3code-ci-arc
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: 'Require one Deploy line (none, or comma-separated targets)'
+      - name: 'Require one Deploy line: none or fleet'
         shell: bash
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
-          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' | grep -E '^[[:space:]]*Deploy:' || true)"
+          # Count "Deploy:" lines at the start of a line, outside fenced code blocks.
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
           count="$(printf '%s' "$lines" | grep -c . || true)"
           if test "$count" -ne 1; then
-            echo "::error::Add exactly one 'Deploy:' line to the PR body: 'Deploy: none' or 'Deploy: <host>, <host>' (found $count)."
+            echo "::error::Add exactly one line 'Deploy: none' or 'Deploy: fleet' to the PR body (found $count)."
             exit 1
           fi
-          value="$(printf '%s' "$lines" | sed -E 's/^[[:space:]]*Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
-          if test "$value" = none; then
-            echo "Deploy: none"
-            exit 0
-          fi
-          if ! printf '%s' "$value" | grep -Eq '^[a-z0-9][a-z0-9-]*([[:space:]]*,[[:space:]]*[a-z0-9][a-z0-9-]*)*$'; then
-            echo "::error::'Deploy: $value' must be 'none' or comma-separated lowercase host ids."
-            exit 1
-          fi
-          echo "Deploy targets: $value"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          case "$value" in
+            none | fleet) echo "Deploy: $value" ;;
+            *)
+              echo "::error::The Deploy line must be 'Deploy: none' or 'Deploy: fleet'."
+              exit 1
+              ;;
+          esac

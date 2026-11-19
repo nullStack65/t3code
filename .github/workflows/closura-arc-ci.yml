@@ -15,7 +15,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: t3-fork-arc-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Pushes group by exact commit, so a burst of merges never cancels a queued
+  # head: every merged head keeps its own check run.
+  group: t3-fork-arc-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -168,7 +170,8 @@ jobs:
             apps/web/src/components/chat/draftAttachmentUploads.test.ts \
             apps/web/src/components/chat/draftUploadReconcile.test.ts \
             apps/web/src/lib/attachmentUploadQueue.test.ts \
-            apps/server/src/ws.test.ts
+            apps/server/src/ws.test.ts \
+            packages/contracts/src/environment.test.ts
 
       - name: Test mobile new-task placement, outbox and uploads
         shell: bash
