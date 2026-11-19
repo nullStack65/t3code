@@ -39,3 +39,16 @@ export function sortBotThreads<
       }) || left.id.localeCompare(right.id),
   );
 }
+
+/**
+ * Splits standing bots out of the sidebar's thread list. Bots go to their own group whatever
+ * their pin, settle or snooze state; everything else continues to the ordinary sections.
+ */
+export function splitStandingThreads<T extends { readonly standing: unknown }>(
+  threads: readonly T[],
+): { readonly bots: T[]; readonly rest: T[] } {
+  const bots: T[] = [];
+  const rest: T[] = [];
+  for (const thread of threads) (thread.standing != null ? bots : rest).push(thread);
+  return { bots, rest };
+}

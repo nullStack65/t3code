@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveBotPresence, sortBotThreads } from "./botPresence";
+import { resolveBotPresence, sortBotThreads, splitStandingThreads } from "./botPresence";
 
 describe("resolveBotPresence", () => {
   it.each(["Pending Approval", "Awaiting Input", "Guest Request", "Plan Ready"] as const)(
@@ -47,5 +47,21 @@ describe("sortBotThreads", () => {
       { id: "a", standing: { name: "alpha" } },
     ];
     expect(sortBotThreads(threads).map((thread) => thread.id)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("splitStandingThreads", () => {
+  it("sends bots to their own group whatever their pin, settle or snooze state", () => {
+    const persona = { name: "Ops" };
+    const threads = [
+      { id: "a", standing: null, pinnedAt: "2026-11-19T00:00:00Z" },
+      { id: "b", standing: persona, pinnedAt: "2026-11-19T00:00:00Z" },
+      { id: "c", standing: persona, settledOverride: "settled" },
+      { id: "d", standing: persona, snoozedAt: "2026-11-19T00:00:00Z" },
+      { id: "e", standing: null },
+    ];
+    const { bots, rest } = splitStandingThreads(threads);
+    expect(bots.map((thread) => thread.id)).toEqual(["b", "c", "d"]);
+    expect(rest.map((thread) => thread.id)).toEqual(["a", "e"]);
   });
 });

@@ -367,7 +367,7 @@ import {
   shouldRefocusComposerOnWindowFocus,
   hasCompactableConversation,
 } from "./ChatView.logic";
-import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -441,8 +441,19 @@ const DismissedFallbackWindowSchema = Schema.NullOr(Schema.String);
 
 const ignoreComposerFocus = () => {};
 
-/** Bot threads whose details card this session already folded once. */
-const botDetailsFoldedKeys = new Set<string>();
+/** Bot threads whose details card was folded once; after that the user's choice stands. */
+const BOT_DETAILS_FOLDED_KEY = "t3code:bot-details-folded:v1";
+const BotDetailsFoldedKeys = Schema.Array(Schema.String);
+function foldBotDetailsOnce(threadKey: string): boolean {
+  const folded = getLocalStorageItem(BOT_DETAILS_FOLDED_KEY, BotDetailsFoldedKeys) ?? [];
+  if (folded.includes(threadKey)) return false;
+  setLocalStorageItem(
+    BOT_DETAILS_FOLDED_KEY,
+    [...folded, threadKey].slice(-500),
+    BotDetailsFoldedKeys,
+  );
+  return true;
+}
 
 export default function ChatView(props: ChatViewProps) {
   const {
@@ -1799,11 +1810,10 @@ export default function ChatView(props: ChatViewProps) {
       selectThreadPanelOpen(state.threadPanelVisibilityByThreadKey, activeThreadRef, "inline"),
   );
   const isStandingBot = activeStanding !== null;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- folds a bot's details card (branch, worktree, PR) the first time this session shows that bot; the panel toggle reopens it
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- folds a bot's details card (branch, worktree, PR) the first time this client shows that bot; the panel toggle reopens it and that choice persists
   useEffect(() => {
     if (!isStandingBot || !activeThreadRef || !activeThreadKey) return;
-    if (botDetailsFoldedKeys.has(activeThreadKey)) return;
-    botDetailsFoldedKeys.add(activeThreadKey);
+    if (!foldBotDetailsOnce(activeThreadKey)) return;
     const store = useRightPanelStore.getState();
     store.setThreadPanelOpen(activeThreadRef, "inline", false);
     store.setThreadPanelOpen(activeThreadRef, "popover", false);

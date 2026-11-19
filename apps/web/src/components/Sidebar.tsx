@@ -191,7 +191,7 @@ import {
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { runBotMenuAction } from "./bots/botMenuActions";
-import { sortBotThreads } from "./bots/botPresence";
+import { sortBotThreads, splitStandingThreads } from "./bots/botPresence";
 import { SidebarBotsGroup } from "./sidebar/SidebarBotsGroup";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
@@ -678,7 +678,9 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const preciseNow = new Date().toISOString();
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
-  const bots: EnvironmentThreadShell[] = [];
+  // Standing bots live in their own group whatever their pin, settle or snooze state. A bot
+  // that is a delegated child stays nested under its parent instead, so it is listed once.
+  const { bots, rest } = splitStandingThreads(visible);
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
   const working: EnvironmentThreadShell[] = [];
@@ -691,16 +693,12 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const snoozed: EnvironmentThreadShell[] = [];
   const settled: EnvironmentThreadShell[] = [];
   const { draggableThreadKeys, activeReorderableThreadKeys } = resolveSidebarReorderableThreadKeys({
-    threads: visible,
+    // Bots sit outside the sortable sections, so they are never drag targets.
+    threads: rest,
     serverConfigs,
     connectedEnvironmentIds: input.connectedEnvironmentIds,
   });
-  for (const thread of visible) {
-    // Standing bots live in their own group whatever their pin, settle or snooze state.
-    if (thread.standing !== null) {
-      bots.push(thread);
-      continue;
-    }
+  for (const thread of rest) {
     const configLoaded = serverConfigs.has(thread.environmentId);
     const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     if (optimisticDrop?.key === threadKey) {

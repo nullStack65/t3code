@@ -143,7 +143,7 @@ function BotPersonaDialog(props: { readonly request: Request }) {
                     <button
                       key={candidate}
                       type="button"
-                      aria-label={candidate}
+                      aria-label={`${candidate} avatar`}
                       aria-pressed={candidate === avatarId}
                       onClick={() => setAvatarId(candidate)}
                       className={cn(
@@ -165,7 +165,7 @@ function BotPersonaDialog(props: { readonly request: Request }) {
                     <button
                       key={candidate}
                       type="button"
-                      aria-label={candidate}
+                      aria-label={`${candidate} accent`}
                       aria-pressed={candidate === accent}
                       onClick={() => setAccent(candidate)}
                       className={cn(

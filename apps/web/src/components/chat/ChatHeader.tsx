@@ -161,6 +161,8 @@ export const ChatHeader = memo(function ChatHeader({
     parentThreadLink,
     interfaceFont,
     isRenamingTitle,
+    // A bot header has no breadcrumb list; reverting to an ordinary thread mounts it again.
+    standing != null,
   ]);
   const renameCommittedRef = useRef(false);
   const startRename = () => {

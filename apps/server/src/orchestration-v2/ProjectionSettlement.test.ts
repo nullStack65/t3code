@@ -326,6 +326,16 @@ it.effect(
         new Set(eligible.map((thread) => thread.id)),
         new Set([idle, completed, queued, woke, background, persistent, rolledBack]),
       );
+      const idleCandidate = candidates.find((thread) => thread.id === idle)!;
+      assert.isFalse(
+        isAutoSettlementCandidate(
+          {
+            ...idleCandidate,
+            standing: { name: "Ops", role: null, avatarId: "bolt", accent: "sky" },
+          },
+          DateTime.toEpochMillis(now),
+        ),
+      );
       assert.deepEqual(
         new Set(eligible.map((thread) => thread.id)),
         new Set(

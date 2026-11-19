@@ -186,6 +186,8 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
+    /** Present when `standing` was passed; false means the thread launched but is not a bot yet. */
+    standingApplied: Schema.optional(Schema.Boolean),
   }),
   dependencies: [
     ...shared.dependencies,

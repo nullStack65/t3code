@@ -227,6 +227,7 @@ export type ProjectionSettlementCandidate = Pick<
   | "settledOverride"
   | "pinnedAt"
   | "autoSettleDisabledAt"
+  | "standing"
   | "snoozedUntil"
   | "snoozedAt"
   | "latestRunId"
@@ -7846,6 +7847,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         AND json_extract(${thread}.payload_json, '$.lineage.sideChat') IS NOT 1
         AND json_extract(${thread}.payload_json, '$.settledOverride') = 'settled'
         AND json_extract(${thread}.payload_json, '$.settledAt') IS NOT NULL
+        AND json_extract(${thread}.payload_json, '$.standing') IS NULL
       )`;
     };
     // Mirrors senderNeedsParent: the parent a thread's sender comes from, else NULL.
