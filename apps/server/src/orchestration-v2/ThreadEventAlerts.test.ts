@@ -96,7 +96,7 @@ it.each([
   const { findings } = judge(shellWith(overrides as never), "run-ended");
   assert.deepEqual(
     findings.filter((finding) => finding.kind === "lane-ended").map((finding) => finding.kind),
-    expected,
+    [...expected],
   );
 });
 

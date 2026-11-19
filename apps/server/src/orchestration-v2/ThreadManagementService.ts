@@ -656,18 +656,19 @@ const make = Effect.gen(function* () {
                         projectId: input.projectId,
                         instanceId: input.instanceId,
                       })
-                    : Effect.sync(() =>
-                        input.launch === true
-                          ? ProviderExhaustion.until(input.instanceId, Date.now())
-                          : null,
-                      ).pipe(
+                    : Clock.currentTimeMillis.pipe(
+                        Effect.map((now) =>
+                          input.launch === true
+                            ? ProviderExhaustion.until(input.instanceId, now)
+                            : null,
+                        ),
                         Effect.flatMap((until) =>
                           until === null
                             ? Effect.void
                             : new ThreadManagementProviderInstanceDisabledError({
                                 projectId: input.projectId,
                                 instanceId: input.instanceId,
-                                exhaustedUntil: new Date(until).toISOString(),
+                                exhaustedUntil: DateTime.formatIso(DateTime.makeUnsafe(until)),
                               }),
                         ),
                       ),

@@ -474,10 +474,11 @@ export function recordUsageLimit(
         entry.alert.groupKey === groupKey,
     );
     const queued = index === -1 ? undefined : outbox[index];
-    if (queued !== undefined && queued.alert.type === "usage-limit-incident") {
+    const queuedAlert = queued?.alert;
+    if (queued !== undefined && queuedAlert?.type === "usage-limit-incident") {
       outbox = outbox.map((entry, at) =>
         at === index
-          ? { ...queued, alert: withIncidentMember(queued.alert, member, input.resetAt) }
+          ? { ...queued, alert: withIncidentMember(queuedAlert, member, input.resetAt) }
           : entry,
       );
       continue;
@@ -493,7 +494,7 @@ export function recordUsageLimit(
       {
         destination,
         alert: {
-          type: "usage-limit-incident",
+          type: "usage-limit-incident" as const,
           id: `${groupKey}:${nowMs}`,
           groupKey,
           environmentId: input.environmentId,

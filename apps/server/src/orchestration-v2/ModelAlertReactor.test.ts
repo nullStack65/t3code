@@ -71,7 +71,10 @@ it("alerts a thread that falls back every run once, until it recovers or changes
   step(alertFor("run:6"));
   assert.deepEqual(enqueued, [true, false, false, false, false, true, false, true]);
   assert.deepEqual(
-    state.outbox.map((entry) => [entry.alert.runId, entry.destination]),
+    state.outbox.map((entry) => [
+      entry.alert.type === "model-degraded" ? entry.alert.runId : entry.alert.id,
+      entry.destination,
+    ]),
     [
       ["run:1", "watcher"],
       ["run:1", "webhook"],

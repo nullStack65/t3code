@@ -33,6 +33,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -1657,7 +1658,10 @@ it.effect("refuses 6 launches on a provider that is out of usage, and starts no 
     const threads = yield* ThreadManagement.ThreadManagementService;
     const before = (yield* threads.listProjectThreads({ projectId, includeSubagents: true }))
       .length;
-    ProviderExhaustion.mark(modelSelection.instanceId, Date.now() + 60 * 60 * 1000);
+    ProviderExhaustion.mark(
+      modelSelection.instanceId,
+      (yield* Clock.currentTimeMillis) + 60 * 60 * 1000,
+    );
     const refusals = yield* Effect.forEach([1, 2, 3, 4, 5, 6], (index) =>
       launches
         .launch(
