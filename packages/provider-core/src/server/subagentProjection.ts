@@ -258,6 +258,33 @@ export function workerAlert(input: {
       };
 }
 
+/** What a run's provider reported about its model: what ran, safeguard fallbacks, a usage limit. */
+export function runModelSignals(
+  projection: Pick<OrchestrationV2ThreadProjection, "turnItems" | "providerTurns">,
+  run: OrchestrationV2Run,
+) {
+  const executedModel = latestProviderTurnForAttempt(
+    projection.providerTurns,
+    run.activeAttemptId,
+  )?.model;
+  const failure =
+    run.status === "failed"
+      ? projection.turnItems
+          .filter((item) => item.runId === run.id && item.type === "error")
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0]
+      : undefined;
+  return {
+    requestedModel: executedModel === undefined ? undefined : run.modelSelection.model,
+    executedModel,
+    fallbackModels: projection.turnItems.flatMap((item) =>
+      item.runId === run.id && item.type === "system_notice" && item.fallbackModel !== undefined
+        ? [item.fallbackModel]
+        : [],
+    ),
+    usageLimited: failure?.type === "error" && failure.failure.class === "usage_limit",
+  };
+}
+
 /** Run signal of the notice that carries a provider's stop reason on a completed run. */
 export const PROVIDER_STOP_REASON_SIGNAL = "provider-stop-reason";
 
@@ -327,19 +354,8 @@ export function subagentResultForRun(
     (run.status === "completed"
       ? withStopNotice(projection, run, "Child task completed without an assistant result.")
       : `Child task ended with status ${run.status}.`);
-  const executedModel = latestProviderTurnForAttempt(
-    projection.providerTurns,
-    run.activeAttemptId,
-  )?.model;
   const alert = workerAlert({
-    requestedModel: executedModel === undefined ? undefined : run.modelSelection.model,
-    executedModel,
-    fallbackModels: projection.turnItems.flatMap((item) =>
-      item.runId === run.id && item.type === "system_notice" && item.fallbackModel !== undefined
-        ? [item.fallbackModel]
-        : [],
-    ),
-    usageLimited: failure?.type === "error" && failure.failure.class === "usage_limit",
+    ...runModelSignals(projection, run),
     finalText: message?.text ?? turnItem?.text,
   });
   return {

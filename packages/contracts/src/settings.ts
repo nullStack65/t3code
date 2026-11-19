@@ -1161,6 +1161,19 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+/** A thread on some environment that hears every model alert from this one. */
+export const ModelAlertWatcher = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+});
+export type ModelAlertWatcher = typeof ModelAlertWatcher.Type;
+
+// Closura: Lead's thread on the laptop hears every machine's alerts.
+const DEFAULT_MODEL_ALERT_WATCHER: ModelAlertWatcher = {
+  environmentId: EnvironmentId.make("2f360b2e-0386-498a-b9cd-62999f3525ba"),
+  threadId: ThreadId.make("0ff5603d-8291-4f56-adaf-5132c62016cf"),
+};
+
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
@@ -1545,6 +1558,15 @@ export const ServerSettings = Schema.Struct({
   automaticPlacementByDefault: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  /**
+   * Where a run that ran another model than selected, hit a provider safeguard fallback or a usage
+   * limit is reported, once per thread until the problem changes. Null reports to no thread.
+   */
+  modelAlertWatcher: Schema.NullOr(ModelAlertWatcher).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MODEL_ALERT_WATCHER)),
+  ),
+  /** Also POSTs each model alert as JSON here. Empty posts nothing. */
+  modelAlertWebhookUrl: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Beta: Claude and Codex predict the next prompt after completed turns. Codex follows a change at once; open Claude threads after they restart. */
   promptSuggestionsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
@@ -1989,6 +2011,8 @@ export const ServerSettingsPatch = Schema.Struct({
   automaticPlacementExcludedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   machinePlacementRole: Schema.optionalKey(MachinePlacementRole),
   automaticPlacementByDefault: Schema.optionalKey(Schema.Boolean),
+  modelAlertWatcher: Schema.optionalKey(Schema.NullOr(ModelAlertWatcher)),
+  modelAlertWebhookUrl: Schema.optionalKey(TrimmedString),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
