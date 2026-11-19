@@ -1,4 +1,12 @@
-import type { EnvironmentId, Founder, ThreadId, ThreadInbox } from "@t3tools/contracts";
+import {
+  resolveThreadSenders,
+  type EnvironmentId,
+  type Founder,
+  type SenderFounder,
+  type ThreadId,
+  type ThreadInbox,
+  type ThreadSender,
+} from "@t3tools/contracts";
 import { ThreadAttribution } from "@t3tools/contracts/settings";
 
 export const THREAD_ATTRIBUTIONS = ThreadAttribution.literals;
@@ -18,70 +26,84 @@ export interface AttributableThread {
   readonly source: {
     readonly inbox?: ThreadInbox | null | undefined;
     readonly createdBy?: string | undefined;
+    /** The server's resolution of the parent chain; wins over the parents this client holds. */
+    readonly parentFounder?: SenderFounder | undefined;
   };
 }
 
-/** Machine owners, chosen in Settings; nothing is assumed for an unmapped machine. */
-type FounderByEnvironmentId = Readonly<Partial<Record<EnvironmentId, Founder>>>;
+/** Machine owners; nothing is assumed for an unmapped machine. */
+export type FounderByEnvironmentId = Readonly<Partial<Record<EnvironmentId, Founder>>>;
+
+/** The part of a server config that names its machine's owner. */
+export interface MachineOwnerConfig {
+  /** The server reports its owner, so its value wins even when null. */
+  readonly machineOwner?: boolean | undefined;
+  readonly settings: { readonly ownerFounder: Founder | null };
+}
+
+/**
+ * Every machine's owner: the one its server reports, so every client agrees, else this client's
+ * own map for servers too old to report one.
+ */
+export function resolveMachineOwners(
+  serverConfigs: ReadonlyMap<EnvironmentId, MachineOwnerConfig>,
+  legacy: FounderByEnvironmentId | undefined,
+): FounderByEnvironmentId {
+  const owners: Partial<Record<EnvironmentId, Founder>> = { ...legacy };
+  for (const [environmentId, config] of serverConfigs) {
+    if (config.machineOwner !== true) continue;
+    if (config.settings.ownerFounder === null) delete owners[environmentId];
+    else owners[environmentId] = config.settings.ownerFounder;
+  }
+  return owners;
+}
 
 export const threadAttributionKey = (thread: {
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
 }) => `${thread.environmentId}:${thread.id}`;
 
-const attributionOf = (founder: Founder, byAgent: boolean): ThreadAttribution =>
-  byAgent ? `${founder}-agents` : founder;
-
-const founderOfAttribution = (attribution: ThreadAttribution): Founder | null =>
-  attribution === "unknown" ? null : attribution.startsWith("jeff") ? "jeff" : "kameron";
-
-const humanFounder = (actor: ThreadInbox["origin"] | undefined): Founder | null =>
-  actor?.kind === "human" ? actor.id : null;
+/** A sender's attribution once its machine's owner is known. */
+export function attributionOfSender(
+  sender: ThreadSender,
+  owner: Founder | undefined,
+): ThreadAttribution {
+  const founder = sender.founder === "machine" ? (owner ?? null) : sender.founder;
+  if (founder === null) return "unknown";
+  return sender.byAgent ? `${founder}-agents` : founder;
+}
 
 /**
- * Resolves every thread's attribution, keyed by `threadAttributionKey`. A human origin or
- * requester is that founder; agent work takes its requester's or owner's founder, else its
- * parent's; only history without inbox fields falls back to the machine's owner.
+ * Resolves every thread's attribution, keyed by `threadAttributionKey`, with the rule servers
+ * count older settled threads by (`resolveThreadSenders`).
  */
 export function resolveThreadAttributions(
   threads: ReadonlyArray<AttributableThread>,
   founderByEnvironmentId: FounderByEnvironmentId,
 ): ReadonlyMap<string, ThreadAttribution> {
-  const byKey = new Map(threads.map((thread) => [threadAttributionKey(thread), thread]));
+  const environmentByKey = new Map<string, EnvironmentId>();
+  const senders = resolveThreadSenders(
+    threads.map((thread) => {
+      const key = threadAttributionKey(thread);
+      environmentByKey.set(key, thread.environmentId);
+      return {
+        key,
+        parentKey:
+          thread.lineage.parentThreadId === null
+            ? null
+            : `${thread.environmentId}:${thread.lineage.parentThreadId}`,
+        inbox: thread.source.inbox,
+        createdBy: thread.source.createdBy,
+        parentFounder: thread.source.parentFounder,
+      };
+    }),
+  );
   const resolved = new Map<string, ThreadAttribution>();
-  const resolving = new Set<string>();
-  const resolve = (key: string, thread: AttributableThread): ThreadAttribution => {
-    const known = resolved.get(key);
-    if (known !== undefined) return known;
-    // A lineage cycle resolves the repeated thread without its parent.
-    resolving.add(key);
-    const inbox = thread.source.inbox;
-    const byAgent = inbox?.origin?.kind === "agent" || thread.source.createdBy === "agent";
-    const parentKey =
-      thread.lineage.parentThreadId === null
-        ? null
-        : `${thread.environmentId}:${thread.lineage.parentThreadId}`;
-    const parent =
-      parentKey === null || resolving.has(parentKey) ? undefined : byKey.get(parentKey);
-    const founder =
-      humanFounder(inbox?.origin) ??
-      humanFounder(inbox?.requestedBy) ??
-      (inbox?.origin?.kind === "agent"
-        ? (inbox.owner ??
-          (parent && parentKey ? founderOfAttribution(resolve(parentKey, parent)) : null))
-        : null) ??
-      // Only history from before inbox routing falls back to the machine: a shared machine
-      // runs both founders' agents, so crediting routed work to its owner would be a guess.
-      (inbox ? null : founderByEnvironmentId[thread.environmentId]) ??
-      null;
-    const attribution =
-      founder === null
-        ? "unknown"
-        : attributionOf(founder, byAgent && humanFounder(inbox?.origin) === null);
-    resolving.delete(key);
-    resolved.set(key, attribution);
-    return attribution;
-  };
-  for (const [key, thread] of byKey) resolve(key, thread);
+  for (const [key, sender] of senders) {
+    resolved.set(
+      key,
+      attributionOfSender(sender, founderByEnvironmentId[environmentByKey.get(key)!]),
+    );
+  }
   return resolved;
 }

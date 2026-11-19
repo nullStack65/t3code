@@ -2,8 +2,10 @@ import { deriveProviderInstanceConfigMap } from "./provider/ProviderInstanceRegi
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
   globalIdleCompaction,
+  requiredScopesForServerSettingsPatch,
   type ManagedPolicyDocument,
   ModelSelection,
   ProjectId,
@@ -252,6 +254,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
       );
       assert.equal(persisted.responseStreamingMode, "turn");
       assert.deepEqual(persisted.projectSettingsOverrides, settings.projectSettingsOverrides);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("stores the machine's owner, sends it to clients, and clears it", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      assert.isNull((yield* service.getSettings).ownerFounder);
+      // An ordinary settings write, not an access change.
+      assert.deepEqual(requiredScopesForServerSettingsPatch({ ownerFounder: "jeff" }), [
+        AuthSettingsWriteScope,
+      ]);
+
+      yield* service.updateSettings({ ownerFounder: "kameron" });
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.equal(persisted.ownerFounder, "kameron");
+      const client = ServerSettingsModule.redactServerSettingsForClient(
+        yield* service.getSettings,
+        { secretReferences: true },
+      );
+      assert.equal(client.ownerFounder, "kameron");
+
+      yield* service.updateSettings({ ownerFounder: null });
+      assert.isNull((yield* service.getSettings).ownerFounder);
+      assert.isNull(
+        (yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath)))
+          .ownerFounder,
+      );
     }).pipe(Effect.provide(layerServerSettings())),
   );
 

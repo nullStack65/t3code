@@ -199,6 +199,7 @@ it("reuses a large thread list across tab renders and updates when its inputs ch
     before,
     beforeMs: Date.parse(before),
     counts: new Map([[ProjectId.make("project-test"), 575]]),
+    groups: null,
   };
   await act(async () => {
     registry.set(

@@ -1,19 +1,22 @@
 import {
+  matchesListedInboxes,
+  type ThreadListFilter,
+} from "@t3tools/client-runtime/state/thread-list-filter";
+import {
   effectiveInboxFilter,
   Founder,
   InboxChoice,
-  matchesInboxFilter,
   primaryInbox,
   type EnvironmentId,
   type ThreadInbox,
 } from "@t3tools/contracts";
-import type { ClientSettings, ThreadAttribution } from "@t3tools/contracts/settings";
+import type { ThreadAttribution } from "@t3tools/contracts/settings";
 
-export interface ThreadListFilter {
-  readonly inboxes: ReadonlyArray<InboxChoice>;
-  readonly hiddenEnvironmentIds: ReadonlyArray<EnvironmentId>;
-  readonly hiddenAttributions: ReadonlyArray<ThreadAttribution>;
-}
+export {
+  matchesThreadListFilter,
+  threadListFilterOf,
+  type ThreadListFilter,
+} from "@t3tools/client-runtime/state/thread-list-filter";
 
 interface FilterableThread {
   readonly environmentId: EnvironmentId;
@@ -23,36 +26,12 @@ interface FilterableThread {
   };
 }
 
-export const threadListFilterOf = (
-  settings: Pick<
-    ClientSettings,
-    | "founderInboxFilter"
-    | "founderInboxOwner"
-    | "sidebarHiddenEnvironmentIds"
-    | "sidebarHiddenThreadAttributions"
-  >,
-): ThreadListFilter => ({
-  inboxes: effectiveInboxFilter(settings),
-  hiddenEnvironmentIds: settings.sidebarHiddenEnvironmentIds ?? [],
-  hiddenAttributions: settings.sidebarHiddenThreadAttributions ?? [],
-});
-
 const matchesInboxes = (thread: FilterableThread, inboxes: ReadonlyArray<InboxChoice>) =>
-  matchesInboxFilter(thread.source.inbox, inboxes) ||
-  // Agent-created threads from before inbox routing carry no Agents routing.
-  (inboxes.includes("agents") &&
-    thread.source.createdBy === "agent" &&
-    primaryInbox(thread.source.inbox) === null);
-
-/** Without an attribution (notifications), the From section does not apply. */
-export const matchesThreadListFilter = (
-  thread: FilterableThread,
-  filter: ThreadListFilter,
-  attribution?: ThreadAttribution,
-) =>
-  !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&
-  (attribution === undefined || !filter.hiddenAttributions.includes(attribution)) &&
-  matchesInboxes(thread, filter.inboxes);
+  matchesListedInboxes(
+    primaryInbox(thread.source.inbox),
+    thread.source.createdBy === "agent",
+    inboxes,
+  );
 
 /** The chosen founder's inbox first, then Agents, so the common pair sits together. */
 export const inboxMenuOrder = (owner: Founder | undefined): ReadonlyArray<InboxChoice> => {
