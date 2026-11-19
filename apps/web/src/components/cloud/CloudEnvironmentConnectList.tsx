@@ -39,6 +39,7 @@ import { Skeleton } from "../ui/skeleton";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { presentSavedCloudEnvironmentConnection } from "./cloudEnvironmentConnectionPresentation";
+import { undismissLinkedEnvironment } from "../../state/linkedEnvironmentDismissals";
 
 const EMPTY_DISCOVERY_REFRESH_INTERVAL_MS = 5_000;
 
@@ -111,7 +112,11 @@ export function CloudEnvironmentConnectRows({
           label: environment.label,
         }),
       }),
-    );
+    ).then((result) => {
+      // Adding it back is the way back from removing it, so it may be added on its own again.
+      if (result._tag === "Success") void undismissLinkedEnvironment(environment.environmentId);
+      return result;
+    });
   const [connectingEnvironmentIds, setConnectingEnvironmentIds] = useState<
     ReadonlySet<EnvironmentId>
   >(new Set());

@@ -1,4 +1,5 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   ProviderDriverKind,
@@ -105,6 +106,7 @@ it.effect("keeps malformed source URLs encodable for config subscribers", () =>
         HttpClient.make(() => Effect.die("Unexpected network request")),
       ),
       NodeCrypto.layer,
+      NodeServices.layer,
     ]),
   ),
 );
@@ -171,6 +173,7 @@ it.effect("reads a management key from its secret provider", () => {
         ),
       ),
       NodeCrypto.layer,
+      NodeServices.layer,
     ]),
   );
 });

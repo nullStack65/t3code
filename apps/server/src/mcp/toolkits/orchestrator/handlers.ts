@@ -1,6 +1,10 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { mcpClientScopes, OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+
+import * as EnvironmentAuth from "../../../auth/EnvironmentAuth.ts";
 
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
@@ -11,6 +15,56 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+
+/**
+ * The link already holds this access here, so the client it adds holds no more. Auth is taken
+ * once, when the handlers are built, so harnesses that never pair need not provide it.
+ */
+export const linkAppPairing = Effect.map(
+  Effect.serviceOption(EnvironmentAuth.EnvironmentAuth),
+  (environmentAuth) =>
+    McpToolAccess.reads(() =>
+      Effect.gen(function* () {
+        const { client } = yield* McpInvocationContext.McpInvocationContext;
+        if (client?.linked !== true) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Only a linked T3 Code environment can add this one to its app.",
+          });
+        }
+        // A call the link makes for one of its agent threads: an agent never gets a credential.
+        if (client.senderThread !== undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Only the linked environment's app can add this one, not its agents.",
+          });
+        }
+        if (Option.isNone(environmentAuth)) {
+          return yield* new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: "This environment cannot issue pairing codes here.",
+          });
+        }
+        const access = McpInvocationContext.linkedAppAccess(client);
+        const issued = yield* environmentAuth.value
+          .issuePairingCredential({
+            scopes: mcpClientScopes(access),
+            label: `${client.label} (app)`,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestratorMcpFailure({ code: "capability_denied", message: error.message }),
+            ),
+          );
+        return {
+          credential: issued.credential,
+          expiresAt: DateTime.formatIso(issued.expiresAt),
+          access,
+        };
+      }),
+    ),
+);
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads((input) =>
@@ -237,6 +291,9 @@ const handlers = {
         return yield* service.interruptThread(scope, input);
       }),
   ),
-} satisfies McpToolAccess.Handlers<typeof OrchestratorToolkit.tools>;
+} satisfies Omit<McpToolAccess.Handlers<typeof OrchestratorToolkit.tools>, "t3_link_app_pairing">;
 
-export const layer = McpToolAccess.toLayer(OrchestratorToolkit, handlers);
+export const layer = McpToolAccess.toLayer(
+  OrchestratorToolkit,
+  Effect.map(linkAppPairing, (pairing) => ({ ...handlers, t3_link_app_pairing: pairing })),
+);

@@ -60,6 +60,8 @@ import { readProject } from "../state/entities";
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { isChunkLoadError } from "../lib/chunkReloadGuard";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
+import { AppConnectionReporter, LinkOnConnectCoordinator } from "../state/peerLinks";
+import { AutoAddLinkedEnvironments } from "../state/knownEnvironments";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -194,6 +196,9 @@ function RootRouteBranch() {
       <GuestShareDialogHost />
       <ProjectCloneToastCoordinator />
       <ConnectDeviceApprovalCoordinator />
+      <AppConnectionReporter />
+      <LinkOnConnectCoordinator />
+      <AutoAddLinkedEnvironments />
       <AddProjectToMachineDialogHost />
       <UseInAnotherAppDialogHost />
       {import.meta.env.DEV && primaryEnvironmentAuthenticated ? <DevReplayHost /> : null}

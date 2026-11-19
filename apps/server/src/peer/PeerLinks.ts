@@ -1,10 +1,12 @@
 import {
+  type AppConnectionReport,
   AuthMcpClientAccess,
   AuthMcpRegistrationError,
   AuthMcpTokenError,
   EnvironmentHttpApi,
   EnvironmentId,
   type ExecutionEnvironmentCapabilities,
+  type KnownEnvironment,
   MCP_PEER_LINK_SOFTWARE_ID,
   type PeerLink,
   type PeerLinkCreateInput,
@@ -25,6 +27,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -37,8 +40,10 @@ import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassification";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { boundedAppConnectionReport, knownEnvironments } from "./knownEnvironments.ts";
 
 const PeerHttpApi = HttpApi.make(EnvironmentHttpApi.identifier)
   .add(EnvironmentHttpApi.groups.metadata)
@@ -81,6 +86,8 @@ export interface ResolvedPeerLink {
   readonly token: string;
   /** The session `token` belongs to, from the same stored link: see `PeerLinks.session`. */
   readonly incarnation: string;
+  /** What the peer said it supports when it answered at `url`. */
+  readonly capabilities: ExecutionEnvironmentCapabilities;
 }
 
 export const LINKED_ENVIRONMENTS_OFF =
@@ -99,6 +106,21 @@ export class PeerLinks extends Context.Service<
     readonly enabled: Effect.Effect<boolean>;
     readonly link: (input: PeerLinkCreateInput) => Effect.Effect<PeerLink, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    /**
+     * Replaces what one client session says its app holds. Kept in memory: a
+     * client reports again whenever it connects or its connections change. A
+     * report counts only while its session is active, so a revoked or expired
+     * session's report drops out.
+     */
+    readonly reportAppConnections: (
+      sessionId: string,
+      connections: ReadonlyArray<AppConnectionReport>,
+    ) => Effect.Effect<void>;
+    /**
+     * Every environment this one knows, links and app connections in one list,
+     * each saying why it is on one side only. Settings reads it over client RPC; agents never see it.
+     */
+    readonly environments: Effect.Effect<ReadonlyArray<KnownEnvironment>, PeerLinkError>;
     /**
      * Machines automatic placement never uses or contacts (server settings). Unreadable settings
      * fail, so placement contacts nobody rather than everyone.
@@ -622,7 +644,12 @@ const make = Effect.gen(function* () {
       ),
     ).pipe(Effect.timeoutOption(LIST_PROBE_TIMEOUT), Effect.orElseSucceed(Option.none));
     if (Option.isNone(answered)) return { ...link, status: "unreachable" };
-    return { ...(yield* withLabel(link, answered.value.label)), status: "reachable" };
+    return {
+      ...(yield* withLabel(link, answered.value.label)),
+      status: "reachable",
+      appPairing: answered.value.capabilities.linkedAppPairing === true,
+      serverVersion: answered.value.serverVersion,
+    };
   });
 
   const list: PeerLinks["Service"]["list"] = Effect.gen(function* () {
@@ -630,6 +657,48 @@ const make = Effect.gen(function* () {
     const now = yield* DateTime.now;
     return yield* Effect.forEach(links, (link) => statusOf(link, now), {
       concurrency: "unbounded",
+    });
+  });
+
+  // A client holds at most a catalog's worth; more is not a real app.
+  const MAX_REPORTED_CONNECTIONS = 200;
+  const appReports = yield* Ref.make<ReadonlyMap<string, ReadonlyArray<AppConnectionReport>>>(
+    new Map(),
+  );
+  const reportAppConnections: PeerLinks["Service"]["reportAppConnections"] = (
+    sessionId,
+    connections,
+  ) =>
+    Ref.update(appReports, (current) =>
+      new Map(current).set(
+        sessionId,
+        connections.slice(0, MAX_REPORTED_CONNECTIONS).map(boundedAppConnectionReport),
+      ),
+    );
+
+  // Absent only where no client reports, such as the CLI.
+  const sessions = yield* Effect.serviceOption(SessionStore.SessionStore);
+  /** The reports of sessions still signed in: a revoked or expired session's stop counting. */
+  const activeReports = Effect.gen(function* () {
+    const reports = [...(yield* Ref.get(appReports))];
+    if (Option.isNone(sessions)) return reports.flatMap(([, connections]) => connections);
+    const active = new Set<string>(
+      (yield* sessions.value.listActive().pipe(Effect.catch(failStorage))).map(
+        (session) => session.sessionId,
+      ),
+    );
+    return reports.flatMap(([sessionId, connections]) =>
+      active.has(sessionId) ? connections : [],
+    );
+  });
+
+  const environments: PeerLinks["Service"]["environments"] = Effect.gen(function* () {
+    const self = yield* environment.getDescriptor;
+    const links = yield* list;
+    return knownEnvironments({
+      self: self.environmentId,
+      links,
+      reports: yield* activeReports,
     });
   });
 
@@ -718,6 +787,7 @@ const make = Effect.gen(function* () {
         url,
         token: new TextDecoder().decode(stored.value),
         incarnation: row.value.secret_name,
+        capabilities: peer.capabilities,
       };
     },
   );
@@ -748,6 +818,8 @@ const make = Effect.gen(function* () {
     enabled,
     link,
     list,
+    reportAppConnections,
+    environments,
     stored,
     placementExclusions,
     session,

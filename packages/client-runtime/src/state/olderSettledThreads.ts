@@ -2,8 +2,11 @@ import {
   isListedThreadLineage,
   isOlderSettledThreadShell,
   ORCHESTRATION_V2_WS_METHODS,
+  senderNeedsParent,
   type EnvironmentId,
+  type OrchestrationV2OlderSettledCount,
   type OrchestrationV2OlderSettledCursor,
+  type OrchestrationV2OlderSettledGroup,
   type OrchestrationV2OlderSettledThreadsPage,
   type OrchestrationV2SearchThreadsInput,
   type OrchestrationV2ThreadFamily,
@@ -32,6 +35,8 @@ export interface OlderSettled {
   readonly before: string;
   readonly beforeMs: number;
   readonly counts: ReadonlyMap<ProjectId, number>;
+  /** The counts by what an inbox filter reads; null from servers that send totals only. */
+  readonly groups: ReadonlyMap<ProjectId, ReadonlyArray<OrchestrationV2OlderSettledGroup>> | null;
 }
 
 /** The scope's projects in one environment, or null for all of them. */
@@ -78,11 +83,23 @@ export function sortOlderSettledScopes(
     .sort((left, right) => left.environmentId.localeCompare(right.environmentId));
 }
 
+/** An environment's counts as `OlderSettled` holds them. */
+export function olderSettledCountsOf(
+  counts: ReadonlyArray<OrchestrationV2OlderSettledCount>,
+): Pick<OlderSettled, "counts" | "groups"> {
+  return {
+    counts: new Map(counts.map(({ projectId, count }) => [projectId, count] as const)),
+    groups: counts.every((entry) => entry.groups !== undefined)
+      ? new Map(counts.map(({ projectId, groups }) => [projectId, groups ?? []] as const))
+      : null,
+  };
+}
+
 /**
  * Changes whenever the older count can: any removal (by largest sequence, so a repeat counts), an
- * older row that arrives, changes or moves project, or an old row arriving outside the set
- * (unsettled). Threads created after the cut never enter it, as threads settle after creation.
- * Archived-thread events arrive as removals too, each costing one count read.
+ * older row that arrives, changes project or routing (its own or a held parent's it takes its
+ * sender from), or an old row arriving outside the set (unsettled). Threads created after the cut
+ * never enter it, as threads settle after creation.
  */
 export function olderSettledCountKey(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -91,15 +108,38 @@ export function olderSettledCountKey(
 ): string {
   let lastRemoval = 0;
   for (const sequence of removedAt.values()) lastRemoval = Math.max(lastRemoval, sequence);
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
   const rows: string[] = [];
   for (const thread of threads) {
     if (!isListedThreadLineage(thread.lineage)) continue;
     const older = isOlderSettledThreadShell(thread, beforeMs);
     if (older || DateTime.toEpochMillis(thread.createdAt) < beforeMs) {
-      rows.push(`${thread.id}:${thread.projectId}:${older ? 1 : 0}`);
+      const routing = older ? `:${JSON.stringify(senderRouting(thread, byId))}` : "";
+      rows.push(`${thread.id}:${thread.projectId}:${older ? 1 : 0}${routing}`);
     }
   }
   return `${lastRemoval}|${rows.sort().join(",")}`;
+}
+
+/**
+ * What an older row's count group reads: its routing and stamped parent founder, plus the
+ * routing of each held parent its sender comes from, so a parent's reroute also recounts.
+ */
+function senderRouting(
+  thread: OrchestrationV2ThreadShell,
+  byId: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell>,
+): ReadonlyArray<unknown> {
+  const routing: unknown[] = [thread.inbox ?? null, thread.parentFounder ?? null];
+  const seen = new Set([thread.id]);
+  let current = thread;
+  while (senderNeedsParent(current.inbox) && current.lineage.parentThreadId !== null) {
+    const parent = byId.get(current.lineage.parentThreadId);
+    if (parent === undefined || seen.has(parent.id)) break;
+    seen.add(parent.id);
+    routing.push(parent.inbox ?? null);
+    current = parent;
+  }
+  return routing;
 }
 
 /** Whether a row sits at or above a page cursor in the server's order (settle time desc, id asc). */
@@ -167,14 +207,56 @@ export function unloadedOlderSettledCount(input: {
     readonly source: OlderSettledRow;
   }>;
 }): number {
+  return settledShelfTotal({ ...input, settledCount: 0, filter: null }).count;
+}
+
+/** How the thread list filter applies to threads a server counted but did not send. */
+export interface OlderSettledFilter {
+  readonly matches: (
+    environmentId: EnvironmentId,
+    group: OrchestrationV2OlderSettledGroup,
+  ) => boolean;
+  /** For a server that sends totals only: whether the filter shows all, none or some of it. */
+  readonly coverage: (environmentId: EnvironmentId) => "all" | "none" | "some";
+}
+
+/**
+ * The Settled shelf's total: its rows plus the server's older counts under the thread list
+ * filter, minus the older rows the client holds. An older row held in the shelf counts once on
+ * each side, so every client of the same servers gets the same total whichever pages it loaded.
+ * A totals-only server under a partial filter gives a lower bound, at least the loaded rows.
+ */
+export function settledShelfTotal(input: {
+  readonly olderSettled: (environmentId: EnvironmentId) => OlderSettled | null;
+  readonly scopes: ReadonlyArray<OlderSettledScope>;
+  /** Every row the client holds in scope that the filter shows, in any section. */
+  readonly threads: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly source: OlderSettledRow;
+  }>;
+  /** Rows in the Settled section. */
+  readonly settledCount: number;
+  /** Null counts every thread, as a list with no filter. */
+  readonly filter: OlderSettledFilter | null;
+}): { readonly count: number; readonly exact: boolean } {
   let unloaded = 0;
+  let exact = true;
   for (const scope of input.scopes) {
     const older = input.olderSettled(scope.environmentId);
     if (older === null) continue;
-    if (scope.projectIds === null) {
-      for (const count of older.counts.values()) unloaded += count;
-    } else {
-      for (const projectId of scope.projectIds) unloaded += older.counts.get(projectId) ?? 0;
+    const projectIds = scope.projectIds ?? [...older.counts.keys()];
+    const coverage = input.filter?.coverage(scope.environmentId) ?? "all";
+    for (const projectId of projectIds) {
+      const groups = older.groups?.get(projectId);
+      if (input.filter !== null && groups !== undefined) {
+        for (const group of groups) {
+          if (input.filter.matches(scope.environmentId, group)) unloaded += group.count;
+        }
+      } else if (coverage === "all") {
+        unloaded += older.counts.get(projectId) ?? 0;
+      } else if (coverage === "some" && (older.counts.get(projectId) ?? 0) > 0) {
+        exact = false;
+      }
     }
     for (const thread of input.threads) {
       if (
@@ -186,7 +268,9 @@ export function unloadedOlderSettledCount(input: {
       }
     }
   }
-  return Math.max(0, unloaded);
+  const total = Math.max(0, input.settledCount + unloaded);
+  // A lower bound never reads below the rows on screen.
+  return { count: exact ? total : Math.max(input.settledCount, total), exact };
 }
 
 /**
@@ -268,10 +352,6 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
     }),
   });
 
-  const countsOf = (source: {
-    readonly counts: OrchestrationV2OlderSettledThreadsPage["counts"];
-  }) => new Map(source.counts.map(({ projectId, count }) => [projectId, count] as const));
-
   const olderSettledAtom = Atom.family((environmentId: EnvironmentId) => {
     let generation = -1;
     // The key of the first state seen this generation, when that state is the snapshot itself.
@@ -290,7 +370,7 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
         fromSnapshot = {
           before: cut.before,
           beforeMs: DateTime.toEpochMillis(DateTime.makeUnsafe(cut.before)),
-          counts: countsOf(cut),
+          ...olderSettledCountsOf(cut.counts),
         };
       }
       // Most shell updates move only the cursor; the key needs new rows or removals.
@@ -315,7 +395,7 @@ export function createOlderSettledThreadAtoms<R, ER, E>(
       );
       if (read !== null && read !== lastReadPage) {
         lastReadPage = read;
-        lastRead = { ...fromSnapshot, counts: countsOf(read) };
+        lastRead = { ...fromSnapshot, ...olderSettledCountsOf(read.counts) };
       }
       return lastRead ?? fromSnapshot;
     }).pipe(Atom.withLabel(`environment-older-settled:${environmentId}`));

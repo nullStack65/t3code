@@ -294,6 +294,7 @@ export const make = Effect.gen(function* () {
       threadInbox: true,
       mcpModeLimitHeader: true,
       linkFence: true,
+      linkedAppPairing: true,
       mcpApprovalCodes: true,
       mcpHostedApproval: true,
       shellThreadFamilies: true,

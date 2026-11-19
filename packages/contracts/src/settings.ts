@@ -419,6 +419,7 @@ export const ClientSettingsSchema = Schema.Struct({
   founderInboxFilter: Schema.optionalKey(Schema.Array(InboxChoice)),
   sidebarHiddenEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   sidebarHiddenThreadAttributions: Schema.optionalKey(Schema.Array(ThreadAttribution)),
+  // Machine owners for servers too old to report `ownerFounder`; newer servers' own value wins.
   founderByEnvironmentId: Schema.optionalKey(Schema.Record(EnvironmentId, Founder)),
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -616,6 +617,11 @@ export const ClientSettingsSchema = Schema.Struct({
   // Opt-in TeX typesetting in rendered Markdown. Off keeps math parsing and
   // KaTeX out of the render path entirely.
   mathRenderingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Linked environments the user removed from this app, so it stops adding them on its own.
+  // Adding one back, by any path, clears it.
+  dismissedLinkedEnvironmentIds: Schema.Array(EnvironmentId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -947,8 +953,16 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
+/**
+ * A read-only quota source: a CLIProxyAPI hub (management API) or a Magpie
+ * gateway (`/v1/magpie/quotas`). A Magpie gateway on loopback answers without
+ * a key; `managementKey` then holds its gateway key when it needs one.
+ */
+export const UsageLimitSourceKind = Schema.Literals(["cliproxy", "magpie"]);
+export type UsageLimitSourceKind = typeof UsageLimitSourceKind.Type;
+
 export const UsageLimitSourceConfig = Schema.Struct({
-  kind: Schema.Literal("cliproxy"),
+  kind: UsageLimitSourceKind,
   label: Schema.optional(TrimmedNonEmptyString),
   url: TrimmedNonEmptyString,
   managementKey: SettingsSecretValue.pipe(
@@ -1375,6 +1389,9 @@ export const CloudSpeechCredentials = Schema.Struct({
   assemblyai: CloudSpeechCredential,
 });
 
+export const MachinePlacementRole = Schema.Literals(["auto", "headless", "interactive"]);
+export type MachinePlacementRole = typeof MachinePlacementRole.Type;
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1409,6 +1426,11 @@ export const ServerSettings = Schema.Struct({
   requireConnectDeviceApproval: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  /**
+   * The founder this machine belongs to, which every client credits its threads without sender
+   * details to. Null credits them to no one. A label only; it grants nothing.
+   */
+  ownerFounder: Schema.NullOr(Founder).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
 
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   cloudSpeechCredentials: CloudSpeechCredentials.pipe(
@@ -1506,6 +1528,22 @@ export const ServerSettings = Schema.Struct({
    */
   automaticPlacementExcludedEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /**
+   * Whether this machine belongs to a person at its keyboard. Automatic placement fills headless
+   * machines first, uses an interactive one only while its person is idle and every headless one
+   * is full, and runs agents there under tighter limits. Auto: a desktop app, macOS, Windows or a
+   * Linux graphical login is interactive; anything else is headless.
+   */
+  machinePlacementRole: MachinePlacementRole.pipe(
+    Schema.withDecodingDefault(Effect.succeed("auto" as const)),
+  ),
+  /**
+   * Closura: agent-launched threads that need nothing of the caller's checkout are placed
+   * automatically unless they name an environment. Off launches them here unless they ask.
+   */
+  automaticPlacementByDefault: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   /** Beta: Claude and Codex predict the next prompt after completed turns. Codex follows a change at once; open Claude threads after they restart. */
   promptSuggestionsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1619,6 +1657,14 @@ export const ServerSettings = Schema.Struct({
   ),
 
   usageModelAliases: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+
+  /**
+   * Who each subscription account belongs to, keyed by its email, so the
+   * Limits view can group accounts by owner. Unlisted accounts are Unassigned.
+   */
+  usageAccountOwners: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
 
@@ -1878,6 +1924,7 @@ export const ServerSettingsPatch = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   keepAwakeWhileAgentsWork: Schema.optionalKey(Schema.Boolean),
   requireConnectDeviceApproval: Schema.optionalKey(Schema.Boolean),
+  ownerFounder: Schema.optionalKey(Schema.NullOr(Founder)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   cloudSpeechCredentials: Schema.optionalKey(
     Schema.Struct({
@@ -1940,6 +1987,8 @@ export const ServerSettingsPatch = Schema.Struct({
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   automaticPlacementExcludedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
+  machinePlacementRole: Schema.optionalKey(MachinePlacementRole),
+  automaticPlacementByDefault: Schema.optionalKey(Schema.Boolean),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
@@ -2009,6 +2058,10 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
 
   usageModelAliases: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
+  ),
+  /** Per-email owner; `null` returns the account to Unassigned. */
+  usageAccountOwners: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
   ),
 });
@@ -2159,5 +2212,6 @@ export const ClientSettingsPatch = Schema.Struct({
   snapShotAnimations: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
   mathRenderingEnabled: Schema.optionalKey(Schema.Boolean),
+  dismissedLinkedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

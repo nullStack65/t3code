@@ -5,7 +5,13 @@ import type {
   OrchestrationV2ShellStreamItem,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
-import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  inboxRoutingFor,
+  makeThreadInbox,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -245,6 +251,8 @@ describe("omitOlderSettledShells", () => {
   const newest = Array.from({ length: 25 }, (_, index) => row(`new-${index}`, index / 10));
   const omit = (threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
     omitOlderSettledShells({ threads, snapshotSequence: 7, now });
+  // History from before inbox routing: its machine's owner's, which each client applies.
+  const HISTORY = { inbox: null, agentCreated: false, founder: "machine", byAgent: false } as const;
 
   it("keeps the 25 newest settled threads and counts the rest per project", () => {
     const sideChat = row("side-chat", 0, {
@@ -271,10 +279,49 @@ describe("omitOlderSettledShells", () => {
       before: DateTime.formatIso(DateTime.makeUnsafe(100 * DAY - 2.4 * DAY)),
       asOfSequence: 7,
       counts: [
-        { projectId: "project-a", count: 1 },
-        { projectId: "project-b", count: 1 },
+        { projectId: "project-a", count: 1, groups: [{ ...HISTORY, count: 1 }] },
+        { projectId: "project-b", count: 1, groups: [{ ...HISTORY, count: 1 }] },
       ],
     });
+  });
+
+  it("groups older counts by what an inbox filter reads, with each stamped parent founder", () => {
+    const kameron = makeThreadInbox({ actor: { kind: "human", id: "kameron" } });
+    const agentWork = makeThreadInbox({
+      actor: { kind: "agent", id: "lead" },
+      routing: inboxRoutingFor("agents"),
+    });
+    const result = omit([
+      ...newest,
+      row("history", 30),
+      row("agent-history", 31, { createdBy: "agent" }),
+      row("kameron", 32, { inbox: kameron }),
+      // A held parent does not count: the store stamps the founder its chain resolves to.
+      row("kameron-parent", null, { inbox: kameron }),
+      row("agent-child", 33, {
+        inbox: agentWork,
+        parentFounder: "jeff",
+        lineage: {
+          parentThreadId: ThreadId.make("kameron-parent"),
+          relationshipToParent: null,
+          rootThreadId: ThreadId.make("kameron-parent"),
+        },
+      }),
+      row("agent-orphan", 34, { inbox: agentWork, parentFounder: null }),
+    ]);
+    expect(result.olderSettled.counts).toEqual([
+      {
+        projectId: "project-a",
+        count: 5,
+        groups: [
+          { ...HISTORY, count: 1 },
+          { ...HISTORY, agentCreated: true, byAgent: true, count: 1 },
+          { inbox: "kameron", agentCreated: false, founder: "kameron", byAgent: false, count: 1 },
+          { inbox: "agents", agentCreated: false, founder: "jeff", byAgent: true, count: 1 },
+          { inbox: "agents", agentCreated: false, founder: null, byAgent: true, count: 1 },
+        ],
+      },
+    ]);
   });
 
   it("keeps threads tied with the 25th newest", () => {
@@ -326,7 +373,9 @@ describe("omitOlderSettledShells", () => {
       "side-chat-parent",
       "side-chat",
     ]);
-    expect(result.olderSettled.counts).toEqual([{ projectId: "project-a", count: 5 }]);
+    expect(result.olderSettled.counts).toEqual([
+      { projectId: "project-a", count: 5, groups: [{ ...HISTORY, count: 5 }] },
+    ]);
   });
 });
 

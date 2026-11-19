@@ -474,11 +474,15 @@ describe("RemoteEnvironmentAuthorization", () => {
   it.effect("gives up on a silent loopback or LAN address sooner than on a remote one", () =>
     Effect.gen(function* () {
       const silent = () => new Promise<Response>(() => {});
-      const harness = yield* makeHarness({ responses: [silent, silent, silent] });
+      const harness = yield* makeHarness({ responses: [silent, silent, silent, silent] });
 
       yield* Effect.gen(function* () {
         const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
-        const authorizeAt = (httpBaseUrl: string, connectionMethod: "direct" | "ssh" = "direct") =>
+        const authorizeAt = (
+          httpBaseUrl: string,
+          connectionMethod: "direct" | "ssh" = "direct",
+          forwarded = false,
+        ) =>
           remote
             .authorizeBearer({
               expectedEnvironmentId: ENVIRONMENT_ID,
@@ -486,17 +490,21 @@ describe("RemoteEnvironmentAuthorization", () => {
               wsBaseUrl: httpBaseUrl.replace(/^http/, "ws"),
               bearerToken: "bearer-token",
               connectionMethod,
+              forwarded,
             })
             .pipe(Effect.flip, Effect.forkChild);
         const lan = yield* authorizeAt("http://192.168.1.2:3773");
         const tailnet = yield* authorizeAt("http://100.101.102.103:3773");
         // An SSH forward listens on loopback but reaches a remote host.
         const forwarded = yield* authorizeAt("http://127.0.0.1:4010", "ssh");
+        // A saved tunnel port, such as `cloudflared access tcp`, also reaches a remote host.
+        const tunnel = yield* authorizeAt("http://127.0.0.1:23780", "direct", true);
 
         yield* TestClock.adjust("3 seconds");
         expect(lan.pollUnsafe()).toBeDefined();
         expect(tailnet.pollUnsafe()).toBeUndefined();
         expect(forwarded.pollUnsafe()).toBeUndefined();
+        expect(tunnel.pollUnsafe()).toBeUndefined();
         expect(yield* Fiber.join(lan)).toMatchObject({
           _tag: "ConnectionTransientError",
           reason: "timeout",
@@ -505,6 +513,7 @@ describe("RemoteEnvironmentAuthorization", () => {
         yield* TestClock.adjust("7 seconds");
         expect(tailnet.pollUnsafe()).toBeDefined();
         expect(forwarded.pollUnsafe()).toBeDefined();
+        expect(tunnel.pollUnsafe()).toBeDefined();
       }).pipe(Effect.provide(harness.layer));
     }),
   );

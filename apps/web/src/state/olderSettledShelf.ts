@@ -3,9 +3,11 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import {
   isListedSettledThread,
   settledShelfFrontier,
+  settledShelfTotal,
   sortOlderSettledScopes,
   unloadedOlderSettledCount,
   wantedOlderSettledPages,
+  type OlderSettledFilter,
   type OlderSettledScope,
 } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
@@ -67,9 +69,14 @@ export function useOlderSettledShelf(input: {
     pages,
     grow: (next: ReadonlyMap<EnvironmentId, number>) => setRequested({ scopeKey, pages: next }),
     isListed: (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier),
-    /** Older settled threads in scope that are not local; add it to the local Settled rows. */
-    unloadedCount: (threads: ReadonlyArray<EnvironmentThreadShell>) =>
-      unloadedOlderSettledCount({ olderSettled: olderOf, scopes, threads }),
+    /** The shelf's total under the list filter; see `settledShelfTotal`. */
+    total: (input: {
+      readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+      readonly settledCount: number;
+      readonly filter: OlderSettledFilter | null;
+    }) => settledShelfTotal({ olderSettled: olderOf, scopes, ...input }),
+    /** Some environment still has older pages to read. */
+    canLoadMore: frontier !== null,
     loading: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.status === "pending"),
     failed: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.status === "failed"),
     retry: () => {

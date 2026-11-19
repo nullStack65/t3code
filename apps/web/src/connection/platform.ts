@@ -52,6 +52,7 @@ import {
 import { clearComposerDraftsEnvironment } from "../composerDraftStore";
 import { isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
+import { subscribeNetworkPathChanges } from "../lib/networkPathChanges";
 import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { acknowledgeRpcRequest, trackRpcRequestSent } from "../rpc/requestLatencyState";
@@ -92,33 +93,12 @@ const layerConnectivity = Connectivity.layer({
   ),
 });
 
-interface NetworkInformationLike extends EventTarget {
-  readonly type?: string;
-}
-
-// change also fires for same-network bandwidth and latency estimates; count only type changes.
 const networkPathChanges = Stream.callback<"network-changed">((queue) =>
   Effect.acquireRelease(
-    Effect.sync(() => {
-      const connection =
-        typeof navigator === "undefined"
-          ? undefined
-          : (navigator as Navigator & { readonly connection?: NetworkInformationLike }).connection;
-      if (connection?.type === undefined) return undefined;
-      let previous = connection.type;
-      const listener = () => {
-        const type = connection.type;
-        if (type === undefined || type === previous) return;
-        previous = type;
-        Queue.offerUnsafe(queue, "network-changed");
-      };
-      connection.addEventListener("change", listener);
-      return { connection, listener };
-    }),
-    (subscription) =>
-      Effect.sync(() =>
-        subscription?.connection.removeEventListener("change", subscription.listener),
-      ),
+    Effect.sync(() =>
+      subscribeNetworkPathChanges(() => Queue.offerUnsafe(queue, "network-changed")),
+    ),
+    (unsubscribe) => Effect.sync(unsubscribe),
   ).pipe(Effect.asVoid),
 );
 

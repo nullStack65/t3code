@@ -2,13 +2,15 @@ import {
   type EnvironmentId,
   OrchestratorMcpFailure,
   type OrchestratorMcpEnvironmentLinksResult,
+  OrchestratorMcpLinkAppPairingResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadWaitInput,
   OrchestratorMcpThreadWaitResult,
-  type PeerLinkError,
+  type PeerLinkAppPairing,
+  PeerLinkError,
   RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -108,6 +110,14 @@ export class PeerForwarding extends Context.Service<
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
+    /**
+     * A one-time pairing credential `environmentId` mints over its link, so this
+     * server's own client can add it as a connection. The peer caps it at the
+     * link's access and lists it under its Authorized clients.
+     */
+    readonly addToApp: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<PeerLinkAppPairing, PeerLinkError>;
     /** The environments this one links to, as an agent sees them. */
     readonly links: (
       scope: Scope,
@@ -379,7 +389,61 @@ const make = Effect.gen(function* () {
           }),
         );
 
+  const addToApp: PeerForwarding["Service"]["addToApp"] = Effect.fn("PeerForwarding.addToApp")(
+    function* (environmentId) {
+      if (!(yield* links.enabled)) {
+        return yield* new PeerLinkError({
+          reason: "disabled",
+          message: PeerLinks.LINKED_ENVIRONMENTS_OFF,
+        });
+      }
+      const resolved = yield* links.resolve(environmentId);
+      const { label, urls } = resolved.link;
+      if (resolved.capabilities.linkedAppPairing !== true) {
+        return yield* new PeerLinkError({
+          reason: "incompatible",
+          message: `${label} runs a T3 Code version that cannot add itself to this app. Update ${label}, then try again.`,
+        });
+      }
+      // Full access here narrows nothing: the peer caps the credential at the link's access.
+      const issued = yield* peers
+        .call({
+          environmentId,
+          tool: "t3_link_app_pairing",
+          arguments: {},
+          limits: { runtimeMode: "full-access", interactionMode: "default" },
+          expectedIncarnation: resolved.incarnation,
+          success: OrchestratorMcpLinkAppPairingResult,
+        })
+        .pipe(
+          Effect.mapError(
+            (failure) =>
+              new PeerLinkError({
+                reason: failure.code === "capability_denied" ? "pairing_rejected" : "unreachable",
+                message: failure.message,
+              }),
+          ),
+        );
+      const expiresAt = DateTime.make(issued.expiresAt);
+      if (Option.isNone(expiresAt)) {
+        return yield* new PeerLinkError({
+          reason: "incompatible",
+          message: `${label} answered in a shape this version does not understand. Update both environments.`,
+        });
+      }
+      return {
+        environmentId,
+        label,
+        urls: [resolved.url, ...urls.filter((url) => url !== resolved.url)],
+        credential: issued.credential,
+        expiresAt: DateTime.toUtc(expiresAt.value),
+        access: issued.access,
+      };
+    },
+  );
+
   return PeerForwarding.of({
+    addToApp,
     call,
     callNative,
     readThread,

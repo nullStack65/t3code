@@ -48,7 +48,7 @@ import {
   appendOrchestrationProtocol,
   orchestrationProtocolCompatibilityError,
 } from "./compatibility.ts";
-import { credentialConnectionId } from "./routes.ts";
+import { connectionRouteKind, credentialConnectionId } from "./routes.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 
 export class ConnectionResolver extends Context.Service<
@@ -169,6 +169,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       wsBaseUrl: profile.wsBaseUrl,
       bearerToken: credential.token,
       connectionMethod: "direct",
+      forwarded: connectionRouteKind({ target, profile: entry.profile }) === "forward",
     });
     return {
       ...authorized,

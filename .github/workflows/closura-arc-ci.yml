@@ -115,9 +115,10 @@ jobs:
             'apps/server/src/speech/CloudSpeech.test.ts': ['AssemblyAI', 'assemblyai'],
             'packages/contracts/src/speech.ts': ['assemblyai'],
             'apps/web/src/components/settings/CloudVoiceConfiguration.tsx': ['assemblyai'],
-            'packages/contracts/src/threadInbox.ts': ['matchesInboxView', 'agent-only'],
+            'packages/contracts/src/threadInbox.ts': ['matchesInboxView', 'matchesInboxFilter', 'agent-only'],
+            'packages/client-runtime/src/state/threadListFilter.ts': ['matchesPrimaryInbox', 'matchesListedInboxes', 'hiddenEnvironmentIds'],
             'apps/web/src/components/sidebar/SidebarThreadFilterMenu.tsx': ['Kameron', 'Jeff', 'Agents', 'Environments'],
-            'apps/web/src/components/sidebar/threadListFilter.logic.ts': ['matchesInboxFilter', 'hiddenEnvironmentIds'],
+            'apps/web/src/components/sidebar/threadListFilter.logic.ts': ['matchesListedInboxes', 'hiddenEnvironmentIds'],
           };
           for (const [file, needles] of Object.entries(required)) {
             const source = readFileSync(file, 'utf8');

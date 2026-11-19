@@ -718,6 +718,11 @@ export const ServerConfig = Schema.Struct({
    * `getOlderSettledThreads` serves them. Only servers that also advertise `shellThreadFamilies`.
    */
   shellOlderSettled: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `settings.ownerFounder` is this machine's owner, even when null. Older servers decode it as
+   * null without meaning it, so clients use their own machine-owner map for them.
+   */
+  machineOwner: Schema.optionalKey(Schema.Boolean),
   shellRevealInFileManager: Schema.optionalKey(Schema.Boolean),
   shellRevealInFileManagerKind: Schema.optionalKey(FileManagerRevealKind),
   threadResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),

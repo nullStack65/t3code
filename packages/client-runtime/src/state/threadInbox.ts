@@ -234,10 +234,11 @@ export function createInboxReturnTracker() {
           thread.runtime?.lastError != null ||
           thread.latestRun?.status === "failed";
         const moved = previous !== undefined && previous.placement !== placement;
+        // Pinned threads list in Working too, so they get the same grace; pinning one mid-grace
+        // still ends it, since that changes its placement.
         const excluded =
           thread.archivedAt != null ||
           thread.deletedAt != null ||
-          thread.pinnedAt != null ||
           thread.settledOverride === "settled" ||
           effectiveSnoozed(thread, { now: observedAt });
         // Only shelf placement is held: execution state and attention requests stay authoritative.

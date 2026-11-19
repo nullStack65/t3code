@@ -15,6 +15,8 @@ import {
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
   resolveSidebarRowStatus,
+  resolveSidebarShelf,
+  resolveSidebarThreadSection,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
   resolveWindowTitleThreadStatus,
@@ -1045,6 +1047,28 @@ describe("Working shelf (beta)", () => {
         runtime: { ...runtime, status: "failed" as const, lastError: "boom" },
       }),
     ).toBe(false);
+  });
+
+  it("lists a pinned thread that waits on its own agents under Working until it finishes", () => {
+    // A pinned parent waiting on a delegated child reads Waiting; it belongs in Working.
+    const shelf = (thread: typeof waiting | typeof idle, placement: { pinned?: boolean } = {}) =>
+      resolveSidebarShelf(
+        resolveSidebarThreadSection({
+          snoozed: false,
+          settled: false,
+          pinned: placement.pinned ?? false,
+        }),
+        isSidebarThreadWorking(thread),
+      );
+    expect(shelf(waiting, { pinned: true })).toBe("working");
+    expect(shelf(waiting)).toBe("working");
+    expect(shelf(idle, { pinned: true })).toBe("pinned");
+    expect(shelf(idle)).toBe("active");
+    // Settled and snoozed threads stay in their own groups even while working.
+    expect(resolveSidebarShelf("settled", true)).toBe("settled");
+    expect(resolveSidebarShelf("snoozed", true)).toBe("snoozed");
+    // A thread waiting on a person is not Working, pinned or not.
+    expect(shelf({ ...waiting, hasPendingApprovals: true }, { pinned: true })).toBe("pinned");
   });
 
   it("keeps a ready plan in the inbox while background work runs", () => {

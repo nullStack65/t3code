@@ -1,5 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
-import { ANOTHER_ADDRESS, linkRequestFailureMessage } from "@t3tools/client-runtime/link-request";
+import {
+  ANOTHER_ADDRESS,
+  type KnownEnvironmentRow,
+  linkRequestFailureMessage,
+} from "@t3tools/client-runtime/link-request";
 import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
@@ -19,8 +23,16 @@ import { useId, useRef, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { mintPairingCodeOn } from "~/state/peerPairingCode";
-import { peerLinkEnvironment, useLinkableMachines } from "~/state/peerLinks";
-import { useEnvironmentQuery } from "~/state/query";
+import { environmentCatalog } from "~/connection/catalog";
+import { linkedEnvironmentsRefreshKey, useKnownEnvironments } from "~/state/knownEnvironments";
+import { dismissLinkedEnvironment } from "~/state/linkedEnvironmentDismissals";
+import {
+  addingLinkedEnvironmentsAtom,
+  addLinkedEnvironmentToApp,
+  forgetLinkOnConnect,
+  peerLinkEnvironment,
+  useLinkableMachines,
+} from "~/state/peerLinks";
 import { useEnvironmentScope, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { accessConfig } from "../auth/ConnectAgentSurface";
@@ -59,16 +71,17 @@ export function LinkedEnvironmentsSettings({
   readonly environmentLabel: string | null;
   readonly isSearchTarget: boolean;
 }) {
-  const links = useEnvironmentQuery(peerLinkEnvironment.list({ environmentId, input: {} }));
+  // One list for links and this app's connections, the one agents here read too.
+  const known = useKnownEnvironments(environmentId);
   // Links made outside this client bump nothing the shared list reads, so showing the panel
   // asks again. Listing probes every linked environment, too costly for a timer nobody asked for.
   // A list still loading counts as read now, so the next return to the window asks again.
   useLiveRefresh(
     () => {
-      if (!links.isPending) links.refresh();
+      if (!known.isPending) known.refresh();
     },
     {
-      key: `linked-environments:${environmentId}`,
+      key: linkedEnvironmentsRefreshKey(environmentId),
       intervalMs: null,
       refreshOnShow: true,
     },
@@ -81,52 +94,153 @@ export function LinkedEnvironmentsSettings({
       title={environmentLabel === null ? search.title : `${search.title} · ${environmentLabel}`}
       headerAction={canLink ? <LinkEnvironmentAction environmentId={environmentId} /> : null}
     >
-      {links.error ? (
-        <SettingsRow title="Could not load linked environments" description={links.error} />
-      ) : !links.data ? (
+      {known.error ? (
+        <SettingsRow title="Could not load linked environments" description={known.error} />
+      ) : known.loading ? (
         <SettingsRow title="Loading linked environments…" role="status" />
-      ) : links.data.links.length === 0 ? (
+      ) : known.rows.length === 0 ? (
         <SettingsRow
           title="No linked environments"
           description="Link another machine running T3 Code, such as a VPS, so agents here can launch and drive threads there."
         />
       ) : (
-        links.data.links.map((link) => (
-          <LinkedEnvironmentRow
-            key={link.environmentId}
-            environmentId={environmentId}
-            link={link}
-          />
-        ))
+        known.rows.map((row) =>
+          row.link === null ? (
+            <AppOnlyEnvironmentRow
+              key={row.environmentId}
+              environmentId={environmentId}
+              row={row}
+              canLink={canLink}
+            />
+          ) : (
+            <LinkedEnvironmentRow
+              key={row.environmentId}
+              environmentId={environmentId}
+              link={row.link}
+              row={row}
+            />
+          ),
+        )
       )}
     </SettingsSection>
+  );
+}
+
+/** A machine this app holds that agents here cannot reach yet, with why and the fix. */
+function AppOnlyEnvironmentRow({
+  environmentId,
+  row,
+  canLink,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly row: KnownEnvironmentRow;
+  readonly canLink: boolean;
+}) {
+  return (
+    <div className={ITEM_ROW_CLASSNAME}>
+      <div className={ITEM_ROW_INNER_CLASSNAME}>
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex min-h-5 items-center gap-1.5">
+            <ConnectionStatusDot
+              tooltipText="In this app, not linked"
+              dotClassName="bg-muted-foreground/30"
+              pingClassName={null}
+            />
+            <h3 className="text-sm font-medium text-foreground">{row.label}</h3>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Not linked{row.serverVersion === null ? "" : ` · ${row.serverVersion}`}
+          </p>
+          {row.issue ? <p className="text-xs text-muted-foreground">{row.issue.message}</p> : null}
+          {row.issue?.action === "link" && row.action === null ? (
+            <p className="text-xs text-muted-foreground/80">
+              Link it from an app connected to {row.label}.
+            </p>
+          ) : null}
+        </div>
+        {canLink && row.action === "link" ? (
+          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+            <LinkEnvironmentAction environmentId={environmentId} preselect={row.environmentId} />
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
 function LinkedEnvironmentRow({
   environmentId,
   link,
+  row,
 }: {
   readonly environmentId: EnvironmentId;
   readonly link: PeerLinkSummary;
+  readonly row: KnownEnvironmentRow;
 }) {
   const nowMinute = useNowMinute();
   const health = peerLinkHealth(link, DateTime.makeUnsafe(nowMinute));
   const unlink = useAtomCommand(peerLinkEnvironment.unlink, { label: "unlink environment" });
   const canUnlink = useAtomValue(peerLinkEnvironment.unlink.permissionAtom(environmentId));
+  const canAddToApp = useAtomValue(peerLinkEnvironment.addToApp.permissionAtom(environmentId));
+  const removeFromApp = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const [busy, setBusy] = useState(false);
+  // An add of this machine runs from any host's row or the automatic add; one at a time.
+  const adding = useAtomValue(addingLinkedEnvironmentsAtom).has(link.environmentId);
   const forget = async () => {
     const confirmed = await (requestConfirmDialog(
-      `Forget ${link.label}? Agents here stop working there. Revoke "T3 Code · …" in ${link.label}'s Sharing & access to end the session there too.`,
+      `Forget ${link.label}? Agents here stop working there. Revoke "T3 Code · …" in ${link.label}'s Sharing & access to end the session there too. An app added through this link stays under Authorized clients there until you revoke it.`,
       { variant: "destructive" },
     ) ?? Promise.resolve(false));
     if (!confirmed) return;
     setBusy(true);
     const result = await unlink({ environmentId, input: { environmentId: link.environmentId } });
     setBusy(false);
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      failureToast("Could not forget the link", String(squashAtomCommandFailure(result)));
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        failureToast("Could not forget the link", String(squashAtomCommandFailure(result)));
+      }
+      return;
     }
+    // The way back out: the app's own connection stays unless the user removes it too.
+    if (!row.inThisApp) return;
+    const alsoRemove = await (requestConfirmDialog(
+      `Also remove ${row.label} from this app? Its threads stay there; this app forgets its pairing. ${row.label} still lists this app under Authorized clients, where you can revoke it.`,
+      { variant: "destructive" },
+    ) ?? Promise.resolve(false));
+    if (!alsoRemove) return;
+    // Another host may still link it. Recorded first, so it is never added back on its own.
+    const undoDismiss = dismissLinkedEnvironment(link.environmentId);
+    const removed = await removeFromApp(link.environmentId);
+    if (removed._tag === "Success") forgetLinkOnConnect(link.environmentId);
+    else if (!isAtomCommandInterrupted(removed)) {
+      // Still in the app, so it is not removed, and nothing should keep it from coming back.
+      void undoDismiss.then((undo) => undo());
+      failureToast(`Could not remove ${row.label}`, String(squashAtomCommandFailure(removed)));
+    }
+  };
+  const add = async () => {
+    if (row.appAddress === null) return;
+    // Pairing clears a dismissal on success, so a later removal starts fresh.
+    const added = await addLinkedEnvironmentToApp(environmentId, {
+      environmentId: link.environmentId,
+      label: link.label,
+      onHostMachine: row.onHostMachine,
+    });
+    if (added._tag === "Interrupted") return;
+    if (added._tag === "Failed") {
+      failureToast(`Could not add ${link.label} to this app`, added.message);
+      return;
+    }
+    toastManager.add({
+      type: "success",
+      title: `Added ${link.label} to this app`,
+      ...(added.access === "read-only"
+        ? {
+            description:
+              "Read-only: the link allows no more. Link it with full access to act there.",
+          }
+        : {}),
+    });
   };
   const status =
     health.kind === "expired"
@@ -138,6 +252,8 @@ function LinkedEnvironmentRow({
           : health.expiresInDays !== null
             ? `Expires in ${health.expiresInDays} ${health.expiresInDays === 1 ? "day" : "days"}. Link it again to renew.`
             : "Reachable";
+  // Expiry already shows in the status line.
+  const issue = row.issue?.action === "relink" ? null : row.issue;
   return (
     <div className={ITEM_ROW_CLASSNAME}>
       <div className={ITEM_ROW_INNER_CLASSNAME}>
@@ -161,18 +277,32 @@ function LinkedEnvironmentRow({
           <p className="text-xs text-muted-foreground">
             {accessConfig[link.access].label} · {status}
           </p>
+          {issue ? <p className="text-xs text-muted-foreground">{issue.message}</p> : null}
           <p className="truncate text-xs text-muted-foreground/80">{link.urls.join(", ")}</p>
         </div>
-        {canUnlink ? (
+        {canUnlink || (canAddToApp && row.action === "add-to-app") ? (
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
-            <Button
-              size="xs"
-              variant="destructive-outline"
-              disabled={busy}
-              onClick={() => void forget()}
-            >
-              {busy ? "Forgetting…" : "Forget"}
-            </Button>
+            {canAddToApp && row.action === "add-to-app" ? (
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={busy || adding}
+                aria-busy={adding}
+                onClick={() => void add()}
+              >
+                {adding ? "Adding…" : "Add to this app"}
+              </Button>
+            ) : null}
+            {canUnlink ? (
+              <Button
+                size="xs"
+                variant="destructive-outline"
+                disabled={busy || adding}
+                onClick={() => void forget()}
+              >
+                Forget
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -180,11 +310,18 @@ function LinkedEnvironmentRow({
   );
 }
 
-function LinkEnvironmentAction({ environmentId }: { readonly environmentId: EnvironmentId }) {
+function LinkEnvironmentAction({
+  environmentId,
+  preselect,
+}: {
+  readonly environmentId: EnvironmentId;
+  /** Opens on this machine, from its own row. */
+  readonly preselect?: EnvironmentId;
+}) {
   const [open, setOpen] = useState(false);
   const machines = useLinkableMachines(environmentId, open);
   // Null until the user picks; with no other machines known, only an address is left.
-  const [choice, setChoice] = useState<string | null>(null);
+  const [choice, setChoice] = useState<string | null>(preselect ?? null);
   const [address, setAddress] = useState("");
   const [pairingCode, setPairingCode] = useState("");
   const [access, setAccess] = useState<AuthMcpClientAccess>("approval-required");
@@ -218,7 +355,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
     if (!next) {
-      setChoice(null);
+      setChoice(preselect ?? null);
       setAddress("");
       setPairingCode("");
       setAccess("approval-required");
@@ -277,10 +414,16 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
     >
       <DialogTrigger
         render={
-          <Button size="xs" variant="default">
-            <PlusIcon className="size-3" />
-            Link
-          </Button>
+          preselect === undefined ? (
+            <Button size="xs" variant="default">
+              <PlusIcon className="size-3" />
+              Link
+            </Button>
+          ) : (
+            <Button size="xs" variant="outline">
+              Link
+            </Button>
+          )
         }
       />
       <DialogPopup className="max-w-md">

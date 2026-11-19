@@ -1,5 +1,12 @@
-import { EnvironmentId, type ServerConfig, ThreadId, TurnItemId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type KnownEnvironment,
+  type ServerConfig,
+  ThreadId,
+  TurnItemId,
+} from "@t3tools/contracts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -9,11 +16,19 @@ import type { EnvironmentPresentation } from "./connection/presentation.ts";
 import type { RelayDiscoveredEnvironment } from "./relay/discovery.ts";
 import {
   ANOTHER_ADDRESS,
+  appConnectionReports,
+  appPairingAddress,
+  appPairingAddresses,
+  autoAddKey,
+  autoAddLinkState,
+  knownEnvironmentRows,
   linkableMachines,
   linkedEnvironmentNames,
+  linkedEnvironmentsToAutoAdd,
   linkRequestAnswerInput,
   linkRequestDisplay,
   linkRequestFailureMessage,
+  singleFlightByKey,
   linkRequestInitialMachine,
   linkRequestTarget,
   linkRequestTargetName,
@@ -337,6 +352,275 @@ describe("linkableMachines", () => {
   });
 });
 
+describe("appConnectionReports", () => {
+  it("reports where each connection answers and whether it can be linked, and nothing else", () => {
+    const configured = (
+      environment: ReturnType<typeof presentation>,
+      serverVersion: string,
+      capabilities: object,
+    ) => ({
+      ...environment,
+      serverConfig: {
+        environment: { serverVersion, capabilities },
+        directEndpoints: [],
+      } as unknown as ServerConfig,
+    });
+    const crown = configured(
+      presentation("environment-crown", "Crown", { saved: ["http://192.168.0.27:3773"] }),
+      "0.1.2",
+      {},
+    );
+    const vps = configured(
+      // A user:pass@ in a saved address is a credential and is never reported.
+      presentation("environment-vps", "VPS", { saved: ["https://me:secret@vps.ts.net"] }),
+      "0.1.10",
+      { mcpModeLimitHeader: true, linkFence: true },
+    );
+    const mini = presentation("environment-mini", "Mini", { connected: false });
+    expect(appConnectionReports([crown, vps, mini])).toEqual([
+      {
+        environmentId: crown.environmentId,
+        label: "Crown",
+        urls: ["http://192.168.0.27:3773"],
+        serverVersion: "0.1.2",
+        keepsLinkLimits: false,
+      },
+      {
+        environmentId: vps.environmentId,
+        label: "VPS",
+        urls: ["https://vps.ts.net"],
+        serverVersion: "0.1.10",
+        keepsLinkLimits: true,
+      },
+      // Never reached, so whether it can be linked is unknown rather than "too old".
+      {
+        environmentId: mini.environmentId,
+        label: "Mini",
+        urls: [],
+        serverVersion: null,
+        keepsLinkLimits: null,
+      },
+    ]);
+  });
+});
+
+describe("knownEnvironmentRows", () => {
+  const known = (
+    id: string,
+    action: "link" | "add-to-app" | null,
+    linked: boolean,
+    inApp = !linked,
+  ): KnownEnvironment => ({
+    environmentId: EnvironmentId.make(id),
+    label: id,
+    urls: [],
+    serverVersion: null,
+    link: linked
+      ? {
+          environmentId: EnvironmentId.make(id),
+          label: id,
+          urls: [`https://${id}.example.ts.net`],
+          access: "read-only",
+          linkedAt: DateTime.makeUnsafe("2026-11-01T00:00:00Z"),
+          expiresAt: DateTime.makeUnsafe("2026-12-01T00:00:00Z"),
+          lastReachedAt: null,
+          lastError: null,
+          status: "reachable",
+          appPairing: true,
+        }
+      : null,
+    inApp,
+    issue: action === null ? null : { action, message: `${id}: ${action}` },
+  });
+
+  it("offers an action only where this client can take it", () => {
+    const rows = knownEnvironmentRows(
+      [
+        known("asus", "add-to-app", true),
+        known("r720", "add-to-app", true),
+        known("box", "link", false),
+        known("crown", "link", false),
+        // Another session's app holds it, so the server's merged view has no issue.
+        known("mini", null, true, true),
+      ],
+      [
+        presentation("r720", "R720", { connected: false }),
+        presentation("box", "Box"),
+        presentation("crown", "Crown", { connected: false }),
+      ],
+      { label: "Laptop", onHostMachine: true },
+    );
+    expect(
+      rows.map((row) => [
+        row.environmentId,
+        row.action,
+        row.issue?.action ?? null,
+        row.connected,
+        row.reachability,
+        row.linkAccess,
+      ]),
+    ).toEqual([
+      ["asus", "add-to-app", "add-to-app", false, "reachable", "read-only"],
+      // Already in this app, before the server heard so: nothing is missing.
+      ["r720", null, null, false, "reachable", "read-only"],
+      ["box", "link", "link", true, "reachable", null],
+      // Only a connected app can mint the code a link needs; the issue still shows.
+      ["crown", null, "link", false, "unknown", null],
+      // Another device holding it says nothing about this one, which can still add it.
+      ["mini", "add-to-app", "add-to-app", false, "reachable", "read-only"],
+    ]);
+  });
+
+  it("adds a link's local forward only from the host's own machine", () => {
+    const base = known("asus", "add-to-app", true);
+    const forwarded = {
+      ...base,
+      link: base.link === null ? null : { ...base.link, urls: ["http://127.0.0.1:13780"] },
+    };
+    const [onLaptop] = knownEnvironmentRows([forwarded], [], {
+      label: "Laptop",
+      onHostMachine: true,
+    });
+    expect([onLaptop?.action, onLaptop?.appAddress]).toEqual([
+      "add-to-app",
+      "http://127.0.0.1:13780",
+    ]);
+    // A browser on a phone would open its own loopback: say so instead of offering a dead button.
+    const [elsewhere] = knownEnvironmentRows([forwarded], [], {
+      label: "Laptop",
+      onHostMachine: false,
+    });
+    expect(elsewhere?.action).toBeNull();
+    expect(elsewhere?.issue?.message).toBe(
+      "Laptop reaches asus only at its own local address, which this device cannot open. Add it from the app on Laptop.",
+    );
+    expect(
+      appPairingAddress(["http://127.0.0.1:13780", "https://asus.example.ts.net"], false),
+    ).toBe("https://asus.example.ts.net");
+    // Adding tries each address the peer just answered at, in order, that this client can open.
+    const answered = ["https://asus.example.ts.net", "http://127.0.0.1:13780"];
+    expect(appPairingAddresses(answered, true)).toEqual(answered);
+    expect(appPairingAddresses(answered, false)).toEqual(["https://asus.example.ts.net"]);
+  });
+});
+
+describe("linkedEnvironmentsToAutoAdd", () => {
+  const hostId = EnvironmentId.make("host");
+  const asus = EnvironmentId.make("asus");
+  type Link = NonNullable<KnownEnvironment["link"]>;
+  const linkOf = (overrides: Partial<Link> = {}): Link => ({
+    environmentId: asus,
+    label: "asus",
+    urls: ["https://asus.example.ts.net"],
+    access: "full-access",
+    linkedAt: DateTime.makeUnsafe("2026-11-01T00:00:00Z"),
+    expiresAt: DateTime.makeUnsafe("2026-12-01T00:00:00Z"),
+    lastReachedAt: null,
+    lastError: null,
+    status: "reachable",
+    appPairing: true,
+    ...overrides,
+  });
+  // Rows as this client sees them, from the host's list and this client's catalog.
+  const rowsFor = (link: Link, held: ReadonlyArray<EnvironmentId> = []) =>
+    knownEnvironmentRows(
+      [
+        {
+          environmentId: asus,
+          label: "asus",
+          urls: [],
+          serverVersion: null,
+          link,
+          inApp: false,
+          issue: { action: "add-to-app", message: "asus is linked for agents but not in the app." },
+        },
+      ],
+      held.map((environmentId) => ({
+        environmentId,
+        connection: { phase: "connected" } as EnvironmentPresentation["connection"],
+      })),
+      { label: "host", onHostMachine: false },
+    );
+  const select = (
+    options: {
+      readonly link?: Link;
+      readonly held?: ReadonlyArray<EnvironmentId>;
+      readonly dismissed?: ReadonlyArray<EnvironmentId>;
+      readonly adding?: ReadonlyArray<EnvironmentId>;
+      readonly failed?: ReadonlyMap<string, string>;
+    } = {},
+  ) =>
+    linkedEnvironmentsToAutoAdd({
+      hostId,
+      rows: rowsFor(options.link ?? linkOf(), options.held),
+      catalog: new Set(options.held ?? []),
+      dismissed: new Set(options.dismissed ?? []),
+      adding: new Set(options.adding ?? []),
+      failed: options.failed ?? new Map(),
+    }).add.map((add) => add.row.environmentId);
+
+  it("adds a reachable linked machine this app lacks and the user did not dismiss", () => {
+    expect(select()).toEqual([asus]);
+  });
+
+  it("adds through a read-only link too, which caps what the app gets", () => {
+    expect(select({ link: linkOf({ access: "read-only" }) })).toEqual([asus]);
+  });
+
+  it("leaves a dismissed machine for the user to add", () => {
+    expect(select({ dismissed: [asus] })).toEqual([]);
+  });
+
+  it("skips a machine the catalog already holds", () => {
+    expect(select({ held: [asus] })).toEqual([]);
+  });
+
+  it("waits for a link that is unreachable, cannot pair, or only at an address this device cannot open", () => {
+    expect(select({ link: linkOf({ status: "unreachable" }) })).toEqual([]);
+    expect(select({ link: linkOf({ appPairing: false }) })).toEqual([]);
+    expect(select({ link: linkOf({ urls: ["http://127.0.0.1:3773"] }) })).toEqual([]);
+  });
+
+  it("starts no second add while one is in flight", () => {
+    expect(select({ adding: [asus] })).toEqual([]);
+  });
+
+  it("retries a failed add only once the link's status, addresses or session change", () => {
+    const failedAt = linkOf();
+    const failed = new Map([[autoAddKey(hostId, asus), autoAddLinkState(failedAt)]]);
+    expect(select({ failed })).toEqual([]);
+    // Only the last answer moved, so a down peer is not asked again.
+    expect(
+      select({
+        failed,
+        link: linkOf({ lastReachedAt: DateTime.makeUnsafe("2026-11-02T00:00:00Z") }),
+      }),
+    ).toEqual([]);
+    expect(select({ failed, link: linkOf({ urls: ["https://asus.tail.ts.net"] }) })).toEqual([
+      asus,
+    ]);
+    expect(
+      select({ failed, link: linkOf({ linkedAt: DateTime.makeUnsafe("2026-11-05T00:00:00Z") }) }),
+    ).toEqual([asus]);
+  });
+
+  it("tries again after a failed peer goes down and comes back", () => {
+    const key = autoAddKey(hostId, asus);
+    const failed = new Map([[key, autoAddLinkState(linkOf())]]);
+    const whileDown = linkedEnvironmentsToAutoAdd({
+      hostId,
+      rows: rowsFor(linkOf({ status: "unreachable" })),
+      catalog: new Set(),
+      dismissed: new Set(),
+      adding: new Set(),
+      failed,
+    });
+    expect(whileDown).toEqual({ add: [], forget: [key] });
+    failed.delete(key);
+    expect(select({ failed })).toEqual([asus]);
+  });
+});
+
 describe("linkedEnvironmentNames", () => {
   it("names the unexpired links as this client does, else as the link does", () => {
     const vps = EnvironmentId.make("environment-vps");
@@ -483,5 +767,52 @@ describe("linkRequestFailureMessage", () => {
     expect(linkRequestFailureMessage({ _tag: "SchemaError", message: "code=abc" })).toBe(
       "Could not answer the request. Try again.",
     );
+  });
+});
+
+describe("singleFlightByKey", () => {
+  it("shares one run per key and reports the keys in flight", async () => {
+    const changes: Array<ReadonlyArray<string>> = [];
+    const run = singleFlightByKey<string, number>((inFlight) => changes.push([...inFlight]));
+    let finish!: (value: number) => void;
+    let starts = 0;
+    const start = () => {
+      starts += 1;
+      return new Promise<number>((resolve) => (finish = resolve));
+    };
+
+    const first = run("a", start);
+    // Reported before run returns, so a caller checking right after sees it in flight.
+    expect(changes).toEqual([["a"]]);
+    const second = run("a", start);
+    expect(second).toBe(first);
+    expect(starts).toBe(1);
+
+    finish(7);
+    await expect(first).resolves.toBe(7);
+    expect(changes).toEqual([["a"], []]);
+
+    // Once settled, the key runs again.
+    const third = run("a", start);
+    expect(third).not.toBe(first);
+    expect(starts).toBe(2);
+    finish(8);
+    await third;
+  });
+
+  it("keeps keys apart and clears a key whose run fails", async () => {
+    const changes: Array<ReadonlyArray<string>> = [];
+    const run = singleFlightByKey<string, string>((inFlight) =>
+      changes.push([...inFlight].toSorted()),
+    );
+    const ok = run("a", () => Promise.resolve("ok"));
+    const failed = run("b", () => {
+      throw new Error("no code");
+    });
+    expect(changes.at(-1)).toEqual(["a", "b"]);
+
+    await expect(ok).resolves.toBe("ok");
+    await expect(failed).rejects.toThrow("no code");
+    expect(changes.at(-1)).toEqual([]);
   });
 });

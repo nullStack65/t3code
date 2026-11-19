@@ -136,6 +136,10 @@ export const codexRoutesSpendNativeQuota = (
 ): boolean =>
   account.requiresOpenaiAuth && account.account?.type !== "apiKey" && routesToNativeOpenai(config);
 
+/** Shown when a custom model provider serves the instance; its gateway reports the accounts. */
+export const CODEX_CUSTOM_PROVIDER_USAGE_MESSAGE =
+  "Not applicable: this instance routes through a custom model provider, not OpenAI quota.";
+
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_CATALOG_REFRESH_TIMEOUT_MS = 3_000;
 const CODEX_CONFIG_PROBE_TIMEOUT_MS = 3_000;
@@ -1133,7 +1137,12 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   // Sign-in guidance still applies when Codex itself says it needs an OpenAI login.
   const usageLimits =
     !snapshot.nativeUsage && !accountStatus.message
-      ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
+      ? makeUnavailableUsageLimits({
+          checkedAt,
+          reason: "unsupported",
+          // A gateway route reports its pooled accounts itself; say so rather than vanish.
+          ...(snapshot.endpoint ? { message: CODEX_CUSTOM_PROVIDER_USAGE_MESSAGE } : {}),
+        })
       : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
         ? makeUnavailableUsageLimits({
             checkedAt,

@@ -16,7 +16,9 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
@@ -29,6 +31,7 @@ import { resolveSettingsSecrets } from "../secrets/settingsSecretValue.ts";
 import * as Settings from "../serverSettings.ts";
 import { windowLimitsModel } from "../provider/claudeUsageLimits.ts";
 import { makeCliproxyApi } from "./cliproxyApi.ts";
+import { discoverGatewayOrigins, gatewayOrigin, makeMagpieApi } from "./magpieQuotas.ts";
 
 export class UsageLimitSources extends Context.Service<
   UsageLimitSources,
@@ -61,6 +64,9 @@ function missingManagementKey(config: UsageLimitSourceConfig): string {
 /** @public */
 export const make = Effect.gen(function* () {
   const api = yield* makeCliproxyApi;
+  const magpie = yield* makeMagpieApi;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const settingsService = yield* Settings.ServerSettingsService;
   const secrets = yield* SecretResolver.SecretResolver;
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
@@ -95,18 +101,77 @@ export const make = Effect.gen(function* () {
       checkedAt,
     } as const;
     const managementKey = yield* readManagementKey(config);
-    if (managementKey.length === 0) {
+    // A Magpie gateway on loopback answers without a key.
+    if (config.kind === "cliproxy" && managementKey.length === 0) {
       return { ...base, accounts: [], error: missingManagementKey(config) };
     }
-    const accounts = yield* api
-      .readAccounts({ url: config.url, managementKey })
-      .pipe(Effect.result);
+    const accounts = yield* (
+      config.kind === "magpie"
+        ? magpie.readAccounts({ url: config.url, managementKey })
+        : api.readAccounts({ url: config.url, managementKey })
+    ).pipe(Effect.result);
     if (accounts._tag === "Failure") {
       yield* Effect.logDebug("usage limit source read failed", { id, cause: accounts.failure });
       return { ...base, accounts: [], error: accounts.failure.detail };
     }
     return { ...base, accounts: accounts.success };
   });
+
+  // Gateways the enabled instances already route through, read without
+  // configuration. An origin that does not answer the quotas route is not a
+  // Magpie gateway and is dropped quietly; nobody configured it.
+  const discoverMagpieSources = Effect.fn("UsageLimitSources.discoverMagpieSources")(
+    function* (
+      settings: ServerSettings | null,
+      configured: ReadonlyArray<UsageLimitSourceSnapshot>,
+    ) {
+      if (!settings) return [];
+      const explicit = new Set(
+        Object.values(settings.usageLimitSources)
+          .filter((config) => config.enabled && config.kind === "magpie")
+          .map((config) => gatewayOrigin(config.url)),
+      );
+      const origins = (yield* discoverGatewayOrigins(settings, process.env).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      )).filter((origin) => !explicit.has(origin));
+      const reads = yield* Effect.forEach(
+        origins,
+        (origin) =>
+          magpie.readAccounts({ url: origin, managementKey: "" }).pipe(
+            Effect.map((accounts) => ({ origin, accounts })),
+            Effect.option,
+          ),
+        { concurrency: 4 },
+      );
+      const checkedAt = DateTime.formatIso(yield* DateTime.now);
+      // A forward and the gateway it reaches report the same accounts: show one.
+      const seen = new Set(configured.map((source) => accountSet(source.accounts)));
+      const discovered: UsageLimitSourceSnapshot[] = [];
+      for (const read of reads) {
+        if (read._tag === "None") continue;
+        const key = accountSet(read.value.accounts);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        discovered.push({
+          id: `magpie:${new URL(read.value.origin).host}` as UsageLimitSourceId,
+          kind: "magpie",
+          label: "Magpie",
+          origin: read.value.origin,
+          endpoint: read.value.origin,
+          checkedAt,
+          accounts: read.value.accounts,
+        });
+      }
+      return discovered.length > 1
+        ? discovered.map((source) => ({
+            ...source,
+            label: `Magpie · ${source.id.slice("magpie:".length)}`,
+          }))
+        : discovered;
+    },
+    Effect.orElseSucceed((): ReadonlyArray<UsageLimitSourceSnapshot> => []),
+  );
 
   const publish = Effect.fn("UsageLimitSources.publish")(function* (
     next: ReadonlyArray<UsageLimitSourceSnapshot>,
@@ -131,7 +196,7 @@ export const make = Effect.gen(function* () {
       ([id, config]) => readSource(id as UsageLimitSourceId, config),
       { concurrency: 4 },
     );
-    yield* publish(snapshots);
+    yield* publish([...snapshots, ...(yield* discoverMagpieSources(settings, snapshots))]);
   }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
 
   // Shares the refresh lock so a stale in-flight read cannot overwrite a redemption.
@@ -142,7 +207,7 @@ export const make = Effect.gen(function* () {
       Effect.mapError(() => new UsageLimitSourceError({ detail: "Could not read hub settings." })),
     );
     const config = settings.usageLimitSources[input.sourceId];
-    if (!config?.enabled) {
+    if (!config?.enabled || config.kind !== "cliproxy") {
       return yield* new UsageLimitSourceError({
         detail: "The usage limit source is missing or disabled.",
       });
@@ -208,6 +273,13 @@ export const make = Effect.gen(function* () {
     },
   } satisfies UsageLimitSources["Service"];
 });
+
+function accountSet(accounts: ReadonlyArray<{ readonly id: string }>): string {
+  return accounts
+    .map((account) => account.id)
+    .sort()
+    .join("\n");
+}
 
 export const layer = Layer.effect(UsageLimitSources, make).pipe(
   Layer.provide(SecretResolverLayer.layer),

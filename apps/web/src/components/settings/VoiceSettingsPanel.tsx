@@ -15,7 +15,8 @@ import {
   AuthFilesystemReadScope,
   AuthSettingsWriteScope,
   CLOUD_SPEECH_LABELS,
-  CloudSpeechProvider,
+  CLOUD_SPEECH_PROVIDER_NAMES,
+  type CloudSpeechProvider,
   DEFAULT_SPEECH_POST_PROCESSING_PROMPT,
   type EnvironmentId,
   type EnvironmentSpeechModel,
@@ -49,6 +50,8 @@ import {
   UnlinkIcon,
   XIcon,
 } from "lucide-react";
+import { useAtomValue } from "@effect/atom-react";
+import { useLocation } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useStableCallback } from "~/hooks/useStableCallback";
@@ -69,6 +72,15 @@ import {
   chooseTranscriptCleanup,
   useCleanupGrant,
 } from "../../speech/voiceConsent";
+import {
+  defaultVoiceEnvironment,
+  voiceEnvironmentCandidates,
+  RECOMMENDED_VOICE_BACKEND,
+  VOICE_BACKENDS,
+  voiceBackendEnvironments,
+  type VoiceBackend,
+} from "../../speech/voiceBackends";
+import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
 import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { runEnvironmentSpeech } from "../../speech/runEnvironmentSpeech";
 import {
@@ -107,15 +119,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "../ui/menu";
-import {
-  Select,
-  SelectGroup,
-  SelectGroupLabel,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
@@ -139,6 +143,16 @@ import { useScopedModelDisabledReason } from "./useScopedModelAvailability";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 
 const OFF = "off";
+const UNAVAILABLE = "unavailable";
+const VOICE_BACKEND_LABELS: Record<VoiceBackend, string> = {
+  ...CLOUD_SPEECH_LABELS,
+  local: "Local model",
+};
+function VoiceBackendIcon({ backend }: { backend: VoiceBackend | null }) {
+  if (backend === null) return <MicOffIcon aria-hidden className="size-4" />;
+  if (backend === "local") return <MonitorIcon aria-hidden className="size-4" />;
+  return <CloudSpeechLogo provider={backend} />;
+}
 function CloudSpeechLogo({ provider }: { provider: CloudSpeechProvider }) {
   if (provider === "assemblyai") return <AudioLinesIcon aria-hidden className="size-4 shrink-0" />;
   if (provider === "openrouter")
@@ -722,24 +736,20 @@ function useVoiceModels(prepared: PreparedConnection | null) {
 
 type VoiceModels = ReturnType<typeof useVoiceModels>;
 
-function AdvancedSpeechSettings({
+/** Local-model rows for the Advanced fold; render only when the environment supports speech. */
+function LocalSpeechAdvancedRows({
   prepared,
   catalog,
+  supported,
 }: {
   prepared: PreparedConnection;
   catalog: VoiceModels;
+  supported: Extract<EnvironmentSpeechStatus, { supported: true }>;
 }) {
   const settings = useClientSettings();
-  const { run, controlsDisabled, status } = catalog;
-  if (!status?.supported) return null;
-  const supported = status;
+  const { run, controlsDisabled } = catalog;
   return (
-    <AdvancedSettings
-      targetIds={[
-        searchableSetting("speech-streaming").id,
-        searchableSetting("speech-hardware").id,
-      ]}
-    >
+    <>
       <SettingsRow
         {...searchableSetting("speech-streaming")}
         title="Streaming transcription"
@@ -829,7 +839,7 @@ function AdvancedSpeechSettings({
           </Select>
         }
       />
-    </AdvancedSettings>
+    </>
   );
 }
 
@@ -1218,11 +1228,41 @@ export function VoiceSettingsPanel() {
   const settingsScope = useOptionalSettingsScope();
   const destination = useVoiceTranscriptionDestination();
   const canManageKey = useEnvironmentScope(destination.environmentId, AuthSettingsWriteScope);
-  const [pendingCloud, setPendingCloud] = useState<{
+  const { environments } = useEnvironments();
+  const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
+  const hash = useLocation({ select: (location) => location.hash.replace(/^#/, "") });
+  // The composer's mic links here on first use; remember it before the page consumes the hash.
+  const [offerRecommended, setOfferRecommended] = useState(
+    () => hash === "voice-transcription-destination",
+  );
+  const candidates = voiceEnvironmentCandidates(environments);
+  const defaultEnvironment = (backend: VoiceBackend) =>
+    defaultVoiceEnvironment(backend, candidates, {
+      current: destination.environmentId,
+      primary: primaryEnvironmentId,
+    });
+  const [chosenCloud, setChosenCloud] = useState<{
     provider: CloudSpeechProvider;
     environmentId: EnvironmentId;
   } | null>(null);
-  const { environments } = useEnvironments();
+  // Until the user acts, a first-time visit offers the recommended backend straight away.
+  const recommended = RECOMMENDED_VOICE_BACKEND;
+  const recommendedEnvironment =
+    offerRecommended && destination.offerFirstRunSetup && recommended !== "local"
+      ? defaultEnvironment(recommended)
+      : null;
+  const pendingCloud =
+    chosenCloud ??
+    (recommendedEnvironment && recommended !== "local"
+      ? { provider: recommended, environmentId: recommendedEnvironment }
+      : null);
+  const chooseBackend = (backend: VoiceBackend, environmentId = defaultEnvironment(backend)) => {
+    setOfferRecommended(false);
+    if (!environmentId) return;
+    if (backend !== "local") return setChosenCloud({ provider: backend, environmentId });
+    setChosenCloud(null);
+    chooseAudioDestination({ kind: "environment", environmentId });
+  };
   const [microphones, setMicrophones] = useState<BrowserMicrophone[]>([]);
   const prepared = destination.cloudProvider ? null : destination.prepared;
   const catalog = useVoiceModels(prepared);
@@ -1256,28 +1296,9 @@ export function VoiceSettingsPanel() {
 
   const order = microphoneOrder(settings);
   const selectedMicrophone = preferredMicrophoneId(order, microphones);
-  const environmentChoices = environments.map((environment) => ({
-    environment,
-    value: JSON.stringify(["environment", environment.environmentId]),
-  }));
-  const cloudGroups = environments
-    .filter(
-      (environment) => environment.serverConfig?.environment.capabilities.cloudVoiceTranscription,
-    )
-    .map((environment) => ({
-      environment,
-      choices: CloudSpeechProvider.literals.map((provider) => ({
-        environment,
-        provider,
-        value: JSON.stringify(["cloud", environment.environmentId, provider]),
-      })),
-    }));
-  const cloudChoices = cloudGroups.flatMap((group) => group.choices);
-  const destinationValue = destination.cloudProvider
-    ? JSON.stringify(["cloud", destination.environmentId, destination.cloudProvider])
-    : destination.environmentId
-      ? JSON.stringify(["environment", destination.environmentId])
-      : OFF;
+  const backend: VoiceBackend | null =
+    destination.cloudProvider ?? (destination.environmentId ? "local" : null);
+  const backendEnvironments = backend ? voiceBackendEnvironments(backend, candidates) : [];
   const cloudEnvironment = environments.find(
     (env) => env.environmentId === pendingCloud?.environmentId,
   );
@@ -1292,6 +1313,17 @@ export function VoiceSettingsPanel() {
     chosenEnvironment?.serverConfig != null &&
     chosenEnvironment.serverConfig.environment.capabilities.voiceTranscription !== true;
   const model = prepared && modelStatus?.supported ? modelStatus : null;
+  const backendValue = !backend ? OFF : chosenEnvironment ? backend : UNAVAILABLE;
+  const destinationDescription =
+    backend && !chosenEnvironment
+      ? "The environment this used is no longer available. Choose a backend to set it up again."
+      : chosenEnvironment && chosenUnsupported
+        ? `${chosenEnvironment.label} can’t run a local model. Choose another backend.`
+        : chosenEnvironment && destination.cloudProvider
+          ? `Audio goes to ${CLOUD_SPEECH_PROVIDER_NAMES[destination.cloudProvider]} through ${chosenEnvironment.label}.`
+          : chosenEnvironment
+            ? `A speech model runs on ${chosenEnvironment.label}.`
+            : "Where your speech is turned into text.";
 
   return (
     <SettingsPageContainer
@@ -1380,33 +1412,20 @@ export function VoiceSettingsPanel() {
         <SettingsRow
           {...searchableSetting("voice-transcription-destination")}
           title="Transcribe with"
-          description={
-            destination.environmentId && chosenUnsupported
-              ? `${chosenEnvironment.label} can’t transcribe audio locally. Choose another destination.`
-              : "Where your speech is turned into text."
-          }
+          description={destinationDescription}
           control={
             <div className="flex w-full min-w-0 items-center gap-1.5 @min-[32rem]/settings-row:w-auto">
               <Select
-                value={destinationValue}
+                value={backendValue}
                 onValueChange={(value) => {
-                  if (!value) return;
-                  const cloud = cloudChoices.find((choice) => choice.value === value);
-                  if (cloud) {
-                    setPendingCloud({
-                      environmentId: cloud.environment.environmentId,
-                      provider: cloud.provider,
-                    });
+                  if (!value || value === UNAVAILABLE) return;
+                  if (value === OFF) {
+                    setOfferRecommended(false);
+                    setChosenCloud(null);
+                    chooseAudioDestination(null);
                     return;
                   }
-                  setPendingCloud(null);
-                  const chosen = environmentChoices.find((choice) => choice.value === value);
-                  if (value === OFF) chooseAudioDestination(null);
-                  else if (chosen)
-                    chooseAudioDestination({
-                      kind: "environment",
-                      environmentId: chosen.environment.environmentId,
-                    });
+                  chooseBackend(value as VoiceBackend);
                 }}
               >
                 <SelectTrigger
@@ -1416,24 +1435,11 @@ export function VoiceSettingsPanel() {
                 >
                   <SelectValue>
                     <span className="flex min-w-0 items-center gap-2">
-                      {destination.cloudProvider ? (
-                        <CloudSpeechLogo provider={destination.cloudProvider} />
-                      ) : destination.environmentId ? (
-                        <MonitorIcon aria-hidden className="size-4" />
-                      ) : (
-                        <MicOffIcon aria-hidden className="size-4" />
-                      )}
+                      <VoiceBackendIcon backend={backend} />
                       <span className="truncate">
-                        {destination.cloudProvider
-                          ? CLOUD_SPEECH_LABELS[destination.cloudProvider]
-                          : destination.environmentId
-                            ? (chosenEnvironment?.label ?? "Chosen environment (unavailable)")
-                            : "Off"}
-                        {destination.cloudProvider && (
-                          <span className="text-muted-foreground">
-                            {" via "}
-                            {chosenEnvironment?.label ?? "unavailable environment"}
-                          </span>
+                        {backend ? VOICE_BACKEND_LABELS[backend] : "Off"}
+                        {backend && !chosenEnvironment && (
+                          <span className="text-muted-foreground"> (unavailable)</span>
                         )}
                       </span>
                     </span>
@@ -1442,48 +1448,30 @@ export function VoiceSettingsPanel() {
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   <SelectItem value={OFF}>
                     <span className="flex items-center gap-2">
-                      <MicOffIcon aria-hidden className="size-4" />
+                      <VoiceBackendIcon backend={null} />
                       Off
                     </span>
                   </SelectItem>
-                  {environmentChoices.length > 0 && (
-                    <SelectGroup>
-                      <SelectGroupLabel>On an environment</SelectGroupLabel>
-                      {environmentChoices.map(({ environment, value }) => (
-                        <SelectItem key={value} value={value}>
-                          <span className="flex items-center gap-2">
-                            <MonitorIcon aria-hidden className="size-4" />
-                            {environment.label}
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  )}
-                  {cloudGroups.map(({ environment, choices }) => (
-                    <SelectGroup key={environment.environmentId}>
-                      <SelectGroupLabel>Cloud via {environment.label}</SelectGroupLabel>
-                      {choices.map(({ value, provider }) => (
-                        <SelectItem
-                          key={value}
-                          value={value}
-                          aria-label={`${CLOUD_SPEECH_LABELS[provider]} via ${environment.label}`}
-                        >
-                          <span className="flex items-center gap-2">
-                            <CloudSpeechLogo provider={provider} />
-                            {CLOUD_SPEECH_LABELS[provider]}
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ))}
-                  {destination.environmentId &&
-                  (!chosenEnvironment ||
-                    (destination.cloudProvider &&
-                      !cloudChoices.some((option) => option.value === destinationValue))) ? (
-                    <SelectItem value={destinationValue}>
-                      Chosen environment (unavailable)
+                  {VOICE_BACKENDS.map((choice) => (
+                    <SelectItem
+                      key={choice}
+                      value={choice}
+                      disabled={voiceBackendEnvironments(choice, candidates).length === 0}
+                    >
+                      <span className="flex items-center gap-2">
+                        <VoiceBackendIcon backend={choice} />
+                        {VOICE_BACKEND_LABELS[choice]}
+                        {choice === RECOMMENDED_VOICE_BACKEND && (
+                          <span className="text-xs text-muted-foreground">Recommended</span>
+                        )}
+                      </span>
                     </SelectItem>
-                  ) : null}
+                  ))}
+                  {backendValue === UNAVAILABLE && backend && (
+                    <SelectItem value={UNAVAILABLE} disabled>
+                      {VOICE_BACKEND_LABELS[backend]} (unavailable)
+                    </SelectItem>
+                  )}
                 </SelectPopup>
               </Select>
               {destination.cloudProvider &&
@@ -1499,7 +1487,7 @@ export function VoiceSettingsPanel() {
                           aria-label={manageLabel}
                           onClick={() => {
                             if (destination.cloudProvider)
-                              setPendingCloud({
+                              setChosenCloud({
                                 provider: destination.cloudProvider,
                                 environmentId: chosenEnvironment.environmentId,
                               });
@@ -1524,7 +1512,10 @@ export function VoiceSettingsPanel() {
               destination.environmentId === pendingCloud.environmentId &&
               destination.cloudProvider === pendingCloud.provider
             }
-            close={() => setPendingCloud(null)}
+            close={() => {
+              setOfferRecommended(false);
+              setChosenCloud(null);
+            }}
           />
         )}
         {(model || destination.cloudProvider) && (
@@ -1605,7 +1596,64 @@ export function VoiceSettingsPanel() {
             projectName={project?.title ?? null}
           />
         ) : null}
-        {prepared && <AdvancedSpeechSettings prepared={prepared} catalog={catalog} />}
+        {backend && (backendEnvironments.length > 1 || (prepared && model)) && (
+          <AdvancedSettings
+            targetIds={
+              prepared && model
+                ? [
+                    searchableSetting("speech-streaming").id,
+                    searchableSetting("speech-hardware").id,
+                  ]
+                : []
+            }
+          >
+            {backendEnvironments.length > 1 && (
+              <SettingsRow
+                title="Transcription environment"
+                description={
+                  backend === "local"
+                    ? "Where the speech model runs. Defaults to this device’s environment."
+                    : "Which environment sends your audio and holds the API key. Defaults to this device’s environment."
+                }
+                control={
+                  <Select
+                    value={chosenEnvironment ? chosenEnvironment.environmentId : UNAVAILABLE}
+                    onValueChange={(value) => {
+                      if (value && value !== UNAVAILABLE)
+                        chooseBackend(backend, value as EnvironmentId);
+                    }}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      aria-label="Transcription environment"
+                      className="max-w-72"
+                    >
+                      <SelectValue>
+                        {chosenEnvironment?.label ?? "Unavailable environment"}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup align="end" alignItemWithTrigger={false}>
+                      {backendEnvironments.map(({ environment }) => (
+                        <SelectItem
+                          key={environment.environmentId}
+                          value={environment.environmentId}
+                        >
+                          <span className="flex items-center gap-2">
+                            <MonitorIcon aria-hidden className="size-4" />
+                            {environment.label}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                }
+              />
+            )}
+            {prepared && model && (
+              <LocalSpeechAdvancedRows prepared={prepared} catalog={catalog} supported={model} />
+            )}
+          </AdvancedSettings>
+        )}
       </SettingsSection>
 
       <SettingsSection id="voice-dictionary" title="Dictionary">
