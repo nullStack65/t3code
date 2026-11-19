@@ -5,6 +5,8 @@ import {
   CommandId,
   MessageId,
   EventId,
+  founderInboxLane,
+  inboxRoutingFor,
   NodeId,
   type OrchestrationV2DomainEvent,
   PlanId,
@@ -459,6 +461,84 @@ it.effect("marks a never-visited thread's first completion unread", () =>
       (yield* projections.getThreadShell(threadId))?.lastVisitedAt,
       ended.lastVisitedAt,
     );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a founder decision request holds an agent thread in their inbox until they answer", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:decision-request");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-decision-request"),
+      threadId,
+      projectId: ProjectId.make("project:decision-request"),
+      title: "Autonomous work",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "mcp",
+      inboxOrigin: { kind: "agent", id: "lead" },
+      inboxRouting: inboxRoutingFor("agents"),
+    });
+    const lanes = Effect.gen(function* () {
+      const inbox = (yield* projections.getThreadShell(threadId))?.inbox;
+      return [founderInboxLane(inbox, "kameron"), founderInboxLane(inbox, "jeff")];
+    });
+    let step = 0;
+    const update = (decisionRequest: "ask" | null) =>
+      orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`decision-request-${++step}`),
+        threadId,
+        decisionRequest:
+          decisionRequest === null
+            ? null
+            : { founder: "kameron", kind: "approval", question: "Send this draft?" },
+      });
+    const message = (createdBy: "agent" | "user") =>
+      Effect.gen(function* () {
+        yield* TestClock.adjust("1 second");
+        const id = `decision-message-${++step}`;
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: createdBy === "user" ? "Yes, send it." : "Still working.",
+          attachments: [],
+          dispatchMode: { type: "defer_start" },
+          createdBy,
+          creationSource: createdBy === "user" ? "web" : "mcp",
+        });
+      });
+    assert.deepEqual(yield* lanes, ["hidden", "hidden"]);
+
+    yield* update("ask");
+    assert.deepEqual(yield* lanes, ["action", "hidden"]);
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("settle-decision-request"),
+      threadId,
+    });
+    assert.deepEqual(yield* lanes, ["hidden", "hidden"]);
+
+    yield* TestClock.adjust("1 second");
+    yield* update("ask");
+    yield* message("agent");
+    assert.deepEqual(yield* lanes, ["action", "hidden"]);
+    yield* message("user");
+    assert.deepEqual(yield* lanes, ["hidden", "hidden"]);
+
+    yield* TestClock.adjust("1 second");
+    yield* update("ask");
+    assert.deepEqual(yield* lanes, ["action", "hidden"]);
+    yield* update(null);
+    assert.deepEqual(yield* lanes, ["hidden", "hidden"]);
   }).pipe(Effect.provide(layerTest)),
 );
 

@@ -7,6 +7,7 @@ import {
   InboxActor,
   InboxChoice,
   SenderFounder,
+  ThreadDecisionAsk,
   ThreadInbox,
   ThreadInboxRoutingPatch,
 } from "./threadInbox.ts";
@@ -3298,6 +3299,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     inboxRouting: Schema.optionalKey(ThreadInboxRoutingPatch),
+    /** Ask a founder (the server stamps when), or null to close the open ask. */
+    decisionRequest: Schema.optionalKey(Schema.NullOr(ThreadDecisionAsk)),
     title: Schema.optional(TrimmedNonEmptyString),
     regenerateTitle: Schema.optional(Schema.Boolean),
     branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),

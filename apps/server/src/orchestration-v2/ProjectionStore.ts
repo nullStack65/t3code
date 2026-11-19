@@ -1,5 +1,9 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
-import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
+import {
+  applyOrchestrationV2ThreadVisit,
+  pendingGuestMessageCount,
+  projectThreadInbox,
+} from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -236,6 +240,7 @@ export type ProjectionSettlementCandidate = Pick<
   | "pendingRuntimeRequest"
   | "pendingBackgroundTasks"
   | "pendingGuestMessageCount"
+  | "inbox"
 > &
   Pick<OrchestrationV2AppThread, "lastSnoozeWakeAt"> & {
     readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
@@ -1732,6 +1737,23 @@ const linkCardStillAsks = (
   latestUserAuthoredMessageAt === null ||
   !DateTime.isGreaterThan(latestUserAuthoredMessageAt, item.startedAt ?? item.updatedAt);
 
+const shellInbox = (
+  inbox: ThreadInbox | undefined,
+  pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null,
+  latestUserAuthoredMessageAt: DateTime.Utc | null,
+) =>
+  inbox === undefined
+    ? {}
+    : {
+        inbox: projectThreadInbox(inbox, {
+          pendingHumanRequest: pendingRuntimeRequest !== null,
+          latestHumanMessageAt:
+            latestUserAuthoredMessageAt === null
+              ? null
+              : DateTime.formatIso(latestUserAuthoredMessageAt),
+        }),
+      };
+
 export function threadShellFromProjection(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
@@ -1809,7 +1831,7 @@ export function threadShellFromProjection(
   });
   return {
     createdBy: projection.thread.createdBy,
-    ...(projection.thread.inbox === undefined ? {} : { inbox: projection.thread.inbox }),
+    ...shellInbox(projection.thread.inbox, pendingRuntimeRequest, latestUserAuthoredMessageAt),
     creationSource: projection.thread.creationSource,
     id: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -2152,7 +2174,11 @@ function shellFromState(input: {
     ...(input.state.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),
-    ...(input.state.thread.inbox === undefined ? {} : { inbox: input.state.thread.inbox }),
+    ...shellInbox(
+      input.state.thread.inbox,
+      input.state.pendingRuntimeRequest,
+      input.state.latestUserAuthoredMessageAt,
+    ),
     ...(input.state.thread.linkOrigin === undefined
       ? {}
       : { linkOrigin: input.state.thread.linkOrigin }),
@@ -8487,6 +8513,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   activityRunStatus: null,
                   activityRunStartedAt: null,
                   pendingRuntimeRequest: null,
+                  // The same projected inbox the shell carries, so an answered ask is already gone.
+                  ...shellInbox(
+                    thread.inbox,
+                    null,
+                    row.latest_user_authored_message_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_user_authored_message_at),
+                  ),
                   pendingGuestMessageCount: pendingGuestMessageCount(thread.guestShare),
                   pendingBackgroundTasks: derivePendingBackgroundWork({
                     latestRun:

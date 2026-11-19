@@ -37,8 +37,10 @@ import {
   type ClaudeCapabilitiesProbe,
 } from "../ClaudeProvider.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
+import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
+import { fetchMagpieGatewayCatalog, withMagpieGatewayModels } from "../MagpieGatewayModels.ts";
 import {
   makeClaudeCodeModelRoutes,
   resolveClaudeModelSettingsKey,
@@ -61,6 +63,7 @@ import {
   mergeClaudeProcessEnvironment,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
+import { customClaudeApiEndpointHost, readClaudeSettingsEnv } from "./ClaudeSkills.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeClaudeMaintenanceResolution } from "./ClaudeMaintenance.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
@@ -270,6 +273,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       Effect.map((result) => result.capabilities),
     );
 
+    // Claude Code's own gateway discovery keeps only Claude names, so T3 reads a Magpie catalog
+    // itself. Anything else, or no answer, leaves the built-in list.
+    const withGatewayModels = Effect.fn("ClaudeDriver.withGatewayModels")(function* (
+      provider: ServerProviderDraft,
+    ) {
+      if (!provider.enabled) return provider;
+      const baseUrl =
+        (yield* readClaudeSettingsEnv(effectiveConfig, stateDir, processEnv)).ANTHROPIC_BASE_URL ??
+        processEnv.ANTHROPIC_BASE_URL;
+      if (baseUrl === undefined || customClaudeApiEndpointHost(baseUrl) === undefined) {
+        return provider;
+      }
+      const gateway = yield* fetchMagpieGatewayCatalog(baseUrl, processEnv).pipe(
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      );
+      return gateway === undefined
+        ? provider
+        : { ...provider, models: withMagpieGatewayModels(provider.models, gateway) };
+    });
+
     const checkProvider = catalogService.refreshInBackground.pipe(
       Effect.andThen(
         modelCatalog.pipe(
@@ -289,6 +312,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
                 ),
             ),
           ),
+          Effect.flatMap(withGatewayModels),
           Effect.tap((provider) =>
             provider.auth.status === "unauthenticated"
               ? Cache.invalidateAll(capabilitiesProbeCache)

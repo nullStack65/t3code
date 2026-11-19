@@ -34,6 +34,13 @@ if (!TELEMETRY_CHANNELS.includes(telemetryChannel)) {
   );
 }
 
+// The exact source commit this build was made from (40-hex), for deployment receipts.
+// Release builds set it; builds without it leave the descriptor's buildCommit absent.
+const buildCommit = process.env.T3CODE_BUILD_COMMIT?.trim().toLowerCase() ?? "";
+if (buildCommit !== "" && !/^[0-9a-f]{40}$/.test(buildCommit)) {
+  throw new Error(`T3CODE_BUILD_COMMIT must be a 40-character hex commit, got "${buildCommit}".`);
+}
+
 // tsdown SEA needs one chunk (sourcemaps count) and Node >=25.7, so package separately.
 // "bundle" emits the embedded CLI. "1" builds dist-exe/t3 from the bootstrap.
 // TEMPORARY one-time Node fix. Remove when fixed: https://github.com/nodejs/node/issues/67048
@@ -147,6 +154,7 @@ export default mergeConfig(
       define: {
         __T3CODE_BUILD_CHANNEL__: JSON.stringify(cliBuildChannel),
         __T3CODE_TELEMETRY_CHANNEL__: JSON.stringify(telemetryChannel),
+        __T3CODE_BUILD_COMMIT__: JSON.stringify(buildCommit),
         __T3CODE_BUILD_RELAY_URL__: JSON.stringify(repoEnv.T3CODE_RELAY_URL?.trim() ?? ""),
         __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
           repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",

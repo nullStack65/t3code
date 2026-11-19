@@ -267,7 +267,7 @@ const ThreadReadTool = Tool.make("t3_thread_read", {
 
 const ThreadUpdateTool = Tool.make("t3_thread_update", {
   description:
-    "Route a thread with action:'route' and inboxRouting (owner, assignee, audience, attentionKind), or rename a thread (`action:'rename'` with `title`) or regenerate its title. Omit `threadId` for this thread. Workspace and branch cannot change here.",
+    "Update a thread; omit `threadId` for this one. When a founder must decide, review or approve, use `action:'request_decision'` with `decision`: the thread shows in their inbox until they reply there, `resolve_decision`, or settle. `action:'route'` refiles it with `inboxRouting`; a founder's or the shared inbox needs `inboxRouting.reason`. `rename` takes `title`; `regenerate_title`. Workspace and branch cannot change here.",
   // Keeps the input's action/field check, which rebuilding the struct would drop.
   parameters: ThreadMetadataMcpUpdateInput.mapFields(
     Struct.assign({ environmentId: OrchestratorMcpEnvironmentTarget }),
