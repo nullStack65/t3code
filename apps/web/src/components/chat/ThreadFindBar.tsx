@@ -101,6 +101,7 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
           ref={inputRef}
           type="search"
           size="sm"
+          className="min-w-24"
           value={props.query}
           aria-label="Find in thread"
           placeholder="Find in thread"
@@ -116,7 +117,7 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
               aria-label="From"
               title="Show only messages from"
               data-thread-find-sender
-              className="h-6 max-w-28 rounded-md bg-transparent px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none"
+              className="h-6 w-20 shrink rounded-md bg-transparent px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none"
               value={props.sender ?? ""}
               onChange={(event) => {
                 const value = event.target.value;
