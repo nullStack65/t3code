@@ -79,7 +79,11 @@ const LIVE_OR_DONE = new Set<string>(["preparing", "starting", "running", "waiti
 export function alertIsStale(
   shell: StaleShell | null,
   runId: string | null,
-  about?: { readonly providerInstanceId: string },
+  about?: {
+    readonly providerInstanceId: string;
+    /** False for a model alert: a newer run that fell back too is the same problem, not a fix. */
+    readonly newerRunSupersedes?: boolean;
+  },
 ): boolean {
   if (shell === null || shell.deletedAt !== null || shell.archivedAt !== null) return true;
   if (about !== undefined) {
@@ -87,6 +91,7 @@ export function alertIsStale(
     if (shell.providerInstanceId !== about.providerInstanceId) return true;
   }
   if (runId === null || shell.latestRunId === runId) return false;
+  if (about?.newerRunSupersedes === false) return false;
   return shell.activeRunId !== null || LIVE_OR_DONE.has(shell.status);
 }
 

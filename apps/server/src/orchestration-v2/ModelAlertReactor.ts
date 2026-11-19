@@ -734,7 +734,9 @@ export const make = Effect.gen(function* () {
     const stillCurrent = Effect.fnUntraced(function* (
       threadId: string,
       runId: string | null,
-      about: { readonly providerInstanceId: string } | undefined,
+      about:
+        | { readonly providerInstanceId: string; readonly newerRunSupersedes?: boolean }
+        | undefined,
     ) {
       const shell = yield* projections.getThreadShell(ThreadId.make(threadId));
       if (alertIsStale(shell, runId, about)) return false;
@@ -749,9 +751,16 @@ export const make = Effect.gen(function* () {
       if (fresh.length === 0) return null;
       return fresh.length === alert.members.length ? alert : { ...alert, members: fresh };
     }
+    // A healthy run clears the thread's degraded mark; until then a newer run is no fix.
+    if (
+      alert.type === "model-degraded" &&
+      (yield* Ref.get(state)).degraded[alert.threadId] === undefined
+    ) {
+      return null;
+    }
     const about =
       alert.type === "model-degraded"
-        ? { providerInstanceId: alert.providerInstanceId }
+        ? { providerInstanceId: alert.providerInstanceId, newerRunSupersedes: false }
         : undefined;
     return (yield* stillCurrent(alert.threadId, alert.runId, about)) ? alert : null;
   });

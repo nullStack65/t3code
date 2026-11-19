@@ -481,6 +481,23 @@ it("a held item waits without failing, and a dropped one leaves without counting
   assert.deepEqual(dropped.incidentSentAt, {});
 });
 
+it("a model alert survives a newer run that fell back too, unlike a thread event", () => {
+  const shell = {
+    latestRunId: "run:2",
+    activeRunId: null,
+    status: "completed",
+    archivedAt: null,
+    deletedAt: null,
+    settledOverride: null,
+    providerInstanceId: "codex",
+  } as never;
+  assert.equal(
+    alertIsStale(shell, "run:1", { providerInstanceId: "codex", newerRunSupersedes: false }),
+    false,
+  );
+  assert.equal(alertIsStale(shell, "run:1", { providerInstanceId: "codex" }), true);
+});
+
 it.each([
   ["the same run", { latestRunId: "run:1", activeRunId: null, status: "failed" }, false],
   [
