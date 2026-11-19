@@ -385,7 +385,7 @@ describe("DesktopSettings", () => {
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
-          // A file without the key is a machine that never turned Tailscale HTTPS off.
+          // A missing key reads as on; an off saved before it became the default left no key.
           tailscaleServeEnabled: true,
           tailscaleServePort: 443,
           updateChannel: "nightly",
@@ -415,7 +415,7 @@ describe("DesktopSettings", () => {
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
-          // A file without the key is a machine that never turned Tailscale HTTPS off.
+          // A missing key reads as on; an off saved before it became the default left no key.
           tailscaleServeEnabled: true,
           tailscaleServePort: 443,
           updateChannel: "latest",

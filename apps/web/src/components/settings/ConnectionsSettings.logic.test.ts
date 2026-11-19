@@ -76,34 +76,19 @@ describe("resolveTailscaleServeBaseUrl", () => {
 
 describe("tailscaleHttpsRow", () => {
   const url = "https://laptop.tail.ts.net";
-  const on = { mode: "local-only", tailscaleServeEnabled: true } as const;
-  const off = { mode: "local-only", tailscaleServeEnabled: false } as const;
+  const on = { tailscaleServeEnabled: true } as const;
+  const off = { tailscaleServeEnabled: false } as const;
 
-  it("keeps the switch on while Serve is on, even before Tailscale answers or exists", () => {
-    expect([
-      tailscaleHttpsRow(on, { status: "available", httpBaseUrl: url }),
-      tailscaleHttpsRow(on, { status: "unavailable", httpBaseUrl: url }),
-      tailscaleHttpsRow(on, null),
-    ]).toEqual([
-      { checked: true, showsSwitch: true, description: `On at ${url}` },
-      {
-        checked: true,
-        showsSwitch: true,
-        description: `On. Waiting for Tailscale Serve to answer at ${url}`,
-      },
-      {
-        checked: true,
-        showsSwitch: true,
-        description: "On. Starts once Tailscale is installed and signed in on this machine.",
-      },
-    ]);
-  });
-
-  it("offers turning on only with a MagicDNS name to serve", () => {
-    expect(tailscaleHttpsRow(off, { status: "unavailable", httpBaseUrl: url }).showsSwitch).toBe(
-      true,
-    );
-    expect(tailscaleHttpsRow(off, null).showsSwitch).toBe(false);
+  it("follows the saved setting, not whether Serve answers", () => {
+    expect(
+      [
+        tailscaleHttpsRow(on, { status: "available", httpBaseUrl: url }),
+        tailscaleHttpsRow(on, { status: "unavailable", httpBaseUrl: url }),
+        tailscaleHttpsRow(on, null),
+        tailscaleHttpsRow(off, { status: "available", httpBaseUrl: url }),
+        tailscaleHttpsRow(off, null),
+      ].map((row) => row.checked),
+    ).toEqual([true, true, true, false, false]);
   });
 });
 

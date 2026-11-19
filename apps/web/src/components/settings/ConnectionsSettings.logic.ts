@@ -63,33 +63,28 @@ export function isQrShareableEndpoint(endpoint: AdvertisedEndpoint): boolean {
 
 /**
  * The Tailscale HTTPS switch and its status line. Serve is on by default and does nothing until
- * Tailscale runs and is signed in. Turning it on needs the MagicDNS name, so off needs one to show
- * the switch. Desktop skips Tailscale probing while Serve and network access are off to avoid
- * macOS prompts, so no endpoint then says nothing about Tailscale.
+ * Tailscale runs here, signed in with MagicDNS. Desktop skips Tailscale probing while Serve and
+ * network access are off to avoid macOS prompts, so no endpoint then says nothing about Tailscale.
  */
 export function tailscaleHttpsRow(
-  state: Pick<DesktopServerExposureState, "mode" | "tailscaleServeEnabled"> | null,
+  state: Pick<DesktopServerExposureState, "tailscaleServeEnabled"> | null,
   endpoint: Pick<AdvertisedEndpoint, "status" | "httpBaseUrl"> | null,
-): { readonly checked: boolean; readonly showsSwitch: boolean; readonly description: string } {
-  if (state?.tailscaleServeEnabled) {
+): { readonly checked: boolean; readonly description: string } {
+  if (!state?.tailscaleServeEnabled) {
     return {
-      checked: true,
-      showsSwitch: true,
-      description: !endpoint
-        ? "On. Starts once Tailscale is installed and signed in on this machine."
-        : endpoint.status === "available"
-          ? `On at ${endpoint.httpBaseUrl}`
-          : `On. Waiting for Tailscale Serve to answer at ${endpoint.httpBaseUrl}`,
+      checked: false,
+      description: endpoint
+        ? `Off. Turn on to serve this backend at ${endpoint.httpBaseUrl}`
+        : "Off. Turn on to serve this backend over Tailscale HTTPS.",
     };
   }
   return {
-    checked: false,
-    showsSwitch: endpoint !== null,
-    description: endpoint
-      ? `Off. Turn on to serve this backend at ${endpoint.httpBaseUrl}`
-      : state && state.mode !== "network-accessible"
-        ? "Off. Turn on Network access to detect Tailscale."
-        : "Off. Start Tailscale to set up HTTPS access through MagicDNS.",
+    checked: true,
+    description: !endpoint
+      ? "On. Inactive until Tailscale runs here, signed in with MagicDNS."
+      : endpoint.status === "available"
+        ? `On at ${endpoint.httpBaseUrl}`
+        : `On, but ${endpoint.httpBaseUrl} doesn't answer. Tailscale Serve needs HTTPS certificates on the tailnet and its port free.`,
   };
 }
 

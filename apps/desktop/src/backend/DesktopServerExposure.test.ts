@@ -181,6 +181,27 @@ describe("DesktopServerExposure", () => {
     );
   });
 
+  it.effect("reads Tailscale by default, and never after Serve is turned off locally", () => {
+    let statusReads = 0;
+    return withHarness(
+      lanNetworkInterfaces,
+      Effect.gen(function* () {
+        const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+        yield* serverExposure.configureFromSettings({ port: 4173 });
+        yield* serverExposure.getAdvertisedEndpoints;
+        assert.equal(statusReads, 1);
+
+        yield* serverExposure.setTailscaleServeEnabled({ enabled: false });
+        yield* serverExposure.getAdvertisedEndpoints;
+        assert.equal(statusReads, 1);
+      }),
+      {},
+      layerMockSpawner("{}", () => {
+        statusReads += 1;
+      }),
+    );
+  });
+
   it.effect("falls back to local-only without losing the requested network preference", () =>
     withHarness(
       emptyNetworkInterfaces,
