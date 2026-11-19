@@ -8,6 +8,11 @@ on:
     # exact commit; the private fleet rollout builds only commits that passed.
     branches: [feat/assemblyai-current, release/native-0.1.10]
   pull_request:
+    # `edited` covers retargeting a PR onto a release branch. Without it, a PR
+    # whose commits were all pushed before the retarget merged with no ARC run.
+    # Any edit reruns the full job rather than skipping it, so a skipped check
+    # can never stand in for a real result on the same head.
+    types: [opened, synchronize, reopened, edited, ready_for_review]
     branches: [feat/assemblyai-current, release/native-0.1.10]
   workflow_dispatch:
 
