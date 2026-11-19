@@ -361,6 +361,7 @@ it.each([
     { pullRequests: [{ ...(openPullRequest as object), snapshot: { state: "merged" } }] },
     false,
   ],
+  ["lane-ended with an open PR, nothing changed", openWithPr, "run-ended", {}, true],
   ["stuck, nothing changed", quietRun, "sweep", {}, true],
   ["stuck, new activity since", quietRun, "sweep", { updatedAt: at(-1) }, false],
   [
@@ -370,6 +371,8 @@ it.each([
     { pendingRuntimeRequest: null },
     false,
   ],
+  ["needs-person, still unanswered", asking, "request", {}, true],
+  ["promise-without-wake, nothing changed", promised, "settled", {}, true],
   [
     "promise-without-wake, a real wait registered since",
     promised,

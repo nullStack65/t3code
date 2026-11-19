@@ -489,7 +489,7 @@ it.each([
   ["a watcher that cannot be read", null, 0, null],
   ["a watcher mid-turn", "running", 0, BUSY_WATCHER_RECHECK_MS],
   ["a watcher with a queued turn", "queued", 0, BUSY_WATCHER_RECHECK_MS],
-  ["a watcher waiting on its own background work", "waiting", 0, null],
+  ["a watcher waiting on its own background work", "waiting", 0, BUSY_WATCHER_RECHECK_MS],
   ["a watcher busy near the cap", "running", BUSY_WATCHER_MAX_HOLD_MS - 1_000, 1_000],
   ["a watcher busy past the cap", "running", BUSY_WATCHER_MAX_HOLD_MS, null],
 ] as const)("busy watcher hold: %s", (_name, status, ageMs, waitMs) => {

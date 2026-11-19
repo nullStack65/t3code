@@ -48,6 +48,7 @@ import {
   ThreadEventAlert,
   type ThreadEventKind,
   threadEventMessage,
+  REJUDGE_TRIGGER,
   threadEventStillHolds,
   type ThreadEventTrigger,
   type ThreadFinding,
@@ -454,7 +455,13 @@ export function afterHold(
   };
 }
 
-const BUSY_WATCHER_STATUSES = new Set<string>(["preparing", "queued", "starting", "running"]);
+const BUSY_WATCHER_STATUSES = new Set<string>([
+  "preparing",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+]);
 /** Matches the flush interval, so a held alert is looked at again on the next flush. */
 export const BUSY_WATCHER_RECHECK_MS = 30_000;
 export const BUSY_WATCHER_MAX_HOLD_MS = 10 * 60 * 1000;
@@ -724,6 +731,13 @@ export const make = Effect.gen(function* () {
       here,
     );
 
+  type WatcherView = {
+    readonly status: string;
+    readonly providerInstanceId: string | null;
+    /** Null when unknown, as for a remote watcher. */
+    readonly usageLimited: boolean | null;
+    readonly resetAt: string | null;
+  };
   const WatcherThreadStatus = Schema.Struct({
     thread: Schema.Struct({ status: Schema.String, providerInstanceId: Schema.String }),
   });
@@ -792,7 +806,7 @@ export const make = Effect.gen(function* () {
         alert,
         shell,
         stuckMinutes: (yield* settings.getSettings).watcherStuckMinutes,
-        ...(yield* judgeContext(shell, alert.kind === "stuck" ? "sweep" : "run-ended")),
+        ...(yield* judgeContext(shell, REJUDGE_TRIGGER[alert.kind])),
       });
       if (!holds) return null;
     }
@@ -838,13 +852,20 @@ export const make = Effect.gen(function* () {
     return { remoteTaskCount, childActivityMs };
   });
 
-  /** The watcher thread's run status, or null when it cannot be read. */
-  const watcherStatus = Effect.fnUntraced(function* (
+  /** The watcher thread as one delivery needs it, or null when it cannot be read. */
+  const readWatcher = Effect.fnUntraced(function* (
     watcher: ModelAlertWatcher,
     here: EnvironmentId,
   ) {
     if (watcher.environmentId === here) {
-      return (yield* projections.getThreadShell(watcher.threadId))?.status ?? null;
+      const shell = yield* projections.getThreadShell(watcher.threadId);
+      if (shell === null) return null;
+      return {
+        status: shell.status as string,
+        providerInstanceId: shell.providerInstanceId as string | null,
+        usageLimited: shell.lastErrorClass === "usage_limit",
+        resetAt: shell.usageLimitResetAt ?? null,
+      } satisfies WatcherView;
     }
     return yield* peers
       .call({
@@ -855,7 +876,13 @@ export const make = Effect.gen(function* () {
         success: WatcherThreadStatus,
       })
       .pipe(
-        Effect.map(({ thread }) => thread.status),
+        // The read result carries no error class or reset time.
+        Effect.map(({ thread }): WatcherView => ({
+          status: thread.status,
+          providerInstanceId: thread.providerInstanceId,
+          usageLimited: null,
+          resetAt: null,
+        })),
         // A read that fails or dies must never block the alert; deliver as if idle.
         Effect.catchCause(() => Effect.succeed(null)),
       );
@@ -865,61 +892,35 @@ export const make = Effect.gen(function* () {
    * When the watcher's own thread is stopped at the same account limit, the time to look again.
    * Anything sent now would only queue a turn that fails the same way.
    */
-  const holdUntil = Effect.fnUntraced(function* (
-    watcher: ModelAlertWatcher,
-    here: EnvironmentId,
-    alert: WatcherAlert,
-    nowMs: number,
-  ) {
+  const holdUntil = (view: WatcherView | null, alert: WatcherAlert, nowMs: number) => {
     const providerInstanceId =
       alert.type === "usage-limit-incident" ||
       (alert.type === "model-degraded" && alert.reasons.includes("usage_limit"))
         ? alert.providerInstanceId
         : null;
-    if (providerInstanceId === null) return null;
-    let down = false;
-    let resetAt: string | null = alert.type === "usage-limit-incident" ? alert.resetAt : null;
-    if (watcher.environmentId === here) {
-      const shell = yield* projections.getThreadShell(watcher.threadId);
-      down =
-        shell !== null &&
-        shell.status === "failed" &&
-        shell.providerInstanceId === providerInstanceId &&
-        shell.lastErrorClass === "usage_limit";
-      resetAt = shell?.usageLimitResetAt ?? resetAt;
-    } else {
-      // The read result carries no error class, so a remote watcher counts as down only while
-      // the reset this alert reports is still ahead.
-      down = yield* peers
-        .call({
-          environmentId: watcher.environmentId,
-          tool: "t3_thread_read",
-          arguments: { threadId: watcher.threadId, limit: 1, runLimit: 1 },
-          limits: { runtimeMode: "full-access", interactionMode: "default" },
-          success: WatcherThreadStatus,
-        })
-        .pipe(
-          Effect.map(
-            ({ thread }) =>
-              thread.status === "failed" && thread.providerInstanceId === providerInstanceId,
-          ),
-          // An unreadable watcher is the delivery's problem, not a reason to hold.
-          Effect.orElseSucceed(() => false),
-        );
-    }
+    if (providerInstanceId === null || view === null) return null;
+    // A remote watcher counts as down only while the reset this alert reports is still ahead.
+    const down =
+      view.status === "failed" &&
+      view.providerInstanceId === providerInstanceId &&
+      view.usageLimited !== false;
+    const resetAt = view.resetAt ?? (alert.type === "usage-limit-incident" ? alert.resetAt : null);
     if (!down) return null;
     // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
     const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
     if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
     return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
-  });
+  };
 
   type DeliveryResult =
     | { readonly _tag: "sent" }
     | { readonly _tag: "dropped" }
     | { readonly _tag: "held"; readonly until: number };
 
-  const deliver = Effect.fnUntraced(function* (entry: Delivery) {
+  const deliver = Effect.fnUntraced(function* (
+    entry: Delivery,
+    watcherView: Effect.Effect<WatcherView | null>,
+  ) {
     const current = yield* settings.getSettings;
     const alert = yield* currentAlert(entry.alert);
     if (alert === null) {
@@ -945,9 +946,10 @@ export const make = Effect.gen(function* () {
     if (watcher === null) return { _tag: "sent" } satisfies DeliveryResult;
     const here = yield* environment.getEnvironmentId;
     const nowMs = yield* Clock.currentTimeMillis;
+    const view = yield* watcherView;
     const until =
-      (yield* holdUntil(watcher, here, alert, nowMs)) ??
-      busyWatcherHold(yield* watcherStatus(watcher, here), entry.createdAt, nowMs);
+      holdUntil(view, alert, nowMs) ??
+      busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
     yield* deliverToWatcher(alert, watcher, here);
     return { _tag: "sent" } satisfies DeliveryResult;
@@ -956,11 +958,20 @@ export const make = Effect.gen(function* () {
   const flush: ModelAlertReactor["Service"]["flush"] = Effect.gen(function* () {
     const nowMs = yield* Clock.currentTimeMillis;
     const due = (yield* Ref.get(state)).outbox.filter((entry) => entry.nextAttemptAt <= nowMs);
+    if (due.length === 0) return;
+    // One read of the watcher per flush, shared by every alert due in it.
+    const watcherView = yield* Effect.cached(
+      Effect.gen(function* () {
+        const watcher = (yield* settings.getSettings).modelAlertWatcher;
+        if (watcher === null) return null;
+        return yield* readWatcher(watcher, yield* environment.getEnvironmentId);
+      }).pipe(Effect.catchCause(() => Effect.succeed(null))),
+    );
     yield* Effect.forEach(
       due,
       (entry) =>
         Effect.gen(function* () {
-          const result = yield* deliver(entry).pipe(
+          const result = yield* deliver(entry, watcherView).pipe(
             Effect.timeout("30 seconds"),
             Effect.catchCause((cause) =>
               Effect.logWarning("delivering a model alert failed; it will be retried", {

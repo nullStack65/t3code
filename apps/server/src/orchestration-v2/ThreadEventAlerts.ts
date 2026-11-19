@@ -327,7 +327,7 @@ export function threadEventAlert(input: {
 }
 
 /** The trigger that judges each kind again at delivery: any trigger whose kinds include it. */
-const REJUDGE_TRIGGER: Record<ThreadEventKind, ThreadEventTrigger> = {
+export const REJUDGE_TRIGGER: Record<ThreadEventKind, ThreadEventTrigger> = {
   "lane-ended": "run-ended",
   "promise-without-wake": "settled",
   stuck: "sweep",
