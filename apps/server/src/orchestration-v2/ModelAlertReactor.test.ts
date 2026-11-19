@@ -164,10 +164,12 @@ it.each([
   );
 });
 
+// Like threadEventAlert, each occurrence gets its own id.
+let occurrence = 0;
 const eventAlert = (finding: ThreadFinding): ThreadEventAlert => ({
   type: "thread-event",
   kind: finding.kind,
-  id: `env:thread:fleet:${finding.kind}:${finding.signature}`,
+  id: `env:thread:fleet:${finding.kind}:${finding.signature}:${(occurrence += 1)}`,
   environmentId: "env",
   environmentLabel: "primary-r720",
   threadId: "thread:fleet",
@@ -212,20 +214,42 @@ it("reports a thread event once per kind and signature until its state changes",
   // A trigger that does not evaluate a kind leaves its dedupe alone.
   step(["needs-person"], []);
   step(["stuck"], [finding("stuck", "run:1")]);
-  // Recovery clears it. The same signature queues nothing while its first delivery still waits;
-  // a new run reports at once.
+  // Recovery clears it, so the same state reports again as a new occurrence.
   step(["stuck"], []);
   step(["stuck"], [finding("stuck", "run:1")]);
   step(["stuck"], [finding("stuck", "run:2")]);
-  assert.deepEqual(enqueued, [true, false, true, false, false, false, false, true]);
+  assert.deepEqual(enqueued, [true, false, true, false, false, false, true, true]);
   assert.deepEqual(
-    state.outbox.map((entry) => entry.alert.id),
-    [
-      "env:thread:fleet:stuck:run:1",
-      "env:thread:fleet:lane-ended:run:1",
-      "env:thread:fleet:stuck:run:2",
-    ],
+    state.outbox.map((entry) => (entry.alert.type === "thread-event" ? entry.alert.kind : "")),
+    ["stuck", "lane-ended", "stuck", "stuck"],
   );
+});
+
+it("a thread holding a question and an inbox flip reports each once, not on every trigger", () => {
+  const both = [finding("needs-person", "request:1"), finding("needs-person", "inbox:kameron")];
+  let state = EMPTY_MODEL_ALERT_STATE;
+  const enqueued: Array<boolean> = [];
+  const step = (findings: ReadonlyArray<ThreadFinding>) => {
+    const result = recordThreadEvents(
+      state,
+      { threadId: "thread:fleet", evaluated: ["needs-person"], findings },
+      eventAlert,
+      ["watcher"],
+      0,
+    );
+    state = result.state;
+    enqueued.push(result.enqueued);
+  };
+  step(both);
+  step(both);
+  step(both);
+  // The question is answered; the inbox flip is still open and was already reported.
+  step([both[1]!]);
+  // Then the flip clears and returns: a new occurrence.
+  step([]);
+  step([both[1]!]);
+  assert.deepEqual(enqueued, [true, false, false, false, false, true]);
+  assert.equal(state.outbox.length, 3);
 });
 
 it("queues one delivery per destination for a thread event, beside model alerts", () => {

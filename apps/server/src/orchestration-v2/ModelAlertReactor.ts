@@ -306,17 +306,24 @@ export function recordThreadEvents(
       }
       continue;
     }
-    // One finding per kind reports at a time; the first (most specific) one wins.
-    const finding = kindFindings.find((candidate) => reported[key] !== candidate.signature);
-    if (finding === undefined) continue;
-    const { [key]: _previous, ...rest } = reported;
-    reported = {
-      ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
-      [key]: finding.signature,
-    };
-    const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
-    outbox = queued.outbox;
-    enqueued ||= queued.enqueued;
+    // A kind can hold several findings at once (a question and an inbox flip), so it remembers
+    // each signature it reported. One that stops being true is forgotten and can report again.
+    const known = (reported[key] ?? "").split("\n").filter((signature) => signature !== "");
+    const current = kindFindings.map((finding) => finding.signature);
+    const stored = current.join("\n");
+    if (reported[key] !== stored) {
+      const { [key]: _previous, ...rest } = reported;
+      reported = {
+        ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
+        [key]: stored,
+      };
+    }
+    for (const finding of kindFindings) {
+      if (known.includes(finding.signature)) continue;
+      const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
+      outbox = queued.outbox;
+      enqueued ||= queued.enqueued;
+    }
   }
   if (reported === state.reported && outbox === state.outbox) return { state, enqueued };
   return { state: { ...state, reported, outbox }, enqueued };
@@ -956,6 +963,8 @@ export const make = Effect.gen(function* () {
     threadId: ThreadId,
     trigger: ThreadEventTrigger,
     usageLimitReported: boolean,
+    /** Open delegated tasks by parent thread, when the caller read them once for many threads. */
+    remoteTasks?: ReadonlyMap<string, number>,
   ) {
     const current = yield* settings.getSettings;
     const here = yield* environment.getEnvironmentId;
@@ -968,9 +977,11 @@ export const make = Effect.gen(function* () {
     const remoteTaskCount =
       trigger === "request" || trigger === "inbox"
         ? 0
-        : (yield* projections.getOpenRemoteDelegatedTasks).filter(
-            (task) => task.parentThreadId === threadId,
-          ).length;
+        : remoteTasks !== undefined
+          ? (remoteTasks.get(threadId) ?? 0)
+          : (yield* projections.getOpenRemoteDelegatedTasks).filter(
+              (task) => task.parentThreadId === threadId,
+            ).length;
     // A parent that waits on children is not stuck while they work.
     const childActivityMs =
       trigger === "sweep"
@@ -1142,10 +1153,15 @@ export const make = Effect.gen(function* () {
       Effect.catchCause((cause) => Effect.logWarning("resume sweep failed", { cause })),
     );
     const index = yield* projections.listActiveShellIndex();
+    // One scan of the delegated tasks for the whole sweep, not one per thread.
+    const remoteTasks = new Map<string, number>();
+    for (const task of yield* projections.getOpenRemoteDelegatedTasks) {
+      remoteTasks.set(task.parentThreadId, (remoteTasks.get(task.parentThreadId) ?? 0) + 1);
+    }
     yield* Effect.forEach(
       index.filter((entry) => entry.mayBeLive && isListedThreadLineage(entry.lineage)),
       (entry) =>
-        handleThreadEvents(entry.id, "sweep", false).pipe(
+        handleThreadEvents(entry.id, "sweep", false, remoteTasks).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("sweeping a thread for a watcher event failed", {
               threadId: entry.id,

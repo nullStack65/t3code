@@ -156,8 +156,10 @@ export function judgeThread(input: {
   const { shell, nowMs } = input;
   const evaluated = KINDS_BY_TRIGGER[input.trigger];
   const findings: ThreadFinding[] = [];
-  // Only a top-level lane that nobody has archived or settled is worth waking the watcher for.
+  // Only a top-level lane an agent runs, that nobody has archived or settled, is worth waking the
+  // watcher for. A person's own thread ending, stopping or going quiet is not news.
   const watched =
+    shell.createdBy === "agent" &&
     isListedThreadLineage(shell.lineage) &&
     shell.archivedAt === null &&
     shell.settledOverride !== "settled";
@@ -248,7 +250,7 @@ export function judgeThread(input: {
     }
   }
 
-  if (evaluated.includes("needs-person") && watched && shell.createdBy === "agent") {
+  if (evaluated.includes("needs-person") && watched) {
     const request = shell.pendingRuntimeRequest;
     const inbox = shell.inbox;
     if (request !== null) {
@@ -301,7 +303,9 @@ export function threadEventAlert(input: {
   return {
     type: "thread-event",
     kind: finding.kind,
-    id: `${input.environmentId}:${shell.id}:${finding.kind}:${finding.signature}`,
+    // The time makes each occurrence its own message: the delivery key hashes this id, and a
+    // recurrence of the same state must not be taken for a replay of the first.
+    id: `${input.environmentId}:${shell.id}:${finding.kind}:${finding.signature}:${input.occurredAt}`,
     environmentId: input.environmentId,
     environmentLabel: input.environmentLabel,
     threadId: shell.id,
