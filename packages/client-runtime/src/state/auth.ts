@@ -6,6 +6,7 @@ import type {
   AuthAccessStreamSnapshotEvent,
   AuthCreatePairingCredentialInput,
   AuthRevokeClientSessionInput,
+  AuthSetClientSessionFounderInput,
   AuthRevokePairingLinkInput,
 } from "@t3tools/contracts";
 import { WS_METHODS } from "@t3tools/contracts";
@@ -121,6 +122,17 @@ export function createAuthEnvironmentAtoms<R, E>(
           url: (urls) => urls.revokeClient(),
           timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
           request: ({ client, headers }) => client.revokeClient({ headers, payload: input }),
+        }),
+    }),
+    setClientFounder: createEnvironmentCommand(runtime, {
+      label: "environment-data:server:auth-set-client-founder",
+      execute: (input: AuthSetClientSessionFounderInput) =>
+        executeConnectedEnvironmentHttpRequest({
+          group: "auth",
+          method: "POST",
+          url: (urls) => urls.setClientFounder(),
+          timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+          request: ({ client, headers }) => client.setClientFounder({ headers, payload: input }),
         }),
     }),
     revokeOtherClients: createEnvironmentCommand(runtime, {

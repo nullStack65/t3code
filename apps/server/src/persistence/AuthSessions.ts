@@ -11,6 +11,7 @@ import {
   AuthClientMetadataDeviceType,
   AuthEnvironmentScopes,
   AuthSessionId,
+  Founder,
   ServerAuthSessionMethod,
 } from "@t3tools/contracts";
 
@@ -41,6 +42,8 @@ export const AuthSessionRecord = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  /** Who an admin says uses this client; null until assigned. */
+  founder: Schema.NullOr(Founder),
 });
 export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 
@@ -106,6 +109,12 @@ export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
 });
 export type SetAuthSessionLastConnectedAtInput = typeof SetAuthSessionLastConnectedAtInput.Type;
 
+export const SetAuthSessionFounderInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  founder: Schema.NullOr(Founder),
+});
+export type SetAuthSessionFounderInput = typeof SetAuthSessionFounderInput.Type;
+
 export class AuthSessionRepository extends Context.Service<
   AuthSessionRepository,
   {
@@ -137,6 +146,10 @@ export class AuthSessionRepository extends Context.Service<
     readonly setLastConnectedAt: (
       input: SetAuthSessionLastConnectedAtInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
+    /** Records who uses a live session; false when it is revoked or unknown. */
+    readonly setFounder: (
+      input: SetAuthSessionFounderInput,
+    ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
     readonly getProofKeyThumbprint: (
       input: GetAuthSessionByIdInput,
     ) => Effect.Effect<Option.Option<string>, AuthSessionRepositoryError>;
@@ -161,6 +174,7 @@ const AuthSessionDbRow = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  founder: Schema.NullOr(Founder),
 });
 
 const AuthSessionRawDbRow = Schema.Struct({
@@ -178,6 +192,7 @@ const AuthSessionRawDbRow = Schema.Struct({
   expiresAt: Schema.Unknown,
   lastConnectedAt: Schema.Unknown,
   revokedAt: Schema.Unknown,
+  founder: Schema.Unknown,
 });
 
 const decodeAuthSessionDbRow = Schema.decodeUnknownEffect(AuthSessionDbRow);
@@ -200,6 +215,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
     expiresAt: row.expiresAt,
     lastConnectedAt: row.lastConnectedAt,
     revokedAt: row.revokedAt,
+    founder: row.founder,
   };
 }
 
@@ -284,7 +300,8 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          founder AS "founder"
         FROM auth_sessions
         WHERE session_id = ${sessionId}
       `,
@@ -292,7 +309,7 @@ export const make = Effect.gen(function* () {
 
   const revokeActiveSessionsForReplacement = SqlSchema.findAll({
     Request: CreateReplacingActiveAuthSessionInput,
-    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    Result: Schema.Struct({ sessionId: AuthSessionId, founder: Schema.NullOr(Founder) }),
     execute: ({ session, revokedAt, replaceSessionId }) =>
       sql`
         UPDATE auth_sessions
@@ -305,7 +322,7 @@ export const make = Effect.gen(function* () {
           AND method = ${session.method}
           AND revoked_at IS NULL
           AND expires_at > ${revokedAt}
-        RETURNING session_id AS "sessionId"
+        RETURNING session_id AS "sessionId", founder AS "founder"
       `,
   });
 
@@ -328,7 +345,8 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          founder AS "founder"
         FROM auth_sessions
         WHERE revoked_at IS NULL
           AND (expires_at > ${now} OR ${sql.in("session_id", connectedSessionIds)})
@@ -344,6 +362,19 @@ export const make = Effect.gen(function* () {
         SET last_connected_at = ${lastConnectedAt}
         WHERE session_id = ${sessionId}
           AND revoked_at IS NULL
+      `,
+  });
+
+  const setFounderRows = SqlSchema.findAll({
+    Request: SetAuthSessionFounderInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ sessionId, founder }) =>
+      sql`
+        UPDATE auth_sessions
+        SET founder = ${founder}
+        WHERE session_id = ${sessionId}
+          AND revoked_at IS NULL
+        RETURNING session_id AS "sessionId"
       `,
   });
 
@@ -431,6 +462,18 @@ export const make = Effect.gen(function* () {
         revokeActiveSessionsForReplacement(input).pipe(
           Effect.flatMap((revokedRows) =>
             createSessionRow(input.session).pipe(
+              Effect.andThen(() => {
+                // Re-pairing one named client keeps who uses it. Replacing every session for a
+                // subject could span several devices, so that never carries a person over.
+                const founders = new Set(revokedRows.map((row) => row.founder));
+                const [founder] = founders;
+                return input.replaceSessionId !== undefined &&
+                  founders.size === 1 &&
+                  founder !== null &&
+                  founder !== undefined
+                  ? setFounderRows({ sessionId: input.session.sessionId, founder })
+                  : Effect.void;
+              }),
               Effect.as(revokedRows.map((row) => row.sessionId)),
             ),
           ),
@@ -557,6 +600,18 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const setFounder: AuthSessionRepository["Service"]["setFounder"] = (input) =>
+    setFounderRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.setFounder:query",
+          "AuthSessionRepository.setFounder:decodeRows",
+          { sessionId: input.sessionId },
+        ),
+      ),
+      Effect.map((rows) => rows.length > 0),
+    );
+
   const getProofKeyThumbprint: AuthSessionRepository["Service"]["getProofKeyThumbprint"] = (
     input,
   ) =>
@@ -593,6 +648,7 @@ export const make = Effect.gen(function* () {
     extend,
     revokeAllExcept,
     setLastConnectedAt,
+    setFounder,
     getProofKeyThumbprint,
     revokeByProofKey,
   } satisfies AuthSessionRepository["Service"];

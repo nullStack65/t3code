@@ -1,4 +1,9 @@
 import { InlineAudioPreview } from "../files/InlineAudioPreview";
+import {
+  messageSenderLabel,
+  resolveMessageSender,
+} from "@t3tools/client-runtime/message-sender";
+import { MessageSenderLine } from "./MessageSenderLine";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import {
   CHAT_USER_MARKDOWN_REMARK_PLUGINS,
@@ -466,6 +471,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const userMessage = resolveUserMessagePresentation(row.message);
+  const sender = resolveMessageSender(row.message);
+  // Name a person's message where the sender changes; agents, guests and T3 Code name themselves.
+  const showSender = sender.kind === "person" && !row.groupedWithPrevious;
+  const personHeading =
+    sender.kind === "person" && sender.sentBy !== null ? messageSenderLabel(sender) : "You";
   // Messages from other agents fold to one line so the user's own messages stay easy to find.
   const folded = userMessage.attribution === "agent";
   const [expanded, setExpanded] = useState(false);
@@ -856,6 +866,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           Sent by T3 Code
         </p>
       ) : null}
+      {showSender ? (
+        <div aria-hidden>
+          <MessageSenderLine sender={sender} align="end" />
+        </div>
+      ) : null}
       {/* The row's heading already names the guest for screen readers. */}
       {userMessage.guestName !== undefined ? (
         <div aria-hidden>
@@ -873,7 +888,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       {mediaAboveText ? (
         <div className="flex max-w-[80%] justify-end">
           {/* The heading leads the media so screen readers reach it before the images. */}
-          <MessageAuthorHeading>You</MessageAuthorHeading>
+          <MessageAuthorHeading>{personHeading}</MessageAuthorHeading>
           {mediaBlock}
         </div>
       ) : null}
@@ -897,7 +912,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             {folded
               ? senderLabel
               : userMessage.guestName === undefined
-                ? "You"
+                ? personHeading
                 : `${userMessage.guestName} (guest)`}
           </MessageAuthorHeading>
         )}

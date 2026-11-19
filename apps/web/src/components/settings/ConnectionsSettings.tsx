@@ -1,3 +1,4 @@
+import type { Founder } from "@t3tools/contracts";
 import { SessionPermissions } from "./SessionPermissions";
 import { useSearch } from "@tanstack/react-router";
 import { ChevronRightIcon, EllipsisIcon } from "lucide-react";
@@ -417,6 +418,9 @@ function ConnectionsSettingsContent({
     reportFailure: false,
   });
   const revokeClient = useAtomCommand(authEnvironment.revokeClient, { reportFailure: false });
+  const setClientFounder = useAtomCommand(authEnvironment.setClientFounder, {
+    reportFailure: false,
+  });
   const revokeOtherClients = useAtomCommand(authEnvironment.revokeOtherClients, {
     reportFailure: false,
   });
@@ -636,6 +640,31 @@ function ConnectionsSettingsContent({
       );
     }
     setRevokingDesktopClientSessionId(null);
+  };
+
+  const handleSetClientFounder = async (
+    sessionId: ServerClientSessionRecord["sessionId"],
+    founder: Founder | null,
+  ) => {
+    if (
+      accessEnvironmentId === null ||
+      !readEnvironmentScope(accessEnvironmentId, AuthAccessWriteScope)
+    )
+      return;
+    const result = await setClientFounder({
+      environmentId: accessEnvironmentId,
+      input: { sessionId, founder },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not set who uses this client",
+          description: error instanceof Error ? error.message : "Try again.",
+        }),
+      );
+    }
   };
 
   const handleRevokeOtherDesktopClients = async () => {
@@ -1141,6 +1170,7 @@ function ConnectionsSettingsContent({
       revokingClientSessionId={revokingDesktopClientSessionId}
       onRevokePairingLink={handleRevokeDesktopPairingLink}
       onRevokeClientSession={requestRevokeClientSession}
+      onSetClientFounder={(sessionId, founder) => void handleSetClientFounder(sessionId, founder)}
       canRevoke={canWriteAccess}
     />
   );

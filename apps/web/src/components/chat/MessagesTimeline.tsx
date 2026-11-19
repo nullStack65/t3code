@@ -7,7 +7,7 @@ import { MarkdownFindContext } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock } from "./WorkLog";
 import { TimelinePendingApprovalRow } from "./TimelinePendingApprovalRow";
-import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import type { OrchestrationMessageSenderFilter, WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { deriveTimelineMinimapItems } from "./timelineMinimapItems";
 import {
   type AssistantCitation,
@@ -139,7 +139,12 @@ import {
 } from "./timelineViewport";
 import { useThreadFindPositionReader } from "./useThreadFindPositionReader";
 import { ThreadActivityAnnouncer } from "./ThreadActivityAnnouncer";
-import { useStableHandoffRuns, useIncrementalTimelineRows, useStableRows } from "./useTimelineRows";
+import {
+  useSenderFilteredRows,
+  useStableHandoffRuns,
+  useIncrementalTimelineRows,
+  useStableRows,
+} from "./useTimelineRows";
 import { useClientSettings } from "../../hooks/useSettings";
 
 function timelineListStateFor(identity: string): {
@@ -326,6 +331,7 @@ interface MessagesTimelineProps {
   findQuery?: string;
   activeFindMatch?: ThreadFindMatch | null;
   findNavigationId?: number;
+  findSender?: OrchestrationMessageSenderFilter | null;
 }
 
 export function MessagesTimeline(props: MessagesTimelineProps) {
@@ -372,6 +378,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   findQuery = "",
   activeFindMatch = null,
   findNavigationId = 0,
+  findSender = null,
   latestRun,
   announcedRun = null,
   detailBehindShell = false,
@@ -754,7 +761,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     toolCallVisibility,
     revealedMessageId,
   });
-  const rows = useStableRows(rawRows, listIdentityKey);
+  const stableRows = useStableRows(rawRows, listIdentityKey);
+  const rows = useSenderFilteredRows(stableRows, findSender);
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =

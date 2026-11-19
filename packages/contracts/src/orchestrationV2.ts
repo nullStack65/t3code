@@ -4,6 +4,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
+  Founder,
   InboxActor,
   InboxChoice,
   SenderFounder,
@@ -48,8 +49,9 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
+  AuthSessionId,
 } from "./baseSchemas.ts";
-import { AuthMcpClientAccess } from "./auth.ts";
+import { AuthClientMetadataDeviceType, AuthMcpClientAccess } from "./auth.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
@@ -160,6 +162,20 @@ export const OrchestrationV2LinkedSender = Schema.Struct({
   title: Schema.String,
 });
 export type OrchestrationV2LinkedSender = typeof OrchestrationV2LinkedSender.Type;
+
+/**
+ * The signed-in client a person typed this message on, stamped by the server from the
+ * authenticated session. Clients cannot set it. `founder` is who this environment's admin
+ * assigned that session to in Connections, or null when nobody has; `device` and `deviceType`
+ * are the session's name and kind then.
+ */
+export const OrchestrationV2MessageSentBy = Schema.Struct({
+  sessionId: AuthSessionId,
+  device: Schema.String,
+  deviceType: AuthClientMetadataDeviceType,
+  founder: Schema.NullOr(Founder),
+});
+export type OrchestrationV2MessageSentBy = typeof OrchestrationV2MessageSentBy.Type;
 
 export const OrchestrationV2NativeRefStrength = Schema.Literals(["strong", "weak", "none"]);
 export type OrchestrationV2NativeRefStrength = typeof OrchestrationV2NativeRefStrength.Type;
@@ -1419,6 +1435,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   followsThreadSelection: Schema.optional(Schema.Literal(true)),
   senderThreadId: Schema.optional(ThreadId),
   linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+  sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
   /**
    * The message is the script a provider-native workflow run executes, not prose. Clients show
@@ -1743,6 +1760,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+    sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
@@ -2662,6 +2680,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+    sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
@@ -3187,6 +3206,7 @@ export const OrchestrationV2Command = Schema.Union([
         titleSeed: Schema.optional(TrimmedNonEmptyString),
         scheduledTaskId: Schema.optional(ScheduledTaskId),
         senderThreadId: Schema.optional(ThreadId),
+        sentBy: Schema.optional(OrchestrationV2MessageSentBy),
         workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
       }),
     ),
@@ -3428,6 +3448,7 @@ export const OrchestrationV2Command = Schema.Union([
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+    sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     /** Start a new provider session without the thread's earlier context. Never steers. */
     freshContext: Schema.optional(Schema.Boolean),

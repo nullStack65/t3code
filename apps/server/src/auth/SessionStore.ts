@@ -5,6 +5,7 @@ import {
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthEnvironmentScope,
+  type Founder,
   AuthWebSocketTicketUse,
   RuntimeMode,
   type ServerAuthSessionMethod,
@@ -362,6 +363,18 @@ export class ProofKeySessionsError extends Schema.TaggedError<ProofKeySessionsEr
   }
 }
 
+export class SessionFounderUpdateError extends Schema.TaggedError<SessionFounderUpdateError>()(
+  "SessionFounderUpdateError",
+  {
+    sessionId: AuthSessionId,
+    ...sessionCredentialInternalErrorContext,
+  },
+) {
+  override get message(): string {
+    return "Failed to record who uses this client.";
+  }
+}
+
 export const SessionCredentialInternalError = Schema.Union([
   SessionClaimsEncodingError,
   SessionCredentialIssueError,
@@ -372,6 +385,7 @@ export const SessionCredentialInternalError = Schema.Union([
   SessionRevocationError,
   OtherSessionsRevocationError,
   ProofKeySessionsError,
+  SessionFounderUpdateError,
 ]);
 export type SessionCredentialInternalError = typeof SessionCredentialInternalError.Type;
 
@@ -380,6 +394,12 @@ export const SessionCredentialError = Schema.Union([
   SessionCredentialInternalError,
 ]);
 export type SessionCredentialError = typeof SessionCredentialError.Type;
+
+export interface AuthSessionSender {
+  readonly label: string | null;
+  readonly deviceType: AuthClientMetadata["deviceType"];
+  readonly founder: Founder | null;
+}
 
 export class SessionStore extends Context.Service<
   SessionStore,
@@ -446,6 +466,15 @@ export class SessionStore extends Context.Service<
     readonly revokeAllExcept: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<number, SessionCredentialInternalError>;
+    /** Records who uses a live session, or clears it with null; false when it is not live. */
+    readonly setFounder: (
+      sessionId: AuthSessionId,
+      founder: Founder | null,
+    ) => Effect.Effect<boolean, SessionCredentialInternalError>;
+    /** The stored name, kind and assigned person of a session, for stamping who sent a message. */
+    readonly senderOf: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<Option.Option<AuthSessionSender>, SessionCredentialInternalError>;
     readonly proofKeyThumbprintOf: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<Option.Option<string>, SessionCredentialInternalError>;
@@ -610,6 +639,7 @@ const make = Effect.gen(function* () {
         expiresAt: row.value.expiresAt,
         lastConnectedAt: row.value.lastConnectedAt,
         connected,
+        ...(row.value.founder === null ? {} : { founder: row.value.founder }),
       }),
     );
   });
@@ -1056,6 +1086,7 @@ const make = Effect.gen(function* () {
           expiresAt: row.expiresAt,
           lastConnectedAt: row.lastConnectedAt,
           connected: connectedSessions.has(row.sessionId),
+          ...(row.founder === null ? {} : { founder: row.founder }),
         }),
       );
     },
@@ -1082,6 +1113,35 @@ const make = Effect.gen(function* () {
       return revoked;
     },
   );
+
+  const setFounder: SessionStore["Service"]["setFounder"] = Effect.fn("SessionStore.setFounder")(
+    function* (sessionId, founder) {
+      const updated = yield* authSessions
+        .setFounder({ sessionId, founder })
+        .pipe(Effect.mapError((cause) => new SessionFounderUpdateError({ sessionId, cause })));
+      if (updated) {
+        const session = yield* loadActiveSession(sessionId).pipe(
+          Effect.mapError((cause) => new SessionFounderUpdateError({ sessionId, cause })),
+        );
+        if (Option.isSome(session)) yield* emitUpsert(session.value);
+      }
+      return updated;
+    },
+  );
+
+  const senderOf: SessionStore["Service"]["senderOf"] = (sessionId) =>
+    authSessions.getById({ sessionId }).pipe(
+      Effect.map(
+        Option.map(
+          (row): AuthSessionSender => ({
+            label: row.client.label,
+            deviceType: row.client.deviceType,
+            founder: row.founder,
+          }),
+        ),
+      ),
+      Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
+    );
 
   const proofKeyThumbprintOf: SessionStore["Service"]["proofKeyThumbprintOf"] = (sessionId) =>
     authSessions
@@ -1212,6 +1272,8 @@ const make = Effect.gen(function* () {
     },
     revoke,
     revokeAllExcept,
+    setFounder,
+    senderOf,
     proofKeyThumbprintOf,
     revokeByProofKey,
     markConnected,

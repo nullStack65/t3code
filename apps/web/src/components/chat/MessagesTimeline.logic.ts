@@ -13,6 +13,12 @@ import {
   IDLE_COMPACTION_TITLES,
 } from "@t3tools/client-runtime/user-message";
 import type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
+import {
+  messageSenderMatches,
+  resolveMessageSender,
+  sameMessageSender,
+} from "@t3tools/client-runtime/message-sender";
+import type { OrchestrationMessageSenderFilter } from "@t3tools/contracts";
 import { renderCodexDirectivesForCopy } from "@t3tools/shared/codexMarkdownDirectives";
 import {
   commandDisplayText,
@@ -2361,12 +2367,38 @@ export function deriveMessagesTimelineRows(input: {
     }
     if (!timelineRowIsOwnUserMessage(row)) return row;
     const previous = result[index - 1];
-    const groupedWithNext = timelineRowIsOwnUserMessage(result[index + 1]);
-    const groupedWithPrevious = timelineRowIsOwnUserMessage(previous);
+    const next = result[index + 1];
+    // Messages group only under one sender, so each change of sender gets its name.
+    const sender = resolveMessageSender(row.message);
+    const groupedWithNext =
+      timelineRowIsOwnUserMessage(next) &&
+      sameMessageSender(sender, resolveMessageSender(next.message));
+    const groupedWithPrevious =
+      timelineRowIsOwnUserMessage(previous) &&
+      sameMessageSender(sender, resolveMessageSender(previous.message));
     const continuesSteer =
       groupedWithPrevious && messageIsSteer(row.message) && messageIsSteer(previous.message);
     if (!groupedWithNext && !groupedWithPrevious) return row;
     return { ...row, groupedWithNext, groupedWithPrevious, continuesSteer };
+  });
+}
+
+/**
+ * The timeline with only `sender`'s messages, for find's "From" filter. Tool calls, plans and
+ * other rows say nothing about who sent them, so they drop out too.
+ */
+export function filterTimelineRowsBySender(
+  rows: MessagesTimelineRow[],
+  sender: OrchestrationMessageSenderFilter | null,
+): MessagesTimelineRow[] {
+  if (sender === null) return rows;
+  return rows.flatMap((row) => {
+    if (row.kind !== "message") return [];
+    if (!messageSenderMatches(resolveMessageSender(row.message), sender)) return [];
+    // Neighbours are gone, so each kept message stands alone.
+    return row.groupedWithNext || row.groupedWithPrevious
+      ? [{ ...row, groupedWithNext: false, groupedWithPrevious: false, continuesSteer: false }]
+      : [row];
   });
 }
 

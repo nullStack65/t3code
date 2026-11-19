@@ -539,6 +539,23 @@ export const layer = HttpApiBuilder.group(
         ),
       )
       .handle(
+        "setClientFounder",
+        Effect.fn("environment.auth.setClientFounder")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const updated = yield* serverAuth.setClientSessionFounder(
+              args.payload.sessionId,
+              args.payload.founder,
+            );
+            return { updated };
+          },
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+            failEnvironmentInternal("client_session_founder_failed", error),
+          ),
+        ),
+      )
+      .handle(
         "approveConnectDevice",
         Effect.fn("environment.auth.approveConnectDevice")(
           function* (args) {

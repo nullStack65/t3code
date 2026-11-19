@@ -1,3 +1,8 @@
+import {
+  messageSenderDetail,
+  messageSenderLabel,
+  resolveMessageSender,
+} from "@t3tools/client-runtime/message-sender";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -2100,6 +2105,7 @@ function renderFeedEntry(
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
       const foldRowId = presentation.attribution === "agent" ? `agent:${message.id}` : null;
+      const sender = resolveMessageSender(message);
       // A linked environment's agent sent it from a thread there.
       const senderRef =
         message.linkedSender ??
@@ -2163,6 +2169,15 @@ function renderFeedEntry(
           ) : null}
           {presentation.guestName !== undefined ? (
             <GuestMessageName name={presentation.guestName} />
+          ) : null}
+          {sender.kind === "person" && !props.userMessageGrouping.groupedWithPrevious ? (
+            <Text
+              className="mb-1 pr-1 text-2xs text-foreground-muted opacity-80"
+              numberOfLines={1}
+            >
+              <Text className="font-t3-medium">{messageSenderLabel(sender)}</Text>
+              {messageSenderDetail(sender) === null ? "" : ` · ${messageSenderDetail(sender)}`}
+            </Text>
           ) : null}
           {mediaAttachments.length + pendingMedia.length > 0 ? (
             <View

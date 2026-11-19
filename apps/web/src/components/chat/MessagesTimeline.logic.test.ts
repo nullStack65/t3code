@@ -25,10 +25,11 @@ import {
 } from "../../test-fixtures";
 import type { TurnDiffSummary } from "../../types";
 import { describe, expect, it } from "vite-plus/test";
-import { MessageId, RunId } from "@t3tools/contracts";
+import { AuthSessionId, MessageId, RunId } from "@t3tools/contracts";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
+  filterTimelineRowsBySender,
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   deriveMessagesTimelineRowsWithState,
@@ -5156,5 +5157,69 @@ describe("isTimelineMinimapTurnVisible", () => {
     expect(isTimelineMinimapTurnVisible(500, undefined, 200, 210)).toBe(false);
     expect(isTimelineMinimapTurnVisible(10, 500, 500, 510)).toBe(false);
     expect(isTimelineMinimapTurnVisible(10, 500, null, null)).toBe(false);
+  });
+});
+
+describe("message senders in the timeline", () => {
+  const runId = RunId.make("sender-run");
+  const time = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
+  const sentBy = (founder: "kameron" | "jeff") => ({
+    sessionId: AuthSessionId.make(`session:${founder}`),
+    device: `${founder} laptop`,
+    deviceType: "desktop" as const,
+    founder,
+  });
+  const message = (
+    id: string,
+    second: number,
+    role: "user" | "assistant",
+    extra: Partial<TimelineEntry & { kind: "message" }>["message"] = undefined,
+  ): TimelineEntry => ({
+    kind: "message",
+    id,
+    createdAt: time(second),
+    message: {
+      id: MessageId.make(id),
+      role,
+      text: id,
+      runId,
+      createdAt: time(second),
+      updatedAt: time(second),
+      streaming: false,
+      ...extra,
+    },
+  });
+  const rows = deriveMessagesTimelineRows({
+    timelineEntries: [
+      message("kameron-1", 0, "user", { sentBy: sentBy("kameron") } as never),
+      message("kameron-2", 1, "user", { sentBy: sentBy("kameron") } as never),
+      message("jeff-1", 2, "user", { sentBy: sentBy("jeff") } as never),
+      message("reply", 3, "assistant"),
+    ],
+    latestRun: { runId, status: "completed", startedAt: time(0), completedAt: time(30) },
+    isWorking: false,
+    expandedRunIds: new Set(),
+    turnDiffSummaries: [],
+    supportsConversationRollback: false,
+  });
+
+  it("groups consecutive messages only under one sender", () => {
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get("kameron-1")).toMatchObject({ groupedWithNext: true });
+    expect(byId.get("kameron-2")).toMatchObject({
+      groupedWithPrevious: true,
+      groupedWithNext: false,
+    });
+    // Jeff's message starts a new group, so it shows his name.
+    expect(byId.get("jeff-1")).not.toHaveProperty("groupedWithPrevious", true);
+  });
+
+  it("keeps only the chosen sender's messages", () => {
+    expect(filterTimelineRowsBySender(rows, null)).toBe(rows);
+    expect(filterTimelineRowsBySender(rows, "jeff").map((row) => row.id)).toEqual(["jeff-1"]);
+    expect(filterTimelineRowsBySender(rows, "model").map((row) => row.id)).toEqual(["reply"]);
+    const kameron = filterTimelineRowsBySender(rows, "kameron");
+    expect(kameron.map((row) => row.id)).toEqual(["kameron-1", "kameron-2"]);
+    expect(kameron[1]).toMatchObject({ groupedWithPrevious: false });
   });
 });

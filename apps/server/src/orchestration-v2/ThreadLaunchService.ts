@@ -12,6 +12,7 @@ import {
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
   type OrchestrationV2DelegatedFrom,
+  type OrchestrationV2MessageSentBy,
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
@@ -83,6 +84,8 @@ export interface ThreadLaunchInitialMessage {
   readonly messageId?: MessageId;
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly senderThreadId?: ThreadId;
+  /** The signed-in client a person typed this on. Only the server's WebSocket handler sets it. */
+  readonly sentBy?: OrchestrationV2MessageSentBy;
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
@@ -1291,6 +1294,9 @@ const make = Effect.gen(function* () {
                 ...(input.initialMessage.senderThreadId === undefined
                   ? {}
                   : { senderThreadId: input.initialMessage.senderThreadId }),
+                ...(input.initialMessage.sentBy === undefined
+                  ? {}
+                  : { sentBy: input.initialMessage.sentBy }),
                 attachments: input.initialMessage.attachments,
                 ...(input.initialMessage.context ? { context: input.initialMessage.context } : {}),
                 ...(input.generateTitle === true ? { titleSeed: input.title } : {}),

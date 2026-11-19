@@ -125,6 +125,8 @@ export interface ServerClientSessionRecord {
   readonly lastConnectedAt: string | null;
   readonly connected: boolean;
   readonly current: boolean;
+  /** Who this environment's admin says uses the client; their messages carry the name. */
+  readonly founder?: import("@t3tools/contracts").Founder;
 }
 
 type ServerAuthGateState =

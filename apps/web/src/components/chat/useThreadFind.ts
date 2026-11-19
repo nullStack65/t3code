@@ -1,3 +1,4 @@
+import type { OrchestrationMessageSenderFilter } from "@t3tools/contracts";
 import type { InlineSkill } from "@t3tools/shared/inlineSkills";
 import type { OrchestrationV2SearchThreadResult, ScopedThreadRef } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -11,6 +12,7 @@ import {
   CLOSED_THREAD_FIND,
   closeThreadFind,
   setThreadFindQuery,
+  setThreadFindSender,
   useThreadFindOpen,
   useThreadFindStore,
   type ThreadFindLocalSelection,
@@ -83,6 +85,7 @@ export function useThreadFind({
         ? { entryId, runId: runId ?? null, occurrence }
         : null,
     findNavigationId: navigationId,
+    findSender: isOpen ? state.sender : null,
   };
   // Keep timeline identity stable during count and response updates to avoid extra jumps.
   const [storedTimeline, setTimeline] = useState(nextTimeline);
@@ -222,6 +225,10 @@ export function useThreadFind({
       onQueryChange: (query: string) => {
         if (threadKey !== null) setThreadFindQuery(threadKey, query);
       },
+      sender: state.sender,
+      onSenderChange: (sender: OrchestrationMessageSenderFilter | null) => {
+        if (threadKey !== null) setThreadFindSender(threadKey, sender);
+      },
       onNext: () => step(1),
       onPrevious: () => step(-1),
       onClose: closeThreadFind,
@@ -236,6 +243,7 @@ export interface TimelineFields {
   readonly findQuery: string;
   readonly activeFindMatch: ThreadFindMatch | null;
   readonly findNavigationId: number;
+  readonly findSender: OrchestrationMessageSenderFilter | null;
 }
 
 function sameTimeline(a: TimelineFields, b: TimelineFields) {
@@ -246,6 +254,7 @@ function sameTimeline(a: TimelineFields, b: TimelineFields) {
     a.findExpanded === b.findExpanded &&
     a.findQuery === b.findQuery &&
     a.findNavigationId === b.findNavigationId &&
+    a.findSender === b.findSender &&
     (aMatch === null || bMatch === null
       ? aMatch === bMatch
       : aMatch.entryId === bMatch.entryId &&

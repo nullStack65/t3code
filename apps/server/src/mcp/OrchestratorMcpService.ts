@@ -1184,6 +1184,8 @@ function timelineItem(input: {
     createdBy: message?.createdBy ?? null,
     creationSource: message?.creationSource ?? null,
     ...(message?.senderThreadId === undefined ? {} : { senderThreadId: message.senderThreadId }),
+    ...(message?.linkedSender === undefined ? {} : { linkedSender: message.linkedSender }),
+    ...(message?.sentBy === undefined ? {} : { sentBy: message.sentBy }),
     type: input.row.item.type,
     status: input.row.item.status,
     title: input.row.item.title,

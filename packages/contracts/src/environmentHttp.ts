@@ -29,6 +29,8 @@ import {
   AuthMcpTokenResult,
   AuthPairingCredentialResult,
   AuthRevokeClientSessionInput,
+  AuthSetClientSessionFounderInput,
+  AuthSetClientSessionFounderResult,
   AuthRevokePairingLinkInput,
   AuthApproveConnectDeviceInput,
   AuthApproveConnectDeviceResult,
@@ -144,6 +146,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "pairing_link_revoke_failed",
   "client_sessions_load_failed",
   "client_session_revoke_failed",
+  "client_session_founder_failed",
   "connect_device_approve_failed",
   "connect_device_revoke_failed",
   "project_snapshot_failed",
@@ -647,6 +650,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       payload: AuthRevokeClientSessionInput,
       success: AuthClientSessionRevokeResult,
       error: EnvironmentSessionRevokeErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setClientFounder", "/api/auth/clients/founder", {
+      headers: OptionalBearerHeaders,
+      payload: AuthSetClientSessionFounderInput,
+      success: AuthSetClientSessionFounderResult,
+      error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

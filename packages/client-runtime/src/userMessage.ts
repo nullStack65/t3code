@@ -62,8 +62,8 @@ export function resolveUserMessagePresentation(message: {
   readonly id?: string;
   readonly role: string;
   readonly text: string;
-  readonly createdBy?: OrchestrationV2Actor;
-  readonly creationSource?: OrchestrationV2CreationSource;
+  readonly createdBy?: OrchestrationV2Actor | undefined;
+  readonly creationSource?: OrchestrationV2CreationSource | undefined;
   readonly scheduledTaskId?: ScheduledTaskId | undefined;
   readonly context?: { readonly guest?: GuestMessageAttribution | undefined } | undefined;
 }): {
