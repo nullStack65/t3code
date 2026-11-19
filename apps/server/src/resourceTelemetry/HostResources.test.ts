@@ -13,12 +13,13 @@ import { vi } from "vite-plus/test";
 import * as HostResources from "./HostResources.ts";
 
 // An 8-CPU host; every cpus() call advances each CPU by 100 ms at `host.busy` utilization.
-const host = vi.hoisted(() => ({ busy: 0, reads: 0 }));
+const host = vi.hoisted(() => ({ busy: 0, reads: 0, load: 0 }));
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeOS>();
   return {
     ...actual,
     totalmem: () => 4 * 1024 ** 3,
+    loadavg: () => [host.load, 0, 0],
     cpus: () => {
       const elapsed = 100 * host.reads++;
       const times = {
@@ -51,12 +52,28 @@ const unlimitedCgroup = {
 };
 
 // Each path serves its values in order and repeats the last one.
-const linuxHost = (files: Record<string, ReadonlyArray<string>>) => {
+const linuxHost = (
+  files: Record<string, ReadonlyArray<string>>,
+  directories: Record<string, ReadonlyArray<string>> = {},
+) => {
   const reads = new Map<string, number>();
   return HostResources.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         FileSystem.layerNoop({
+          readDirectory: (path) => {
+            const entries = directories[path];
+            return entries
+              ? Effect.succeed([...entries])
+              : Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "NotFound",
+                    module: "FileSystem",
+                    method: "readDirectory",
+                    pathOrDescriptor: path,
+                  }),
+                );
+          },
           readFileString: (path) => {
             const values = files[path];
             if (!values) {
@@ -92,6 +109,49 @@ const read = Effect.gen(function* () {
 });
 
 describe("HostResources.layer", () => {
+  it.effect("reports load per host CPU and the agents running under this user", () => {
+    const manager = "/user.slice/user-1000.slice/user@1000.service";
+    const server = `${manager}/app.slice/t3.service`;
+    const agents = `/sys/fs/cgroup${manager}/app.slice/app-t3code.slice/app-t3code-agents.slice`;
+    return Effect.gen(function* () {
+      setup();
+      host.load = 20;
+      const snapshot = yield* read;
+      host.load = 0;
+
+      // 20 runnable on 8 CPUs; two populated scopes from two servers, one finished.
+      assert.strictEqual(snapshot.loadPerCpu, 2.5);
+      assert.strictEqual(snapshot.runningAgents, 2);
+    }).pipe(
+      Effect.provide(
+        linuxHost(
+          {
+            "/proc/self/cgroup": [`0::${server}\n`],
+            "/proc/meminfo": unlimitedCgroup["/proc/meminfo"],
+            [`${agents}/app-t3code-agents-a.slice/t3code-claude-1.scope/cgroup.events`]: [
+              "populated 1\nfrozen 0\n",
+            ],
+            [`${agents}/app-t3code-agents-a.slice/t3code-codex-2.scope/cgroup.events`]: [
+              "populated 0\nfrozen 0\n",
+            ],
+            [`${agents}/app-t3code-agents-b.slice/t3code-claude-3.scope/cgroup.events`]: [
+              "populated 1\nfrozen 0\n",
+            ],
+          },
+          {
+            [agents]: ["app-t3code-agents-a.slice", "app-t3code-agents-b.slice", "cgroup.procs"],
+            [`${agents}/app-t3code-agents-a.slice`]: [
+              "t3code-claude-1.scope",
+              "t3code-codex-2.scope",
+              "memory.max",
+            ],
+            [`${agents}/app-t3code-agents-b.slice`]: ["t3code-claude-3.scope"],
+          },
+        ),
+      ),
+    );
+  });
+
   it.effect("reports the CPU quota and usage of the server's cgroup", () =>
     Effect.gen(function* () {
       setup();

@@ -2,8 +2,11 @@ import {
   CHATGPT_USAGE_URL,
   collectLimitAccounts,
   collectExternalUsageLinks,
+  collectAccountOwners,
   collectLimitNotices,
-  collectLimitPools,
+  collectLimitOwnerGroups,
+  collectNotApplicable,
+  UNASSIGNED_OWNER,
   cursorUsageWindowDetails,
   displayLimitWindows,
   formatResetsIn,
@@ -18,7 +21,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
-import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
+import { AlertTriangleIcon, CircleSlashIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
 import {
   createContext,
   Fragment,
@@ -585,13 +588,23 @@ function PoolWindowCard({
   );
 }
 
-function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: number }) {
+function PoolSection({
+  pool,
+  now,
+  nested,
+}: {
+  readonly pool: LimitPool;
+  readonly now: number;
+  /** Under an owner heading, the provider heading drops a level. */
+  readonly nested: boolean;
+}) {
   const color = barColor(pool.driver);
   const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
   const windows = displayLimitWindows(pool);
+  const Heading = nested ? "h3" : "h2";
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="flex items-center gap-2 text-sm font-medium text-foreground">
+      <Heading className="flex items-center gap-2 text-sm font-medium text-foreground">
         <ProviderInstanceIcon
           driverKind={pool.driver}
           displayName={label}
@@ -600,7 +613,7 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
           iconClassName="size-4 text-foreground/80"
         />
         {label}
-      </h2>
+      </Heading>
       {windows.map((window) => {
         const details =
           pool.driver === "cursor" ? cursorUsageWindowDetails(window.id, pool) : undefined;
@@ -628,22 +641,46 @@ export function UsageLimitsPooled({
 }) {
   const [segmentPopover] = useState(() => PopoverCreateHandle<SegmentPayload>());
   const segmentPopoverActions = useRef<PopoverPrimitive.Root.Actions | null>(null);
-  const pools = collectLimitPools(collectLimitAccounts(presentations), now);
+  const groups = collectLimitOwnerGroups(
+    collectLimitAccounts(presentations),
+    collectAccountOwners(presentations),
+    now,
+  );
+  const pools = groups.flatMap((group) => group.pools);
   const notices = collectLimitNotices(presentations);
+  const notApplicable = collectNotApplicable(presentations);
+  // Without an owner map everything is Unassigned; a lone heading would be noise.
+  const showOwners = groups.some((group) => group.owner !== UNASSIGNED_OWNER);
   const externalLinks = collectExternalUsageLinks(presentations);
   return (
     <div className="flex flex-col gap-8">
-      {pools.length === 0 && notices.length === 0 && externalLinks.length === 0 ? (
+      {pools.length === 0 &&
+      notices.length === 0 &&
+      externalLinks.length === 0 &&
+      notApplicable.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           No provider on the selected environments reports subscription limits.
         </p>
       ) : null}
       <SegmentPopoverContext value={segmentPopover}>
-        {pools.map((pool) => (
-          <Fragment key={pool.driver}>
-            <PoolSection pool={pool} now={now} />
-          </Fragment>
-        ))}
+        {groups.map((group) =>
+          showOwners ? (
+            <section key={group.owner} className="flex flex-col gap-5">
+              <h2 className="border-b border-border/60 pb-1.5 text-base font-semibold text-foreground">
+                {group.owner}
+              </h2>
+              {group.pools.map((pool) => (
+                <PoolSection key={pool.driver} pool={pool} now={now} nested />
+              ))}
+            </section>
+          ) : (
+            <Fragment key={group.owner}>
+              {group.pools.map((pool) => (
+                <PoolSection key={pool.driver} pool={pool} now={now} nested={false} />
+              ))}
+            </Fragment>
+          ),
+        )}
       </SegmentPopoverContext>
       <Popover handle={segmentPopover} actionsRef={segmentPopoverActions}>
         {({ payload }) =>
@@ -692,7 +729,33 @@ export function UsageLimitsPooled({
         </section>
       ))}
       <LimitNotices notices={notices} />
+      <NotApplicableList entries={notApplicable} />
     </div>
+  );
+}
+
+/** Usage that cannot be read on this setup, with why; informational, not a warning. */
+function NotApplicableList({
+  entries,
+}: {
+  readonly entries: ReturnType<typeof collectNotApplicable>;
+}) {
+  if (entries.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-2 text-xs text-muted-foreground">
+      <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+        <CircleSlashIcon className="size-4 text-muted-foreground" aria-hidden />
+        Not applicable
+      </h2>
+      <ul className="flex flex-col gap-1">
+        {entries.map((entry) => (
+          <li key={entry.subject} className="break-words">
+            <span className="font-medium text-foreground">{entry.subject}:</span>{" "}
+            {entry.reason.replace(/^Not applicable:\s*/, "")}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

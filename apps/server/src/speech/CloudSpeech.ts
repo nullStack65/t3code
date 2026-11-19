@@ -14,10 +14,12 @@ import {
 } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import { cloudSpeechLanguages, effectiveSpeechLanguage } from "@t3tools/shared/speech";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
@@ -35,6 +37,11 @@ const endpoints = {
 };
 const OPENROUTER_CATALOG_URL =
   "https://openrouter.ai/api/v1/models?output_modalities=transcription&zdr=true";
+/**
+ * Keys a host injects at launch (for example `infisical run -- t3`), so nobody types or sees them.
+ * A key saved in settings still wins.
+ */
+const HOST_KEY_VARIABLES = { assemblyai: "ASSEMBLYAI_API_KEY" } as const;
 const isApiKey = Schema.is(CloudSpeechApiKey);
 const isModelId = Schema.is(CloudSpeechModelId);
 const sameCredential = Schema.toEquivalence(SettingsSecretValue);
@@ -140,15 +147,34 @@ export const layer = Layer.effect(
     const settings = yield* ServerSettings.ServerSettingsService;
     const resolver = yield* SecretResolver.SecretResolver;
     const http = yield* HttpClient.HttpClient;
-    const credentials = settings.getSettings.pipe(
+    const hostAssemblyAi = Option.filter(
+      Option.map(yield* Config.Redacted(HOST_KEY_VARIABLES.assemblyai).pipe(Config.option), (key) =>
+        Redacted.value(key).trim(),
+      ),
+      isApiKey,
+    );
+    // Agent subprocesses inherit this environment; only this service should hold the key.
+    // @effect-diagnostics-next-line processEnvInEffect:off
+    delete process.env[HOST_KEY_VARIABLES.assemblyai];
+    const savedCredentials = settings.getSettings.pipe(
       Effect.map((value) => value.cloudSpeechCredentials),
     );
-    const configured = credentials.pipe(
+    const credentials = savedCredentials.pipe(
+      Effect.map((saved) =>
+        !saved.assemblyai && Option.isSome(hostAssemblyAi)
+          ? { ...saved, assemblyai: hostAssemblyAi.value }
+          : saved,
+      ),
+    );
+    const configured = savedCredentials.pipe(
       Effect.map(({ openai, xai, openrouter, assemblyai }) => ({
         openai: Boolean(openai),
         xai: Boolean(xai),
         openrouter: Boolean(openrouter),
-        assemblyai: Boolean(assemblyai),
+        assemblyai: Boolean(assemblyai) || Option.isSome(hostAssemblyAi),
+        ...(!assemblyai && Option.isSome(hostAssemblyAi)
+          ? { hostManaged: ["assemblyai" as const] }
+          : {}),
       })),
     );
     const execute = (request: HttpClientRequest.HttpClientRequest) =>

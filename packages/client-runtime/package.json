@@ -339,6 +339,14 @@
       "types": "./src/state/threads.ts",
       "default": "./src/state/threads.ts"
     },
+    "./state/thread-attribution": {
+      "types": "./src/state/threadAttribution.ts",
+      "default": "./src/state/threadAttribution.ts"
+    },
+    "./state/thread-list-filter": {
+      "types": "./src/state/threadListFilter.ts",
+      "default": "./src/state/threadListFilter.ts"
+    },
     "./state/thread-activity-announcement": {
       "types": "./src/state/threadActivityAnnouncement.ts",
       "default": "./src/state/threadActivityAnnouncement.ts"

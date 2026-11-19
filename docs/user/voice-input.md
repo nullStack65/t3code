@@ -12,20 +12,26 @@ to a named environment on that phone, open **Settings → Voice → Transcribe o
 
 ## Choose where audio goes
 
-On web and desktop, you choose where transcription runs.
-Nothing is sent until you choose one: open **Settings → Voice** and set
-**Transcribe with** to the environment that should transcribe for you.
-On a new device, the microphone or dictation shortcut opens that setting from the composer.
+On web and desktop, you choose what transcribes your speech.
+Nothing is sent until you choose: open **Settings → Voice** and set
+**Transcribe with** to a backend: **AssemblyAI**, **OpenAI**, **Grok Voice Transcribe**,
+**OpenRouter**, or **Local model** for a speech model you download.
+On a new device, the microphone or dictation shortcut opens that setting from the composer
+and offers **AssemblyAI** straight away.
+The backend runs on your own environment unless you pick another under
+**Advanced → Transcription environment**, which appears when more than one environment can run it.
 Microphone audio recorded on this device is sent to that environment over your
 authenticated connection, transcribed there, and discarded. The choice is saved
 on this device only, so every computer and browser you use asks for it once.
 Set it back to **Off** at any time; a recording in progress is discarded.
 
 If the chosen environment goes offline, voice input waits for it. T3 Code never
-substitutes another environment.
+substitutes another environment. If you pick a backend while its environment is offline,
+choose **Open Environments** to reconnect it.
 
-For cloud dictation, choose **OpenAI** or **Grok Voice Transcribe** via the environment
-you want to use. If it needs a key, enter one and choose **Save and enable**.
+Cloud backends need an API key on the environment. If the environment was started
+with one, such as `ASSEMBLYAI_API_KEY` loaded from your vault, just choose **Use AssemblyAI**;
+there is nothing to type. Otherwise enter a key and choose **Save and enable**.
 You can also choose a [secret provider](secrets.md) instead of **Value** and enter a
 reference. Unlock the vault on that environment before dictating. Anyone with
 dictation access to the environment can use the key, but only this device opts in.
@@ -33,7 +39,7 @@ If a key is already saved, just confirm the provider. After
 you stop, the environment forwards your recording and any vocabulary hints to
 the selected provider, which bills its API account. No local model download or chat
 subscription is needed. Switch back to **This device** on mobile or **Off** on
-web and desktop to stop sharing. Removing the key stops that provider for everyone
+web and desktop to stop sharing. Removing a saved key stops that provider for everyone
 on the environment.
 
 **OpenRouter** works the same way but has no default model: pick one from its live

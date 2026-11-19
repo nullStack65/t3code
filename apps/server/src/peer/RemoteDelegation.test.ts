@@ -156,6 +156,7 @@ const loadOf = (cpuUtilization: number): HostResourcesSnapshot => ({
   cpuCount: 8,
   availableMemoryBytes: 8 * GiB,
   totalMemoryBytes: 16 * GiB,
+  placementRole: "headless",
 });
 
 const makeBoxThread = Effect.gen(function* () {
@@ -517,6 +518,7 @@ const boxToolkitLayer = (thread: BoxThread) => {
       ),
   });
   const layerBoxLaunches = Layer.mock(ThreadLaunch.ThreadLaunchService)({
+    checkWorktreeBase: () => Effect.void,
     launch: (input) =>
       Ref.get(thread.runless).pipe(
         Effect.flatMap((runless) =>
@@ -887,6 +889,23 @@ const launchPlaced = (
       message: "Run the suite wherever there is room.",
       modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
       placement: "auto",
+      ...args,
+    },
+    outsideScope,
+  );
+
+/** A launch that says nothing about placement, so this machine's default decides. */
+const launchUnplaced = (
+  laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
+  args: Record<string, unknown>,
+) =>
+  laptopEnv.call(
+    "t3_thread_launch",
+    {
+      projectId: "project:laptop",
+      title: "Suite",
+      message: "Run the suite wherever there is room.",
+      modelSelection: { instanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
       ...args,
     },
     outsideScope,
@@ -1620,6 +1639,73 @@ it.effect("an outside client's auto-placed launch starts at the project's defaul
       const launched = yield* launchPlaced(a, { clientRequestId: "defaults" });
       expect(launched.isError, JSON.stringify(launched.content)).toBe(false);
       expect((yield* Ref.get(thread.launchedWith))?.runtimeMode).toBe("approval-required");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a fresh worktree from origin is placed without asking, unless kept here", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const localLaunches = yield* Ref.make(0);
+      const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+        localLaunch: Ref.update(localLaunches, (count) => count + 1),
+      });
+      yield* linkTo(a.links, b, "full-access");
+      const fresh = { type: "worktree", baseRef: "main", startFromOrigin: true };
+      // Without a key nothing could find the machine again after a lost answer: it stays here.
+      yield* launchUnplaced(a, { workspaceStrategy: fresh });
+      expect(yield* Ref.get(localLaunches)).toBe(1);
+      const placed = yield* launchUnplaced(a, {
+        clientRequestId: "fresh",
+        workspaceStrategy: fresh,
+      });
+      expect(placed.isError, JSON.stringify(placed.content)).toBe(false);
+      expect(placed.structuredContent).toMatchObject({ environmentId: box.environmentId });
+      expect(yield* Ref.get(localLaunches)).toBe(1);
+
+      // 'here', or the fleet default turned off, keeps it on this machine.
+      yield* launchPlaced(a, {
+        placement: "here",
+        clientRequestId: "kept",
+        workspaceStrategy: fresh,
+      });
+      expect(yield* Ref.get(localLaunches)).toBe(2);
+      yield* a.settings.updateSettings({ automaticPlacementByDefault: false });
+      yield* launchUnplaced(a, { clientRequestId: "off", workspaceStrategy: fresh });
+      expect(yield* Ref.get(localLaunches)).toBe(3);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("placement nobody asked for runs here when no machine has room", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      yield* Ref.set(thread.resources, { ...loadOf(0.99) });
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const localLaunches = yield* Ref.make(0);
+      const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+        localLaunch: Ref.update(localLaunches, (count) => count + 1),
+      });
+      yield* linkTo(a.links, b, "full-access");
+      const fresh = { type: "worktree", baseRef: "main", startFromOrigin: true };
+      yield* launchUnplaced(a, { clientRequestId: "room", workspaceStrategy: fresh });
+      expect(yield* Ref.get(localLaunches)).toBe(1);
+      expect(yield* Ref.get(thread.launched)).toBeNull();
+      // Asked for, it still fails loudly instead.
+      const asked = yield* launchPlaced(a, { clientRequestId: "full", workspaceStrategy: fresh });
+      expect(asked.isError).toBe(true);
+      expect(yield* Ref.get(localLaunches)).toBe(1);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

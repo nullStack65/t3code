@@ -1742,16 +1742,24 @@ describe("Working section beta", () => {
   const ids = (layout: ReturnType<typeof buildThreadListV2Items>) =>
     layout.items.map((item) => item.thread.id);
 
-  it("folds unpinned working threads into a collapsed shelf", () => {
+  it("folds working threads, pinned ones too, into a collapsed shelf", () => {
     const layout = build();
-    expect(ids(layout)).toEqual([
-      "pinned-working",
-      "finished-late",
-      "asks-approval",
-      "finished-early",
-    ]);
-    expect(layout.workingCount).toBe(1);
-    expect(layout.workingShelfHeaderIndex).toBe(4);
+    expect(ids(layout)).toEqual(["finished-late", "asks-approval", "finished-early"]);
+    expect(layout.workingCount).toBe(2);
+    expect(layout.workingShelfHeaderIndex).toBe(3);
+    // A pinned thread waiting on its own child agent is Working, not in the top list.
+    const waitingOnChild = makeThread({
+      id: ThreadId.make("pinned-waiting"),
+      title: "pinned-waiting",
+      pinnedAt: "2026-06-01T00:00:00.000Z",
+      runtime: { ...running, status: "idle" },
+      pendingBackgroundTasks: [{ taskId: "child", kind: "subagent" }],
+    });
+    expect(ids(build({ threads: [waitingOnChild] }))).toEqual([]);
+    expect(build({ threads: [waitingOnChild] }).workingCount).toBe(1);
+    expect(
+      ids(build({ threads: [{ ...waitingOnChild, runtime: null, pendingBackgroundTasks: [] }] })),
+    ).toEqual(["pinned-waiting"]);
 
     const off = build({ workingShelfEnabled: false });
     expect(ids(off)).toContain("working");
@@ -1791,7 +1799,7 @@ describe("Working section beta", () => {
       inboxReturnAt: (thread) =>
         thread.id === "finished-early" ? Date.parse("2026-06-01T04:00:00.000Z") : undefined,
     });
-    expect(ids(layout).slice(1)).toEqual(["finished-early", "finished-late", "asks-approval"]);
+    expect(ids(layout)).toEqual(["finished-early", "finished-late", "asks-approval"]);
   });
 
   it("places the shelf after queued tasks and before snoozed and settled threads", () => {

@@ -49,6 +49,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import {
+  CODEX_CUSTOM_PROVIDER_USAGE_MESSAGE,
   checkCodexProviderStatus,
   mapCodexModelCapabilities,
   type CodexAppServerProviderSnapshot,
@@ -731,6 +732,25 @@ it.layer(
 
         assert.strictEqual(status.status, "ready");
         assert.strictEqual(status.auth.status, "unknown");
+      }),
+    );
+
+    it.effect("says why usage is not applicable for a gateway-routed instance", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: { account: null, requiresOpenaiAuth: false },
+              endpoint: "http://127.0.0.1:3425",
+              nativeUsage: false,
+            }),
+          ),
+        );
+        assert.strictEqual(status.usageLimits?.unavailable?.reason, "unsupported");
+        assert.strictEqual(
+          status.usageLimits?.unavailable?.message,
+          CODEX_CUSTOM_PROVIDER_USAGE_MESSAGE,
+        );
       }),
     );
 

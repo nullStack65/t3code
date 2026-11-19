@@ -806,9 +806,16 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
       withoutOld?.threads.map((thread) => thread.id),
       ["parent", "live", ...recent, "remote-parent", "remote-child-parent"],
     );
-    assert.deepEqual(withoutOld?.olderSettled?.counts, [
-      { projectId: ProjectId.make("project"), count: 2 },
-    ]);
+    const counts = withoutOld?.olderSettled?.counts ?? [];
+    assert.deepEqual(
+      counts.map(({ projectId, count }) => ({ projectId, count })),
+      [{ projectId: ProjectId.make("project"), count: 2 }],
+    );
+    // The index-built snapshot breaks the count down too, for clients' inbox filters.
+    assert.equal(
+      counts[0]?.groups?.reduce((total, group) => total + group.count, 0),
+      counts[0]?.count,
+    );
   }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
 );
 

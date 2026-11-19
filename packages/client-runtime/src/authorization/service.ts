@@ -70,6 +70,8 @@ export class RemoteEnvironmentAuthorization extends Context.Service<
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      /** A loopback port forward to another machine, such as a tunnel: it may take a remote's time to answer. */
+      readonly forwarded?: boolean;
     }) => Effect.Effect<AuthorizedRemoteEnvironment, ConnectionAttemptError>;
     readonly authorizeDpop: (input: {
       readonly expectedEnvironmentId: EnvironmentId;
@@ -186,6 +188,7 @@ export const make = Effect.gen(function* () {
       readonly expectedEnvironmentId: EnvironmentId;
       readonly httpBaseUrl: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly forwarded?: boolean;
     }) {
       const checked = checkedDescriptors.get(input.httpBaseUrl);
       checkedDescriptors.delete(input.httpBaseUrl);
@@ -200,7 +203,9 @@ export const make = Effect.gen(function* () {
               input.httpBaseUrl,
               input.connectionMethod,
               // An SSH forward listens on loopback but reaches a remote host.
-              input.connectionMethod === "direct" && isNearbyAddress(input.httpBaseUrl)
+              input.connectionMethod === "direct" &&
+                input.forwarded !== true &&
+                isNearbyAddress(input.httpBaseUrl)
                 ? NEARBY_DESCRIPTOR_TIMEOUT_MS
                 : undefined,
             ).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
@@ -223,6 +228,7 @@ export const make = Effect.gen(function* () {
       readonly wsBaseUrl: string;
       readonly bearerToken: string;
       readonly connectionMethod: ClientConnectionMethod;
+      readonly forwarded?: boolean;
     }) {
       const descriptor = yield* verifyDirectEndpoint(input);
       const socketUrl = yield* resolveRemoteWebSocketConnectionUrl({

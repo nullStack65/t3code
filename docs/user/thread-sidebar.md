@@ -210,6 +210,16 @@ rules to connected environments that support shared settings. Offline environmen
 and older servers keep their previous values. Changing a rule does not reopen
 already settled threads.
 
+The **Settled** count includes older settled threads the shelf has not loaded yet, filtered like
+the list, so every app connected to the same machines shows the same number. A count such as
+`25+` means an older server reported only its total, so filtered threads it holds are not counted.
+
+Threads from before inbox routing are credited to their machine's owner. Set the owner once per
+machine in **Settings → Threads → Machine owners**. The machine keeps it, so every app connected to
+that machine agrees. Machines on older versions use each device's own choice instead. After a
+machine upgrades, a device that had chosen an owner for it offers **Set on machine** to keep
+that choice.
+
 ## Link a pull request
 
 The server finds the PR for each unsettled thread's saved branch, even when your

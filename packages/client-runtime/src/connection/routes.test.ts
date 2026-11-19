@@ -8,7 +8,7 @@ import {
   type ConnectionRoute,
 } from "./catalog.ts";
 import { pullRequestRoutingConnectionKey } from "./pullRequestRoutingPermissions.ts";
-import { BearerConnectionTarget, RelayConnectionTarget } from "./model.ts";
+import { BearerConnectionTarget, PrimaryConnectionTarget, RelayConnectionTarget } from "./model.ts";
 import {
   connectionRouteId,
   connectionRouteKind,
@@ -73,7 +73,7 @@ describe("connection routes", () => {
     expect(connectionRouteLabel(direct("mesh", "http://100.96.0.1:3773/"))).toBe("VPN");
     expect(connectionRouteKind(TAILNET)).toBe("tailnet");
     expect(connectionRouteKind(PUBLIC)).toBe("public");
-    expect(connectionRouteKind(direct("lo", "http://127.0.0.1:3773/"))).toBe("loopback");
+    expect(connectionRouteKind(direct("lo", "http://127.0.0.1:3773/"))).toBe("forward");
     expect(connectionRouteKind(direct("ts6", "http://[fd7a:115c:a1e0::1]:3773/"))).toBe("tailnet");
     expect(connectionRouteLabel(TAILNET)).toBe("Tailscale");
     expect(connectionRouteLabel(RELAY)).toBe("T3 Connect");
@@ -106,6 +106,36 @@ describe("connection routes", () => {
     expect(isNearbyAddress("https://desk.tail1234.ts.net/")).toBe(false);
     expect(isNearbyAddress("https://desk.example.com/")).toBe(false);
     expect(isNearbyAddress("not a url")).toBe(false);
+  });
+
+  it("tells a forwarded loopback port from a server on this device", () => {
+    const forward = direct("r720", "http://127.0.0.1:23780/");
+    expect(connectionRouteKind(forward)).toBe("forward");
+    expect(connectionRouteLabel(forward)).toBe("Forwarded");
+    // Its far side is authenticated, and the port cannot move to another host.
+    expect(routeKeepsItsHost(forward)).toBe(true);
+    const wsl = direct("local:wsl:Ubuntu", "http://127.0.0.1:3774/");
+    expect(connectionRouteKind(wsl)).toBe("loopback");
+    expect(connectionRouteLabel(wsl)).toBe("This device");
+    const primary: ConnectionRoute = {
+      target: new PrimaryConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "Desk",
+        httpBaseUrl: "http://127.0.0.1:3773/",
+        wsBaseUrl: "ws://127.0.0.1:3773/",
+      }),
+      profile: Option.none(),
+    };
+    expect(connectionRouteKind(primary)).toBe("loopback");
+  });
+
+  it("places a direct route ahead of a forward, and a forward behind direct routes", () => {
+    const forward = direct("r720", "http://127.0.0.1:23780/");
+    expect(insertRoute([forward, RELAY], TAILNET)).toEqual([TAILNET, forward, RELAY]);
+    expect(insertRoute([forward], LAN)).toEqual([LAN, forward]);
+    expect(insertRoute([LAN, TAILNET, RELAY], forward)).toEqual([LAN, TAILNET, forward, RELAY]);
+    // An order already saved, possibly dragged, is not rearranged.
+    expect(insertRoute([forward, TAILNET], LAN)).toEqual([LAN, forward, TAILNET]);
   });
 
   it("places a new route after faster kinds and ahead of T3 Connect", () => {

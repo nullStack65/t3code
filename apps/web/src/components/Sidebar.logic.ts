@@ -76,10 +76,18 @@ export function resolveSidebarRowAccessibility(input: {
   readonly title: string;
   readonly statusLabel: string | null;
   readonly projectDisplayName: string | null;
+  readonly attributionLabel?: string | null;
   readonly isActive: boolean;
 }): { readonly label: string; readonly current: "page" | undefined } {
   return {
-    label: [input.title, input.statusLabel, input.projectDisplayName].filter(Boolean).join(", "),
+    label: [
+      input.title,
+      input.statusLabel,
+      input.projectDisplayName,
+      input.attributionLabel ? `from ${input.attributionLabel}` : null,
+    ]
+      .filter(Boolean)
+      .join(", "),
     current: input.isActive ? "page" : undefined,
   };
 }
@@ -200,6 +208,18 @@ export function resolveSidebarThreadSection(input: {
   if (input.settled) return "settled";
   if (input.pinned) return "pinned";
   return "active";
+}
+
+/**
+ * The shelf a thread lists in while the Working shelf is on. Work the thread waits on, such as
+ * its own background task or child agent, keeps it Working even when pinned; it returns to
+ * Pinned when it finishes. Snoozed and settled threads stay put.
+ */
+export function resolveSidebarShelf(
+  section: SidebarSection,
+  working: boolean,
+): SidebarSection | "working" {
+  return working && (section === "active" || section === "pinned") ? "working" : section;
 }
 
 const SIDEBAR_MARKER_PREFIX = "sidebar-marker-";

@@ -1,5 +1,7 @@
 import {
   EnvironmentId,
+  inboxRoutingFor,
+  makeThreadInbox,
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationV2GetShellSnapshotError,
   ProjectId,
@@ -38,6 +40,7 @@ import {
   isListedSettledThread,
   olderSettledCountKey,
   settledShelfFrontier,
+  settledShelfTotal,
   unloadedOlderSettledCount,
   wantedOlderSettledPages,
   type OlderSettled,
@@ -52,6 +55,7 @@ const older: OlderSettled = {
   before,
   beforeMs: 50 * DAY,
   counts: new Map([[project, 3]]),
+  groups: null,
 };
 
 const row = (
@@ -96,6 +100,56 @@ describe("olderSettledCountKey", () => {
     // An older row that moves to another project.
     expect(key([{ ...base[0]!, projectId: ProjectId.make("project-b") }, base[1]!])).not.toBe(
       start,
+    );
+    // An older row routed to another inbox, which moves it between the counts' groups.
+    expect(
+      key([
+        { ...base[0]!, inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }) },
+        base[1]!,
+      ]),
+    ).not.toBe(start);
+  });
+
+  it("changes when a parent an older row takes its sender from is rerouted", () => {
+    const agentWork = makeThreadInbox({
+      actor: { kind: "agent", id: "lead" },
+      routing: inboxRoutingFor("agents"),
+    });
+    const parent = { ...row("parent", { createdDay: 60 }), inbox: agentWork };
+    const grandparent = row("grandparent", { createdDay: 60 });
+    const child = {
+      ...row("child-old", { settledDay: 10 }),
+      lineage: {
+        parentThreadId: parent.id,
+        relationshipToParent: null,
+        rootThreadId: grandparent.id,
+      },
+      inbox: agentWork,
+      parentFounder: null,
+    } as OrchestrationV2ThreadShell;
+    const withParent = (lineageParent: OrchestrationV2ThreadShell) => [
+      child,
+      { ...lineageParent, lineage: { ...lineageParent.lineage, parentThreadId: grandparent.id } },
+      grandparent,
+    ];
+    const start = key(withParent(parent));
+    const jeff = inboxRoutingFor("jeff");
+    // The parent, and through its ownerless agent work, the grandparent.
+    expect(key(withParent({ ...parent, inbox: { ...agentWork, ...jeff } }))).not.toBe(start);
+    expect(
+      key([
+        ...withParent(parent).slice(0, 2),
+        { ...grandparent, inbox: { ...agentWork, ...jeff } },
+      ]),
+    ).not.toBe(start);
+    // A new stamp from the server.
+    expect(key([{ ...child, parentFounder: "jeff" }, ...withParent(parent).slice(1)])).not.toBe(
+      start,
+    );
+    // A parent of a row with its own owner does not move its group.
+    const owned = { ...child, inbox: { ...agentWork, ...jeff } };
+    expect(key([owned, { ...parent, inbox: makeThreadInbox({ actor: null }) }])).toBe(
+      key([owned, parent]),
     );
   });
 
@@ -204,6 +258,33 @@ it("counts older threads the client does not hold, once", () => {
       ],
     }),
   ).toBe(18);
+});
+
+it("never reads a lower-bound total below the Settled rows on screen", () => {
+  // A totals-only server and a filter that shows part of it: 3 older counted, 40 loaded and
+  // listed after several pages. Subtracting them from no total would read "0+".
+  const loaded = Array.from({ length: 40 }, (_, index) => ({
+    source: row(`paged-${index}`, { settledDay: 10 }),
+    environmentId,
+  }));
+  const total = settledShelfTotal({
+    olderSettled: () => older,
+    scopes: [{ environmentId, projectIds: null }],
+    threads: loaded,
+    settledCount: loaded.length + 2,
+    filter: { matches: () => true, coverage: () => "some" },
+  });
+  expect(total).toEqual({ count: 42, exact: false });
+  // An exact total still nets loaded rows against the server's count.
+  expect(
+    settledShelfTotal({
+      olderSettled: () => older,
+      scopes: [{ environmentId, projectIds: null }],
+      threads: loaded.slice(0, 3),
+      settledCount: 5,
+      filter: null,
+    }),
+  ).toEqual({ count: 5, exact: true });
 });
 
 describe("wantedOlderSettledPages", () => {

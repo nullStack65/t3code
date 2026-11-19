@@ -1,4 +1,3 @@
-import { effectiveInboxView, matchesInboxView } from "@t3tools/contracts";
 import {
   type EnvironmentThreadShell,
   type PendingSubagentRequest,
@@ -21,6 +20,7 @@ import {
 
 import { getClientSettings, subscribeClientSettings } from "../hooks/useSettings";
 import { isWindowsPlatform } from "../lib/utils";
+import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
 import { environmentSummaries } from "../state/presentation";
 import { environmentShell } from "../state/shell";
 import { environmentThreadShells } from "../state/threads";
@@ -114,9 +114,10 @@ export function startThreadNotifications(
       ? new Set(registry.get(environmentThreadShells.threadRefsAtom).map(threadKey))
       : null;
     const outsideInbox = new Set<string>();
+    const filter = threadListFilterOf(getClientSettings());
     for (const [environmentId, state] of watched) {
       for (const [threadId, entry] of state.previous) {
-        if (!matchesInboxView(entry.thread.source.inbox, effectiveInboxView(getClientSettings())))
+        if (!matchesThreadListFilter({ environmentId, source: entry.thread.source }, filter))
           outsideInbox.add(threadKey({ environmentId, threadId }));
       }
     }
@@ -143,7 +144,13 @@ export function startThreadNotifications(
     kind: ThreadNotificationKind,
   ) => {
     const { thread, status } = state;
-    if (!matchesInboxView(thread.source.inbox, effectiveInboxView(getClientSettings()))) return;
+    if (
+      !matchesThreadListFilter(
+        { environmentId, source: thread.source },
+        threadListFilterOf(getClientSettings()),
+      )
+    )
+      return;
     if (
       registry
         .get(environmentThreadShells.hiddenThreadKeysAtom)

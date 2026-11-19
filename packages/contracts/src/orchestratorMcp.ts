@@ -185,7 +185,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   placement: Schema.optional(
     Schema.Literals(["auto"]).annotate({
       description:
-        "'auto': for work that needs none of your checkout's changes. Runs here or on a linked environment with spare capacity, this repository's project and your exact provider and model; there, in that project's checkout. Ignored with target.environmentId or isolation. Reuse clientRequestId on retry to keep the environment chosen.",
+        "'auto': use for any work that needs none of your checkout's changes. Runs on the least-loaded headless machine, here or linked, with spare capacity, this repository's project and your exact provider and model; there, in that project's checkout. Ignored with target.environmentId or isolation. Reuse clientRequestId on retry to keep the environment chosen.",
     }),
   ),
   mode: Schema.optional(

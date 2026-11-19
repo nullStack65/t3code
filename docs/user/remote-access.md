@@ -141,7 +141,9 @@ route** in the machine's route list, or next to it in the T3 Connect list.
 A pairing link for a saved machine is refused when it comes from an address
 that machine does not have yet; add that address with **Add route** instead.
 Pairing again over an address the machine already has still works. A new route
-is placed by speed, in that order, and you can reorder routes at any time.
+is placed by speed, in that order, and you can reorder routes at any time. A
+`localhost` port forwarded to the machine, such as a `cloudflared access tcp`
+tunnel, shows as Forwarded and is placed after its LAN and Tailscale routes.
 
 While connected through T3 Connect or a paired address, T3 Code also learns the
 machine's current LAN and Tailscale addresses and adds them as routes, so
@@ -413,6 +415,29 @@ one `target.projectId` names), and this thread wakes with its result when it
 ends, as for any delegated task. It keeps following the task across restarts.
 If the other machine revokes the link, or the link is removed here, the task
 fails with that reason.
+
+### Spread agent work across linked machines
+
+Agents can let T3 Code pick the machine for independent work: a task with
+`placement: "auto"`, or a new thread in a worktree started from origin. In
+Closura builds the second needs no request when the agent passes a
+`clientRequestId`. Turn **Place new agent threads
+automatically** off in **Settings → Labs** to keep those threads on this machine.
+
+T3 Code picks the machine with the most room, judged by CPU use, load per core,
+free memory and how many agents already run there. Headless machines are used
+first. A Linux machine marked as someone's computer gets work only when every
+headless machine is full and nobody is using it. Agents there are capped at half
+its cores and get low CPU and disk priority, and more of its memory is kept free,
+so it stays responsive. A Mac or Windows machine, or one on an older release,
+never takes placed work from another machine. If no machine has room, work that
+started here stays here.
+
+Each machine decides its own role in **Settings → Labs → Load balancing**. The
+**Detect** setting treats the desktop app, a Mac, Windows, or a Linux graphical
+login as someone's computer. Set a headless machine that also runs a desktop,
+such as a computer-use host, to **Headless** by hand. A linked machine is used
+only if its link allows launching threads, not with read-only access.
 
 ## Manage or revoke access
 

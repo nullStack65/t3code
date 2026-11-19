@@ -28,6 +28,8 @@ export const CloudSpeechKeys = Schema.Struct({
   xai: Schema.Boolean,
   openrouter: Schema.optionalKey(Schema.Boolean),
   assemblyai: Schema.optionalKey(Schema.Boolean),
+  /** Providers whose key comes from the host's launch environment, not settings. */
+  hostManaged: Schema.optionalKey(Schema.Array(CloudSpeechProvider)),
 });
 export type CloudSpeechKeys = typeof CloudSpeechKeys.Type;
 

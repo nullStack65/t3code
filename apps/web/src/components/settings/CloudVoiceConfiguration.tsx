@@ -29,6 +29,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { HttpClient } from "effect/http";
 import { Atom, AsyncResult } from "effect/reactivity";
+import { useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { isSecretsFeatureEnabled } from "../../env";
 import {
@@ -164,6 +165,7 @@ export function CloudVoiceConfiguration({
   const company = CLOUD_SPEECH_PROVIDER_NAMES[provider];
   const routed = provider === "openrouter";
   const formId = useId();
+  const navigate = useNavigate();
   const prepared = Option.getOrNull(usePreparedConnection(id));
   const canUse = useEnvironmentScope(id, AuthOrchestrationOperateScope);
   const canManage = useEnvironmentScope(id, AuthSettingsWriteScope);
@@ -183,6 +185,9 @@ export function CloudVoiceConfiguration({
   const [error, setError] = useState("");
   const [model, setModel] = useState(currentModel ?? "");
   const saved = AsyncResult.isSuccess(presence) ? presence.value?.[provider] : undefined;
+  // The host's launch environment supplies this key, so there is nothing to type or remove.
+  const hostManaged =
+    AsyncResult.isSuccess(presence) && presence.value?.hostManaged?.includes(provider) === true;
   const existing = environment.serverConfig?.settings?.cloudSpeechCredentials?.[provider];
   const sources =
     isSecretsFeatureEnabled && environment.serverConfig?.secretReferences
@@ -210,7 +215,8 @@ export function CloudVoiceConfiguration({
     );
   const connected = canUse && prepared !== null;
   // Fixed providers edit the key only when nothing is saved or the device already uses them.
-  const editingKey = canManage && saved !== undefined && (routed || active || !saved);
+  const editingKey =
+    canManage && saved !== undefined && !hostManaged && (routed || active || !saved);
   const listedModels = AsyncResult.isSuccess(models) ? (models.value?.models ?? null) : null;
   const modelChosen = isModelId(model) && (listedModels?.some((m) => m.id === model) ?? false);
   const keyReady = draft.trim() ? credential !== undefined : Boolean(saved);
@@ -309,6 +315,50 @@ export function CloudVoiceConfiguration({
     </>
   );
 
+  const primaryAction = !connected ? (
+    <Button
+      type="button"
+      size="sm"
+      onClick={() => {
+        close();
+        void navigate({ to: "/settings/connections" });
+      }}
+    >
+      Open Environments
+    </Button>
+  ) : remove ? (
+    <Button
+      type="button"
+      size="sm"
+      variant="destructive"
+      disabled={busy}
+      onClick={() => void saveKey(null, false)}
+    >
+      Remove key
+    </Button>
+  ) : routed ? (
+    saved !== undefined && (saved || canManage) ? (
+      <Button type="submit" form={formId} size="sm" disabled={busy || !canSubmit}>
+        {active ? "Save" : "Save and enable"}
+      </Button>
+    ) : null
+  ) : editingKey ? (
+    <Button type="submit" form={formId} size="sm" disabled={busy || !credential}>
+      {active ? "Save key" : "Save and enable"}
+    </Button>
+  ) : saved && !active ? (
+    <Button
+      type="button"
+      size="sm"
+      onClick={() => {
+        enable();
+        close();
+      }}
+    >
+      Use {name}
+    </Button>
+  ) : null;
+
   return (
     <Dialog
       open
@@ -338,7 +388,11 @@ export function CloudVoiceConfiguration({
         {!remove && (
           <DialogPanel>
             {!connected ? (
-              <p>Connect to {environment.label} with dictation access to continue.</p>
+              <p role="status">
+                {prepared === null
+                  ? `${environment.label} isn’t connected. Open Environments to reconnect it.`
+                  : `This device’s access to ${environment.label} doesn’t include dictation. Open Environments to pair it again with full access.`}
+              </p>
             ) : AsyncResult.isFailure(presence) && saved === undefined ? (
               <Button size="sm" variant="outline" onClick={refresh}>
                 Retry loading API key
@@ -405,6 +459,9 @@ export function CloudVoiceConfiguration({
               <p>Ask an administrator on {environment.label} to add an API key.</p>
             ) : (
               <p className="text-sm text-muted-foreground">
+                {hostManaged
+                  ? `Uses the ${company} key ${environment.label} was started with, so there’s nothing to enter. `
+                  : ""}
                 This choice applies only to this device. Choose Off to stop sharing.
               </p>
             )}
@@ -416,7 +473,7 @@ export function CloudVoiceConfiguration({
           </p>
         )}
         <DialogFooter>
-          {connected && canManage && saved && (active || routed) && !remove && (
+          {connected && canManage && saved && !hostManaged && (active || routed) && !remove && (
             <div className="sm:mr-auto">
               <Button
                 type="button"
@@ -430,41 +487,9 @@ export function CloudVoiceConfiguration({
             </div>
           )}
           <Button type="button" size="sm" variant="outline" disabled={busy} onClick={close}>
-            Cancel
+            {primaryAction ? "Cancel" : "Close"}
           </Button>
-          {connected &&
-            (remove ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="destructive"
-                disabled={busy}
-                onClick={() => void saveKey(null, false)}
-              >
-                Remove key
-              </Button>
-            ) : routed ? (
-              saved !== undefined && (saved || canManage) ? (
-                <Button type="submit" form={formId} size="sm" disabled={busy || !canSubmit}>
-                  {active ? "Save" : "Save and enable"}
-                </Button>
-              ) : null
-            ) : editingKey ? (
-              <Button type="submit" form={formId} size="sm" disabled={busy || !credential}>
-                {active ? "Save key" : "Save and enable"}
-              </Button>
-            ) : saved && !active ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => {
-                  enable();
-                  close();
-                }}
-              >
-                Use {name}
-              </Button>
-            ) : null)}
+          {primaryAction}
         </DialogFooter>
       </DialogPopup>
     </Dialog>

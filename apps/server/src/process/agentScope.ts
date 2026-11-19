@@ -13,11 +13,13 @@ import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { MachinePresence } from "../resourceTelemetry/HostResources.ts";
 import * as ProviderProcesses from "./providerProcesses.ts";
 
 const AGENT_SLICE = "app-t3code-agents.slice";
@@ -27,6 +29,19 @@ const AGENTS_PARENT_SLICE = "app-t3code.slice";
 // has those controllers: current systemd delegates cpu, rarely io. TasksMax keeps agents
 // below logind's 33% per-user task limit, leaving forks for the server.
 const AGENTS_PARENT_PROPERTIES = ["CPUWeight=10", "IOWeight=10", "TasksMax=25%"];
+// On a person's computer agents also yield to every app and never take more than half
+// the cores, so the desktop stays responsive however much work is placed there.
+function agentsParentProperties(role: AgentHostRole, cpuCount: number) {
+  if (role === "headless") return [...AGENTS_PARENT_PROPERTIES, "CPUQuota="];
+  return [
+    "CPUWeight=1",
+    "IOWeight=1",
+    "TasksMax=25%",
+    `CPUQuota=${Math.max(100, Math.floor(cpuCount * 50))}%`,
+  ];
+}
+
+export type AgentHostRole = "headless" | "interactive";
 
 export function ownedAgentSlice(stateDir: string): string {
   const hash = NodeCrypto.createHash("sha256").update(stateDir).digest("hex").slice(0, 12);
@@ -41,7 +56,16 @@ const GiB = 1024 ** 3;
  * working. Small machines still give agents at least half of RAM before
  * throttling and three quarters before a kill.
  */
-function agentSliceMemoryLimits(totalBytes: number) {
+export function agentSliceMemoryLimits(totalBytes: number, role: AgentHostRole = "headless") {
+  if (role === "interactive") {
+    // A person's computer keeps 4 GB or 40% for them before agents slow, and 3 GB or 30%
+    // before one is killed.
+    const high = Math.max(GiB, totalBytes - Math.max(4 * GiB, Math.floor(totalBytes * 0.4)));
+    return {
+      high,
+      max: Math.max(high + GiB / 2, totalBytes - Math.max(3 * GiB, Math.floor(totalBytes * 0.3))),
+    };
+  }
   return {
     high: Math.max(totalBytes - 6 * GiB, Math.floor(totalBytes / 2)),
     max: Math.max(totalBytes - 4 * GiB, Math.floor(totalBytes * 0.75)),
@@ -110,6 +134,11 @@ export const make = Effect.gen(function* () {
   const { stateDir } = yield* ServerConfig.ServerConfig;
   const { hasOtherLiveOwner } = yield* ProviderProcesses.ProviderProcesses;
   const ownedSlice = ownedAgentSlice(stateDir);
+  // Without presence (tests, embedded servers) the machine is treated as headless.
+  const presence = yield* Effect.serviceOption(MachinePresence);
+  const hostRole: Effect.Effect<AgentHostRole> = Option.isSome(presence)
+    ? presence.value.role
+    : Effect.succeed("headless");
   const layerScope = yield* Effect.scope;
 
   const resolve = (command: string, env: NodeJS.ProcessEnv) =>
@@ -202,36 +231,48 @@ export const make = Effect.gen(function* () {
         });
         return false;
       });
-      // VMs and containers can resize RAM live, so each launch re-checks the total
-      // the limits came from. A failed update is retried by the next launch.
+      // VMs and containers can resize RAM live, and a machine can become someone's
+      // computer, so each launch re-checks the total and role the limits came from.
+      // A failed update is retried by the next launch.
       let appliedTotal: number | undefined;
+      let appliedRole: AgentHostRole | undefined;
       const memoryLimitsLock = yield* Semaphore.make(1);
       const applyMemoryLimits = memoryLimitsLock.withPermits(1)(
         Effect.gen(function* () {
           const total = NodeOS.totalmem();
-          if (total === appliedTotal) return;
-          const limits = agentSliceMemoryLimits(total);
+          const role = yield* hostRole;
+          if (total === appliedTotal && role === appliedRole) return;
+          const limits = agentSliceMemoryLimits(total, role);
           const applied = yield* setProperties(AGENT_SLICE, [
             `MemoryHigh=${limits.high}`,
             `MemoryMax=${limits.max}`,
           ]);
           if (!applied) return;
+          if (role !== appliedRole) {
+            const parentApplied = yield* setProperties(
+              AGENTS_PARENT_SLICE,
+              agentsParentProperties(role, NodeOS.cpus().length),
+            );
+            if (!parentApplied) return;
+          }
           if (appliedTotal !== undefined) {
-            yield* Effect.logInfo("Agent memory limits follow a memory change", {
+            yield* Effect.logInfo("Agent limits follow a memory or role change", {
               slice: AGENT_SLICE,
               previousTotal: appliedTotal,
               total,
+              role,
               ...limits,
             });
           }
           appliedTotal = total;
+          appliedRole = role;
         }),
       );
       yield* applyMemoryLimits;
-      yield* setProperties(AGENTS_PARENT_SLICE, AGENTS_PARENT_PROPERTIES);
       yield* Effect.logInfo("Agent scopes are on", {
         slice: AGENT_SLICE,
-        ...agentSliceMemoryLimits(NodeOS.totalmem()),
+        role: appliedRole,
+        ...agentSliceMemoryLimits(NodeOS.totalmem(), appliedRole),
         oomPolicy: supportsOomPolicy,
       });
       return {
