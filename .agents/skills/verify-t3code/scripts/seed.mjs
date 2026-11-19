@@ -3,7 +3,7 @@
 // provider. Each step logs its sub-feature ID and asserts the end state.
 //   node seed.mjs RUN_DIR
 import { execFileSync } from "node:child_process";
-import { start, check, mainText } from "./lib.mjs";
+import { start, check } from "./lib.mjs";
 
 const { run, t, p, step, finish } = await start("seed.mjs", 90000);
 
@@ -11,7 +11,7 @@ const { run, t, p, step, finish } = await start("seed.mjs", 90000);
 // Skip it: a verify run must not read a person's transcripts.
 await step("onboarding.connect", "wait for the wizard, read step 1", async () => {
   await p.getByRole("button", { name: "Continue" }).waitFor({ timeout: 180000 });
-  const text = await mainText(p, 2000).catch(() => "") || (await p.locator("body").innerText());
+  const text = await p.locator("body").innerText();
   check(/Connected/.test(text) && /primary-asus|Computers to set up/.test(text), "Connect step does not show a connected computer");
   return `${new URL(p.url()).pathname} | ${text.replace(/\s+/g, " ").slice(0, 160)}`;
 });
