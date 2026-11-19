@@ -9,6 +9,7 @@ import { assert, it, vi } from "@effect/vitest";
 import {
   CheckpointId,
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
   type ModelSelection,
@@ -19,6 +20,8 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
+  RunAttemptId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -29,6 +32,8 @@ import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
@@ -46,7 +51,11 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
 import * as EventSink from "./EventSink.ts";
+import * as ModelAlertReactor from "./ModelAlertReactor.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
@@ -125,6 +134,7 @@ const layerTest = Layer.mergeAll(
   RuntimeLayer.layerEventSink,
   ThreadCommandExecutor.layer,
   EffectOutbox.layer,
+  ProjectionStore.layer,
 ).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
@@ -1397,6 +1407,100 @@ const runEvent = (input: {
       : { delegatedCompletion: input.delegatedCompletion }),
   },
 });
+
+const hereEnvironmentId = EnvironmentId.make("environment:model-alert-here");
+
+/** A model alert reactor here whose peer link records each send, failing the first `failSends`. */
+const makeModelAlertReactor = (input: {
+  readonly watcher: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
+  readonly failSends?: number;
+}) =>
+  Effect.gen(function* () {
+    const sends = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
+    const failures = yield* Ref.make(input.failSends ?? 0);
+    const reactor = yield* ModelAlertReactor.make.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest({ modelAlertWatcher: input.watcher }),
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(hereEnvironmentId),
+            getDescriptor: Effect.succeed({
+              environmentId: hereEnvironmentId,
+              label: "test-box",
+            } as never),
+          }),
+          Layer.mock(PeerMcpClient.PeerMcpClient)({
+            call: (request) =>
+              Effect.gen(function* () {
+                yield* Ref.update(sends, (all) => [
+                  ...all,
+                  {
+                    environmentId: request.environmentId,
+                    tool: request.tool,
+                    ...request.arguments,
+                  },
+                ]);
+                if ((yield* Ref.getAndUpdate(failures, (left) => left - 1)) > 0) {
+                  return yield* Effect.die("the watcher's machine is asleep");
+                }
+                return {} as never;
+              }),
+          }),
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("no webhook is set")),
+          ),
+          layerServerConfig,
+        ).pipe(Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer))),
+      ),
+    );
+    return { reactor, sends: Ref.get(sends) };
+  });
+
+/** Finishes a run whose provider reported running `executedModel`. */
+const finishRunOnModel = (input: {
+  readonly threadId: ThreadId;
+  readonly runId: RunId;
+  readonly ordinal: number;
+  readonly executedModel: string;
+  readonly now: DateTime.Utc;
+}) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const attemptId = RunAttemptId.make(`attempt:${input.runId}`);
+    const run = runEvent({ ...input, status: "completed" });
+    const finished = {
+      ...run,
+      id: EventId.make(`event:${input.runId}:on-model`),
+      payload: { ...run.payload, activeAttemptId: attemptId },
+    };
+    yield* eventSink.write({
+      commandId: CommandId.make(`command:${input.runId}:on-model`),
+      events: [
+        {
+          id: EventId.make(`event:${input.runId}:provider-turn`),
+          type: "provider-turn.updated",
+          threadId: input.threadId,
+          runId: input.runId,
+          occurredAt: input.now,
+          payload: {
+            id: ProviderTurnId.make(`provider-turn:${input.runId}`),
+            providerThreadId: ProviderThreadId.make(`provider-thread:${input.runId}`),
+            nodeId: NodeId.make(`node:${input.runId}`),
+            runAttemptId: attemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: input.now,
+            completedAt: input.now,
+            model: input.executedModel,
+          },
+        },
+        finished,
+      ],
+    });
+    return finished;
+  });
 
 const seedRestartCancelledChild = (input: {
   readonly parentThreadId: ThreadId;
@@ -4871,6 +4975,191 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
   );
 
   // Running does not prove prompt consumption in Claude; re-offer cut deliveries even when resuming the turn.
+  it.effect("alerts the watcher and the parent once when a child ran another model", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:model-alert");
+      const threadId = ThreadId.make("thread:model-alert-parent");
+      const runId = RunId.make("run:model-alert-parent");
+      const rootNodeId = NodeId.make("node:model-alert-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:model-alert-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "model-alert-child",
+        completionWake: "always",
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+      const finished = yield* finishRunOnModel({
+        threadId: child.childThreadId,
+        runId: child.childRunId,
+        ordinal: 1,
+        executedModel: "gpt-5.4-mini",
+        now,
+      });
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId);
+      const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (row) => row.id === child.taskId,
+      );
+      assert.deepEqual(task?.workerAlert?.reasons, ["model_substituted"]);
+
+      const watcherThreadId = ThreadId.make("thread:model-alert-watcher");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:model-alert-watcher"),
+        threadId: watcherThreadId,
+        projectId,
+        title: "Lead",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const { reactor } = yield* makeModelAlertReactor({
+        watcher: { environmentId: hereEnvironmentId, threadId: watcherThreadId },
+      });
+      const alerts = Effect.gen(function* () {
+        yield* reactor.flush;
+        return (yield* orchestrator.getThreadProjection(watcherThreadId)).messages.filter(
+          (message) => message.text.startsWith("Model alert"),
+        );
+      });
+      yield* reactor.handle(finished);
+      // A replayed event and the child's next run on the same fallback stay quiet.
+      yield* reactor.handle(finished);
+      yield* reactor.handle(
+        yield* finishRunOnModel({
+          threadId: child.childThreadId,
+          runId: RunId.make("run:model-alert-child:2"),
+          ordinal: 2,
+          executedModel: "gpt-5.4-mini",
+          now,
+        }),
+      );
+      const [alert, ...more] = yield* alerts;
+      assert.deepEqual(more, []);
+      for (const part of [
+        "Model alert from test-box (environment environment:model-alert-here)",
+        `(t3-thread://v2/environment:model-alert-here/${child.childThreadId})`,
+        "it ran gpt-5.4-mini instead of gpt-5.4",
+        `Run ${child.childRunId} ended completed. Reasons: model_substituted.`,
+      ]) {
+        assert.include(alert?.text, part);
+      }
+
+      // A top-level thread has no parent to tell, so only the watcher hears it.
+      const topLevelThreadId = ThreadId.make("thread:model-alert-top-level");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("command:model-alert-top-level"),
+        threadId: topLevelThreadId,
+        projectId,
+        title: "Fleet overnight",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      yield* reactor.handle(
+        yield* finishRunOnModel({
+          threadId: topLevelThreadId,
+          runId: RunId.make("run:model-alert-top-level"),
+          ordinal: 1,
+          executedModel: "gpt-5.4-mini",
+          now,
+        }),
+      );
+      assert.deepEqual(
+        (yield* alerts).map((message) => message.text.includes(`/${topLevelThreadId})`)),
+        [false, true],
+      );
+    }),
+  );
+
+  it.effect("sends a model alert over the link to the watcher's machine and retries it", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:model-alert-remote");
+      const threadId = ThreadId.make("thread:model-alert-remote");
+      yield* ProjectService.ProjectService.pipe(
+        Effect.flatMap((projects) =>
+          projects.create({
+            commandId: CommandId.make("command:model-alert-remote-project"),
+            projectId,
+            title: "Model alert remote",
+            workspaceRoot: "/workspace/model-alert-remote",
+          }),
+        ),
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("command:model-alert-remote-thread"),
+        threadId,
+        projectId,
+        title: "On the box",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const laptop = EnvironmentId.make("environment:laptop");
+      const lead = ThreadId.make("thread:lead");
+      const { reactor, sends } = yield* makeModelAlertReactor({
+        watcher: { environmentId: laptop, threadId: lead },
+        failSends: 1,
+      });
+      yield* reactor.handle(
+        yield* finishRunOnModel({
+          threadId,
+          runId: RunId.make("run:model-alert-remote"),
+          ordinal: 1,
+          executedModel: "gpt-5.4-mini",
+          now,
+        }),
+      );
+      yield* reactor.flush;
+      // Not due yet: the failed send waits before its retry.
+      yield* reactor.flush;
+      yield* TestClock.adjust("15 seconds");
+      yield* reactor.flush;
+      yield* TestClock.adjust("1 hour");
+      yield* reactor.flush;
+      const sent = yield* sends;
+      assert.equal(sent.length, 2);
+      assert.deepEqual(sent[0], sent[1]);
+      assert.deepInclude(sent[0], {
+        environmentId: laptop,
+        tool: "t3_thread_send",
+        threadId: lead,
+        mode: "queue",
+      });
+      assert.match(String(sent[0]?.clientRequestId), /^model-alert:[0-9a-f]{64}$/);
+    }),
+  );
+
   it.effect("re-offers a cut delivery even when a continuation resumes its turn", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
