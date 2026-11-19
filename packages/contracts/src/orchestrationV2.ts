@@ -53,6 +53,7 @@ import { AuthMcpClientAccess } from "./auth.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
+import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
 import { ThreadTitleRegenerationOutcome } from "./threadTitle.ts";
 import {
   OrchestrationSearchThreadsInput,
@@ -523,6 +524,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Absent on threads written before tags existed; read as empty. */
   tags: Schema.optional(StoredThreadTags),
+  /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
+  standing: Schema.optional(StoredThreadStanding),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2025,6 +2028,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.pin-reordered",
       "thread.active-reordered",
       "thread.tags-updated",
+      "thread.standing-updated",
       "thread.visited",
       "thread.marked-unread",
       "thread.metadata-updated",
@@ -2294,6 +2298,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Absent on threads written before tags existed; read as empty. */
   tags: Schema.optional(StoredThreadTags),
+  /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
+  standing: Schema.optional(StoredThreadStanding),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
@@ -2993,6 +2999,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.pin-reordered",
       "thread.active-reordered",
       "thread.tags-updated",
+      "thread.standing-updated",
       "thread.visited",
       "thread.marked-unread",
       "thread.pull-request-synced",
@@ -3259,6 +3266,13 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.unpin"),
     commandId: CommandId,
     threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.standing.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    /** The persona to show, or null to make it an ordinary thread again. */
+    standing: Schema.NullOr(ThreadStanding),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.tag.set"),
