@@ -102,7 +102,8 @@ await home();
 await step("pullrequests.page", "open Pull Requests from sidebar footer", async () => {
   await p.getByRole("button", { name: "Pull Requests", exact: true }).click();
   await p.waitForURL(/\/pull-requests(\?.*)?$/);
-  await p.waitForTimeout(3500);
+  // The list is a skeleton first: wait for either rows ("#<number>") or the error.
+  await p.waitForFunction(() => /#\d+ |Could not load pull requests/.test(document.querySelector("main")?.innerText ?? ""), null, { timeout: 60000 });
   const text = await mainText(300);
   if (/Could not load pull requests/.test(text)) throw new Error(`first visit shows: ${text.slice(text.indexOf("Could not load"), text.indexOf("Could not load") + 90)}`);
   return `${new URL(p.url()).pathname} | ${text}`;

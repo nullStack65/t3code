@@ -39,11 +39,10 @@ Preconditions: baseline from [README.md](README.md); a thread titled
   drawer, and the palette can reopen in a project-picker mode that lists only projects
   and leaves a modal over the page. Press Escape, click the page body, then Control+K,
   and confirm the input placeholder starts "Search commands" before typing.
-- Not understood yet: in two earlier instances the search after an archive and
-  Unarchive returned nothing for a thread that was in the sidebar, and a reload was not
-  tried before the run was lost. It may be a stale search index after Unarchive or a
-  harness focus problem; repeat the archive, Unarchive, search sequence and reload before
-  calling it a bug.
+- Two early runs recorded an empty palette for a thread that was in the sidebar after an
+  archive and Unarchive. Both were this harness opening the palette in the wrong state
+  (focus in the terminal, project-picker mode). With the focus-and-placeholder sequence
+  above the same search returned the thread, so it is not an app bug.
 - Results arrive after the dialog opens: on a busy host an immediate read returns
   nothing. Poll for an option for up to 12 s before concluding the thread is missing;
   an early run recorded `[]` this way while the thread existed.

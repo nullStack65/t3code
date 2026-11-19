@@ -30,7 +30,8 @@ Preconditions: baseline from [README.md](README.md); the host's `gh` is logged i
 
 - This is a live read of GitHub through the host's `gh` credentials, not the fixture.
   It is read-only; do not drive linking or any write from a verify run.
-- BUG, reproduced on three fresh instances: the first visit to the page (after opening
+- BUG, reproduced on three of four fresh instances (the fourth showed the list, but its
+  check then only read the loading skeleton): the first visit to the page (after opening
   Usage) shows "Could not load pull requests" with the internal text "All fibers
   interrupted without error" and a Retry button. Retry lists the PRs, and later visits in
   the same instance list them at once. `drive-surfaces.mjs` records this as `FAIL
