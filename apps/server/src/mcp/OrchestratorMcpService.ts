@@ -68,6 +68,7 @@ import {
   SECRET_REQUEST_UNSAVED_NOTE,
   agentLaunchInboxError,
   agentLaunchInboxRouting,
+  withLegacyPeerInboxReason,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -127,6 +128,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import {
   clientModeCeiling,
+  isLegacyInboxPeer,
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
@@ -3126,12 +3128,17 @@ const make = Effect.gen(function* () {
     createThreads: Effect.fn("OrchestratorMcpService.createThreads")(
       function* (callerScope, input) {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "create_threads");
-        for (const request of input.threads) {
+        // An older linked environment cannot send a reason; file its threads as FYI, not a dead end.
+        const legacyPeer = isLegacyInboxPeer(callerScope);
+        const threads = input.threads.map((request) =>
+          withLegacyPeerInboxReason(request, legacyPeer),
+        );
+        for (const request of threads) {
           const inboxError = agentLaunchInboxError(request);
           if (inboxError !== null) return yield* failure("invalid_request", inboxError);
         }
         // Each thread shares this thread's checkout, so another environment cannot take it.
-        for (const request of input.threads) {
+        for (const request of threads) {
           yield* admitPlacement(
             chooseThreadPlacement(
               {
@@ -3160,7 +3167,7 @@ const make = Effect.gen(function* () {
         const providers = yield* loadProviders;
         const key = yield* requestKey(input.clientRequestId);
         const created = yield* Effect.forEach(
-          input.threads,
+          threads,
           (request, index) =>
             Effect.gen(function* () {
               const commandId = stableCommandId({

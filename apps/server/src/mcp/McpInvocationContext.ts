@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
+  PEER_FEATURE_INBOX_REASON,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
   type ProviderInteractionMode,
@@ -48,6 +49,8 @@ export interface McpClientCaller {
   readonly narrowedTo?: ClientModes | undefined;
   /** A linked environment's thread this request is made for (`T3-Sender-Thread`). */
   readonly senderThread?: OrchestrationV2LinkedSender | undefined;
+  /** What a linked environment says its tools support (`T3-Peer-Features`); none from older ones. */
+  readonly peerFeatures?: ReadonlyArray<string> | undefined;
   /** An outside client's thread links go through this hosted app, as Copy thread's do. */
   readonly hostedAppUrl?: string | undefined;
 }
@@ -66,6 +69,21 @@ export const MODE_LIMIT_HEADER = "t3-mode-limit";
  * it. Read only from a linked client.
  */
 export const SENDER_THREAD_HEADER = "t3-sender-thread";
+
+/**
+ * `T3-Peer-Features: <feature>,<feature>`: what a linked environment's tools support, so this
+ * side can tell an older release from a current one (its `clientInfo` version never changes).
+ * Read only from a linked client. A missing header means a release from before it.
+ */
+export const PEER_FEATURES_HEADER = "t3-peer-features";
+
+/** Features this release's peer client announces on every call. */
+export const PEER_FEATURES: ReadonlyArray<string> = [PEER_FEATURE_INBOX_REASON];
+
+/** A linked environment whose tools cannot send `inboxRouting.reason`. */
+export const isLegacyInboxPeer = (scope: Pick<McpInvocationScope, "client">): boolean =>
+  scope.client?.linked === true &&
+  !(scope.client.peerFeatures ?? []).includes(PEER_FEATURE_INBOX_REASON);
 
 export interface ClientModes {
   readonly runtimeMode: RuntimeMode;

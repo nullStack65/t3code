@@ -10,6 +10,7 @@ import {
   type ThreadMetadataMcpUpdateResult,
   ThreadId,
   routeThreadInbox,
+  withLegacyPeerInboxReason,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -18,7 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import { isLegacyInboxPeer, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { threadNotFound } from "./threadAccess.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
@@ -151,8 +152,10 @@ const make = Effect.gen(function* () {
 
   const update = Effect.fn("ThreadMetadataMcpService.update")(function* (
     scope: McpInvocationScope,
-    input: ThreadMetadataMcpUpdateInput,
+    requested: ThreadMetadataMcpUpdateInput,
   ) {
+    // An older linked environment cannot send a reason; file its route as FYI, not a dead end.
+    const input = withLegacyPeerInboxReason(requested, isLegacyInboxPeer(scope));
     if (!scope.capabilities.has("orchestration")) {
       return yield* failure(
         "capability_denied",

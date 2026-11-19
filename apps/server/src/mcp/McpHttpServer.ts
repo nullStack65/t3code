@@ -225,6 +225,21 @@ const withSenderThread = (
     : { ...invocation, client: { ...invocation.client, senderThread: decoded.value } };
 };
 
+/** Records what a linked environment's tools support; anything malformed reads as none. */
+const withPeerFeatures = (
+  invocation: McpInvocationContext.McpInvocationScope,
+  request: HttpServerRequest.HttpServerRequest,
+): McpInvocationContext.McpInvocationScope => {
+  const header = request.headers[McpInvocationContext.PEER_FEATURES_HEADER];
+  if (header === undefined || invocation.client?.linked !== true) return invocation;
+  const peerFeatures = header
+    .split(",")
+    .map((feature) => feature.trim())
+    .filter((feature) => /^[a-z0-9-]{1,64}$/.test(feature))
+    .slice(0, 32);
+  return { ...invocation, client: { ...invocation.client, peerFeatures } };
+};
+
 // The Linked environments beta is off here: links wait until it is on again.
 const linkedEnvironmentsOff = HttpServerResponse.jsonUnsafe(
   {
@@ -270,7 +285,10 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
-    const asked = withModeLimit(withSenderThread(invocation, request), request);
+    const asked = withModeLimit(
+      withPeerFeatures(withSenderThread(invocation, request), request),
+      request,
+    );
     if (asked === undefined) return invalidModeLimit;
     const limited = McpInvocationContext.withRuntimeModeCeiling(asked, runtimeModeCeiling);
     const linkedEnvironments = yield* linksEnabled;
