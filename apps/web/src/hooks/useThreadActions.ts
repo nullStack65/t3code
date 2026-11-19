@@ -14,6 +14,7 @@ import {
   EnvironmentId,
   type ScopedThreadRef,
   ThreadId,
+  type ThreadStanding,
   sessionGrantsScope,
 } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
@@ -41,6 +42,7 @@ import {
   readDelegatedUnderParent,
   readEnvironmentServerConfigLoaded,
   readEnvironmentSupportsAutoSettleOptOut,
+  readEnvironmentSupportsThreadStanding,
   readEnvironmentThreadRefs,
   readProject,
   readThreadShell,
@@ -128,6 +130,18 @@ export class ThreadAutoSettleOptOutUnsupportedError extends Schema.TaggedError<T
 ) {
   override get message(): string {
     return "This environment's server does not support turning auto-settle off per thread yet. Update the server to use it.";
+  }
+}
+
+export class ThreadStandingUnsupportedError extends Schema.TaggedError<ThreadStandingUnsupportedError>()(
+  "ThreadStandingUnsupportedError",
+  {
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+  },
+) {
+  override get message(): string {
+    return "This environment's server does not support standing bot threads yet. Update the server to use it.";
   }
 }
 
@@ -298,6 +312,9 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const setThreadAutoSettleMutation = useOrchestrationCommand(threadEnvironment.setAutoSettle, {
+    reportFailure: false,
+  });
+  const setThreadStandingMutation = useOrchestrationCommand(threadEnvironment.setStanding, {
     reportFailure: false,
   });
   const reorderPinnedThreadMutation = useOrchestrationCommand(threadEnvironment.reorderPin, {
@@ -746,6 +763,23 @@ export function useThreadActions() {
     });
   };
 
+  const setThreadStanding = async (target: ScopedThreadRef, standing: ThreadStanding | null) => {
+    if (!readEnvironmentSupportsThreadStanding(target.environmentId)) {
+      return AsyncResult.failure(
+        Cause.fail(
+          new ThreadStandingUnsupportedError({
+            environmentId: target.environmentId,
+            threadId: target.threadId,
+          }),
+        ),
+      );
+    }
+    return setThreadStandingMutation({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId, standing },
+    });
+  };
+
   const sendPin = async (target: ScopedThreadRef, opts: { orderKey?: string } = {}) => {
     if (!readEnvironmentServerConfigLoaded(target.environmentId)) {
       return AsyncResult.failure(
@@ -1029,6 +1063,7 @@ export function useThreadActions() {
     reorderActiveThread,
     markThreadUnread,
     setThreadAutoSettle,
+    setThreadStanding,
     turnThreadIntoProject: (target: ScopedThreadRef) =>
       createProjectFromThread({
         environmentId: target.environmentId,

@@ -81,3 +81,19 @@ export function resolveThreadStandingAccent(accent: string): ThreadStandingAccen
     ? (accent as ThreadStandingAccent)
     : THREAD_STANDING_ACCENTS[0];
 }
+
+/** A stored standing value with unknown avatar and accent ids mapped to built-ins. */
+export function resolveThreadStanding(
+  stored: StoredThreadStanding | undefined,
+): ThreadStanding | null {
+  if (stored == null) return null;
+  const name = stored.name.trim();
+  if (name.length === 0) return null;
+  const role = stored.role?.trim() ?? "";
+  return {
+    name,
+    role: role.length === 0 ? null : role,
+    avatarId: resolveThreadStandingAvatarId(stored.avatarId),
+    accent: resolveThreadStandingAccent(stored.accent),
+  };
+}

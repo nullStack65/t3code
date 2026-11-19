@@ -16,6 +16,7 @@ import type {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import { resolveThreadStanding } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import { formatSubagentDisplayTitle } from "./subagentDisplay.ts";
@@ -186,6 +187,8 @@ export interface EnvironmentThreadShell {
   readonly snoozedAt: string | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
+  /** Persona when this thread is a standing bot; independent of pinning. */
+  readonly standing: import("@t3tools/contracts").ThreadStanding | null;
   readonly autoSettleDisabledAt?: string | null;
   readonly pinOrderKey: string | null;
   readonly activeOrderKey: string | null;
@@ -341,6 +344,7 @@ export function presentThreadShell(
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
+    standing: resolveThreadStanding(thread.standing),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
     pinOrderKey: thread.pinOrderKey ?? null,
     activeOrderKey: thread.activeOrderKey ?? null,

@@ -3,6 +3,7 @@ import {
   clampedPositiveInt,
   InboxChoiceParameter,
   ThreadInboxRoutingPatch,
+  ThreadStanding,
   NonNegativeInt,
   ModelSelection,
   TrimmedNonEmptyString,
@@ -145,6 +146,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     inbox: Schema.optional(InboxChoiceParameter),
     inboxRouting: Schema.optional(ThreadInboxRoutingPatch),
     title: TrimmedNonEmptyString,
+    standing: Schema.optional(
+      ThreadStanding.annotate({
+        description:
+          "Make it a standing bot thread with this persona ({name, role?, avatarId, accent}). Change later with t3_thread_update set_standing.",
+      }),
+    ),
     modelSelection: Schema.optional(ModelSelection),
     runtimeMode: Schema.optional(RuntimeMode),
     interactionMode: Schema.optional(ProviderInteractionMode),

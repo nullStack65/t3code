@@ -585,6 +585,21 @@ export const pinThread = Effect.fn("EnvironmentCommands.pinThread")(function* (
   });
 });
 
+export interface SetThreadStandingInput extends ThreadCommandInput {
+  /** The bot persona, or null to make the thread ordinary again. */
+  readonly standing: import("@t3tools/contracts").ThreadStanding | null;
+}
+export const setThreadStanding = Effect.fn("EnvironmentCommands.setThreadStanding")(function* (
+  input: SetThreadStandingInput,
+) {
+  return yield* dispatch({
+    type: "thread.standing.set",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    standing: input.standing,
+  });
+});
+
 export interface SetThreadAutoSettleInput extends ThreadCommandInput {
   readonly enabled: boolean;
 }

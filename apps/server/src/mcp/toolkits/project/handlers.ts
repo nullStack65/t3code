@@ -483,6 +483,16 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           }),
         );
         const thread = result.projection.thread;
+        // Derived from the launch command, so a retry replays rather than repeats it.
+        if (input.standing !== undefined)
+          yield* context.threads
+            .dispatch({
+              type: "thread.standing.set",
+              commandId: CommandId.make(`${commandId}:standing`),
+              threadId: thread.id,
+              standing: input.standing,
+            })
+            .pipe(Effect.mapError(unavailable));
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
         return {
           threadId: thread.id,
