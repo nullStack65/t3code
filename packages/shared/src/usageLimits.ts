@@ -171,19 +171,73 @@ function providersWithLimits(providers: readonly ServerProvider[]): readonly Ser
   );
 }
 
-export type LimitPresentations = ReadonlyMap<
-  EnvironmentId,
-  {
-    readonly entry: { readonly target: { readonly label: string } };
-    readonly serverConfig: {
-      readonly providers: readonly ServerProvider[];
-      readonly usageLimitSources?: UsageLimitSourceSnapshots | undefined;
-      readonly settings?:
-        | { readonly usageAccountOwners?: Readonly<Record<string, string>> | undefined }
-        | undefined;
-    } | null;
+export interface LimitServerConfig {
+  readonly providers: readonly ServerProvider[];
+  readonly usageLimitSources?: UsageLimitSourceSnapshots | undefined;
+  readonly settings?:
+    | { readonly usageAccountOwners?: Readonly<Record<string, string>> | undefined }
+    | undefined;
+}
+
+export interface LimitPresentation {
+  readonly entry: { readonly target: { readonly label: string } };
+  /** Absent means connected: callers that only hold live configs need not say so. */
+  readonly connection?: { readonly phase: string } | undefined;
+  readonly serverConfig: LimitServerConfig | null;
+}
+
+export type LimitPresentations = ReadonlyMap<EnvironmentId, LimitPresentation>;
+
+export interface OfflineLimitEnvironment {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  /** The newest check in its last config: about when it stopped answering. */
+  readonly since: string | null;
+}
+
+function latestCheck(config: LimitServerConfig): string | null {
+  const checks = [
+    ...config.providers.flatMap((provider) => [
+      provider.checkedAt,
+      provider.usageLimits?.checkedAt,
+    ]),
+    ...(config.usageLimitSources ?? []).map((source) => source.checkedAt),
+  ];
+  let latest: string | null = null;
+  for (const checkedAt of checks) {
+    if (!checkedAt || !Number.isFinite(Date.parse(checkedAt))) continue;
+    if (latest === null || Date.parse(checkedAt) > Date.parse(latest)) latest = checkedAt;
   }
->;
+  return latest;
+}
+
+/**
+ * Only connected environments count. A disconnected one keeps its last config,
+ * and with it the errors it last reported; a stopped machine would repeat them
+ * forever. It becomes one offline line instead. One still on its first connect
+ * has nothing to say yet, so it is left out.
+ */
+export function splitLimitPresentations(presentations: LimitPresentations): {
+  readonly live: LimitPresentations;
+  readonly offline: readonly OfflineLimitEnvironment[];
+} {
+  const live = new Map<EnvironmentId, LimitPresentation>();
+  const offline: OfflineLimitEnvironment[] = [];
+  for (const [environmentId, presentation] of presentations) {
+    const phase = presentation.connection?.phase ?? "connected";
+    if (phase === "connected") {
+      live.set(environmentId, presentation);
+      continue;
+    }
+    if (phase === "connecting") continue;
+    offline.push({
+      environmentId,
+      label: presentation.entry.target.label,
+      since: presentation.serverConfig ? latestCheck(presentation.serverConfig) : null,
+    });
+  }
+  return { live, offline };
+}
 
 export function collectExternalUsageLinks(presentations: LimitPresentations) {
   const links = new Map<
@@ -448,7 +502,15 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
         notices.add(`${label(environmentLabel, source.label)}: No accounts reported.`);
       }
       for (const account of source.accounts) {
-        if (account.usageLimits.unavailable?.reason !== "probeFailed") continue;
+        const unavailable = account.usageLimits.unavailable;
+        if (source.kind === "magpie" && isBillingRefusal(unavailable)) {
+          // A real billing state, not "no quota here"; every machine sees the same account, so once.
+          notices.add(
+            `${source.label} · ${sourceAccountName(account)}: the vendor says payment is required, so this subscription's billing needs attention.`,
+          );
+          continue;
+        }
+        if (unavailable?.reason !== "probeFailed") continue;
         const subject = `${source.label} · ${sourceAccountName(account)}`;
         notices.add(
           `${label(environmentLabel, subject)}: ${limitsNotice(account.usageLimits) ?? ""}`,
@@ -464,19 +526,40 @@ function sourceAccountName(account: { readonly id: string; readonly email?: stri
   return account.email ?? account.id.replace(/^[\w-]+:/, "");
 }
 
+/** "Payment Required" from a vendor: a lapsed or unpaid subscription, which needs a person. */
+function isBillingRefusal(
+  unavailable: ServerProviderUsageLimits["unavailable"] | undefined,
+): boolean {
+  return (
+    unavailable?.reason === "unsupported" && /payment required/i.test(unavailable.message ?? "")
+  );
+}
+
+export interface NotApplicableEntry {
+  readonly environment: string;
+  readonly subject: string;
+  /** Why, without the "Not applicable:" lead-in. */
+  readonly reason: string;
+}
+
 /**
  * Usage that cannot be read on its current setup (a key with no subscription,
  * an instance whose gateway reports for it), so a missing bar reads as "not
- * applicable". Only entries that say why are listed.
+ * applicable". Only entries that say why are listed, one per environment.
  */
 export function collectNotApplicable(
   presentations: LimitPresentations,
-): ReadonlyArray<{ readonly subject: string; readonly reason: string }> {
-  const label = (environmentLabel: string, subject: string) =>
-    presentations.size > 1 ? `${environmentLabel} · ${subject}` : subject;
-  const entries = new Map<string, string>();
+): readonly NotApplicableEntry[] {
+  const entries = new Map<string, NotApplicableEntry>();
+  const add = (environment: string, subject: string, reason: string) => {
+    entries.set(`${environment}\u0000${subject}`, {
+      environment,
+      subject,
+      reason: reason.replace(/^Not applicable:\s*/, ""),
+    });
+  };
   for (const presentation of presentations.values()) {
-    const environmentLabel = presentation.entry.target.label;
+    const environment = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
       // Only an explicit "Not applicable:" reason: other unsupported messages
       // (a sign-in prompt, a sharing notice shown as a link) ask for action.
@@ -488,23 +571,54 @@ export function collectNotApplicable(
       ) {
         continue;
       }
-      const name = provider.displayName?.trim() || String(provider.driver);
-      entries.set(label(environmentLabel, name), unavailable.message);
+      add(
+        environment,
+        provider.displayName?.trim() || String(provider.driver),
+        unavailable.message,
+      );
     }
     for (const source of presentation.serverConfig?.usageLimitSources ?? []) {
       // Magpie maps only standing vendor refusals to unsupported.
       if (source.kind !== "magpie") continue;
       for (const account of source.accounts) {
         const unavailable = account.usageLimits.unavailable;
-        if (unavailable?.reason !== "unsupported") continue;
-        entries.set(
-          label(environmentLabel, `${source.label} · ${sourceAccountName(account)}`),
+        if (unavailable?.reason !== "unsupported" || isBillingRefusal(unavailable)) continue;
+        add(
+          environment,
+          `${source.label} · ${sourceAccountName(account)}`,
           unavailable.message ?? "This account has no subscription limits.",
         );
       }
     }
   }
-  return [...entries].map(([subject, reason]) => ({ subject, reason }));
+  return [...entries.values()];
+}
+
+/**
+ * The same instance and reason on several machines is one row naming the
+ * machines, so the list grows with setups, not with the fleet.
+ */
+export function groupNotApplicable(entries: readonly NotApplicableEntry[]): ReadonlyArray<{
+  readonly subject: string;
+  readonly reason: string;
+  readonly environments: readonly string[];
+}> {
+  const groups = new Map<string, { subject: string; reason: string; environments: string[] }>();
+  for (const entry of entries) {
+    const key = `${entry.subject}\u0000${entry.reason}`;
+    const group = groups.get(key);
+    if (group) {
+      if (!group.environments.includes(entry.environment))
+        group.environments.push(entry.environment);
+    } else {
+      groups.set(key, {
+        subject: entry.subject,
+        reason: entry.reason,
+        environments: [entry.environment],
+      });
+    }
+  }
+  return [...groups.values()];
 }
 
 export const UNASSIGNED_OWNER = "Unassigned";

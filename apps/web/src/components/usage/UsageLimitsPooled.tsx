@@ -6,6 +6,9 @@ import {
   collectLimitNotices,
   collectLimitOwnerGroups,
   collectNotApplicable,
+  groupNotApplicable,
+  type OfflineLimitEnvironment,
+  splitLimitPresentations,
   UNASSIGNED_OWNER,
   cursorUsageWindowDetails,
   displayLimitWindows,
@@ -21,7 +24,14 @@ import {
 } from "@t3tools/shared/usageLimits";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
-import { AlertTriangleIcon, CircleSlashIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  ChevronRightIcon,
+  CircleSlashIcon,
+  CloudOffIcon,
+  ExternalLinkIcon,
+  TicketIcon,
+} from "lucide-react";
 import {
   createContext,
   Fragment,
@@ -36,7 +46,7 @@ import {
 import { ensureLocalApi } from "../../localApi";
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { formatUpcomingTimestamp } from "../../timestampFormat";
+import { formatDayAwareTimestamp, formatUpcomingTimestamp } from "../../timestampFormat";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { providerClients } from "../settings/providerDriverMeta";
 import { RedactedSensitiveText } from "../settings/RedactedSensitiveText";
@@ -633,12 +643,13 @@ function PoolSection({
 }
 
 export function UsageLimitsPooled({
-  presentations,
+  presentations: selected,
   now,
 }: {
   readonly presentations: Parameters<typeof collectLimitAccounts>[0];
   readonly now: number;
 }) {
+  const { live: presentations, offline } = splitLimitPresentations(selected);
   const [segmentPopover] = useState(() => PopoverCreateHandle<SegmentPayload>());
   const segmentPopoverActions = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const groups = collectLimitOwnerGroups(
@@ -657,7 +668,8 @@ export function UsageLimitsPooled({
       {pools.length === 0 &&
       notices.length === 0 &&
       externalLinks.length === 0 &&
-      notApplicable.length === 0 ? (
+      notApplicable.length === 0 &&
+      offline.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           No provider on the selected environments reports subscription limits.
         </p>
@@ -729,33 +741,74 @@ export function UsageLimitsPooled({
         </section>
       ))}
       <LimitNotices notices={notices} />
-      <NotApplicableList entries={notApplicable} />
+      <OfflineEnvironments environments={offline} now={now} />
+      <NotApplicableSummary entries={notApplicable} />
     </div>
   );
 }
 
-/** Usage that cannot be read on this setup, with why; informational, not a warning. */
-function NotApplicableList({
+/** A machine that stopped answering: one quiet line, not its last errors. */
+function OfflineEnvironments({
+  environments,
+  now,
+}: {
+  readonly environments: readonly OfflineLimitEnvironment[];
+  readonly now: number;
+}) {
+  const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
+  if (environments.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1 text-xs text-muted-foreground">
+      {environments.map((environment) => (
+        <li key={environment.environmentId} className="flex items-center gap-1.5 break-words">
+          <CloudOffIcon className="size-3.5 shrink-0" aria-hidden />
+          <span>
+            <span className="font-medium text-foreground">{environment.label}</span>:{" "}
+            {environment.since
+              ? `offline since ${formatDayAwareTimestamp(environment.since, timestampFormat, now)}`
+              : "offline"}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Usage that cannot be read on this setup, with why; informational, not a
+ * warning, so it stays closed. Each instance and reason is one row naming its
+ * machines.
+ */
+function NotApplicableSummary({
   entries,
 }: {
   readonly entries: ReturnType<typeof collectNotApplicable>;
 }) {
   if (entries.length === 0) return null;
+  const groups = groupNotApplicable(entries);
+  // With one machine in view, naming it on every row is noise.
+  const nameMachines = new Set(entries.map((entry) => entry.environment)).size > 1;
   return (
-    <section className="flex flex-col gap-2 text-xs text-muted-foreground">
-      <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-        <CircleSlashIcon className="size-4 text-muted-foreground" aria-hidden />
-        Not applicable
-      </h2>
-      <ul className="flex flex-col gap-1">
-        {entries.map((entry) => (
-          <li key={entry.subject} className="break-words">
-            <span className="font-medium text-foreground">{entry.subject}:</span>{" "}
-            {entry.reason.replace(/^Not applicable:\s*/, "")}
+    <details className="group text-xs text-muted-foreground">
+      <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-sm outline-none select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&::-webkit-details-marker]:hidden">
+        <ChevronRightIcon
+          className="size-3.5 shrink-0 transition-transform group-open:rotate-90"
+          aria-hidden
+        />
+        <CircleSlashIcon className="size-3.5 shrink-0" aria-hidden />
+        {entries.length === 1
+          ? "1 instance has no quota to read"
+          : `${entries.length} instances have no quota to read`}
+      </summary>
+      <ul className="mt-2 flex flex-col gap-1 ps-5">
+        {groups.map((group) => (
+          <li key={`${group.subject}:${group.reason}`} className="break-words">
+            <span className="font-medium text-foreground">{group.subject}:</span> {group.reason}
+            {nameMachines ? <span> ({group.environments.join(", ")})</span> : null}
           </li>
         ))}
       </ul>
-    </section>
+    </details>
   );
 }
 

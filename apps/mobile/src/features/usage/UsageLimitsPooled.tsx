@@ -13,6 +13,7 @@ import {
   formatResetsIn,
   paceRemainingPercent,
   remainingPercent,
+  splitLimitPresentations,
   type LimitAccount,
   type LimitPoolWindow,
 } from "@t3tools/shared/usageLimits";
@@ -417,16 +418,19 @@ export function UsageLimitsSection({
     selectedEnvironmentIds === null
       ? presentations
       : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
-  const pools = collectLimitPools(collectLimitAccounts(selected), now);
-  const notices = collectLimitNotices(selected);
-  const externalLinks = collectExternalUsageLinks(selected);
+  // A disconnected machine's last config would repeat its last errors; it is one offline line.
+  const { live, offline } = splitLimitPresentations(selected);
+  const pools = collectLimitPools(collectLimitAccounts(live), now);
+  const notices = collectLimitNotices(live);
+  const externalLinks = collectExternalUsageLinks(live);
   const colors = useProviderColors();
   return (
     <View className="gap-6">
       {pools.length === 0 &&
       notices.length === 0 &&
       failedLabels.length === 0 &&
-      externalLinks.length === 0 ? (
+      externalLinks.length === 0 &&
+      offline.length === 0 ? (
         <Text className="py-12 text-center text-base text-foreground-muted">
           {selected.size === 0
             ? "Select an environment to see limits."
@@ -508,6 +512,14 @@ export function UsageLimitsSection({
           </View>
         </View>
       ) : null}
+      {offline.map((environment) => (
+        <Text key={environment.environmentId} className="px-1 text-xs text-foreground-muted">
+          {environment.label}:{" "}
+          {environment.since
+            ? `offline since ${new Date(environment.since).toLocaleString()}`
+            : "offline"}
+        </Text>
+      ))}
     </View>
   );
 }

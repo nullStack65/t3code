@@ -63,3 +63,68 @@ describe("UsageLimitsPooled ChatGPT usage card", () => {
       .toBeVisible();
   });
 });
+
+function routedCodex(): ServerProvider {
+  return {
+    ...managedChatGpt("magpie_codex", "Magpie Codex"),
+    usageLimits: {
+      checkedAt,
+      windows: [],
+      unavailable: {
+        reason: "unsupported",
+        message: "Not applicable: this instance routes through a custom model provider.",
+      },
+    },
+  };
+}
+
+describe("UsageLimitsPooled quiet states", () => {
+  it("shows a stopped machine as one offline line, not its last errors", async () => {
+    const failing: ServerProvider = {
+      ...managedChatGpt("codex", "Codex"),
+      usageLimits: {
+        checkedAt,
+        windows: [],
+        unavailable: { reason: "probeFailed", message: "Codex could not read usage." },
+      },
+    };
+    const presentations = new Map([
+      [
+        EnvironmentId.make("crown"),
+        {
+          entry: { target: { label: "Crown Rain Gutters" } },
+          connection: { phase: "reconnecting" },
+          serverConfig: { providers: [failing] },
+        },
+      ],
+    ]);
+    await using screen = await render(
+      <UsageLimitsPooled presentations={presentations} now={Date.parse(checkedAt)} />,
+    );
+
+    await expect.element(screen.getByText(/offline since/)).toBeVisible();
+    expect(screen.container.textContent).not.toContain("could not read usage");
+  });
+
+  it("folds not-applicable instances into one closed summary across machines", async () => {
+    const presentations = new Map(
+      ["primary-r720", "primary-asus", "primary-mac-laptop"].map((label) => [
+        EnvironmentId.make(label),
+        { entry: { target: { label } }, serverConfig: { providers: [routedCodex()] } },
+      ]),
+    );
+    await using screen = await render(
+      <UsageLimitsPooled presentations={presentations} now={Date.parse(checkedAt)} />,
+    );
+
+    const summary = screen.getByText("3 instances have no quota to read");
+    await expect.element(summary).toBeVisible();
+    const details = screen.container.querySelector("details");
+    expect(details?.open).toBe(false);
+    await summary.click();
+    await expect
+      .element(screen.getByText("(primary-r720, primary-asus, primary-mac-laptop)"))
+      .toBeVisible();
+    expect(screen.container.querySelectorAll("details li")).toHaveLength(1);
+  });
+});
