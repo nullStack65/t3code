@@ -1,0 +1,7 @@
+# Checks of machine-failover-drill.sh that fail today, one per line: <check id> <gap>.
+# Remove a line when its gap closes; the drill exits 3 (XPASS) until you do.
+C1.record    G1 the work record lives only in the failed machine's SQLite; nothing holds it off-machine
+C2.lease     G2 no heartbeat or lease on threads, runs or tasks, so nothing notices orphaned work
+C3.takeover  G3 nothing re-places orphaned work or resumes it from its pushed branch or checkpoint
+C4.fence     G4 a returning machine resumes its own interrupted runs; no epoch fences the stale copy
+C4.reconcile G4 a returning machine never learns that another machine finished its work
