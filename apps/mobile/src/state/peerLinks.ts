@@ -14,6 +14,7 @@ import { relayEnvironmentDiscovery } from "./relay";
 import { useEnvironmentQuery } from "./query";
 import { useAtomCommand } from "./use-atom-command";
 
+// Web adds linked machines on its own (`linkedEnvironmentsToAutoAdd`); mobile does not yet.
 export const peerLinkEnvironment = createPeerLinkEnvironmentAtoms(connectionAtomRuntime);
 
 /**

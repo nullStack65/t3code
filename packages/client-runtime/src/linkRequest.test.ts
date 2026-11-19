@@ -19,12 +19,16 @@ import {
   appConnectionReports,
   appPairingAddress,
   appPairingAddresses,
+  autoAddKey,
+  autoAddLinkState,
   knownEnvironmentRows,
   linkableMachines,
   linkedEnvironmentNames,
+  linkedEnvironmentsToAutoAdd,
   linkRequestAnswerInput,
   linkRequestDisplay,
   linkRequestFailureMessage,
+  singleFlightByKey,
   linkRequestInitialMachine,
   linkRequestTarget,
   linkRequestTargetName,
@@ -500,6 +504,123 @@ describe("knownEnvironmentRows", () => {
   });
 });
 
+describe("linkedEnvironmentsToAutoAdd", () => {
+  const hostId = EnvironmentId.make("host");
+  const asus = EnvironmentId.make("asus");
+  type Link = NonNullable<KnownEnvironment["link"]>;
+  const linkOf = (overrides: Partial<Link> = {}): Link => ({
+    environmentId: asus,
+    label: "asus",
+    urls: ["https://asus.example.ts.net"],
+    access: "full-access",
+    linkedAt: DateTime.makeUnsafe("2026-11-01T00:00:00Z"),
+    expiresAt: DateTime.makeUnsafe("2026-12-01T00:00:00Z"),
+    lastReachedAt: null,
+    lastError: null,
+    status: "reachable",
+    appPairing: true,
+    ...overrides,
+  });
+  // Rows as this client sees them, from the host's list and this client's catalog.
+  const rowsFor = (link: Link, held: ReadonlyArray<EnvironmentId> = []) =>
+    knownEnvironmentRows(
+      [
+        {
+          environmentId: asus,
+          label: "asus",
+          urls: [],
+          serverVersion: null,
+          link,
+          inApp: false,
+          issue: { action: "add-to-app", message: "asus is linked for agents but not in the app." },
+        },
+      ],
+      held.map((environmentId) => ({
+        environmentId,
+        connection: { phase: "connected" } as EnvironmentPresentation["connection"],
+      })),
+      { label: "host", onHostMachine: false },
+    );
+  const select = (
+    options: {
+      readonly link?: Link;
+      readonly held?: ReadonlyArray<EnvironmentId>;
+      readonly dismissed?: ReadonlyArray<EnvironmentId>;
+      readonly adding?: ReadonlyArray<EnvironmentId>;
+      readonly failed?: ReadonlyMap<string, string>;
+    } = {},
+  ) =>
+    linkedEnvironmentsToAutoAdd({
+      hostId,
+      rows: rowsFor(options.link ?? linkOf(), options.held),
+      catalog: new Set(options.held ?? []),
+      dismissed: new Set(options.dismissed ?? []),
+      adding: new Set(options.adding ?? []),
+      failed: options.failed ?? new Map(),
+    }).add.map((add) => add.row.environmentId);
+
+  it("adds a reachable linked machine this app lacks and the user did not dismiss", () => {
+    expect(select()).toEqual([asus]);
+  });
+
+  it("adds through a read-only link too, which caps what the app gets", () => {
+    expect(select({ link: linkOf({ access: "read-only" }) })).toEqual([asus]);
+  });
+
+  it("leaves a dismissed machine for the user to add", () => {
+    expect(select({ dismissed: [asus] })).toEqual([]);
+  });
+
+  it("skips a machine the catalog already holds", () => {
+    expect(select({ held: [asus] })).toEqual([]);
+  });
+
+  it("waits for a link that is unreachable, cannot pair, or only at an address this device cannot open", () => {
+    expect(select({ link: linkOf({ status: "unreachable" }) })).toEqual([]);
+    expect(select({ link: linkOf({ appPairing: false }) })).toEqual([]);
+    expect(select({ link: linkOf({ urls: ["http://127.0.0.1:3773"] }) })).toEqual([]);
+  });
+
+  it("starts no second add while one is in flight", () => {
+    expect(select({ adding: [asus] })).toEqual([]);
+  });
+
+  it("retries a failed add only once the link's status, addresses or session change", () => {
+    const failedAt = linkOf();
+    const failed = new Map([[autoAddKey(hostId, asus), autoAddLinkState(failedAt)]]);
+    expect(select({ failed })).toEqual([]);
+    // Only the last answer moved, so a down peer is not asked again.
+    expect(
+      select({
+        failed,
+        link: linkOf({ lastReachedAt: DateTime.makeUnsafe("2026-11-02T00:00:00Z") }),
+      }),
+    ).toEqual([]);
+    expect(select({ failed, link: linkOf({ urls: ["https://asus.tail.ts.net"] }) })).toEqual([
+      asus,
+    ]);
+    expect(
+      select({ failed, link: linkOf({ linkedAt: DateTime.makeUnsafe("2026-11-05T00:00:00Z") }) }),
+    ).toEqual([asus]);
+  });
+
+  it("tries again after a failed peer goes down and comes back", () => {
+    const key = autoAddKey(hostId, asus);
+    const failed = new Map([[key, autoAddLinkState(linkOf())]]);
+    const whileDown = linkedEnvironmentsToAutoAdd({
+      hostId,
+      rows: rowsFor(linkOf({ status: "unreachable" })),
+      catalog: new Set(),
+      dismissed: new Set(),
+      adding: new Set(),
+      failed,
+    });
+    expect(whileDown).toEqual({ add: [], forget: [key] });
+    failed.delete(key);
+    expect(select({ failed })).toEqual([asus]);
+  });
+});
+
 describe("linkedEnvironmentNames", () => {
   it("names the unexpired links as this client does, else as the link does", () => {
     const vps = EnvironmentId.make("environment-vps");
@@ -646,5 +767,52 @@ describe("linkRequestFailureMessage", () => {
     expect(linkRequestFailureMessage({ _tag: "SchemaError", message: "code=abc" })).toBe(
       "Could not answer the request. Try again.",
     );
+  });
+});
+
+describe("singleFlightByKey", () => {
+  it("shares one run per key and reports the keys in flight", async () => {
+    const changes: Array<ReadonlyArray<string>> = [];
+    const run = singleFlightByKey<string, number>((inFlight) => changes.push([...inFlight]));
+    let finish!: (value: number) => void;
+    let starts = 0;
+    const start = () => {
+      starts += 1;
+      return new Promise<number>((resolve) => (finish = resolve));
+    };
+
+    const first = run("a", start);
+    // Reported before run returns, so a caller checking right after sees it in flight.
+    expect(changes).toEqual([["a"]]);
+    const second = run("a", start);
+    expect(second).toBe(first);
+    expect(starts).toBe(1);
+
+    finish(7);
+    await expect(first).resolves.toBe(7);
+    expect(changes).toEqual([["a"], []]);
+
+    // Once settled, the key runs again.
+    const third = run("a", start);
+    expect(third).not.toBe(first);
+    expect(starts).toBe(2);
+    finish(8);
+    await third;
+  });
+
+  it("keeps keys apart and clears a key whose run fails", async () => {
+    const changes: Array<ReadonlyArray<string>> = [];
+    const run = singleFlightByKey<string, string>((inFlight) =>
+      changes.push([...inFlight].toSorted()),
+    );
+    const ok = run("a", () => Promise.resolve("ok"));
+    const failed = run("b", () => {
+      throw new Error("no code");
+    });
+    expect(changes.at(-1)).toEqual(["a", "b"]);
+
+    await expect(ok).resolves.toBe("ok");
+    await expect(failed).rejects.toThrow("no code");
+    expect(changes.at(-1)).toEqual([]);
   });
 });

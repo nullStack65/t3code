@@ -9,12 +9,16 @@ function Probe(props: {
   readonly enabled?: boolean;
   readonly intervalMs?: number | null;
   readonly refreshOnShow?: boolean;
+  readonly refreshOnReconnect?: boolean;
 }) {
   useLiveRefresh(props.refresh, {
     key: props.viewKey,
     enabled: props.enabled ?? true,
     ...(props.intervalMs !== undefined ? { intervalMs: props.intervalMs } : {}),
     ...(props.refreshOnShow !== undefined ? { refreshOnShow: props.refreshOnShow } : {}),
+    ...(props.refreshOnReconnect !== undefined
+      ? { refreshOnReconnect: props.refreshOnReconnect }
+      : {}),
   });
   return null;
 }
@@ -61,5 +65,33 @@ describe("useLiveRefresh", () => {
 
     expect(periodic).toHaveBeenCalledTimes(5);
     expect(untimed).not.toHaveBeenCalled();
+  });
+
+  it("with refreshOnReconnect, reads when the browser comes back online, outside the floor", async () => {
+    const reconnecting = vi.fn();
+    const plain = vi.fn();
+    using _timers = fakeTimers({ now: 1_000_000 });
+    await using _screen = await render(
+      <>
+        <Probe refresh={reconnecting} viewKey="reconnect" intervalMs={null} refreshOnReconnect />
+        <Probe refresh={plain} viewKey="no-reconnect" intervalMs={null} />
+      </>,
+      // A bare hook probe; nothing here navigates.
+      { router: false },
+    );
+    // The first arrival only records the mount-time read.
+    await act(() => window.dispatchEvent(new Event("online")));
+    expect(reconnecting).not.toHaveBeenCalled();
+
+    // A burst inside the floor reads once.
+    await act(() => vi.advanceTimersByTime(LIVE_REFRESH_MIN_INTERVAL_MS));
+    await act(() => window.dispatchEvent(new Event("online")));
+    await act(() => window.dispatchEvent(new Event("online")));
+    expect(reconnecting).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTime(LIVE_REFRESH_MIN_INTERVAL_MS));
+    await act(() => window.dispatchEvent(new Event("online")));
+    expect(reconnecting).toHaveBeenCalledTimes(2);
+    expect(plain).not.toHaveBeenCalled();
   });
 });

@@ -1,10 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   appConnectionReports,
+  appPairingAddresses,
   linkableMachines,
   linkedEnvironmentNames,
   linkRequestFailureMessage,
   offersLinkedEnvironments,
+  singleFlightByKey,
 } from "@t3tools/client-runtime/link-request";
 import { createPeerLinkEnvironmentAtoms } from "@t3tools/client-runtime/state/peerLinks";
 import {
@@ -12,11 +14,16 @@ import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
   type EnvironmentId,
+  type PeerLinkAppAccess,
 } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useEffect, useEffectEvent } from "react";
 
+import { connectPairing } from "../connection/onboarding";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -180,6 +187,73 @@ export async function linkFromThisApp(
     },
   });
   return linked._tag === "Success" ? null : String(squashAtomCommandFailure(linked));
+}
+
+export type AddToAppOutcome =
+  | { readonly _tag: "Added"; readonly access: PeerLinkAppAccess }
+  | { readonly _tag: "Failed"; readonly message: string }
+  | { readonly _tag: "Interrupted" };
+
+/** The linked machines being added to this app now, by any host, button or automatic add. */
+export const addingLinkedEnvironmentsAtom = Atom.make<ReadonlySet<EnvironmentId>>(
+  new Set<EnvironmentId>(),
+).pipe(Atom.keepAlive, Atom.withLabel("peer-links:adding-to-app"));
+
+const addOnce = singleFlightByKey<EnvironmentId, AddToAppOutcome>((inFlight) =>
+  appAtomRegistry.set(addingLinkedEnvironmentsAtom, inFlight),
+);
+
+/**
+ * Adds a machine `hostId` links to this app: the peer mints a single-use code over the link,
+ * capped at the link's access, and this client pairs with it at the addresses it reaches.
+ * "Add to this app" and the automatic add both run this. While one add of a machine runs, from
+ * any host, another gets the same outcome, so it never spends a second code.
+ */
+export function addLinkedEnvironmentToApp(
+  hostId: EnvironmentId,
+  machine: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly onHostMachine: boolean;
+  },
+): Promise<AddToAppOutcome> {
+  return addOnce(machine.environmentId, () => addToApp(hostId, machine));
+}
+
+async function addToApp(
+  hostId: EnvironmentId,
+  machine: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly onHostMachine: boolean;
+  },
+): Promise<AddToAppOutcome> {
+  const issued = await peerLinkEnvironment.addToApp.run(appAtomRegistry, {
+    environmentId: hostId,
+    input: { environmentId: machine.environmentId },
+  });
+  if (issued._tag === "Failure") {
+    return isAtomCommandInterrupted(issued)
+      ? { _tag: "Interrupted" }
+      : { _tag: "Failed", message: String(squashAtomCommandFailure(issued)) };
+  }
+  // Where the peer just answered first, then its other addresses this client reaches. One that
+  // does not answer as this machine never receives the code, so the next can.
+  let failure: string | null = null;
+  for (const host of appPairingAddresses(issued.value.urls, machine.onHostMachine)) {
+    const result = await connectPairing.run(appAtomRegistry, {
+      host,
+      pairingCode: issued.value.credential,
+      expectedEnvironmentId: machine.environmentId,
+    });
+    if (result._tag === "Success") return { _tag: "Added", access: issued.value.access };
+    if (isAtomCommandInterrupted(result)) return { _tag: "Interrupted" };
+    failure = String(squashAtomCommandFailure(result));
+  }
+  return {
+    _tag: "Failed",
+    message: failure ?? `${machine.label} answers only at addresses this device cannot open.`,
+  };
 }
 
 /** Links the user chose while adding a connection, kept until that connection connects. */

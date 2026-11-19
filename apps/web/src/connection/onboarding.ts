@@ -3,10 +3,15 @@ import {
   createAtomCommandScheduler,
   createRuntimeCommand,
 } from "@t3tools/client-runtime/state/runtime";
-import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
+import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import { undismissLinkedEnvironment } from "../state/linkedEnvironmentDismissals";
 import { connectionAtomRuntime } from "./runtime";
+
+// Adding a machine by any path is the way back from removing it, so it may be added on its own again.
+const undismissAdded = (environmentId: EnvironmentId) =>
+  Effect.sync(() => void undismissLinkedEnvironment(environmentId));
 
 const onboardingScheduler = createAtomCommandScheduler();
 
@@ -20,6 +25,7 @@ export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
   execute: (input: ConnectionOnboarding.PairingConnectionInput) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
+      Effect.tap(undismissAdded),
     ),
 });
 
@@ -33,5 +39,6 @@ export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime,
   execute: (input: ConnectionOnboarding.SshConnectionInput) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerSsh(input)),
+      Effect.tap(undismissAdded),
     ),
 });

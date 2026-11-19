@@ -399,8 +399,12 @@ reasons. When you add an environment in **Settings → Environments**, leave **A
 for agents** ticked to link it once it connects. A linked machine the app is
 not connected to has **Add to this app**, which adds it at no more than the
 link's access: a full-access link adds a full client, anything less adds a
-read-only one, and that machine lists it under **Sharing & access**. An
-environment too old for either shows **Update it**. Removing an environment
+read-only one, and that machine lists it under **Sharing & access**. In the
+desktop and web app, linked machines appear in your app on their own, at no more
+than the link's access. A machine that comes online later appears the next time
+you return to the app or your network changes. Removing one keeps it out until
+you add it back, by **Add to this app** or any other way. An environment too old
+for either shows **Update it**. Removing an environment
 offers to forget its link too, and forgetting a link offers to remove the
 environment from the app. Neither ends the app's access on the other machine:
 it still lists this app under **Authorized clients** until you revoke it there.

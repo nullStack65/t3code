@@ -1,5 +1,7 @@
 import { useEffect, useEffectEvent, useId } from "react";
 
+import { subscribeNetworkPathChanges } from "../lib/networkPathChanges";
+
 export const LIVE_REFRESH_MIN_INTERVAL_MS = 10_000;
 
 const LIVE_REFRESH_INTERVAL_MS = 5 * 60_000;
@@ -83,6 +85,11 @@ export function useLiveRefresh(
      * long stale when shown.
      */
     readonly refreshOnShow?: boolean;
+    /**
+     * Also treat the browser coming back online, or the device changing networks, like a
+     * return to the window: for a read whose answer depends on what else is reachable.
+     */
+    readonly refreshOnReconnect?: boolean;
   } = {},
 ): void {
   const {
@@ -90,6 +97,7 @@ export function useLiveRefresh(
     key,
     intervalMs = LIVE_REFRESH_INTERVAL_MS,
     refreshOnShow = false,
+    refreshOnReconnect = false,
   } = options;
   const runRefresh = useEffectEvent((viewId: string, now: number) => {
     if (refresh === null) return;
@@ -146,11 +154,17 @@ export function useLiveRefresh(
     syncTimer();
     window.addEventListener("focus", onArrival);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    if (refreshOnReconnect) window.addEventListener("online", onArrival);
+    const stopWatchingNetwork = refreshOnReconnect
+      ? subscribeNetworkPathChanges(onArrival)
+      : () => undefined;
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", onArrival);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("online", onArrival);
+      stopWatchingNetwork();
       stopWatchingInteraction();
     };
-  }, [enabled, viewId, intervalMs, refreshOnShow]);
+  }, [enabled, viewId, intervalMs, refreshOnShow, refreshOnReconnect]);
 }

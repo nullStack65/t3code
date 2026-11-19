@@ -617,6 +617,11 @@ export const ClientSettingsSchema = Schema.Struct({
   // Opt-in TeX typesetting in rendered Markdown. Off keeps math parsing and
   // KaTeX out of the render path entirely.
   mathRenderingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Linked environments the user removed from this app, so it stops adding them on its own.
+  // Adding one back, by any path, clears it.
+  dismissedLinkedEnvironmentIds: Schema.Array(EnvironmentId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -2207,5 +2212,6 @@ export const ClientSettingsPatch = Schema.Struct({
   snapShotAnimations: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
   mathRenderingEnabled: Schema.optionalKey(Schema.Boolean),
+  dismissedLinkedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;
