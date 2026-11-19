@@ -31,7 +31,7 @@ const LABELS = { general: "General", appearance: "Appearance", keybindings: "Key
 
 // Settings has its own sidebar of buttons; enter it once from the footer gear.
 // A string only this section's body contains; the header and URL change before the body.
-const MARKER = { general: "New threads", appearance: "Colors & themes", keybindings: "bindings", providers: "Refresh provider status", integrations: "Agent browser access", "source-control": "Repositories", storage: "Worktrees", connections: "Network access", archived: "Archived" };
+const MARKER = { general: "New threads", appearance: "Colors & themes", keybindings: "Appearance: Cycle", providers: "Refresh provider status", integrations: "Agent browser access", "source-control": "Repositories", storage: "Worktrees", connections: "Network access", archived: "Archived" };
 
 // Settings has its own sidebar of buttons; enter it once from the footer gear.
 const settingsRoute = (slug) => async () => {
@@ -69,6 +69,21 @@ await step("threads.archived.returns", "after Unarchive, leave Settings and read
     .locator('[data-testid="sidebar-row-card"], [data-testid="sidebar-row-slim"]')
     .evaluateAll((els) => els.map((e) => e.innerText.replace(/\s+/g, " ").trim()));
   return JSON.stringify(rows);
+});
+
+await step("search.palette", "Control+K, type the thread title (after archive + unarchive)", async () => {
+  await p.keyboard.press("Escape");
+  await p.mouse.click(800, 200);
+  await p.keyboard.press("Control+k");
+  await p.locator('input[placeholder^="Search commands"]').first().fill("renamed");
+  for (let i = 0; i < 12; i++) {
+    await p.waitForTimeout(1000);
+    if (await p.locator('[role="option"]').count()) break;
+  }
+  const opts = (await p.locator('[role="option"]').allInnerTexts()).map((s) => s.replace(/\s+/g, " "));
+  await p.keyboard.press("Escape");
+  if (!opts.length) throw new Error('palette says "No matching commands, projects, or threads" for a thread that is in the sidebar');
+  return JSON.stringify(opts.slice(0, 4));
 });
 
 const home = async () => {
@@ -109,21 +124,8 @@ await step("threads.new", "click New thread", async () => {
   return `${new URL(p.url()).pathname.split("/")[1]} | ${await mainText(120)}`;
 });
 
-await step("search.palette", "Control+K, type the thread title (after archive + unarchive)", async () => {
-  await p.keyboard.press("Escape");
-  await p.mouse.click(800, 200);
-  await p.keyboard.press("Control+k");
-  await p.locator('input[placeholder^="Search commands"]').first().fill("renamed");
-  for (let i = 0; i < 12; i++) {
-    await p.waitForTimeout(1000);
-    if (await p.locator('[role="option"]').count()) break;
-  }
-  const opts = (await p.locator('[role="option"]').allInnerTexts()).map((s) => s.replace(/\s+/g, " "));
-  await p.keyboard.press("Escape");
-  if (!opts.length) throw new Error('palette says "No matching commands, projects, or threads" for a thread that is in the sidebar');
-  return JSON.stringify(opts.slice(0, 4));
-});
-
+await p.keyboard.press("Escape");
+await p.waitForTimeout(500);
 await step("terminal.drawer", "toggle the terminal drawer, run a command that writes a file", async () => {
   await p.locator('button[aria-label="Toggle terminal drawer"]').first().click();
   await p.waitForTimeout(4000);

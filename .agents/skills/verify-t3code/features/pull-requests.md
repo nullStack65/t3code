@@ -23,16 +23,20 @@ Preconditions: baseline from [README.md](README.md); the host's `gh` is logged i
 - Click "Pull Requests" → the URL is `/pull-requests?involvement=all&state=open` and the
   main text starts "Pull Requests Sort Filters All Authored" followed by rows such as
   "#100 feat(server): … nullStack65 nullstack65/t3code 5m ago" (`pullrequests.page`).
+  Observed on three fresh instances: the first visit fails (see Gotchas); after Retry
+  the same list appears.
 
 ## Gotchas
 
 - This is a live read of GitHub through the host's `gh` credentials, not the fixture.
   It is read-only; do not drive linking or any write from a verify run.
-- Observed once: the first visit after the Usage page showed "Could not load pull
-  requests: All fibers interrupted without error" with a Retry button; Retry listed
-  the PRs, and three later visits listed them at once. It is an internal error string
-  in the UI. If the first visit shows it again, record it as a failure, do not retry
-  past it, and report it.
+- BUG, reproduced on three fresh instances: the first visit to the page (after opening
+  Usage) shows "Could not load pull requests" with the internal text "All fibers
+  interrupted without error" and a Retry button. Retry lists the PRs, and later visits in
+  the same instance list them at once. `drive-surfaces.mjs` records this as `FAIL
+  pullrequests.page`. Do not click Retry to make the step pass or wait it out. The
+  nullStack65/t3code repo has issues disabled, so the report lives here and in the PR that
+  added this file.
 
 ## Proves it works
 

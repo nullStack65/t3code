@@ -44,8 +44,10 @@ Preconditions: baseline from [README.md](README.md).
 ## Gotchas
 
 - Lazy routes: right after the click the header and URL already say Providers while the
-  body is still the previous page (Keybindings). Wait for the body, not the URL. A 1.5 s
-  read recorded exactly that once; 8 s later it was correct.
+  body is still the previous page (Keybindings). Wait for a string only the new body has
+  (`MARKER` in `drive-surfaces.mjs`), not the URL and not "text changed": the header alone
+  changes the text. Observed body delays of 0.1 to 4.7 s in dev mode. A marker that also
+  appears in the header (the word "bindings" in "Keybindings") matches too early.
 - Changing a setting was not driven (no Save flow was exercised); these steps only prove
   each page renders its section.
 - Settings changes made here persist in `$RUN/home/userdata/settings.json`, not in the

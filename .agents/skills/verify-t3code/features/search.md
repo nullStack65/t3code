@@ -23,14 +23,27 @@ environments and runs commands. A person types part of a title and picks the thr
 Preconditions: baseline from [README.md](README.md); a thread titled
 `verify-t3code: renamed`.
 
-- Press Control+K, type `renamed` into the dialog input, wait for `[role="option"]`
-  → one option "Completed verify-t3code: renamed DA demo-app · Local · t3code/ <id> · 8m
-  ago" for an active thread (`search.palette`).
+- Click the page body (focus off the terminal), press Control+K, type `renamed` into
+  `input[placeholder^="Search commands"]`, wait for `[role="option"]` → one option
+  "verify-t3code: renamed DA demo-app · Local · t3code/ <id> · just now" for an active
+  thread (`search.active`).
+- Archive the thread, Unarchive it from Settings > Archive, then repeat the search
+  (`search.palette`). Read the result as logged: an empty list with "No matching
+  commands, projects, or threads" while the thread is in the sidebar is a failure.
 - Snooze the thread first, then repeat → one option "verify-t3code: renamed DA demo-app
   · Local · t3code/ <id> · just now" (`search.snoozed`).
 
 ## Gotchas
 
+- Open state is easy to get wrong: Control+K does nothing while focus is in the terminal
+  drawer, and the palette can reopen in a project-picker mode that lists only projects
+  and leaves a modal over the page. Press Escape, click the page body, then Control+K,
+  and confirm the input placeholder starts "Search commands" before typing.
+- Not understood yet: in two earlier instances the search after an archive and
+  Unarchive returned nothing for a thread that was in the sidebar, and a reload was not
+  tried before the run was lost. It may be a stale search index after Unarchive or a
+  harness focus problem; repeat the archive, Unarchive, search sequence and reload before
+  calling it a bug.
 - Results arrive after the dialog opens: on a busy host an immediate read returns
   nothing. Poll for an option for up to 12 s before concluding the thread is missing;
   an early run recorded `[]` this way while the thread existed.
