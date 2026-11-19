@@ -7,6 +7,7 @@ import {
   promisesToContinue,
   threadEventAlert,
   threadEventMessage,
+  threadEventStillHolds,
   type ThreadEventTrigger,
   type WatchedShell,
 } from "./ThreadEventAlerts.ts";
@@ -301,6 +302,91 @@ it("a recurrence of the same state is a new message", () => {
       occurredAt,
     });
   assert.notEqual(make("2026-11-19T05:00:00.000Z").id, make("2026-11-19T05:30:00.000Z").id);
+});
+
+const fired = (overrides: Partial<WatchedShell>, trigger: ThreadEventTrigger) => {
+  const shell = shellWith(overrides);
+  const finding = judge(shell, trigger).findings[0]!;
+  return threadEventAlert({
+    environmentId: "env-r720" as never,
+    environmentLabel: "primary-r720",
+    shell,
+    finding,
+    occurredAt: DateTime.formatIso(DateTime.makeUnsafe(NOW)),
+  });
+};
+const stillHolds = (
+  alert: ReturnType<typeof fired>,
+  overrides: Partial<WatchedShell>,
+  base: Partial<WatchedShell>,
+) =>
+  threadEventStillHolds({ alert, shell: shellWith({ ...base, ...overrides }), stuckMinutes: 20 });
+
+const failed = { status: "failed" } as never;
+const openWithPr = { status: "completed", pullRequests: [openPullRequest] } as never;
+const quietRun = {
+  activeRunId: "run:8",
+  status: "running",
+  activityRunStatus: "running",
+  updatedAt: at(25),
+} as never;
+const asking = {
+  pendingRuntimeRequest: { id: "request:9", kind: "approval", userOnly: false },
+} as never;
+const promised = { status: "idle", latestVisibleMessage: assistantSays(FLEET_PROMISE) } as never;
+
+it.each([
+  ["lane-ended, nothing changed", failed, "run-ended", {}, true],
+  ["lane-ended, the lane restarted itself", failed, "run-ended", quietRun, false],
+  [
+    "lane-ended, a newer run already finished",
+    failed,
+    "run-ended",
+    { latestRunId: "run:8", status: "completed" },
+    false,
+  ],
+  ["lane-ended, the lane was settled", failed, "run-ended", { settledOverride: "settled" }, false],
+  ["lane-ended, the lane was archived", failed, "run-ended", { archivedAt: at(1) }, false],
+  [
+    "lane-ended with an open PR, a PR watch registered since",
+    openWithPr,
+    "run-ended",
+    { pendingBackgroundTasks: [{ taskId: "pull-request-watch:97", kind: "monitor" }] },
+    false,
+  ],
+  [
+    "lane-ended with an open PR, the PR merged since",
+    openWithPr,
+    "run-ended",
+    { pullRequests: [{ ...(openPullRequest as object), snapshot: { state: "merged" } }] },
+    false,
+  ],
+  ["stuck, nothing changed", quietRun, "sweep", {}, true],
+  ["stuck, new activity since", quietRun, "sweep", { updatedAt: at(-1) }, false],
+  [
+    "needs-person, the question was answered",
+    asking,
+    "request",
+    { pendingRuntimeRequest: null },
+    false,
+  ],
+  [
+    "promise-without-wake, a real wait registered since",
+    promised,
+    "settled",
+    { pendingBackgroundTasks: [{ taskId: "b1", kind: "command" }] },
+    false,
+  ],
+] as const)("at delivery, %s -> still holds %s", (_name, base, trigger, now, expected) => {
+  const alert = fired(base, trigger);
+  assert.equal(stillHolds(alert, now as never, base), expected);
+});
+
+it("a thread event still holds when delivery waited past the recent-run window", () => {
+  // Judged at the time it fired, not now: a watcher offline for two hours still hears it.
+  const alert = fired(failed, "run-ended");
+  assert.equal(stillHolds(alert, {}, failed), true);
+  assert.equal(stillHolds({ ...alert, occurredAt: "not a time" }, quietRun, failed), true);
 });
 
 it("each trigger evaluates only the kinds it can change", () => {

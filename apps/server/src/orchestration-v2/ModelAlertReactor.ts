@@ -48,6 +48,7 @@ import {
   ThreadEventAlert,
   type ThreadEventKind,
   threadEventMessage,
+  threadEventStillHolds,
   type ThreadEventTrigger,
   type ThreadFinding,
 } from "./ThreadEventAlerts.ts";
@@ -453,6 +454,27 @@ export function afterHold(
   };
 }
 
+const BUSY_WATCHER_STATUSES = new Set<string>(["preparing", "queued", "starting", "running"]);
+/** Matches the flush interval, so a held alert is looked at again on the next flush. */
+export const BUSY_WATCHER_RECHECK_MS = 30_000;
+export const BUSY_WATCHER_MAX_HOLD_MS = 10 * 60 * 1000;
+
+/**
+ * While the watcher is mid-turn, a sent alert only queues behind that turn and is judged stale or
+ * not when it was sent. Holding it until the turn ends lets the delivery check drop what went stale
+ * meanwhile. Bounded, so a watcher that never goes idle still hears everything.
+ */
+export function busyWatcherHold(
+  watcherStatus: string | null,
+  createdAt: number,
+  nowMs: number,
+): number | null {
+  if (watcherStatus === null || !BUSY_WATCHER_STATUSES.has(watcherStatus)) return null;
+  const deadline = createdAt + BUSY_WATCHER_MAX_HOLD_MS;
+  if (nowMs >= deadline) return null;
+  return Math.min(nowMs + BUSY_WATCHER_RECHECK_MS, deadline);
+}
+
 /**
  * Records a thread that stopped at a usage limit. The server resumes it at the reset, so Lead
  * hears nothing unless it does not come back; otherwise every thread of one provider account
@@ -762,7 +784,80 @@ export const make = Effect.gen(function* () {
       alert.type === "model-degraded"
         ? { providerInstanceId: alert.providerInstanceId, newerRunSupersedes: false }
         : undefined;
-    return (yield* stillCurrent(alert.threadId, alert.runId, about)) ? alert : null;
+    if (!(yield* stillCurrent(alert.threadId, alert.runId, about))) return null;
+    if (alert.type === "thread-event") {
+      const shell = yield* projections.getThreadShell(ThreadId.make(alert.threadId));
+      if (shell === null) return null;
+      const holds = threadEventStillHolds({
+        alert,
+        shell,
+        stuckMinutes: (yield* settings.getSettings).watcherStuckMinutes,
+        ...(yield* judgeContext(shell, alert.kind === "stuck" ? "sweep" : "run-ended")),
+      });
+      if (!holds) return null;
+    }
+    return alert;
+  });
+
+  /** What the shell does not carry: open delegated tasks elsewhere, and children's last activity. */
+  const judgeContext = Effect.fnUntraced(function* (
+    shell: OrchestrationV2ThreadShell,
+    trigger: ThreadEventTrigger,
+    remoteTasks?: ReadonlyMap<string, number>,
+  ) {
+    const remoteTaskCount =
+      trigger === "request" || trigger === "inbox"
+        ? 0
+        : remoteTasks !== undefined
+          ? (remoteTasks.get(shell.id) ?? 0)
+          : (yield* projections.getOpenRemoteDelegatedTasks).filter(
+              (task) => task.parentThreadId === shell.id,
+            ).length;
+    // A parent that waits on children is not stuck while they work.
+    const childActivityMs =
+      trigger === "sweep"
+        ? Math.max(
+            0,
+            ...(yield* Effect.forEach(
+              (shell.pendingBackgroundTasks ?? []).flatMap((task) =>
+                task.kind === "subagent" && task.childThreadId !== undefined
+                  ? [task.childThreadId]
+                  : [],
+              ),
+              (childId) =>
+                projections
+                  .getThreadShell(childId)
+                  .pipe(
+                    Effect.map((child) =>
+                      child === null ? 0 : DateTime.toEpochMillis(child.updatedAt),
+                    ),
+                  ),
+            )),
+          )
+        : null;
+    return { remoteTaskCount, childActivityMs };
+  });
+
+  /** The watcher thread's run status, or null when it cannot be read. */
+  const watcherStatus = Effect.fnUntraced(function* (
+    watcher: ModelAlertWatcher,
+    here: EnvironmentId,
+  ) {
+    if (watcher.environmentId === here) {
+      return (yield* projections.getThreadShell(watcher.threadId))?.status ?? null;
+    }
+    return yield* peers
+      .call({
+        environmentId: watcher.environmentId,
+        tool: "t3_thread_read",
+        arguments: { threadId: watcher.threadId, limit: 1, runLimit: 1 },
+        limits: { runtimeMode: "full-access", interactionMode: "default" },
+        success: WatcherThreadStatus,
+      })
+      .pipe(
+        Effect.map(({ thread }) => thread.status),
+        Effect.orElseSucceed(() => null),
+      );
   });
 
   /**
@@ -826,7 +921,15 @@ export const make = Effect.gen(function* () {
   const deliver = Effect.fnUntraced(function* (entry: Delivery) {
     const current = yield* settings.getSettings;
     const alert = yield* currentAlert(entry.alert);
-    if (alert === null) return { _tag: "dropped" } satisfies DeliveryResult;
+    if (alert === null) {
+      yield* Effect.logInfo("watcher alert no longer true; dropped without waking anyone", {
+        alertId: entry.alert.id,
+        type: entry.alert.type,
+        kind: entry.alert.type === "thread-event" ? entry.alert.kind : null,
+        destination: entry.destination,
+      });
+      return { _tag: "dropped" } satisfies DeliveryResult;
+    }
     if (entry.destination === "webhook") {
       const url = current.modelAlertWebhookUrl.trim();
       if (url === "") return { _tag: "sent" } satisfies DeliveryResult;
@@ -840,7 +943,10 @@ export const make = Effect.gen(function* () {
     const watcher = current.modelAlertWatcher;
     if (watcher === null) return { _tag: "sent" } satisfies DeliveryResult;
     const here = yield* environment.getEnvironmentId;
-    const until = yield* holdUntil(watcher, here, alert, yield* Clock.currentTimeMillis);
+    const nowMs = yield* Clock.currentTimeMillis;
+    const until =
+      (yield* holdUntil(watcher, here, alert, nowMs)) ??
+      busyWatcherHold(yield* watcherStatus(watcher, here), entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
     yield* deliverToWatcher(alert, watcher, here);
     return { _tag: "sent" } satisfies DeliveryResult;
@@ -1029,44 +1135,13 @@ export const make = Effect.gen(function* () {
     if (watcher === null && current.modelAlertWebhookUrl.trim() === "") return;
     const shell = yield* projections.getThreadShell(threadId);
     if (shell === null || shell.deletedAt !== null) return;
-    const remoteTaskCount =
-      trigger === "request" || trigger === "inbox"
-        ? 0
-        : remoteTasks !== undefined
-          ? (remoteTasks.get(threadId) ?? 0)
-          : (yield* projections.getOpenRemoteDelegatedTasks).filter(
-              (task) => task.parentThreadId === threadId,
-            ).length;
-    // A parent that waits on children is not stuck while they work.
-    const childActivityMs =
-      trigger === "sweep"
-        ? Math.max(
-            0,
-            ...(yield* Effect.forEach(
-              (shell.pendingBackgroundTasks ?? []).flatMap((task) =>
-                task.kind === "subagent" && task.childThreadId !== undefined
-                  ? [task.childThreadId]
-                  : [],
-              ),
-              (childId) =>
-                projections
-                  .getThreadShell(childId)
-                  .pipe(
-                    Effect.map((child) =>
-                      child === null ? 0 : DateTime.toEpochMillis(child.updatedAt),
-                    ),
-                  ),
-            )),
-          )
-        : null;
     const nowMs = yield* Clock.currentTimeMillis;
     const judged = judgeThread({
       shell,
       trigger,
       nowMs,
       stuckMinutes: current.watcherStuckMinutes,
-      remoteTaskCount,
-      childActivityMs,
+      ...(yield* judgeContext(shell, trigger, remoteTasks)),
       usageLimitReported,
     });
     const label = (yield* environment.getDescriptor).label;
