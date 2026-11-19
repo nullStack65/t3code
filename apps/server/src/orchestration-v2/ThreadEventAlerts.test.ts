@@ -100,6 +100,25 @@ it.each([
   );
 });
 
+it.each(["failed", "interrupted"] as const)(
+  "a %s run on a thread a person created is not a lane event",
+  (status) => {
+    const { findings } = judge(shellWith({ status, createdBy: "user" } as never), "run-ended");
+    assert.deepEqual(findings, []);
+    const stuck = judge(
+      shellWith({
+        createdBy: "user",
+        status: "running",
+        activeRunId: "run:8",
+        activityRunStatus: "running",
+        updatedAt: at(90),
+      } as never),
+      "sweep",
+    );
+    assert.deepEqual(stuck.findings, []);
+  },
+);
+
 it("lane-ended stays quiet for a failure the model alert already reported as a usage limit", () => {
   const { findings } = judge(shellWith({ status: "failed" } as never), "run-ended", {
     usageLimitReported: true,
@@ -268,6 +287,20 @@ it("needs-person: an agent lane raising a question or flipping to a founder", ()
     ).findings,
     [],
   );
+});
+
+it("a recurrence of the same state is a new message", () => {
+  const shell = shellWith({ status: "failed" } as never);
+  const finding = judge(shell, "run-ended").findings[0]!;
+  const make = (occurredAt: string) =>
+    threadEventAlert({
+      environmentId: "env-r720" as never,
+      environmentLabel: "primary-r720",
+      shell,
+      finding,
+      occurredAt,
+    });
+  assert.notEqual(make("2026-11-19T05:00:00.000Z").id, make("2026-11-19T05:30:00.000Z").id);
 });
 
 it("each trigger evaluates only the kinds it can change", () => {
