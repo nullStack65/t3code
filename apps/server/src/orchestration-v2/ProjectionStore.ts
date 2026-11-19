@@ -3,7 +3,6 @@ import {
   applyOrchestrationV2ThreadVisit,
   pendingGuestMessageCount,
   projectThreadInbox,
-  type ThreadInbox,
 } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
