@@ -65,13 +65,16 @@ describe("shared fleet organizational inbox", () => {
     ]);
     // Agent work filed to another founder or Shared stays out of "Kameron + Agents".
     const mineAndAgents = ["kameron", "agents"] as const;
-    // An agent files work to a founder only with a reason; without one it stays in Agents.
+    // New agent routes to a founder need a reason. Routing without one is how lanes were filed
+    // before `reason` existed; those show to that founder as FYI rather than vanishing.
     const filedToJeff = makeThreadInbox({
       actor: bot,
       routing: { ...inboxRoutingFor("jeff"), reason: "decision" },
     });
     const unreasoned = makeThreadInbox({ actor: bot, routing: inboxRoutingFor("jeff") });
-    expect(primaryInbox(unreasoned)).toBe("agents");
+    expect(primaryInbox(unreasoned)).toBe("jeff");
+    expect(founderInboxLane(unreasoned, "jeff")).toBe("FYI");
+    expect(founderInboxLane(unreasoned, "kameron")).toBe("hidden");
     const sharedByKameron = makeThreadInbox({ actor: kameron, routing: { audience: "shared" } });
     expect(matchesInboxFilter(filedToJeff, mineAndAgents)).toBe(false);
     expect(matchesInboxFilter(filedToJeff, ["jeff"])).toBe(true);
@@ -143,7 +146,7 @@ describe("shared fleet organizational inbox", () => {
     expect(visibleIn(quieter)).toEqual(["kameron", "agents"]);
     expect(founderInboxLane(quieter, "kameron")).toBe("FYI");
   });
-  it("never files reason-less agent work into a founder's lane", () => {
+  it("shows reason-less agent lanes only to the founder they were routed to, as FYI", () => {
     const people = [null, kameron, jeff] as const;
     const patches: ThreadInboxRoutingPatch[] = [{}];
     for (const owner of [null, "kameron", "jeff"] as const)
@@ -154,9 +157,15 @@ describe("shared fleet organizational inbox", () => {
     for (const routing of patches) {
       for (const parent of [undefined, makeThreadInbox({ actor: kameron })]) {
         const inbox = makeThreadInbox({ actor: bot, routing, ...(parent ? { parent } : {}) });
+        // Pre-reason lanes (audience = founder) keep showing; nothing else reason-less does.
+        const expected = (founder: "kameron" | "jeff") => {
+          if (inbox.audience === "agent-only" && inbox.assignee?.kind !== "human") return "hidden";
+          const assigned = inbox.assignee?.kind === "human" ? inbox.assignee.id : inbox.owner;
+          return assigned === founder && inbox.audience === founder ? "FYI" : "hidden";
+        };
         expect([founderInboxLane(inbox, "kameron"), founderInboxLane(inbox, "jeff")]).toEqual([
-          "hidden",
-          "hidden",
+          expected("kameron"),
+          expected("jeff"),
         ]);
         expect(agentInboxRoutingError(inbox, routing) === null).toBe(
           inbox.audience === "agent-only" && inbox.assignee?.kind !== "human",
@@ -281,6 +290,7 @@ describe("shared fleet organizational inbox", () => {
     expect(child.requestedBy).toEqual(jeff);
     expect(child.origin).toEqual(bot);
     // Child work an agent started reports in Agents, not the requester's inbox.
+    expect(child.audience).toBe("agent-only");
     expect(founderInboxLane(child, "jeff")).toBe("hidden");
     expect(child.executorEnvironmentId).toBe("r720");
   });
