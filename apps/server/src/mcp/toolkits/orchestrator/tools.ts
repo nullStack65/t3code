@@ -8,6 +8,7 @@ import {
   OrchestratorMcpEnvironmentUnlinkInput,
   OrchestratorMcpEnvironmentUnlinkResult,
   OrchestratorMcpLinkAppPairingResult,
+  OrchestratorMcpLinkRenewResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskInput,
@@ -376,6 +377,19 @@ export const LinkAppPairingTool = Tool.make("t3_link_app_pairing", {
   .annotate(Tool.Destructive, false)
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.onlyForLinks);
 
+// Offered to another environment's link only, never to an agent.
+export const LinkRenewTool = Tool.make("t3_link_renew", {
+  description:
+    "For a linked T3 Code environment: its link's credential, signed again with a later expiry. The link keeps its session here.",
+  success: OrchestratorMcpLinkRenewResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [McpInvocationContext.McpInvocationContext],
+})
+  .annotate(Tool.Title, "Renew this link")
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.onlyForLinks);
+
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
@@ -398,4 +412,5 @@ export const OrchestratorToolkit = Toolkit.make(
   EnvironmentLinkTool,
   EnvironmentUnlinkTool,
   LinkAppPairingTool,
+  LinkRenewTool,
 );

@@ -139,6 +139,17 @@ export class PeerLinks extends Context.Service<
     readonly get: (
       environmentId: EnvironmentId,
     ) => Effect.Effect<Option.Option<PeerLink>, PeerLinkError>;
+    /**
+     * Keeps a renewed token for the link session `incarnation` names, under that same name, so
+     * `session` does not change and work bound to it stays bound. False, keeping nothing, when the
+     * link was forgotten or linked again meanwhile.
+     */
+    readonly renewed: (input: {
+      readonly environmentId: EnvironmentId;
+      readonly incarnation: string;
+      readonly token: string;
+      readonly expiresAt: DateTime.Utc;
+    }) => Effect.Effect<boolean, PeerLinkError>;
     /** Forgets the link here. The peer still lists the session until it is revoked there. */
     readonly unlink: (environmentId: EnvironmentId) => Effect.Effect<boolean, PeerLinkError>;
     /** An address that answers as the linked peer, with its token, ready to call. */
@@ -792,6 +803,26 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const renewed: PeerLinks["Service"]["renewed"] = Effect.fn("PeerLinks.renewed")(
+    function* (input) {
+      const row = yield* readRow(input.environmentId);
+      if (Option.isNone(row) || row.value.secret_name !== input.incarnation) return false;
+      // The old token and the new one name the same session there, so a call reading either works.
+      yield* secrets
+        .set(input.incarnation, new TextEncoder().encode(input.token))
+        .pipe(Effect.catch(failStorage));
+      const updated = yield* sql<{ environment_id: string }>`
+      UPDATE peer_environment_links SET expires_at = ${DateTime.formatIso(input.expiresAt)}
+      WHERE environment_id = ${input.environmentId} AND secret_name = ${input.incarnation}
+      RETURNING environment_id
+    `.pipe(Effect.catch(failStorage));
+      if (updated.length > 0) return true;
+      // Forgotten or linked again since the read: that removed this name's token, or is about to.
+      yield* secrets.remove(input.incarnation).pipe(Effect.ignore);
+      return false;
+    },
+  );
+
   const recordOutcome: PeerLinks["Service"]["recordOutcome"] = (environmentId, outcome) =>
     DateTime.now.pipe(
       Effect.flatMap((now) =>
@@ -824,6 +855,7 @@ const make = Effect.gen(function* () {
     placementExclusions,
     session,
     get,
+    renewed,
     unlink,
     resolve,
     recordOutcome,

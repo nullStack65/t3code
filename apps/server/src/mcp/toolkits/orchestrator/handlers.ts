@@ -1,4 +1,4 @@
-import { mcpClientScopes, OrchestratorMcpFailure } from "@t3tools/contracts";
+import { AuthSessionId, mcpClientScopes, OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -61,6 +61,61 @@ export const linkAppPairing = Effect.map(
           credential: issued.credential,
           expiresAt: DateTime.formatIso(issued.expiresAt),
           access,
+        };
+      }),
+    ),
+);
+
+/** The calling link's own session, renewed in place, so a link never needs a new pairing code. */
+export const linkRenew = Effect.map(
+  Effect.serviceOption(EnvironmentAuth.EnvironmentAuth),
+  (environmentAuth) =>
+    McpToolAccess.reads(() =>
+      Effect.gen(function* () {
+        const { client } = yield* McpInvocationContext.McpInvocationContext;
+        if (client?.linked !== true) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Only a linked T3 Code environment can renew its link.",
+          });
+        }
+        // The link's credential is the linked environment's, never one of its agents'.
+        if (client.senderThread !== undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Only the linked environment can renew its link, not its agents.",
+          });
+        }
+        if (Option.isNone(environmentAuth)) {
+          return yield* new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: "This environment cannot renew links here.",
+          });
+        }
+        const renewed = yield* environmentAuth.value
+          .renewMcpClientSession({
+            sessionId: AuthSessionId.make(client.sessionId),
+            access: client.access,
+            peerLink: true,
+          })
+          .pipe(
+            Effect.mapError(
+              () =>
+                new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: "The link could not be renewed here. The server log has details.",
+                }),
+            ),
+          );
+        if (Option.isNone(renewed)) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "This link's session was revoked or has ended here, so it cannot be renewed.",
+          });
+        }
+        return {
+          accessToken: renewed.value.token,
+          expiresAt: DateTime.formatIso(renewed.value.expiresAt),
         };
       }),
     ),
@@ -291,9 +346,18 @@ const handlers = {
         return yield* service.interruptThread(scope, input);
       }),
   ),
-} satisfies Omit<McpToolAccess.Handlers<typeof OrchestratorToolkit.tools>, "t3_link_app_pairing">;
+} satisfies Omit<
+  McpToolAccess.Handlers<typeof OrchestratorToolkit.tools>,
+  "t3_link_app_pairing" | "t3_link_renew"
+>;
 
 export const layer = McpToolAccess.toLayer(
   OrchestratorToolkit,
-  Effect.map(linkAppPairing, (pairing) => ({ ...handlers, t3_link_app_pairing: pairing })),
+  Effect.all([linkAppPairing, linkRenew]).pipe(
+    Effect.map(([pairing, renew]) => ({
+      ...handlers,
+      t3_link_app_pairing: pairing,
+      t3_link_renew: renew,
+    })),
+  ),
 );

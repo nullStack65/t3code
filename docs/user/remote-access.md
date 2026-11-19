@@ -392,7 +392,12 @@ an address you trust: the code is sent there.
 - The link shows up in that machine's **Settings → Sharing & access** like any
   outside agent. Revoke it there to end it. **Forget** on this machine only
   removes it here.
-- Links last 30 days. Link again with a new pairing code to renew one.
+- A link's credential lasts 30 days, and the linking machine renews it by
+  itself once 20 days or fewer are left, with no pairing code. Both machines
+  need a T3 Code version that renews links. A link that cannot renew, because
+  the other machine stays off, runs an older T3 Code or revoked the link, sends
+  the watcher thread one alert. A revoked or expired link needs linking again
+  with a new pairing code.
 
 The app and its machine keep one list of your environments: what this machine
 links and what the app connects to. **Linked environments** shows a machine

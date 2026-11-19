@@ -622,6 +622,19 @@ export class EnvironmentAuth extends Context.Service<
       ServerAuthInternalError
     >;
     /**
+     * The calling link's own session, signed again for another full lifetime. The session id stays,
+     * so the work the link started here stays its own. Only a linked environment's session renews:
+     * an outside agent still signs in again when its session ends. None when it is revoked or gone.
+     */
+    readonly renewMcpClientSession: (input: {
+      readonly sessionId: AuthSessionId;
+      readonly access: AuthMcpClientAccess;
+      readonly peerLink: boolean;
+    }) => Effect.Effect<
+      Option.Option<{ readonly token: string; readonly expiresAt: DateTime.Utc }>,
+      ServerAuthInternalError
+    >;
+    /**
      * Spends a code covering all granted scopes and returns the level it approves. A level-bound
      * code must name `access`. Rejects desktop grants and leaves refused codes unspent.
      */
@@ -1567,6 +1580,21 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),
       );
 
+  const renewMcpClientSession: EnvironmentAuth["Service"]["renewMcpClientSession"] = (input) =>
+    input.peerLink
+      ? sessions
+          .renew({
+            sessionId: input.sessionId,
+            ttl: MCP_CLIENT_SESSION_TTL,
+            ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
+            peerLink: true,
+          })
+          .pipe(
+            Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+            Effect.withSpan("EnvironmentAuth.renewMcpClientSession"),
+          )
+      : Effect.succeedNone;
+
   const consumeMcpApprovalCode: EnvironmentAuth["Service"]["consumeMcpApprovalCode"] = (
     code,
     access,
@@ -1626,6 +1654,7 @@ export const make = Effect.gen(function* () {
     issueStartupPairingUrl,
     authenticateMcpClient,
     issueMcpClientSession,
+    renewMcpClientSession,
     consumeMcpApprovalCode,
   });
 });

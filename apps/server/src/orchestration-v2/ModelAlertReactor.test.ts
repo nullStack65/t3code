@@ -15,6 +15,8 @@ import {
   modelAlertDestinations,
   modelAlertFor,
   overdueResumes,
+  type PeerLinkRenewalAlert,
+  recordLinkRenewal,
   recordModelAlert,
   recordUsageLimit,
   RESUME_GRACE_MS,
@@ -632,4 +634,55 @@ it("a provider out of usage is tracked until its reset, and a healthy run clears
   ProviderExhaustion.mark("magpie-primary-codex", 9_000);
   ProviderExhaustion.clear("magpie-primary-codex");
   assert.equal(ProviderExhaustion.until("magpie-primary-codex", 1_000), null);
+});
+
+const linkAlert = (at: number): PeerLinkRenewalAlert => ({
+  type: "peer-link-renewal",
+  id: `peer-link-renewal:environment-box:${at}`,
+  environmentId: "environment-a",
+  environmentLabel: "primary-r720",
+  linkedEnvironmentId: "environment-box",
+  linkedLabel: "ASUS",
+  expiresAt: "2026-12-19T00:00:00.000Z",
+  detail: "ASUS did not answer.",
+  occurredAt: DateTime.formatIso(DateTime.makeUnsafe(at)),
+});
+
+it("a link that keeps failing to renew alerts once, until it renews", () => {
+  let state = EMPTY_MODEL_ALERT_STATE;
+  const enqueued: Array<boolean> = [];
+  const step = (
+    outcome: Parameters<typeof recordLinkRenewal>[1],
+    destinations: ReadonlyArray<"watcher" | "webhook"> = ["watcher", "webhook"],
+  ) => {
+    const result = recordLinkRenewal(state, outcome, destinations, 0);
+    state = result.state;
+    enqueued.push(result.enqueued);
+  };
+  // Every hourly sweep fails; only the first one queues anything.
+  for (const at of [1, 2, 3]) step({ _tag: "failed", alert: linkAlert(at) });
+  step({ _tag: "renewed", linkedEnvironmentId: "environment-box" });
+  // A later failure after a renewal is news again.
+  step({ _tag: "failed", alert: linkAlert(4) });
+  assert.deepEqual(enqueued, [true, false, false, false, true]);
+  assert.deepEqual(
+    state.outbox.map((entry) => [entry.alert.id, entry.destination]),
+    [
+      ["peer-link-renewal:environment-box:1", "watcher"],
+      ["peer-link-renewal:environment-box:1", "webhook"],
+      ["peer-link-renewal:environment-box:4", "watcher"],
+      ["peer-link-renewal:environment-box:4", "webhook"],
+    ],
+  );
+  // Another link failing is its own alert.
+  const other = recordLinkRenewal(
+    state,
+    { _tag: "failed", alert: { ...linkAlert(5), linkedEnvironmentId: "environment-air" } },
+    ["watcher"],
+    0,
+  );
+  assert.equal(other.enqueued, true);
+  const message = watcherAlertMessage(linkAlert(1));
+  assert.include(message, "Link alert from primary-r720");
+  assert.include(message, "ASUS did not answer.");
 });
