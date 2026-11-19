@@ -8,6 +8,12 @@ on:
     # exact commit; the private fleet rollout builds only commits that passed.
     branches: [feat/assemblyai-current, release/native-0.1.10]
   pull_request:
+    # `edited` covers retargeting a PR onto a release branch. Without it, a PR
+    # whose commits were all pushed before the retarget merged with no ARC run.
+    # A founder's edit reruns the full job. An edit by anyone else (for example
+    # CodeRabbit rewriting the description) starts a run whose job is skipped;
+    # the concurrency group below keeps it from cancelling the real run.
+    types: [opened, synchronize, reopened, edited]
     branches: [feat/assemblyai-current, release/native-0.1.10]
   workflow_dispatch:
 
@@ -16,8 +22,10 @@ permissions:
 
 concurrency:
   # Pushes group by exact commit, so a burst of merges never cancels a queued
-  # head: every merged head keeps its own check run.
-  group: t3-fork-arc-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  # head: every merged head keeps its own check run. PR runs also group by the
+  # triggering actor, so a bot's edit-triggered (skipped) run never cancels a
+  # founder's in-progress run.
+  group: t3-fork-arc-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.triggering_actor || 'x' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
