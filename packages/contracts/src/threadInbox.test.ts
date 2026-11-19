@@ -10,6 +10,7 @@ import {
   effectiveInboxFilter,
   inboxOriginFor,
   founderInboxLane,
+  staysActiveWhileWorking,
   compositeThreadKey,
   agentLaunchInboxRouting,
   agentLaunchInboxError,
@@ -333,4 +334,31 @@ it("keeps founder-owned agent-only children out of founder inboxes", () => {
   const assigned = routeThreadInbox(child, { assignee: jeff });
   expect(matchesInboxView(assigned, "jeff")).toBe(true);
   expect(matchesInboxView(assigned, "kameron")).toBe(false);
+});
+
+describe("staysActiveWhileWorking", () => {
+  const actionForKameron = makeThreadInbox({
+    actor: bot,
+    routing: { assignee: kameron, reason: "review" },
+  });
+
+  it("keeps a thread waiting on a shown founder in the active list", () => {
+    expect(founderInboxLane(actionForKameron, "kameron")).toBe("action");
+    expect(staysActiveWhileWorking(actionForKameron, ["kameron", "agents"])).toBe(true);
+    expect(staysActiveWhileWorking(actionForKameron, ["kameron", "jeff", "shared", "agents"])).toBe(
+      true,
+    );
+  });
+
+  it("leaves it on the Working shelf when that founder's inbox is not shown", () => {
+    expect(staysActiveWhileWorking(actionForKameron, ["jeff", "agents"])).toBe(false);
+    expect(staysActiveWhileWorking(actionForKameron, ["agents"])).toBe(false);
+    expect(staysActiveWhileWorking(undefined, ["kameron"])).toBe(false);
+  });
+
+  it("does not hold FYI threads or unrouted agent work active", () => {
+    const fyi = routeThreadInbox(actionForKameron, { attentionKind: "FYI", reason: "review" });
+    expect(staysActiveWhileWorking(fyi, ["kameron"])).toBe(false);
+    expect(staysActiveWhileWorking(makeThreadInbox({ actor: bot }), ["kameron"])).toBe(false);
+  });
 });

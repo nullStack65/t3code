@@ -244,6 +244,19 @@ const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
   InboxChoice.literals.every((choice) => filter.includes(choice));
 
 /**
+ * A thread waiting on a founder whose inbox is shown stays in the active list while it works,
+ * so the collapsed Working shelf cannot hide it. Agents, Shared and FYI work are unaffected.
+ */
+export function staysActiveWhileWorking(
+  inbox: ThreadInbox | null | undefined,
+  filter: ReadonlyArray<InboxChoice>,
+) {
+  return Founder.literals.some(
+    (founder) => filter.includes(founder) && founderInboxLane(inbox, founder) === "action",
+  );
+}
+
+/**
  * The one inbox a thread is filtered under, so unchecking an inbox hides all of its threads:
  * Shared, else the founder it is filed to, else Agents. Null is unclassified history.
  */
