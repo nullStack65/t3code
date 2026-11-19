@@ -1168,7 +1168,8 @@ export const ModelAlertWatcher = Schema.Struct({
 });
 export type ModelAlertWatcher = typeof ModelAlertWatcher.Type;
 
-// Closura: Lead's thread on the laptop hears every machine's alerts.
+// Closura: Lead's thread on the laptop hears every machine's alerts and thread events. Moving Lead
+// to an always-on machine means changing this one value (or `modelAlertWatcher` on each machine).
 const DEFAULT_MODEL_ALERT_WATCHER: ModelAlertWatcher = {
   environmentId: EnvironmentId.make("2f360b2e-0386-498a-b9cd-62999f3525ba"),
   threadId: ThreadId.make("0ff5603d-8291-4f56-adaf-5132c62016cf"),
@@ -1559,14 +1560,24 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   /**
-   * Where a run that ran another model than selected, hit a provider safeguard fallback or a usage
-   * limit is reported, once per thread until the problem changes. Null reports to no thread.
+   * The watcher thread. It hears a run that ran another model than selected, hit a provider
+   * safeguard fallback or a usage limit, and each lane that ended, promised to continue with
+   * nothing to wake it, got stuck or needs a person. Each reports once per thread until its state
+   * changes. Null reports to no thread.
    */
   modelAlertWatcher: Schema.NullOr(ModelAlertWatcher).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_MODEL_ALERT_WATCHER)),
   ),
-  /** Also POSTs each model alert as JSON here. Empty posts nothing. */
+  /** Also POSTs each alert and thread event as JSON here. Empty posts nothing. */
   modelAlertWebhookUrl: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /**
+   * Minutes an active run may go without a new item before the watcher hears it is stuck. Zero
+   * turns the check off.
+   */
+  watcherStuckMinutes: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1_440 })).pipe(
+    // Closura: twenty minutes without any activity is long enough to be worth a look.
+    Schema.withDecodingDefault(Effect.succeed(20)),
+  ),
   /** Beta: Claude and Codex predict the next prompt after completed turns. Codex follows a change at once; open Claude threads after they restart. */
   promptSuggestionsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
@@ -2013,6 +2024,9 @@ export const ServerSettingsPatch = Schema.Struct({
   automaticPlacementByDefault: Schema.optionalKey(Schema.Boolean),
   modelAlertWatcher: Schema.optionalKey(Schema.NullOr(ModelAlertWatcher)),
   modelAlertWebhookUrl: Schema.optionalKey(TrimmedString),
+  watcherStuckMinutes: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1_440 })),
+  ),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
