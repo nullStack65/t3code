@@ -2,7 +2,7 @@ import type { ServerProviderModel } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { CLAUDE_EFFORT_LEVELS } from "./ClaudeModelCatalog.ts";
 
@@ -35,7 +35,7 @@ export function parseMagpieGatewayCatalog(
 }
 
 /** Reads the catalog the way Claude Code's gateway discovery does; any failure means "not Magpie". */
-export const fetchMagpieGatewayCatalog = Effect.fn("fetchMagpieGatewayCatalog")(function* (
+export const fetchMagpieGatewayCatalog = Effect.fn("MagpieGatewayModels.fetchCatalog")(function* (
   baseUrl: string,
   environment: NodeJS.ProcessEnv,
 ) {
@@ -53,6 +53,8 @@ export const fetchMagpieGatewayCatalog = Effect.fn("fetchMagpieGatewayCatalog")(
       ),
     )
     .pipe(
+      // Like Claude Code's own discovery: a redirect must not carry the key to another host.
+      Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }),
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap((response) => response.json),
       Effect.map(parseMagpieGatewayCatalog),
