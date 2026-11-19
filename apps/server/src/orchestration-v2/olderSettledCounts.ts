@@ -10,27 +10,26 @@ import {
 
 /** What counting reads from a thread, from its shell or the store's index. */
 export type OlderSettledCountRow = Pick<OrchestrationV2ThreadShell, "id" | "projectId"> & {
-  readonly lineage: Pick<OrchestrationV2ThreadShell["lineage"], "parentThreadId">;
   readonly inbox?: ThreadInbox | undefined;
   readonly createdBy?: string | undefined;
+  readonly parentFounder?: OrchestrationV2ThreadShell["parentFounder"] | undefined;
 };
 
 /**
- * Per project, the rows `isOlder` matches, grouped by what an inbox filter reads. `rows` holds
- * every active thread, so a sender's parent chain resolves like it does on a client holding them.
+ * Per project, the older settled rows grouped by what an inbox filter reads. Each row's sender
+ * uses its stamped `parentFounder`, so no other row is needed.
  */
-export function countOlderSettledThreads<Row extends OlderSettledCountRow>(
-  rows: ReadonlyArray<Row>,
-  isOlder: (row: Row) => boolean,
+export function countOlderSettledThreads(
+  older: ReadonlyArray<OlderSettledCountRow>,
 ): ReadonlyArray<OrchestrationV2OlderSettledCount> {
-  const older = rows.filter(isOlder);
   if (older.length === 0) return [];
   const senders = resolveThreadSenders(
-    rows.map((row) => ({
+    older.map((row) => ({
       key: row.id,
-      parentKey: row.lineage.parentThreadId,
+      parentKey: null,
       inbox: row.inbox,
       createdBy: row.createdBy,
+      parentFounder: row.parentFounder,
     })),
   );
   const byProject = new Map<

@@ -194,11 +194,15 @@ export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: In
 }
 
 /**
- * Who a thread came from, before its machine's owner is applied: `"machine"` stands for that
- * owner, which clients look up. `byAgent` marks an agent's work for that founder.
+ * A sender's founder before its machine's owner is applied: `"machine"` stands for that owner,
+ * which clients look up.
  */
+export const SenderFounder = Schema.NullOr(Schema.Union([Founder, Schema.Literal("machine")]));
+export type SenderFounder = typeof SenderFounder.Type;
+
+/** Who a thread came from. `byAgent` marks an agent's work for that founder. */
 export interface ThreadSender {
-  readonly founder: Founder | "machine" | null;
+  readonly founder: SenderFounder;
   readonly byAgent: boolean;
 }
 
@@ -208,16 +212,25 @@ export interface ThreadSenderInput {
   readonly parentKey: string | null;
   readonly inbox?: ThreadInbox | null | undefined;
   readonly createdBy?: string | undefined;
+  /** The founder the server resolved from the parent chain; used instead of walking parents. */
+  readonly parentFounder?: SenderFounder | undefined;
 }
 
 const humanFounder = (actor: InboxActor | null | undefined): Founder | null =>
   actor?.kind === "human" ? actor.id : null;
 
 /**
+ * Whether a thread's sender comes from its parent: agent work with no owner or human requester.
+ * The server's parent-chain read mirrors this in SQL.
+ */
+export const senderNeedsParent = (inbox: ThreadInbox | null | undefined): boolean =>
+  inbox?.origin?.kind === "agent" && inbox.owner === null && inbox.requestedBy?.kind !== "human";
+
+/**
  * Every thread's sender, keyed by `key`. A human origin or requester is that founder; agent work
  * takes its owner, else its parent's founder; only history without inbox fields falls back to the
- * machine's owner. Servers count older settled threads by sender and clients label rows by it, so
- * the two agree.
+ * machine's owner. Servers stamp `parentFounder` on the threads they send and count by it, so a
+ * sender never depends on which parents a client holds; parents are walked only without it.
  */
 export function resolveThreadSenders(
   threads: ReadonlyArray<ThreadSenderInput>,
@@ -231,17 +244,19 @@ export function resolveThreadSenders(
     // A lineage cycle resolves the repeated thread without its parent.
     resolving.add(thread.key);
     const inbox = thread.inbox;
-    const parent =
-      thread.parentKey === null || resolving.has(thread.parentKey)
-        ? undefined
-        : byKey.get(thread.parentKey);
+    const fromParent = (): SenderFounder => {
+      if (thread.parentFounder !== undefined) return thread.parentFounder;
+      const parent =
+        thread.parentKey === null || resolving.has(thread.parentKey)
+          ? undefined
+          : byKey.get(thread.parentKey);
+      return parent ? resolve(parent).founder : null;
+    };
     const human = humanFounder(inbox?.origin);
     const founder =
       human ??
       humanFounder(inbox?.requestedBy) ??
-      (inbox?.origin?.kind === "agent"
-        ? (inbox.owner ?? (parent ? resolve(parent).founder : null))
-        : null) ??
+      (inbox?.origin?.kind === "agent" ? (inbox.owner ?? fromParent()) : null) ??
       // Only history from before inbox routing falls back to the machine: a shared machine
       // runs both founders' agents, so crediting routed work to its owner would be a guess.
       (inbox ? null : "machine");

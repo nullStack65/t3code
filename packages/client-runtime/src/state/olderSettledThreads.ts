@@ -2,6 +2,7 @@ import {
   isListedThreadLineage,
   isOlderSettledThreadShell,
   ORCHESTRATION_V2_WS_METHODS,
+  senderNeedsParent,
   type EnvironmentId,
   type OrchestrationV2OlderSettledCount,
   type OrchestrationV2OlderSettledCursor,
@@ -96,9 +97,9 @@ export function olderSettledCountsOf(
 
 /**
  * Changes whenever the older count can: any removal (by largest sequence, so a repeat counts), an
- * older row that arrives, changes project or inbox routing, or an old row arriving outside the
- * set (unsettled). Threads created after the cut never enter it, as threads settle after creation.
- * Archived-thread events arrive as removals too, each costing one count read.
+ * older row that arrives, changes project or routing (its own or a held parent's it takes its
+ * sender from), or an old row arriving outside the set (unsettled). Threads created after the cut
+ * never enter it, as threads settle after creation.
  */
 export function olderSettledCountKey(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -107,16 +108,38 @@ export function olderSettledCountKey(
 ): string {
   let lastRemoval = 0;
   for (const sequence of removedAt.values()) lastRemoval = Math.max(lastRemoval, sequence);
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
   const rows: string[] = [];
   for (const thread of threads) {
     if (!isListedThreadLineage(thread.lineage)) continue;
     const older = isOlderSettledThreadShell(thread, beforeMs);
     if (older || DateTime.toEpochMillis(thread.createdAt) < beforeMs) {
-      const routing = older ? `:${JSON.stringify(thread.inbox ?? null)}` : "";
+      const routing = older ? `:${JSON.stringify(senderRouting(thread, byId))}` : "";
       rows.push(`${thread.id}:${thread.projectId}:${older ? 1 : 0}${routing}`);
     }
   }
   return `${lastRemoval}|${rows.sort().join(",")}`;
+}
+
+/**
+ * What an older row's count group reads: its routing and stamped parent founder, plus the
+ * routing of each held parent its sender comes from, so a parent's reroute also recounts.
+ */
+function senderRouting(
+  thread: OrchestrationV2ThreadShell,
+  byId: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell>,
+): ReadonlyArray<unknown> {
+  const routing: unknown[] = [thread.inbox ?? null, thread.parentFounder ?? null];
+  const seen = new Set([thread.id]);
+  let current = thread;
+  while (senderNeedsParent(current.inbox) && current.lineage.parentThreadId !== null) {
+    const parent = byId.get(current.lineage.parentThreadId);
+    if (parent === undefined || seen.has(parent.id)) break;
+    seen.add(parent.id);
+    routing.push(parent.inbox ?? null);
+    current = parent;
+  }
+  return routing;
 }
 
 /** Whether a row sits at or above a page cursor in the server's order (settle time desc, id asc). */
@@ -201,7 +224,7 @@ export interface OlderSettledFilter {
  * The Settled shelf's total: its rows plus the server's older counts under the thread list
  * filter, minus the older rows the client holds. An older row held in the shelf counts once on
  * each side, so every client of the same servers gets the same total whichever pages it loaded.
- * Not exact when a server sends totals only and the filter shows part of it; show a lower bound.
+ * A totals-only server under a partial filter gives a lower bound, at least the loaded rows.
  */
 export function settledShelfTotal(input: {
   readonly olderSettled: (environmentId: EnvironmentId) => OlderSettled | null;
@@ -245,7 +268,9 @@ export function settledShelfTotal(input: {
       }
     }
   }
-  return { count: Math.max(0, input.settledCount + unloaded), exact };
+  const total = Math.max(0, input.settledCount + unloaded);
+  // A lower bound never reads below the rows on screen.
+  return { count: exact ? total : Math.max(input.settledCount, total), exact };
 }
 
 /**

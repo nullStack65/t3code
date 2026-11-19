@@ -10,6 +10,7 @@ import {
 import { useServerConfigs } from "../../state/entities";
 import { useEnvironmentIdentities } from "../../state/environments";
 import { useEnvironmentScope } from "../../state/session";
+import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
@@ -70,6 +71,7 @@ export function MachineOwnersRow() {
             label={label}
             owner={owners[environmentId]}
             reportsOwner={serverConfigs.get(environmentId)?.machineOwner === true}
+            deviceChoice={legacyOwners?.[environmentId]}
           />
         ))}
       </div>
@@ -82,8 +84,13 @@ function MachineOwnerRow(props: {
   label: string;
   owner: Founder | undefined;
   reportsOwner: boolean;
+  /** This device's own entry from before machines stored their owner. */
+  deviceChoice: Founder | undefined;
 }) {
   const { environmentId, label, owner, reportsOwner } = props;
+  // An upgraded machine with no owner yet: offer this device's earlier choice, never push it,
+  // so devices with different maps do not overwrite each other.
+  const migratable = reportsOwner && owner === undefined ? props.deviceChoice : undefined;
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const updateEnvironmentSettings = useUpdateEnvironmentSettings(environmentId);
   const setOwner = (founder: Founder | null) => {
@@ -97,7 +104,22 @@ function MachineOwnerRow(props: {
   };
   return (
     <div className="flex items-center justify-between gap-4">
-      <span className="min-w-0 truncate text-sm">{label}</span>
+      <div className="flex min-w-0 flex-col">
+        <span className="truncate text-sm">{label}</span>
+        {migratable ? (
+          <span className="flex items-center gap-1 text-muted-foreground text-xs">
+            This device chose {OWNER_LABELS[migratable]}.
+            <Button
+              variant="link"
+              size="xs"
+              disabled={!canWrite}
+              onClick={() => setOwner(migratable)}
+            >
+              Set on machine
+            </Button>
+          </span>
+        ) : null}
+      </div>
       <div className="w-40 shrink-0">
         <Select
           value={owner ?? UNSET}

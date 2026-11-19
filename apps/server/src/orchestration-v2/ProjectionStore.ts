@@ -81,6 +81,8 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadInbox,
+  resolveThreadSenders,
+  type SenderFounder,
 } from "@t3tools/contracts";
 import { createOrchestrationV2TurnItemVisibility } from "@t3tools/shared/orchestrationV2Timeline";
 import {
@@ -477,9 +479,10 @@ export interface ActiveShellIndexEntry extends Pick<
   | "pinOrderKey"
   | "snoozedUntil"
 > {
-  /** Read only to count older settled threads by sender. */
+  /** Only on settled listed rows, which older settled counts group by sender. */
   readonly inbox?: ThreadInbox | undefined;
   readonly createdBy?: string | undefined;
+  readonly parentFounder?: SenderFounder | undefined;
   /** False only when no run, request, work item, or watch can make the shell live. */
   readonly mayBeLive: boolean;
   /** Whether it delegated a task to a linked environment, whose clients nest that task under it. */
@@ -1127,6 +1130,8 @@ type ShellThreadRow = {
   readonly thread_id: string;
   readonly payload_json: string;
   readonly forked_from_run_source_thread_id: string | null;
+  /** The parent its sender comes from, which the shell's `parentFounder` resolves. */
+  readonly sender_parent_thread_id: string | null;
   readonly latest_run_id: string | null;
   readonly latest_run_status: string | null;
   readonly latest_run_requested_at: string | null;
@@ -2115,9 +2120,12 @@ function visibleItemCountForShell(input: {
 function shellFromState(input: {
   readonly state: ShellThreadState;
   readonly visibleItemCount: number;
+  /** Set when the thread's sender comes from its parent chain. */
+  readonly parentFounder: SenderFounder | undefined;
 }): OrchestrationV2ThreadShell {
   return {
     createdBy: input.state.thread.createdBy,
+    ...(input.parentFounder === undefined ? {} : { parentFounder: input.parentFounder }),
     creationSource: input.state.thread.creationSource,
     id: input.state.thread.id,
     projectId: input.state.thread.projectId,
@@ -7799,6 +7807,66 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
       )`;
     };
+    // A listed thread (isListedThreadLineage) that is settled, as isOlderSettledThreadShell reads.
+    const isSettledListedThread = (alias: string) => {
+      const thread = sql.literal(alias);
+      return sql`(
+        json_extract(${thread}.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
+        AND json_extract(${thread}.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND json_extract(${thread}.payload_json, '$.settledOverride') = 'settled'
+        AND json_extract(${thread}.payload_json, '$.settledAt') IS NOT NULL
+      )`;
+    };
+    // Mirrors senderNeedsParent: the parent a thread's sender comes from, else NULL.
+    const senderParentId = (alias: string) => {
+      const thread = sql.literal(alias);
+      return sql`CASE
+        WHEN json_extract(${thread}.payload_json, '$.inbox.origin.kind') = 'agent'
+          AND json_extract(${thread}.payload_json, '$.inbox.owner') IS NULL
+          AND json_extract(${thread}.payload_json, '$.inbox.requestedBy.kind') IS NOT 'human'
+          THEN json_extract(${thread}.payload_json, '$.lineage.parentThreadId')
+      END`;
+    };
+    /**
+     * Each parent's sender founder, read up its chain only while a sender comes from its parent.
+     * Shells stamp it as `parentFounder` and older counts group by it, so neither a client nor a
+     * count needs the parents themselves.
+     */
+    const readParentFounders = Effect.fn("ProjectionStore.readParentFounders")(function* (
+      parentIds: ReadonlyArray<string>,
+    ) {
+      const ids = [...new Set(parentIds)];
+      if (ids.length === 0) return new Map<string, SenderFounder>();
+      const rows = yield* sql<{
+        readonly thread_id: string;
+        readonly parent_thread_id: string | null;
+        readonly inbox_json: string | null;
+        readonly created_by: string | null;
+      }>`
+          WITH RECURSIVE chain(thread_id, parent_thread_id) AS (
+            SELECT t.thread_id, ${senderParentId("t")}
+            FROM orchestration_v2_projection_threads t
+            WHERE t.thread_id IN ${sql.in(ids)}
+            UNION
+            SELECT t.thread_id, ${senderParentId("t")}
+            FROM chain
+            JOIN orchestration_v2_projection_threads t ON t.thread_id = chain.parent_thread_id
+          )
+          SELECT chain.thread_id, chain.parent_thread_id,
+            json_extract(t.payload_json, '$.inbox') AS inbox_json,
+            json_extract(t.payload_json, '$.createdBy') AS created_by
+          FROM chain
+          JOIN orchestration_v2_projection_threads t ON t.thread_id = chain.thread_id
+        `;
+      const senders = resolveThreadSenders(
+        rows.map((row) => ({
+          key: row.thread_id,
+          parentKey: row.parent_thread_id,
+          ...shellIndexSender(row),
+        })),
+      );
+      return new Map(ids.map((id) => [id, senders.get(id)?.founder ?? null] as const));
+    });
     // Mirrors isSilentRunForShell.
     const isSilentShellRun = (alias: string) => {
       const run = sql.literal(alias);
@@ -7892,6 +7960,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   THEN json_extract(t.payload_json, '$.forkedFrom.threadId')
                 ELSE NULL
               END AS forked_from_run_source_thread_id,
+              ${senderParentId("t")} AS sender_parent_thread_id,
               presented.run_id AS latest_run_id,
               presented.status AS latest_run_status,
               presented.requested_at AS latest_run_requested_at,
@@ -8725,6 +8794,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           pendingSourceIds.push(ThreadId.make(source.forked_from_run_source_thread_id));
         }
       }
+      const founders = yield* readParentFounders(
+        targetThreadRows.flatMap((row) => row.sender_parent_thread_id ?? []),
+      );
+      const parentFounders = new Map(
+        targetThreadRows.flatMap((row) =>
+          row.sender_parent_thread_id === null
+            ? []
+            : [
+                [
+                  ThreadId.make(row.thread_id),
+                  founders.get(row.sender_parent_thread_id) ?? null,
+                ] as const,
+              ],
+        ),
+      );
       const threadRows = [...rowsByThreadId.values()];
       const threadIds = [...rowsByThreadId.keys()];
       const forkSourceIds = shellForkSourceIds(threadRows);
@@ -8763,6 +8847,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       ]);
       return {
         targetThreadIds,
+        parentFounders,
         threadRows,
         runRows,
         itemCountRows,
@@ -8775,6 +8860,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const decodeShellSnapshot = Effect.fn("ProjectionStore.decodeShellSnapshot")(function* ({
       targetThreadIds,
+      parentFounders,
       threadRows,
       runRows,
       itemCountRows,
@@ -8811,6 +8897,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               threadId: state.thread.id,
               statesByThreadId,
             }),
+            parentFounder: parentFounders.get(state.thread.id),
           }),
         );
 
@@ -8977,14 +9064,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly snoozed_until: string | null;
         readonly inbox_json: string | null;
         readonly created_by: string | null;
+        readonly sender_parent_thread_id: string | null;
         readonly may_be_live: number;
         readonly has_remote_tasks: number;
       }>`
         SELECT
           t.thread_id,
           t.project_id,
-          json_extract(t.payload_json, '$.inbox') AS inbox_json,
-          json_extract(t.payload_json, '$.createdBy') AS created_by,
+          -- Only older settled counts read these, so other rows skip the extract and decode.
+          CASE WHEN ${isSettledListedThread("t")}
+            THEN json_extract(t.payload_json, '$.inbox') END AS inbox_json,
+          CASE WHEN ${isSettledListedThread("t")}
+            THEN json_extract(t.payload_json, '$.createdBy') END AS created_by,
+          CASE WHEN ${isSettledListedThread("t")}
+            THEN ${senderParentId("t")} END AS sender_parent_thread_id,
           json_extract(t.payload_json, '$.lineage.relationshipToParent') AS relationship_to_parent,
           json_extract(t.payload_json, '$.lineage.parentThreadId') AS parent_thread_id,
           json_extract(t.payload_json, '$.lineage.rootThreadId') AS root_thread_id,
@@ -9041,6 +9134,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND t.archived_at IS NULL
         ORDER BY t.updated_at ASC, t.thread_id ASC
       `;
+      const founders = yield* readParentFounders(
+        rows.flatMap((row) => row.sender_parent_thread_id ?? []),
+      );
       return rows.map((row): ActiveShellIndexEntry => ({
         id: ThreadId.make(row.thread_id),
         projectId: ProjectId.make(row.project_id),
@@ -9054,6 +9150,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         pinOrderKey: row.pin_order_key,
         snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
         ...shellIndexSender(row),
+        ...(row.sender_parent_thread_id === null
+          ? {}
+          : { parentFounder: founders.get(row.sender_parent_thread_id) ?? null }),
         mayBeLive: row.may_be_live === 1,
         hasRemoteTasks: row.has_remote_tasks === 1,
       }));
@@ -9168,15 +9267,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     )(function* ({ before, projectIds, limit }) {
       // ISO strings in one format, so string order is time order.
       const older = sql`
-        SELECT t.thread_id, t.project_id,
+        SELECT t.thread_id, t.project_id, t.payload_json,
           json_extract(t.payload_json, '$.settledAt') AS settled_at
         FROM orchestration_v2_projection_threads t
         WHERE t.deleted_at IS NULL
           AND t.archived_at IS NULL
-          AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
-          AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
-          AND json_extract(t.payload_json, '$.settledOverride') = 'settled'
-          AND json_extract(t.payload_json, '$.settledAt') IS NOT NULL${
+          AND ${isSettledListedThread("t")}${
             projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
           }
       `;
@@ -9195,43 +9291,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY older.settled_at DESC, older.thread_id ASC
               LIMIT ${limit}
             `;
-      // Every active row, so the counts group by sender through parents as snapshots do.
+      // Only the older rows; a parent chain is read only for agent work without an owner.
       const countRows =
         limit !== 0
           ? []
           : yield* sql<{
               readonly thread_id: string;
               readonly project_id: string;
-              readonly parent_thread_id: string | null;
               readonly inbox_json: string | null;
               readonly created_by: string | null;
-              readonly is_older: number;
+              readonly sender_parent_thread_id: string | null;
             }>`
-              SELECT t.thread_id, t.project_id,
-                json_extract(t.payload_json, '$.lineage.parentThreadId') AS parent_thread_id,
-                json_extract(t.payload_json, '$.inbox') AS inbox_json,
-                json_extract(t.payload_json, '$.createdBy') AS created_by,
-                t.thread_id IN (
-                  SELECT older.thread_id FROM (${older}) older WHERE ${belowCursor}
-                ) AS is_older
-              FROM orchestration_v2_projection_threads t
-              WHERE t.deleted_at IS NULL
-                AND t.archived_at IS NULL
+              WITH older AS (${older})
+              SELECT older.thread_id, older.project_id,
+                json_extract(older.payload_json, '$.inbox') AS inbox_json,
+                json_extract(older.payload_json, '$.createdBy') AS created_by,
+                ${senderParentId("older")} AS sender_parent_thread_id
+              FROM older
+              WHERE ${belowCursor}
             `;
+      const founders = yield* readParentFounders(
+        countRows.flatMap((row) => row.sender_parent_thread_id ?? []),
+      );
       return {
         threadIds: pageRows.map((row) => ThreadId.make(row.thread_id)),
         counts: countOlderSettledThreads(
           countRows.map((row) => ({
             id: ThreadId.make(row.thread_id),
             projectId: ProjectId.make(row.project_id),
-            lineage: {
-              parentThreadId:
-                row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
-            },
             ...shellIndexSender(row),
-            isOlder: row.is_older === 1,
+            ...(row.sender_parent_thread_id === null
+              ? {}
+              : { parentFounder: founders.get(row.sender_parent_thread_id) ?? null }),
           })),
-          (row) => row.isOlder,
         ),
       };
     }, Effect.mapError(shellSnapshotReadError));
@@ -9312,9 +9404,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             if (state === undefined) {
               return null;
             }
+            const parentId = rowsByThreadId.get(threadId)?.sender_parent_thread_id ?? null;
             return shellFromState({
               state,
               visibleItemCount: visibleItemCountForShell({ threadId, statesByThreadId }),
+              parentFounder:
+                parentId === null
+                  ? undefined
+                  : ((yield* readParentFounders([parentId])).get(parentId) ?? null),
             });
           }),
         )

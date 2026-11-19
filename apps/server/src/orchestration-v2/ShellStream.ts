@@ -181,7 +181,9 @@ type ShellTrimRow = Pick<
   OrchestrationV2ThreadShell,
   "id" | "projectId" | "lineage" | "settledOverride" | "settledAt"
 > &
-  Pick<OlderSettledCountRow, "inbox" | "createdBy"> & { readonly hasRemoteTasks?: boolean };
+  Pick<OlderSettledCountRow, "inbox" | "createdBy" | "parentFounder"> & {
+    readonly hasRemoteTasks?: boolean;
+  };
 
 /**
  * What a subscriber's trims read across every active row. Computed from full shells or from the
@@ -194,7 +196,8 @@ interface ShellTrimFacts {
   readonly remoteTaskParentIds: ReadonlySet<string>;
   /** Undefined when no thread is settled, so none is older. */
   readonly olderSettledBeforeMs: number | undefined;
-  readonly olderSettledCounts: ReadonlyArray<OrchestrationV2OlderSettledCount>;
+  /** Grouped on first use, so only snapshots that omit older settled threads pay for it. */
+  readonly olderSettledCounts: () => ReadonlyArray<OrchestrationV2OlderSettledCount>;
 }
 
 const NEWEST_SETTLED_KEPT = 25;
@@ -220,17 +223,19 @@ function shellTrimFacts(rows: ReadonlyArray<ShellTrimRow>): ShellTrimFacts {
   settledTimes.sort((left, right) => right - left);
   // With fewer than 25, the oldest one is the cut, so nothing is older.
   const olderSettledBeforeMs = settledTimes[NEWEST_SETTLED_KEPT - 1] ?? settledTimes.at(-1);
+  let counts: ReadonlyArray<OrchestrationV2OlderSettledCount> | undefined;
   return {
     subagentParentIds,
     subagentThreadIds,
     remoteTaskParentIds,
     olderSettledBeforeMs,
-    olderSettledCounts:
-      olderSettledBeforeMs === undefined
-        ? []
-        : countOlderSettledThreads(rows, (row) =>
-            isOlderSettledThreadShell(row, olderSettledBeforeMs),
-          ),
+    olderSettledCounts: () =>
+      (counts ??=
+        olderSettledBeforeMs === undefined
+          ? []
+          : countOlderSettledThreads(
+              rows.filter((row) => isOlderSettledThreadShell(row, olderSettledBeforeMs)),
+            )),
   };
 }
 
@@ -290,7 +295,7 @@ function omitOlderSettledShellsWith(
     olderSettled: {
       before: DateTime.formatIso(DateTime.makeUnsafe(beforeMs)),
       asOfSequence: input.snapshotSequence,
-      counts: facts.olderSettledCounts,
+      counts: facts.olderSettledCounts(),
     },
   };
 }

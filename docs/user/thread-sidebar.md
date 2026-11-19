@@ -216,7 +216,9 @@ the list, so every app connected to the same machines shows the same number. A c
 
 Threads from before inbox routing are credited to their machine's owner. Set the owner once per
 machine in **Settings → Threads → Machine owners**. The machine keeps it, so every app connected to
-that machine agrees. Machines on older versions use each device's own choice instead.
+that machine agrees. Machines on older versions use each device's own choice instead. After a
+machine upgrades, a device that had chosen an owner for it offers **Set on machine** to keep
+that choice.
 
 ## Link a pull request
 

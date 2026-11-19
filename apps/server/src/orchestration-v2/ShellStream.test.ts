@@ -285,7 +285,7 @@ describe("omitOlderSettledShells", () => {
     });
   });
 
-  it("groups older counts by what an inbox filter reads, through each parent", () => {
+  it("groups older counts by what an inbox filter reads, with each stamped parent founder", () => {
     const kameron = makeThreadInbox({ actor: { kind: "human", id: "kameron" } });
     const agentWork = makeThreadInbox({
       actor: { kind: "agent", id: "lead" },
@@ -296,19 +296,18 @@ describe("omitOlderSettledShells", () => {
       row("history", 30),
       row("agent-history", 31, { createdBy: "agent" }),
       row("kameron", 32, { inbox: kameron }),
-      // Unowned agent work is its parent's founder's, even when the parent is not older.
-      row("jeff-parent", null, {
-        inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }),
-      }),
+      // A held parent does not count: the store stamps the founder its chain resolves to.
+      row("kameron-parent", null, { inbox: kameron }),
       row("agent-child", 33, {
         inbox: agentWork,
+        parentFounder: "jeff",
         lineage: {
-          parentThreadId: ThreadId.make("jeff-parent"),
+          parentThreadId: ThreadId.make("kameron-parent"),
           relationshipToParent: null,
-          rootThreadId: ThreadId.make("jeff-parent"),
+          rootThreadId: ThreadId.make("kameron-parent"),
         },
       }),
-      row("agent-orphan", 34, { inbox: agentWork }),
+      row("agent-orphan", 34, { inbox: agentWork, parentFounder: null }),
     ]);
     expect(result.olderSettled.counts).toEqual([
       {

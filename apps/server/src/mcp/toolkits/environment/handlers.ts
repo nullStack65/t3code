@@ -15,14 +15,12 @@ export function preferences(settings: ServerSettings) {
     enableProviderUpdateChecks,
     backgroundActivity,
     sourceControlWritingStyle,
-    ownerFounder,
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
     defaultThreadEnvMode,
     newWorktreesStartFromOrigin,
     enableProviderUpdateChecks,
-    ownerFounder,
     backgroundActivity: { profile: backgroundActivity.profile },
     sourceControlWritingStyle: {
       ...sourceControlWritingStyle,

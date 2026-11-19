@@ -163,6 +163,7 @@ const assertShellIndexCoversShells = Effect.fnUntraced(function* () {
       | "snoozedUntil"
       | "inbox"
       | "createdBy"
+      | "parentFounder"
     >,
   ) => ({
     id: row.id,
@@ -173,8 +174,16 @@ const assertShellIndexCoversShells = Effect.fnUntraced(function* () {
     pinnedAt: iso(row.pinnedAt),
     pinOrderKey: row.pinOrderKey ?? null,
     snoozedUntil: iso(row.snoozedUntil),
-    inbox: row.inbox ?? null,
-    createdBy: row.createdBy ?? null,
+    // The index carries what older settled counts group by only on settled listed rows.
+    ...(isListedThreadLineage(row.lineage) &&
+    row.settledOverride === "settled" &&
+    row.settledAt !== null
+      ? {
+          inbox: row.inbox ?? null,
+          createdBy: row.createdBy ?? null,
+          parentFounder: row.parentFounder,
+        }
+      : {}),
   });
   assert.deepEqual(index.map(trimmed), shells.map(trimmed));
   shells.forEach((shell, position) => {
@@ -3109,13 +3118,13 @@ it.effect("SQL list older settled threads below a cursor", () =>
           ...(input.inbox === undefined ? {} : { inbox: input.inbox }),
           lineage: {
             parentThreadId:
-              input.subagent === true
-                ? id("b")
-                : input.parent === undefined
-                  ? null
-                  : id(input.parent),
+              input.parent !== undefined
+                ? id(input.parent)
+                : input.subagent === true
+                  ? id("b")
+                  : null,
             relationshipToParent: input.subagent === true ? "subagent" : null,
-            rootThreadId: input.subagent === true ? id("b") : id(input.parent ?? input.name),
+            rootThreadId: id(input.parent ?? (input.subagent === true ? "b" : input.name)),
           },
           forkedFrom: null,
           createdAt: now,
@@ -3177,7 +3186,11 @@ it.effect("SQL list older settled threads below a cursor", () =>
       ],
     });
 
-    // Recounts group like snapshots: by routing, and by sender through an active parent.
+    // Recounts group like snapshots: by routing, and by sender through the parent chain.
+    const agentWork = makeThreadInbox({
+      actor: { kind: "agent", id: "lead" },
+      routing: inboxRoutingFor("agents"),
+    });
     yield* createThread({
       name: "jeff-root",
       settledDay: null,
@@ -3189,10 +3202,23 @@ it.effect("SQL list older settled threads below a cursor", () =>
       settledDay: 6,
       project: "project:c",
       parent: "jeff-root",
-      inbox: makeThreadInbox({
-        actor: { kind: "agent", id: "lead" },
-        routing: inboxRoutingFor("agents"),
-      }),
+      inbox: agentWork,
+    });
+    // A fork of an idle subagent: opted-in clients never hold the subagent it takes Jeff from.
+    yield* createThread({
+      name: "subagent",
+      settledDay: null,
+      project: "project:c",
+      subagent: true,
+      parent: "jeff-root",
+      inbox: agentWork,
+    });
+    yield* createThread({
+      name: "subagent-fork",
+      settledDay: 5,
+      project: "project:c",
+      parent: "subagent",
+      inbox: agentWork,
     });
     yield* createThread({
       name: "kameron",
@@ -3202,15 +3228,42 @@ it.effect("SQL list older settled threads below a cursor", () =>
     });
     // The index carries the routing the snapshot's counts group by, as the shells do.
     yield* assertShellIndexCoversShells();
-    const routed = yield* list(before, 0, [ProjectId.make("project:c")]);
-    assert.equal(routed.counts.length, 1);
+    const shells = new Map(
+      (yield* store.getShellSnapshot()).threads.map((shell) => [shell.id, shell] as const),
+    );
+    assert.equal(shells.get(id("subagent-fork"))?.parentFounder, "jeff");
+    assert.equal(shells.get(id("agent-child"))?.parentFounder, "jeff");
+    assert.isFalse(shells.has(id("kameron")) && "parentFounder" in shells.get(id("kameron"))!);
+    assert.equal((yield* store.getThreadShell(id("subagent-fork")))?.parentFounder, "jeff");
+
+    const recount = (projectId: string) =>
+      Effect.gen(function* () {
+        const { statements, tracer } = traceSqlStatements();
+        const listing = yield* list(before, 0, [ProjectId.make(projectId)]).pipe(
+          Effect.withTracer(tracer),
+        );
+        return { listing, statements };
+      });
+    const routed = yield* recount("project:c");
+    assert.equal(routed.listing.counts.length, 1);
     assert.sameDeepMembers(
-      [...(routed.counts[0]?.groups ?? [])],
+      [...(routed.listing.counts[0]?.groups ?? [])],
       [
-        { inbox: "agents", agentCreated: false, founder: "jeff", byAgent: true, count: 1 },
+        { inbox: "agents", agentCreated: false, founder: "jeff", byAgent: true, count: 2 },
         { inbox: "kameron", agentCreated: false, founder: "kameron", byAgent: false, count: 1 },
       ],
     );
+    // The recount reads the requested project's older rows, then one chain read for the agents.
+    const chainReads = (statements: ReadonlyArray<string>) =>
+      statements.filter((statement) => statement.includes("WITH RECURSIVE chain"));
+    assert.lengthOf(chainReads(routed.statements), 1);
+    assert.isTrue(
+      routed.statements.some(
+        (statement) => statement.includes("WITH older AS") && statement.includes("project_id IN"),
+      ),
+    );
+    // Rows with an owner or no inbox never read a parent.
+    assert.lengthOf(chainReads((yield* recount("project:b")).statements), 0);
   }).pipe(Effect.provide(layerTest)),
 );
 

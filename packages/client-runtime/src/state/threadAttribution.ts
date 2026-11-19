@@ -2,6 +2,7 @@ import {
   resolveThreadSenders,
   type EnvironmentId,
   type Founder,
+  type SenderFounder,
   type ThreadId,
   type ThreadInbox,
   type ThreadSender,
@@ -25,6 +26,8 @@ export interface AttributableThread {
   readonly source: {
     readonly inbox?: ThreadInbox | null | undefined;
     readonly createdBy?: string | undefined;
+    /** The server's resolution of the parent chain; wins over the parents this client holds. */
+    readonly parentFounder?: SenderFounder | undefined;
   };
 }
 
@@ -91,6 +94,7 @@ export function resolveThreadAttributions(
             : `${thread.environmentId}:${thread.lineage.parentThreadId}`,
         inbox: thread.source.inbox,
         createdBy: thread.source.createdBy,
+        parentFounder: thread.source.parentFounder,
       };
     }),
   );

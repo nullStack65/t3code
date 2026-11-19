@@ -7,8 +7,10 @@ import {
   primaryInbox,
   ProjectId,
   resolveThreadSenders,
+  senderNeedsParent,
   ThreadId,
   type Founder,
+  type SenderFounder,
   type OrchestrationV2OlderSettledCount,
   type OrchestrationV2ThreadShell,
   type ThreadInbox,
@@ -57,7 +59,11 @@ interface Row {
   readonly source: Pick<
     OrchestrationV2ThreadShell,
     "id" | "projectId" | "lineage" | "settledOverride" | "settledAt" | "createdBy"
-  > & { readonly inbox?: ThreadInbox; readonly pinnedAt: DateTime.Utc | null };
+  > & {
+    readonly inbox?: ThreadInbox;
+    readonly pinnedAt: DateTime.Utc | null;
+    readonly parentFounder?: SenderFounder;
+  };
 }
 
 const row = (
@@ -67,13 +73,14 @@ const row = (
     readonly inbox?: ThreadInbox;
     readonly settledDay?: number;
     readonly parent?: string;
+    readonly subagent?: boolean;
     readonly createdBy?: "user" | "agent";
     readonly pinned?: boolean;
   } = {},
 ): Row => {
   const lineage = {
     parentThreadId: input.parent === undefined ? null : ThreadId.make(input.parent),
-    relationshipToParent: null,
+    relationshipToParent: input.subagent === true ? "subagent" : null,
     rootThreadId: ThreadId.make(input.parent ?? id),
   } as const;
   return {
@@ -94,8 +101,38 @@ const row = (
   };
 };
 
+const agentWork = makeThreadInbox({ actor: bot, routing: inboxRoutingFor("agents") });
+
+/** What each server sends: rows whose sender comes from a parent carry the chain's founder. */
+function stampParentFounders(rows: ReadonlyArray<Row>): ReadonlyArray<Row> {
+  const senders = resolveThreadSenders(
+    rows.map((thread) => ({
+      key: `${thread.environmentId}:${thread.id}`,
+      parentKey:
+        thread.lineage.parentThreadId === null
+          ? null
+          : `${thread.environmentId}:${thread.lineage.parentThreadId}`,
+      inbox: thread.source.inbox,
+      createdBy: thread.source.createdBy,
+    })),
+  );
+  return rows.map((thread) =>
+    senderNeedsParent(thread.source.inbox) && thread.lineage.parentThreadId !== null
+      ? {
+          ...thread,
+          source: {
+            ...thread.source,
+            parentFounder:
+              senders.get(`${thread.environmentId}:${thread.lineage.parentThreadId}`)?.founder ??
+              null,
+          },
+        }
+      : thread,
+  );
+}
+
 // Everything the servers store. Days below 50 settled before each trimming server's cut.
-const SERVER_ROWS: ReadonlyArray<Row> = [
+const SERVER_ROWS: ReadonlyArray<Row> = stampParentFounders([
   row(asus, "k-recent", { inbox: makeThreadInbox({ actor: kameron }), settledDay: 90 }),
   row(asus, "history-recent", { settledDay: 91 }),
   row(asus, "history-old-1", { settledDay: 10 }),
@@ -104,11 +141,11 @@ const SERVER_ROWS: ReadonlyArray<Row> = [
   row(asus, "jeff-old", { inbox: makeThreadInbox({ actor: jeff }), settledDay: 13 }),
   // Agent work with no owner takes its parent's founder, which every client holds (active).
   row(asus, "jeff-root", { inbox: makeThreadInbox({ actor: jeff }) }),
-  row(asus, "agent-old", {
-    inbox: makeThreadInbox({ actor: bot, routing: inboxRoutingFor("agents") }),
-    settledDay: 14,
-    parent: "jeff-root",
-  }),
+  row(asus, "agent-old", { inbox: agentWork, settledDay: 14, parent: "jeff-root" }),
+  // Forks of an idle subagent with no owner: apps that omit idle subagents lack their parent.
+  row(asus, "subagent", { inbox: agentWork, parent: "jeff-root", subagent: true }),
+  row(asus, "subagent-fork-old", { inbox: agentWork, settledDay: 16, parent: "subagent" }),
+  row(asus, "subagent-fork-recent", { inbox: agentWork, settledDay: 94, parent: "subagent" }),
   // Pinned older threads stay in every snapshot, outside the Settled shelf.
   row(asus, "pinned-old", { settledDay: 15, pinned: true }),
   row(air, "air-history-old", { settledDay: 20 }),
@@ -125,7 +162,7 @@ const SERVER_ROWS: ReadonlyArray<Row> = [
     inbox: makeThreadInbox({ actor: kameron }),
     settledDay: 31,
   }),
-];
+]);
 
 const owner = (ownerFounder: Founder | null): MachineOwnerConfig => ({
   machineOwner: true,
@@ -147,16 +184,19 @@ const isOlder = (thread: Row) =>
 function serverOlderSettled(withGroups: boolean): ReadonlyMap<EnvironmentId, OlderSettled> {
   const result = new Map<EnvironmentId, OlderSettled>();
   for (const environmentId of TRIMMING) {
-    const rows = SERVER_ROWS.filter((thread) => thread.environmentId === environmentId);
+    const older = SERVER_ROWS.filter(
+      (thread) => thread.environmentId === environmentId && isOlder(thread),
+    );
+    // Like the server, each older row's own fields and stamp, without any other row.
     const senders = resolveThreadSenders(
-      rows.map((thread) => ({
+      older.map((thread) => ({
         key: thread.id,
-        parentKey: thread.lineage.parentThreadId,
+        parentKey: null,
         inbox: thread.source.inbox,
         createdBy: thread.source.createdBy,
+        parentFounder: thread.source.parentFounder,
       })),
     );
-    const older = rows.filter(isOlder);
     const groups = new Map<
       string,
       NonNullable<OrchestrationV2OlderSettledCount["groups"]>[number]
@@ -227,13 +267,17 @@ function sidebar(input: {
       input.held.map((thread) => [threadAttributionKey(thread), attributionOf(thread)]),
     ),
     listed: new Set(listed.map(threadAttributionKey)),
+    settledOnScreen: settled.length,
     total,
   };
 }
 
-// Every snapshot row: newer than the cut, pinned, or from a server that trims nothing.
+// Every snapshot row: newer than the cut, pinned, or from a server that trims nothing. Opted-in
+// apps also omit idle subagents.
 const SNAPSHOT_ROWS = SERVER_ROWS.filter(
-  (thread) => !isOlder(thread) || thread.source.pinnedAt !== null,
+  (thread) =>
+    (!isOlder(thread) || thread.source.pinnedAt !== null) &&
+    thread.lineage.relationshipToParent !== "subagent",
 );
 // One app saw only the snapshots; the other also loaded every older page, in another order.
 const CLIENT_A = {
@@ -317,14 +361,45 @@ describe("one inbox across apps", () => {
     ).toBe("unknown");
   });
 
-  it("shows a lower bound, the same on every app, when a server sends totals only", () => {
+  it("credits a fork of a subagent alike on an app that lacks the subagent", () => {
+    const filter = FILTERS[0]![1];
+    const key = `${asus}:subagent-fork-recent`;
+    expect(CLIENT_A.held.some((thread) => thread.id === "subagent")).toBe(false);
+    expect(CLIENT_B.held.some((thread) => thread.id === "subagent")).toBe(true);
+    const a = sidebar({ ...CLIENT_A, olderSettled, filter });
+    const b = sidebar({ ...CLIENT_B, olderSettled, filter });
+    expect(a.attributions.get(key)).toBe("jeff-agents");
+    expect(b.attributions.get(key)).toBe("jeff-agents");
+    // Without the server's stamp, the app lacking the subagent could only say Unknown.
+    const unstamped = CLIENT_A.held.map((thread) => {
+      const { parentFounder: _, ...source } = thread.source;
+      return { ...thread, source };
+    });
+    expect(
+      sidebar({ ...CLIENT_A, held: unstamped, olderSettled, filter }).attributions.get(key),
+    ).toBe("unknown");
+    // Its older sibling, which no app holds, counts under Jeff's agents too.
+    const fromJeff = FILTERS[5]![1];
+    expect(sidebar({ ...CLIENT_A, olderSettled, filter: fromJeff }).total).toEqual({
+      count: truthFor(fromJeff).total.count,
+      exact: true,
+    });
+  });
+
+  it("shows a lower bound, never below the rows on screen, when a server sends totals only", () => {
     const totalsOnly = serverOlderSettled(false);
     const kameronInbox = FILTERS[1]![1];
-    const a = sidebar({ ...CLIENT_A, olderSettled: totalsOnly, filter: kameronInbox });
-    const b = sidebar({ ...CLIENT_B, olderSettled: totalsOnly, filter: kameronInbox });
-    expect(a.total).toEqual(b.total);
-    expect(a.total.exact).toBe(false);
-    expect(a.total.count).toBeLessThanOrEqual(truthFor(kameronInbox).total.count);
+    const truth = truthFor(kameronInbox).total.count;
+    for (const client of [CLIENT_A, CLIENT_B]) {
+      const shelf = sidebar({ ...client, olderSettled: totalsOnly, filter: kameronInbox });
+      expect(shelf.total.exact).toBe(false);
+      expect(shelf.total.count).toBeGreaterThanOrEqual(shelf.settledOnScreen);
+      expect(shelf.total.count).toBeLessThanOrEqual(truth);
+    }
+    // The app that loaded every older page shows all of them, not fewer than it lists.
+    expect(
+      sidebar({ ...CLIENT_B, olderSettled: totalsOnly, filter: kameronInbox }).total.count,
+    ).toBe(truth);
     // Unfiltered, the totals are the whole answer.
     const all = FILTERS[0]![1];
     expect(sidebar({ ...CLIENT_A, olderSettled: totalsOnly, filter: all }).total).toEqual({

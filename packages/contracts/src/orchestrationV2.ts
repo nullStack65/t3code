@@ -4,9 +4,9 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
-  Founder,
   InboxActor,
   InboxChoice,
+  SenderFounder,
   ThreadInbox,
   ThreadInboxRoutingPatch,
 } from "./threadInbox.ts";
@@ -2220,6 +2220,11 @@ export type OrchestrationV2LatestVisibleMessageSummary =
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   inbox: Schema.optionalKey(ThreadInbox),
+  /**
+   * For agent work with no owner or human requester, the founder its parent chain resolves to,
+   * so every client labels it alike whichever parents it holds. Older servers omit it.
+   */
+  parentFounder: Schema.optionalKey(SenderFounder),
   id: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -2354,7 +2359,7 @@ export function isOlderSettledThreadShell(
 export const OrchestrationV2OlderSettledGroup = Schema.Struct({
   inbox: Schema.NullOr(InboxChoice),
   agentCreated: Schema.Boolean,
-  founder: Schema.NullOr(Schema.Union([Founder, Schema.Literal("machine")])),
+  founder: SenderFounder,
   byAgent: Schema.Boolean,
   count: NonNegativeInt,
 });
