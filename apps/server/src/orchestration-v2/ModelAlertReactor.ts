@@ -856,7 +856,8 @@ export const make = Effect.gen(function* () {
       })
       .pipe(
         Effect.map(({ thread }) => thread.status),
-        Effect.orElseSucceed(() => null),
+        // A read that fails or dies must never block the alert; deliver as if idle.
+        Effect.catchCause(() => Effect.succeed(null)),
       );
   });
 

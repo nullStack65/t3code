@@ -1432,6 +1432,9 @@ const makeModelAlertReactor = (input: {
           Layer.mock(PeerMcpClient.PeerMcpClient)({
             call: (request) =>
               Effect.gen(function* () {
+                // The busy-watcher check reads the remote watcher first; it finds it idle.
+                if (request.tool === "t3_thread_read")
+                  return { thread: { status: "idle" } } as never;
                 yield* Ref.update(sends, (all) => [
                   ...all,
                   {
@@ -5088,6 +5091,13 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
           now,
         }),
       );
+      // The first alert queued a turn on the watcher, so the next one waits for that turn,
+      // up to the hold cap, instead of queueing behind it.
+      assert.deepEqual(
+        (yield* alerts).map((message) => message.text.includes(`/${topLevelThreadId})`)),
+        [false],
+      );
+      yield* TestClock.adjust("11 minutes");
       assert.deepEqual(
         (yield* alerts).map((message) => message.text.includes(`/${topLevelThreadId})`)),
         [false, true],
