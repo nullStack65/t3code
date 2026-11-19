@@ -27,6 +27,13 @@ declare const __T3CODE_TELEMETRY_CHANNEL__: ReleaseChannel | undefined;
 export const telemetryChannel: ReleaseChannel =
   typeof __T3CODE_TELEMETRY_CHANNEL__ === "undefined" ? "dev" : __T3CODE_TELEMETRY_CHANNEL__;
 
+// The source commit the build was made from, when the build stamped one (T3CODE_BUILD_COMMIT).
+declare const __T3CODE_BUILD_COMMIT__: string | undefined;
+export const buildCommit: string | undefined =
+  typeof __T3CODE_BUILD_COMMIT__ === "undefined" || __T3CODE_BUILD_COMMIT__ === ""
+    ? undefined
+    : __T3CODE_BUILD_COMMIT__;
+
 export const DEFAULT_PORT = 3773;
 
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
