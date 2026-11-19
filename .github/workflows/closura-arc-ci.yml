@@ -152,6 +152,8 @@ jobs:
           vp test run \
             apps/server/src/speech/CloudSpeech.test.ts \
             packages/contracts/src/threadInbox.test.ts \
+            packages/contracts/src/threadInbox.invariants.test.ts \
+            packages/contracts/src/threadInbox.upgrade.test.ts \
             packages/contracts/src/threadMetadataMcp.test.ts \
             apps/web/src/components/threadActionMenu.logic.test.ts \
             apps/web/src/components/sidebar/threadListFilter.logic.test.ts \
