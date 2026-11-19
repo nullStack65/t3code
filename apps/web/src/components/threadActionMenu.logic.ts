@@ -1,4 +1,8 @@
-import type { ThreadInboxRoutingPatch } from "@t3tools/contracts";
+import {
+  inboxRoutingFor,
+  type InboxChoice,
+  type ThreadInboxRoutingPatch,
+} from "@t3tools/contracts";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
@@ -298,19 +302,13 @@ export function buildThreadActionMenuItems(
 }
 
 export function threadRoutingUpdateFromMenuAction(action: string): ThreadInboxRoutingPatch | null {
-  if (action === "inbox:kameron" || action === "inbox:jeff") {
-    const founder = action === "inbox:kameron" ? "kameron" : "jeff";
-    return {
-      owner: founder,
-      assignee: { kind: "human", id: founder },
-      audience: founder,
-      attentionKind: "action",
-    };
-  }
-  if (action === "inbox:shared")
-    return { owner: null, assignee: null, audience: "shared", attentionKind: "FYI" };
-  if (action === "inbox:agents")
-    return { owner: null, assignee: null, audience: "agent-only", attentionKind: "background" };
+  if (
+    action === "inbox:kameron" ||
+    action === "inbox:jeff" ||
+    action === "inbox:shared" ||
+    action === "inbox:agents"
+  )
+    return inboxRoutingFor(action.slice("inbox:".length) as InboxChoice);
   if (action === "attention:action") return { attentionKind: "action" };
   if (action === "attention:FYI") return { attentionKind: "FYI" };
   if (action === "attention:background") return { attentionKind: "background" };
