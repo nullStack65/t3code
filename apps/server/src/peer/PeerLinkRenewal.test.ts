@@ -141,6 +141,22 @@ it.effect("a session revoked on the peer is not renewed and alerts", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("an expired link is not tried again and alerts that it needs linking again", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { box, b, links, renewal, outcomes } = yield* setup();
+      const session = Option.getOrThrow(yield* links.session(box.environmentId));
+      const before = (yield* Ref.get(b.bearers)).length;
+      yield* TestClock.adjust(Duration.days(31));
+      yield* renewal.sweep;
+      expect((yield* Ref.get(b.bearers)).length).toBe(before);
+      const [outcome] = yield* Ref.get(outcomes);
+      expect(outcome).toMatchObject({ _tag: "failed", alert: { linkSession: session } });
+      expect(outcome?._tag === "failed" && outcome.alert.detail).toContain("Link it again");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it("a peer that is only off alerts in the link's last week; anything else alerts at once", () => {
   const link = { expiresAt: days(30) };
   const transient = { transient: true, detail: "Box did not answer." };

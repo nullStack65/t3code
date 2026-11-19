@@ -6,6 +6,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 
@@ -125,27 +126,42 @@ export const make = Effect.gen(function* () {
   });
 
   const renewOne = Effect.fnUntraced(function* (link: PeerLink, now: DateTime.Utc) {
-    const outcome = yield* Effect.result(attempt(link));
+    // An expired link's token is refused there, so only linking again brings it back.
+    const expired = DateTime.isLessThanOrEqualTo(link.expiresAt, now);
+    const outcome = expired
+      ? Result.fail<RenewalFailure>({
+          transient: false,
+          detail: `The link expired before it could renew. Link it again with a new pairing code from ${link.label}.`,
+        })
+      : yield* Effect.result(attempt(link));
     if (outcome._tag === "Success") {
-      // Not kept: the link was forgotten or linked again meanwhile, so it has nothing to alert.
-      yield* Effect.logInfo("peer link renewed", {
-        linkedEnvironmentId: link.environmentId,
-        expiresAt: DateTime.formatIso(outcome.success.expiresAt),
-        kept: outcome.success.kept,
-      });
+      if (outcome.success.kept) {
+        yield* Effect.logInfo("peer link renewed", {
+          linkedEnvironmentId: link.environmentId,
+          expiresAt: DateTime.formatIso(outcome.success.expiresAt),
+        });
+      } else {
+        // Forgotten or linked again meanwhile: the new link is fresh, so nothing is left to alert.
+        yield* Effect.logInfo("peer link renewed after it was replaced; the renewal was not kept", {
+          linkedEnvironmentId: link.environmentId,
+        });
+      }
       yield* alerts.linkRenewal({ _tag: "renewed", linkedEnvironmentId: link.environmentId });
       return;
     }
     const failure = outcome.failure;
-    // Forgotten between listing and renewing: nothing is left to renew or report.
-    const current = yield* links.get(link.environmentId).pipe(Effect.orElseSucceed(Option.none));
-    if (Option.isNone(current)) return;
-    yield* Effect.logWarning("peer link renewal failed", {
-      linkedEnvironmentId: link.environmentId,
-      expiresAt: DateTime.formatIso(link.expiresAt),
-      transient: failure.transient,
-      detail: failure.detail,
-    });
+    // The session names this link, so linking again starts a fresh alert. Forgotten between
+    // listing and now: nothing is left to renew or report.
+    const linkSession = yield* links.session(link.environmentId);
+    if (Option.isNone(linkSession)) return;
+    if (!expired) {
+      yield* Effect.logWarning("peer link renewal failed", {
+        linkedEnvironmentId: link.environmentId,
+        expiresAt: DateTime.formatIso(link.expiresAt),
+        transient: failure.transient,
+        detail: failure.detail,
+      });
+    }
     if (!alertDue(failure, link, now)) return;
     const descriptor = yield* environment.getDescriptor;
     const nowMs = yield* Clock.currentTimeMillis;
@@ -158,6 +174,7 @@ export const make = Effect.gen(function* () {
         environmentLabel: descriptor.label,
         linkedEnvironmentId: link.environmentId,
         linkedLabel: link.label,
+        linkSession: linkSession.value,
         expiresAt: DateTime.formatIso(link.expiresAt),
         detail: failure.detail,
         occurredAt: DateTime.formatIso(now),
@@ -170,7 +187,16 @@ export const make = Effect.gen(function* () {
     const now = yield* DateTime.now;
     const stored = yield* links.stored;
     for (const link of stored) {
-      if (renewalDue(link, now)) yield* renewOne(link, now);
+      if (!renewalDue(link, now)) continue;
+      // One link's defect never stops the others from renewing.
+      yield* renewOne(link, now).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("peer link renewal failed unexpectedly", {
+            linkedEnvironmentId: link.environmentId,
+            cause,
+          }),
+        ),
+      );
     }
   }).pipe(
     Effect.catchCause((cause) => Effect.logWarning("peer link renewal sweep failed", { cause })),

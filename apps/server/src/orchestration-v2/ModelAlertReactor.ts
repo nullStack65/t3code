@@ -90,6 +90,11 @@ export const PeerLinkRenewalAlert = Schema.Struct({
   environmentLabel: Schema.String,
   linkedEnvironmentId: Schema.String,
   linkedLabel: Schema.String,
+  /**
+   * Names the link's session here (its secret store entry, never the credential), so linking
+   * again starts a fresh alert rather than inheriting the old link's.
+   */
+  linkSession: Schema.String,
   /** When the link stops working, or stopped. */
   expiresAt: Schema.String,
   /** Why the last renewal failed. */
@@ -350,11 +355,17 @@ export function recordThreadEvents(
   return { state: { ...state, reported, outbox }, enqueued };
 }
 
-const linkReportedKey = (linkedEnvironmentId: string) => `peer-link\n${linkedEnvironmentId}`;
+const linkReportedPrefix = (linkedEnvironmentId: string) => `peer-link\n${linkedEnvironmentId}\n`;
+const linkReportedKey = (alert: PeerLinkRenewalAlert) =>
+  `${linkReportedPrefix(alert.linkedEnvironmentId)}${alert.linkSession}`;
+/** A link alert's `reported` entry once some destination received it. */
+const linkDelivered = (id: string) => `delivered:${id}`;
 
 /**
- * Records a link's renewal outcome. A failing link alerts once; it stays quiet through every
- * later failure until a renewal succeeds, which lets its next failure alert again.
+ * Records a link's renewal outcome. A failing link alerts once and stays quiet through every
+ * later failure while that alert is queued or once it was delivered. A renewal, or linking
+ * again, lets the next failure alert again, and so does an alert that expired from the outbox
+ * undelivered. Nothing counts as reported until something was queued.
  */
 export function recordLinkRenewal(
   state: ModelAlertState,
@@ -365,27 +376,53 @@ export function recordLinkRenewal(
   nowMs: number,
 ): { readonly state: ModelAlertState; readonly enqueued: boolean } {
   if (outcome._tag === "renewed") {
-    const key = linkReportedKey(outcome.linkedEnvironmentId);
-    if (state.reported[key] === undefined) return { state, enqueued: false };
-    const { [key]: _cleared, ...reported } = state.reported;
+    const prefix = linkReportedPrefix(outcome.linkedEnvironmentId);
+    const reported = Object.fromEntries(
+      Object.entries(state.reported).filter(([key]) => !key.startsWith(prefix)),
+    );
+    if (Object.keys(reported).length === Object.keys(state.reported).length) {
+      return { state, enqueued: false };
+    }
     return { state: { ...state, reported }, enqueued: false };
   }
   const { alert } = outcome;
-  const key = linkReportedKey(alert.linkedEnvironmentId);
-  if (state.reported[key] !== undefined) return { state, enqueued: false };
+  const key = linkReportedKey(alert);
+  const previous = state.reported[key];
+  if (previous !== undefined) {
+    const delivered = previous.startsWith(linkDelivered(""));
+    const queued = pruneOutbox(state.outbox, nowMs).some((entry) => entry.alert.id === previous);
+    if (delivered || queued) return { state, enqueued: false };
+  }
   const queued = enqueueAlert(state.outbox, alert, destinations, nowMs);
+  if (!queued.enqueued) return { state, enqueued: false };
   return {
     state: {
       ...state,
       reported: {
-        ...Object.fromEntries(Object.entries(state.reported).slice(-(MAX_REPORTED - 1))),
+        ...Object.fromEntries(
+          Object.entries(state.reported)
+            .filter(([existing]) => existing !== key)
+            .slice(-(MAX_REPORTED - 1)),
+        ),
         [key]: alert.id,
       },
       outbox: queued.outbox,
     },
-    enqueued: queued.enqueued,
+    enqueued: true,
   };
 }
+
+/** Marks a delivered link alert, so its link stays quiet until it renews or is linked again. */
+const markLinkDelivered = (
+  reported: ModelAlertState["reported"],
+  entry: Delivery,
+): ModelAlertState["reported"] => {
+  if (entry.alert.type !== "peer-link-renewal") return reported;
+  const key = linkReportedKey(entry.alert);
+  return reported[key] === entry.alert.id
+    ? { ...reported, [key]: linkDelivered(entry.alert.id) }
+    : reported;
+};
 
 const pruneOutbox = (outbox: ReadonlyArray<Delivery>, nowMs: number) =>
   outbox.filter((entry) => nowMs - entry.createdAt < OUTBOX_TTL_MS);
@@ -425,6 +462,7 @@ export function afterDeliveryAttempt(
   return {
     ...state,
     incidentSentAt,
+    reported: delivered ? markLinkDelivered(state.reported, entry) : state.reported,
     outbox: pruneOutbox(state.outbox, nowMs).flatMap((candidate) => {
       if (!sameDelivery(candidate, entry)) return [candidate];
       if (delivered) {
@@ -807,8 +845,8 @@ export const make = Effect.gen(function* () {
   const currentAlert = Effect.fnUntraced(function* (alert: WatcherAlert) {
     // A link that renewed while its alert waited has nothing left to say.
     if (alert.type === "peer-link-renewal") {
-      const reported = (yield* Ref.get(state)).reported[linkReportedKey(alert.linkedEnvironmentId)];
-      return reported === alert.id ? alert : null;
+      const reported = (yield* Ref.get(state)).reported[linkReportedKey(alert)];
+      return reported === alert.id || reported === linkDelivered(alert.id) ? alert : null;
     }
     const stillCurrent = Effect.fnUntraced(function* (
       threadId: string,

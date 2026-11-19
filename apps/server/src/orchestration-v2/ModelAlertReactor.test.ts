@@ -643,6 +643,7 @@ const linkAlert = (at: number): PeerLinkRenewalAlert => ({
   environmentLabel: "primary-r720",
   linkedEnvironmentId: "environment-box",
   linkedLabel: "ASUS",
+  linkSession: "peer-link:environment-box:1",
   expiresAt: "2026-12-19T00:00:00.000Z",
   detail: "ASUS did not answer.",
   occurredAt: DateTime.formatIso(DateTime.makeUnsafe(at)),
@@ -685,4 +686,61 @@ it("a link that keeps failing to renew alerts once, until it renews", () => {
   const message = watcherAlertMessage(linkAlert(1));
   assert.include(message, "Link alert from primary-r720");
   assert.include(message, "ASUS did not answer.");
+});
+
+it("a link alert counts only once queued, and only a delivered one keeps the link quiet", () => {
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  // With nowhere to send it, nothing is marked, so the next sweep with a watcher alerts.
+  const nowhere = recordLinkRenewal(
+    EMPTY_MODEL_ALERT_STATE,
+    { _tag: "failed", alert: linkAlert(1) },
+    [],
+    0,
+  );
+  assert.equal(nowhere.enqueued, false);
+  assert.deepEqual(nowhere.state.reported, {});
+  const queued = recordLinkRenewal(
+    nowhere.state,
+    { _tag: "failed", alert: linkAlert(2) },
+    ["watcher"],
+    0,
+  );
+  assert.equal(queued.enqueued, true);
+
+  // Never delivered and gone from the outbox: the link alerts again.
+  const expired = recordLinkRenewal(
+    queued.state,
+    { _tag: "failed", alert: linkAlert(3) },
+    ["watcher"],
+    WEEK + 1,
+  );
+  assert.equal(expired.enqueued, true);
+
+  // Delivered: quiet past the outbox's week, until it renews.
+  const delivered = afterDeliveryAttempt(queued.state, queued.state.outbox[0]!, true, 1);
+  assert.equal(delivered.outbox.length, 0);
+  const later = recordLinkRenewal(
+    delivered,
+    { _tag: "failed", alert: linkAlert(4) },
+    ["watcher"],
+    WEEK + 1,
+  );
+  assert.equal(later.enqueued, false);
+
+  // Linking again names a new session, so its first failure is news.
+  const relinked = recordLinkRenewal(
+    delivered,
+    { _tag: "failed", alert: { ...linkAlert(5), linkSession: "peer-link:environment-box:2" } },
+    ["watcher"],
+    2,
+  );
+  assert.equal(relinked.enqueued, true);
+  // A renewal clears every session's record for that link.
+  const renewed = recordLinkRenewal(
+    relinked.state,
+    { _tag: "renewed", linkedEnvironmentId: "environment-box" },
+    [],
+    3,
+  );
+  assert.deepEqual(renewed.state.reported, {});
 });
