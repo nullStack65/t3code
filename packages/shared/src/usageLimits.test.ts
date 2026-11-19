@@ -21,6 +21,8 @@ import {
   collectLimitNotices,
   collectLimitOwnerGroups,
   collectNotApplicable,
+  groupNotApplicable,
+  splitLimitPresentations,
   collectLimitPools,
   elapsedShare,
   exhaustedUsageWindow,
@@ -1946,12 +1948,108 @@ describe("owners and not-applicable usage", () => {
     expect(groups.map((group) => group.owner)).toEqual(["Unassigned"]);
   });
 
-  it("lists not-applicable usage apart from failures", () => {
+  it("lists not-applicable usage apart from failures, and a billing refusal as a notice", () => {
     const view = presentations();
     expect(collectNotApplicable(view)).toEqual([
-      { subject: "Magpie Codex", reason: "Not applicable: gateway reports it." },
-      { subject: "Magpie · owner.a@example.com · Team", reason: "Payment Required." },
+      { environment: "Crown", subject: "Magpie Codex", reason: "gateway reports it." },
     ]);
-    expect(collectLimitNotices(view)).toEqual(["Magpie · k: Upstream timed out."]);
+    expect(collectLimitNotices(view)).toEqual([
+      "Magpie · owner.a@example.com · Team: the vendor says payment is required, so this subscription's billing needs attention.",
+      "Magpie · k: Upstream timed out.",
+    ]);
+  });
+
+  it("names a billing refusal once however many machines see it", () => {
+    const view = new Map([
+      [EnvironmentId.make("env-a"), presentations().get(EnvironmentId.make("env-a"))!],
+      [
+        EnvironmentId.make("env-b"),
+        {
+          ...presentations().get(EnvironmentId.make("env-a"))!,
+          entry: { target: { label: "Desk" } },
+        },
+      ],
+    ]);
+    const billing = collectLimitNotices(view).filter((notice) => notice.includes("payment"));
+    expect(billing).toHaveLength(1);
+  });
+
+  it("groups one instance and reason across machines into one row", () => {
+    const base = presentations().get(EnvironmentId.make("env-a"))!;
+    const view = new Map(
+      ["r720", "asus", "laptop"].map((label) => [
+        EnvironmentId.make(label),
+        { ...base, entry: { target: { label } } },
+      ]),
+    );
+    const entries = collectNotApplicable(view);
+    expect(entries).toHaveLength(3);
+    expect(groupNotApplicable(entries)).toEqual([
+      {
+        subject: "Magpie Codex",
+        reason: "gateway reports it.",
+        environments: ["r720", "asus", "laptop"],
+      },
+    ]);
+  });
+});
+
+describe("splitLimitPresentations", () => {
+  const checkedAt = "2026-11-18T22:00:00.000Z";
+  const later = "2026-11-18T22:05:00.000Z";
+  const failing = provider({
+    checkedAt,
+    usageLimits: {
+      checkedAt: later,
+      windows: [],
+      unavailable: { reason: "probeFailed", message: "Codex could not read usage." },
+    },
+  });
+  const config = { providers: [failing] };
+  const view = new Map([
+    [
+      EnvironmentId.make("live"),
+      {
+        entry: { target: { label: "Desk" } },
+        connection: { phase: "connected" },
+        serverConfig: config,
+      },
+    ],
+    [
+      EnvironmentId.make("stopped"),
+      {
+        entry: { target: { label: "Crown Rain Gutters" } },
+        connection: { phase: "reconnecting" },
+        serverConfig: config,
+      },
+    ],
+    [
+      EnvironmentId.make("starting"),
+      {
+        entry: { target: { label: "Laptop" } },
+        connection: { phase: "connecting" },
+        serverConfig: null,
+      },
+    ],
+    [
+      EnvironmentId.make("never"),
+      { entry: { target: { label: "Air" } }, connection: { phase: "error" }, serverConfig: null },
+    ],
+    [EnvironmentId.make("implicit"), { entry: { target: { label: "Box" } }, serverConfig: config }],
+  ]);
+
+  it("keeps only connected environments and turns the rest into offline lines", () => {
+    const { live, offline } = splitLimitPresentations(view);
+    expect([...live.keys()]).toEqual(["live", "implicit"]);
+    expect(offline).toEqual([
+      { environmentId: "stopped", label: "Crown Rain Gutters", since: later },
+      { environmentId: "never", label: "Air", since: null },
+    ]);
+  });
+
+  it("drops a stopped machine's last errors from the notices", () => {
+    const { live } = splitLimitPresentations(view);
+    expect(collectLimitNotices(live).some((notice) => notice.includes("Crown"))).toBe(false);
+    expect(collectLimitNotices(view).some((notice) => notice.includes("Crown"))).toBe(true);
   });
 });
