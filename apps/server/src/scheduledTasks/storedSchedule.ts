@@ -15,6 +15,22 @@ import * as Schema from "effect/Schema";
 export const OWNED_SCHEDULE_FORMAT = "t3.scheduled-task.placement";
 export const OWNED_SCHEDULE_VERSION = 1;
 
+/** In SQL: a stored schedule outside the owned/versioned family. Malformed JSON stays legacy. */
+export const legacyScheduleSql = (column: string) =>
+  `((CASE WHEN json_valid(${column}) THEN json_type(${column}, '$.format') END) IS NULL)`;
+
+/** In SQL: a saved task snapshot that carries a placement or an owned-family schedule marker. */
+export const heldSnapshotSql = (column: string) =>
+  `(CASE WHEN json_valid(${column}) THEN json_type(${column}, '$.placement') IS NOT NULL OR json_type(${column}, '$.schedule.format') IS NOT NULL ELSE 0 END)`;
+
+/** In SQL, for webhook tables: no held (owned or newer-format) task row has this task id. */
+export const noHeldTaskSql = (taskIdColumn: string) =>
+  `NOT EXISTS (SELECT 1 FROM scheduled_tasks held_task WHERE held_task.task_id = ${taskIdColumn} AND NOT ${legacyScheduleSql("held_task.schedule_json")})`;
+
+/** In SQL: neither a held task row nor a held saved snapshot belongs to this task id. */
+export const noHeldBookkeepingSql = (taskIdColumn: string) =>
+  `(${noHeldTaskSql(taskIdColumn)} AND NOT EXISTS (SELECT 1 FROM scheduled_task_webhook_pending held_pending WHERE held_pending.task_id = ${taskIdColumn} AND ${heldSnapshotSql("held_pending.task_json")}))`;
+
 const OwnedScheduleEnvelopeV1 = Schema.Struct({
   format: Schema.Literal(OWNED_SCHEDULE_FORMAT),
   version: Schema.Literal(OWNED_SCHEDULE_VERSION),

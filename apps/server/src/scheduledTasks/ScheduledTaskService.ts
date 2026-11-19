@@ -46,7 +46,13 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import { readStoredSchedule } from "./storedSchedule.ts";
+import {
+  heldSnapshotSql,
+  legacyScheduleSql,
+  noHeldBookkeepingSql,
+  noHeldTaskSql,
+  readStoredSchedule,
+} from "./storedSchedule.ts";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -192,24 +198,17 @@ const webhookFilters = (filters: ReadonlyArray<ScheduledTaskWebhookFilter> | und
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
 const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
-/**
- * In SQL: the row's stored schedule is not in the owned/versioned envelope family (see
- * `storedSchedule.ts`). Malformed JSON stays legacy, so corrupt rows keep their handling. Every
- * legacy write carries this at the statement itself, so a stale read cannot reach a held row.
- */
-const legacyScheduleSql = (column: string) =>
-  `((CASE WHEN json_valid(${column}) THEN json_type(${column}, '$.format') END) IS NULL)`;
+/** Legacy writes carry this in the statement, so a stale read cannot reach a held row. */
 const LEGACY_ROW = legacyScheduleSql("schedule_json");
 const LEGACY_TASK_ROW = legacyScheduleSql("scheduled_tasks.schedule_json");
-/** In SQL, for pending webhook rows: the saved task snapshot is not an owned task's. */
-const OWNED_SNAPSHOT_FREE =
-  "((CASE WHEN json_valid(task_json) THEN json_type(task_json, '$.placement') END) IS NULL)";
-/** In SQL, for webhook tables: no held (owned or newer-format) task owns this row's task. */
-const NO_HELD_TASK = (taskIdColumn: string) =>
-  `NOT EXISTS (SELECT 1 FROM scheduled_tasks held WHERE held.task_id = ${taskIdColumn} AND NOT ${legacyScheduleSql("held.schedule_json")})`;
+/** For pending webhook rows: the saved snapshot is held, so no legacy path reads or settles it. */
+const HELD_SNAPSHOT = heldSnapshotSql("task_json");
+const NO_HELD_PENDING_TASK = noHeldTaskSql("scheduled_task_webhook_pending.task_id");
 /** Owned tasks wait for placement that this server does not run yet; see `storedSchedule.ts`. */
 const OWNED_TASK_HELD =
   "This task's automatic placement is not available on this server yet, so it is held.";
+const PLACED_AUTOMATICALLY =
+  "This task is placed automatically, so it can't be changed with this form.";
 const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ScheduledTask.fields.workspaceStrategy),
 );
@@ -665,6 +664,42 @@ export const layer = Layer.effect(
       return kind === "owned" || kind === "unsupported";
     });
 
+    /**
+     * Fails with `OwnedTaskHeld` when the task's current row, or this delivery's saved snapshot, is
+     * held. Run it inside the write's transaction, so nothing changes between check and write.
+     */
+    const failIfHeld = (taskId: string, deliveryId?: string) =>
+      sql<{ held: number }>`
+        SELECT (
+          EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${taskId} AND NOT ${sql.literal(LEGACY_ROW)})
+          OR EXISTS (SELECT 1 FROM scheduled_task_webhook_pending
+            WHERE delivery_id = ${deliveryId ?? null} AND ${sql.literal(HELD_SNAPSHOT)})
+        ) AS held
+      `.pipe(
+        Effect.flatMap(([row]) =>
+          row !== undefined && row.held !== 0
+            ? Effect.fail(new OwnedTaskHeld({ reason: OWNED_TASK_HELD }))
+            : Effect.void,
+        ),
+      );
+    /** Legacy webhook bookkeeping, written only while neither the task nor the delivery is held. */
+    const whileLegacy = <A, E>(
+      taskId: string,
+      deliveryId: string | undefined,
+      effect: Effect.Effect<A, E>,
+    ) =>
+      sql
+        .withTransaction(failIfHeld(taskId, deliveryId).pipe(Effect.andThen(effect)))
+        .pipe(
+          Effect.mapError((cause): OwnedTaskHeld | ScheduledTaskError =>
+            isOwnedTaskHeld(cause)
+              ? cause
+              : isScheduledTaskError(cause)
+                ? cause
+                : dedupeError(cause),
+          ),
+        );
+
     const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
       const rows = yield* getRows(id).pipe(
         Effect.mapError((cause) =>
@@ -1030,7 +1065,18 @@ export const layer = Layer.effect(
       const startedAtIso = iso(startedAt);
       const run = Effect.gen(function* () {
         // Re-read stale poll snapshots so deleted, paused or postponed tasks cannot fire.
-        const active = yield* findTask(task.id);
+        // A delivery whose row became unreadable because it is held is held, not failed.
+        const active = yield* findTask(task.id).pipe(
+          Effect.catch((error) =>
+            webhook === undefined
+              ? Effect.fail(error)
+              : rowHeld(task.id).pipe(
+                  Effect.flatMap((held) =>
+                    Effect.fail(held ? new OwnedTaskHeld({ reason: OWNED_TASK_HELD }) : error),
+                  ),
+                ),
+          ),
+        );
         if (active === null) {
           if (webhook !== undefined) {
             return yield* new WebhookDeliverySkipped({
@@ -1102,6 +1148,7 @@ export const layer = Layer.effect(
           yield* sql
             .withTransaction(
               Effect.gen(function* () {
+                yield* failIfHeld(active.id, webhook.deliveryId);
                 yield* markRunning(active.id, startedAtIso, webhook.deliveryId);
                 // Recovery must distinguish this delivery from other windows waiting on the same task.
                 yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'running' WHERE delivery_id = ${webhook.deliveryId}`;
@@ -1109,7 +1156,9 @@ export const layer = Layer.effect(
             )
             .pipe(
               Effect.mapError((cause) =>
-                taskError("Could not start webhook run.", { taskId: task.id, cause }),
+                isOwnedTaskHeld(cause)
+                  ? cause
+                  : taskError("Could not start webhook run.", { taskId: task.id, cause }),
               ),
             );
 
@@ -1209,6 +1258,8 @@ export const layer = Layer.effect(
         // files, and the transaction holds SQLite's writer lock.
         const origin = yield* readWebhookOrigin;
         const record = Effect.gen(function* () {
+          // Held since the run started: its pending and delivery state stay as they are.
+          if (webhook !== undefined) yield* failIfHeld(task.id, webhook.deliveryId);
           const [row] = yield* getRows(task.id);
           const current = row === undefined ? null : yield* decodeRow(row, origin);
           const scheduleSource = current ?? task;
@@ -1257,7 +1308,7 @@ export const layer = Layer.effect(
           .withTransaction(record)
           .pipe(
             Effect.mapError((cause) =>
-              isScheduledTaskError(cause)
+              isScheduledTaskError(cause) || isOwnedTaskHeld(cause)
                 ? cause
                 : taskError(
                     webhook === undefined
@@ -1538,10 +1589,7 @@ export const layer = Layer.effect(
       const existingTask = yield* findTask(id);
       // Owned tasks are edited only through the checked placement form, title-only edits included.
       if (existingTask?.placement !== undefined) {
-        return yield* taskError(
-          "This task is placed automatically, so it can't be changed with this form.",
-          { taskId: id },
-        );
+        return yield* taskError(PLACED_AUTOMATICALLY, { taskId: id });
       }
       const threadMode = resolveThreadMode(input, existingTask);
       const keptThreadId = input.threadId ?? existingTask?.threadId ?? null;
@@ -1598,42 +1646,6 @@ export const layer = Layer.effect(
           : input.schedule.type === "once"
             ? { type: "once", runAt: iso(DateTime.makeUnsafe(input.schedule.runAt)) }
             : input.schedule;
-      const webhook =
-        input.schedule.type === "webhook"
-          ? yield* Effect.gen(function* () {
-              const existing = existingTask === null ? null : yield* findWebhookCredentials(id);
-              const token = existing?.token ?? (yield* newWebhookToken);
-              const signature = input.schedule.type === "webhook" ? input.schedule.signature : null;
-              // A secretRef is a value the user entered for an agent; this
-              // save consumes it, so it cannot be used again. A replay of a
-              // save that already used it keeps the secret that save stored.
-              const replay = input.commandId !== undefined && existing?.secret != null;
-              const fromRef =
-                signature?.secretRef === undefined
-                  ? undefined
-                  : yield* secretRequests
-                      .consume({ ref: signature.secretRef, projectId: input.projectId })
-                      .pipe(
-                        Effect.catch((error) =>
-                          replay
-                            ? Effect.void
-                            : Effect.fail(taskError(error.message, { taskId: id })),
-                        ),
-                      );
-              // A ref, when given, is the only source: a plain secret sent
-              // alongside it must not replace what a replayed save stored.
-              const provided = signature?.secretRef === undefined ? signature?.secret : fromRef;
-              const secret = signature == null ? null : (provided ?? existing?.secret ?? null);
-              const secretChanged =
-                signature == null || provided !== undefined || existing === null;
-              if (signature != null && secret === null) {
-                return yield* taskError("A webhook signature check needs a signing secret.", {
-                  taskId: id,
-                });
-              }
-              return { token, secret, secretChanged };
-            })
-          : { token: null, secret: null, secretChanged: true };
       // A folder that is not a Git repository, Scratch included, cannot hold a worktree.
       const workspaceStrategy: ScheduledTask["workspaceStrategy"] =
         input.workspaceStrategy.type === "worktree" &&
@@ -1672,12 +1684,65 @@ export const layer = Layer.effect(
         lastRunError: existingTask?.lastRunError ?? null,
         runCount: existingTask?.runCount ?? 0,
       };
-      yield* saveTask(
-        task,
-        input.requireExisting === true,
-        scheduleUnchanged ? existingTask.schedule : null,
-        webhook,
-      );
+      const keptSchedule = scheduleUnchanged ? existingTask.schedule : null;
+      // One transaction from the hold check to the save: a task that became held since its read
+      // is refused before its one-use secretRef is spent. Secret reads are local files.
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* failIfHeld(id);
+            const webhook =
+              input.schedule.type === "webhook"
+                ? yield* Effect.gen(function* () {
+                    const existing =
+                      existingTask === null ? null : yield* findWebhookCredentials(id);
+                    const token = existing?.token ?? (yield* newWebhookToken);
+                    const signature =
+                      input.schedule.type === "webhook" ? input.schedule.signature : null;
+                    // A secretRef is a value the user entered for an agent; this
+                    // save consumes it, so it cannot be used again. A replay of a
+                    // save that already used it keeps the secret that save stored.
+                    const replay = input.commandId !== undefined && existing?.secret != null;
+                    const fromRef =
+                      signature?.secretRef === undefined
+                        ? undefined
+                        : yield* secretRequests
+                            .consume({ ref: signature.secretRef, projectId: input.projectId })
+                            .pipe(
+                              Effect.catch((error) =>
+                                replay
+                                  ? Effect.void
+                                  : Effect.fail(taskError(error.message, { taskId: id })),
+                              ),
+                            );
+                    // A ref, when given, is the only source: a plain secret sent
+                    // alongside it must not replace what a replayed save stored.
+                    const provided =
+                      signature?.secretRef === undefined ? signature?.secret : fromRef;
+                    const secret =
+                      signature == null ? null : (provided ?? existing?.secret ?? null);
+                    const secretChanged =
+                      signature == null || provided !== undefined || existing === null;
+                    if (signature != null && secret === null) {
+                      return yield* taskError("A webhook signature check needs a signing secret.", {
+                        taskId: id,
+                      });
+                    }
+                    return { token, secret, secretChanged };
+                  })
+                : { token: null, secret: null, secretChanged: true };
+            yield* saveTask(task, input.requireExisting === true, keptSchedule, webhook);
+          }),
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            isOwnedTaskHeld(cause)
+              ? taskError(PLACED_AUTOMATICALLY, { taskId: id })
+              : isScheduledTaskError(cause)
+                ? cause
+                : taskError("Could not save schedule task.", { taskId: id, cause }),
+          ),
+        );
       yield* notifyChanged;
       return { task: (yield* findTask(id)) ?? task };
     });
@@ -2013,6 +2078,7 @@ export const layer = Layer.effect(
       return sql
         .withTransaction(
           Effect.gen(function* () {
+            yield* failIfHeld(input.taskId);
             // Require the task to exist so deletes cannot leave deliveries for a recreated task.
             yield* sql`
               INSERT INTO scheduled_task_webhook_deliveries (
@@ -2044,7 +2110,9 @@ export const layer = Layer.effect(
         )
         .pipe(
           Effect.mapError((cause) =>
-            taskError("Could not record webhook delivery.", { taskId: input.taskId, cause }),
+            isOwnedTaskHeld(cause)
+              ? cause
+              : taskError("Could not record webhook delivery.", { taskId: input.taskId, cause }),
           ),
         );
     };
@@ -2161,21 +2229,23 @@ export const layer = Layer.effect(
           Metrics.increment(Metrics.webhookRunsTotal, { outcome }),
         ]);
       const dispatched = yield* Ref.make(false);
+      const failDelivery = (message: string) =>
+        whileLegacy(
+          task.id,
+          deliveryId,
+          markDeliveryFailed(deliveryId, message).pipe(
+            Effect.andThen(releaseFailedDelivery(deliveryId)),
+          ),
+        );
       return yield* runTask(task, "webhook", { deliveryId, prompt, dispatched }).pipe(
         Effect.flatMap(({ dispatchFailed }) =>
           dispatchFailed
-            ? runOutcome("failed").pipe(
-                Effect.andThen(markDeliveryFailed(deliveryId, "The run failed to start.")),
-                Effect.andThen(releaseFailedDelivery(deliveryId)),
-              )
+            ? runOutcome("failed").pipe(Effect.andThen(failDelivery("The run failed to start.")))
             : runOutcome("started"),
         ),
         Effect.catchTags({
           WebhookDeliverySkipped: (skipped) =>
-            runOutcome("skipped").pipe(
-              Effect.andThen(markDeliveryFailed(deliveryId, skipped.reason)),
-              Effect.andThen(releaseFailedDelivery(deliveryId)),
-            ),
+            runOutcome("skipped").pipe(Effect.andThen(failDelivery(skipped.reason))),
         }),
         Effect.as(true),
         // Dispatch success owns the replay key even if later bookkeeping fails.
@@ -2186,30 +2256,30 @@ export const layer = Layer.effect(
             const started = yield* Ref.get(dispatched);
             yield* Effect.logWarning("Webhook dispatch failed", { taskId: task.id, cause });
             yield* runOutcome(started ? "started" : "failed");
-            yield* markDeliveryFailed(
+            yield* whileLegacy(
+              task.id,
               deliveryId,
-              started
-                ? "The run started, but completion could not be recorded."
-                : "The run failed to start.",
-            );
-            if (!started) {
-              yield* sql
-                .withTransaction(
-                  Effect.gen(function* () {
-                    const counted =
-                      yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'failed'
+              Effect.gen(function* () {
+                yield* markDeliveryFailed(
+                  deliveryId,
+                  started
+                    ? "The run started, but completion could not be recorded."
+                    : "The run failed to start.",
+                );
+                if (!started) {
+                  const counted =
+                    yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'failed'
                 WHERE delivery_id = ${deliveryId} AND state = 'running' RETURNING delivery_id`;
-                    if (counted.length > 0)
-                      yield* sql`UPDATE scheduled_tasks SET run_count = run_count + 1
+                  if (counted.length > 0)
+                    yield* sql`UPDATE scheduled_tasks SET run_count = run_count + 1
                 WHERE task_id = ${task.id} AND created_at = ${task.createdAt} AND ${sql.literal(LEGACY_ROW)}`;
-                  }),
-                )
-                .pipe(Effect.mapError(dedupeError));
-              yield* releaseFailedDelivery(deliveryId);
-            }
+                  yield* releaseFailedDelivery(deliveryId);
+                }
+              }),
+            );
             // Pending windows retry the same command id to finish bookkeeping.
             return !started;
-          }),
+          }).pipe(Effect.catchTag("OwnedTaskHeld", () => Effect.succeed(false))),
         ),
       );
     });
@@ -2336,17 +2406,25 @@ export const layer = Layer.effect(
       return yield* Effect.uninterruptible(
         Effect.gen(function* () {
           if (request.relayDeliveryId !== undefined) {
-            const claimed = yield* sql<{ relay_delivery_id: string }>`
-                INSERT INTO scheduled_task_webhook_relay_deliveries
-                  (relay_delivery_id, task_id, seen_at)
-                VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
-                ON CONFLICT (relay_delivery_id) DO NOTHING
-                RETURNING relay_delivery_id
-              `.pipe(
-              Effect.mapError((cause) =>
-                taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
-              ),
-            );
+            const claimed = yield* sql
+              .withTransaction(
+                failIfHeld(task.id).pipe(
+                  Effect.andThen(sql<{ relay_delivery_id: string }>`
+                    INSERT INTO scheduled_task_webhook_relay_deliveries
+                      (relay_delivery_id, task_id, seen_at)
+                    VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
+                    ON CONFLICT (relay_delivery_id) DO NOTHING
+                    RETURNING relay_delivery_id
+                  `),
+                ),
+              )
+              .pipe(
+                Effect.mapError((cause) =>
+                  isOwnedTaskHeld(cause)
+                    ? cause
+                    : taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
+                ),
+              );
             if (claimed.length === 0) {
               yield* observe("duplicate");
               return { _tag: "accepted" as const, deliveryId, outcome: "duplicate" as const };
@@ -2355,6 +2433,7 @@ export const layer = Layer.effect(
             yield* sql`
                 DELETE FROM scheduled_task_webhook_relay_deliveries
                 WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
+                  AND ${sql.literal(noHeldBookkeepingSql("scheduled_task_webhook_relay_deliveries.task_id"))}
               `.pipe(Effect.ignore);
           }
           const log = (
@@ -2479,7 +2558,7 @@ export const layer = Layer.effect(
             Effect.mapError((cause) => (cause === "queue_full" ? cause : dedupeError(cause))),
           );
           const admit = <A, E>(effect: Effect.Effect<A, E>) =>
-            sql.withTransaction(effect).pipe(
+            sql.withTransaction(failIfHeld(task.id).pipe(Effect.andThen(effect))).pipe(
               Effect.catch((cause) =>
                 cause === "first_rejected" || cause === "rejected" || cause === "queue_full"
                   ? Effect.succeed({
@@ -2489,7 +2568,9 @@ export const layer = Layer.effect(
                           : ("rate_limited" as const),
                       log: cause === "first_rejected",
                     })
-                  : Effect.fail(isScheduledTaskError(cause) ? cause : dedupeError(cause)),
+                  : isOwnedTaskHeld(cause)
+                    ? Effect.fail(cause)
+                    : Effect.fail(isScheduledTaskError(cause) ? cause : dedupeError(cause)),
               ),
             );
           const deduped =
@@ -2507,6 +2588,8 @@ export const layer = Layer.effect(
                       checkCapacity,
                       (ownerId) => replaceDeliveryRequest(ownerId, request),
                     ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+                    if (outcome === "held")
+                      return yield* new OwnedTaskHeld({ reason: OWNED_TASK_HELD });
                     if (
                       outcome === "pending" ||
                       outcome === "coalesced" ||
@@ -2636,6 +2719,10 @@ export const layer = Layer.effect(
           claimAcquired = false;
           return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
         }).pipe(
+          // Held since its read: answered as a paused hook, undoing only this request's own claim.
+          Effect.catchTag("OwnedTaskHeld", () =>
+            releaseClaim({ _tag: "disabled" as const }).pipe(Effect.tap(() => observe("disabled"))),
+          ),
           Effect.onError(() =>
             Effect.all([
               releaseClaim(undefined),
@@ -2655,17 +2742,19 @@ export const layer = Layer.effect(
       const readVersion = yield* pendingWebhooks.version;
       // A held task's pending rows stay exactly as they are: not promoted, cleaned up or sent.
       yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'dispatching' WHERE state = 'pending' AND due_at <= ${now}
-        AND ${sql.literal(NO_HELD_TASK("scheduled_task_webhook_pending.task_id"))}
-        AND ${sql.literal(OWNED_SNAPSHOT_FREE)}`;
+        AND ${sql.literal(NO_HELD_PENDING_TASK)}
+        AND NOT ${sql.literal(HELD_SNAPSHOT)}`;
       const tasks = yield* sql<{ task_id: ScheduledTaskId }>`
         SELECT DISTINCT task_id FROM scheduled_task_webhook_pending WHERE state IN ('dispatching', 'running', 'completed', 'failed')
-          AND ${sql.literal(NO_HELD_TASK("scheduled_task_webhook_pending.task_id"))}
+          AND ${sql.literal(NO_HELD_PENDING_TASK)}
+          AND NOT ${sql.literal(HELD_SNAPSHOT)}
       `.pipe(NodeSqliteClient.readOnly);
       // Workers can leave rows behind to retry, so keep polling while any are claimed.
       if (tasks.length === 0) {
         const [next] = yield* sql<{ due_at: number | null }>`
           SELECT MIN(due_at) AS due_at FROM scheduled_task_webhook_pending WHERE state = 'pending'
-            AND ${sql.literal(NO_HELD_TASK("scheduled_task_webhook_pending.task_id"))}
+            AND ${sql.literal(NO_HELD_PENDING_TASK)}
+            AND NOT ${sql.literal(HELD_SNAPSHOT)}
         `.pipe(NodeSqliteClient.readOnly);
         yield* pendingWebhooks.record(readVersion, next?.due_at ?? Infinity, now);
       }
@@ -2685,16 +2774,31 @@ export const layer = Layer.effect(
                 state: string;
               }>`
               SELECT delivery_id, task_json, request_json, state FROM scheduled_task_webhook_pending
-              WHERE task_id = ${taskId} AND state IN ('dispatching', 'running', 'completed', 'failed') ORDER BY due_at, rowid LIMIT 1
+              WHERE task_id = ${taskId} AND state IN ('dispatching', 'running', 'completed', 'failed')
+                AND NOT ${sql.literal(HELD_SNAPSHOT)}
+              ORDER BY due_at, rowid LIMIT 1
             `.pipe(NodeSqliteClient.readOnly);
               if (entry === undefined) return;
+              // Each settlement rechecks the current row and this entry's snapshot as it writes.
+              const settle = <A, E>(effect: Effect.Effect<A, E>) =>
+                whileLegacy(taskId, entry.delivery_id, effect).pipe(
+                  Effect.as(true),
+                  Effect.catchTag("OwnedTaskHeld", () => Effect.succeed(false)),
+                );
               const remove = sql`DELETE FROM scheduled_task_webhook_pending WHERE delivery_id = ${entry.delivery_id}`;
+              const failAndRemove = (message: string) =>
+                settle(
+                  markDeliveryFailed(entry.delivery_id, message).pipe(
+                    Effect.andThen(releaseFailedDelivery(entry.delivery_id)),
+                    Effect.andThen(remove),
+                  ),
+                );
               if (entry.state === "completed" || entry.state === "failed") {
-                if (entry.state === "failed") {
-                  yield* markDeliveryFailed(entry.delivery_id, "The run failed to start.");
-                  yield* releaseFailedDelivery(entry.delivery_id);
-                }
-                yield* remove;
+                const settled =
+                  entry.state === "failed"
+                    ? yield* failAndRemove("The run failed to start.")
+                    : yield* settle(remove);
+                if (!settled) return;
                 continue;
               }
               const prepared = yield* Effect.gen(function* () {
@@ -2722,26 +2826,26 @@ export const layer = Layer.effect(
               if (Exit.isFailure(prepared)) {
                 if (Cause.hasInterruptsOnly(prepared.cause))
                   return yield* Effect.failCause(prepared.cause);
-                yield* markDeliveryFailed(
-                  entry.delivery_id,
-                  "The pending webhook payload could not be prepared.",
-                );
-                yield* releaseFailedDelivery(entry.delivery_id);
-                yield* remove;
+                if (!(yield* failAndRemove("The pending webhook payload could not be prepared.")))
+                  return;
                 continue;
               }
               if (prepared.value.held) return;
               const { task, taskJson, rendered } = prepared.value;
               if (rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
-                yield* markDeliveryFailed(entry.delivery_id, PROMPT_TOO_LONG);
-                yield* releaseFailedDelivery(entry.delivery_id);
-              } else {
-                if (taskJson !== null)
-                  yield* sql`UPDATE scheduled_task_webhook_pending SET task_json = ${taskJson} WHERE delivery_id = ${entry.delivery_id}`;
-                yield* sql`UPDATE scheduled_task_webhook_deliveries SET outcome = 'accepted', error = NULL, rendered_prompt = ${rendered.prompt.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT)}, missing_fields_json = ${encodeMissingFieldsJson(rendered.missing)} WHERE delivery_id = ${entry.delivery_id}`;
-                if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt))) return;
+                if (!(yield* failAndRemove(PROMPT_TOO_LONG))) return;
+                continue;
               }
-              yield* remove;
+              const accepted = yield* settle(
+                Effect.gen(function* () {
+                  if (taskJson !== null)
+                    yield* sql`UPDATE scheduled_task_webhook_pending SET task_json = ${taskJson} WHERE delivery_id = ${entry.delivery_id}`;
+                  yield* sql`UPDATE scheduled_task_webhook_deliveries SET outcome = 'accepted', error = NULL, rendered_prompt = ${rendered.prompt.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT)}, missing_fields_json = ${encodeMissingFieldsJson(rendered.missing)} WHERE delivery_id = ${entry.delivery_id}`;
+                }),
+              );
+              if (!accepted) return;
+              if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt))) return;
+              if (!(yield* settle(remove))) return;
             }
           });
           // The worker owns its reservation, so an interrupt anywhere still releases it.

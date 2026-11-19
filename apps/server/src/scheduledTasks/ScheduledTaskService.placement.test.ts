@@ -9,6 +9,7 @@ import {
   SecretRef,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Digest from "effect/crypto/Digest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -16,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
+import * as Tracer from "effect/Tracer";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -104,13 +106,13 @@ const insertTask = (
 
 const insertPending = (
   sql: SqlClient.SqlClient,
-  row: { id: string; taskId: string; state: string; taskJson?: string },
+  row: { id: string; taskId: string; state: string; taskJson?: string; dueAt?: number },
 ) =>
   sql`INSERT INTO scheduled_task_webhook_pending ${sql.insert({
     delivery_id: row.id,
     task_id: row.taskId,
     coalesce_key: row.id,
-    due_at: 0,
+    due_at: row.dueAt ?? 0,
     state: row.state,
     task_json: row.taskJson ?? "{}",
     request_json: JSON.stringify({
@@ -134,14 +136,84 @@ const heldState = (sql: SqlClient.SqlClient, ids: ReadonlyArray<string>) =>
     occurrences: sql`SELECT * FROM scheduled_task_occurrences ORDER BY occurrence_id`,
   });
 
+/** Holds the next call through it once armed, until the test releases it. */
+interface Gate {
+  armed: boolean;
+  readonly started: Deferred.Deferred<void>;
+  readonly release: Deferred.Deferred<void>;
+}
+const makeGate = Effect.gen(function* () {
+  const gate: Gate = {
+    armed: false,
+    started: yield* Deferred.make<void>(),
+    release: yield* Deferred.make<void>(),
+  };
+  return gate;
+});
+const pass = (gate: Gate | undefined) =>
+  Effect.suspend(() => {
+    if (gate === undefined || !gate.armed) return Effect.void;
+    gate.armed = false;
+    return Deferred.succeed(gate.started, undefined).pipe(
+      Effect.andThen(Deferred.await(gate.release)),
+      Effect.asVoid,
+    );
+  });
+
+/** Runs `work` and waits until a span named `name` it started has ended, forked work included. */
+const waitForSpan = <A, E, R>(work: Effect.Effect<A, E, R>, name: string) =>
+  Effect.gen(function* () {
+    const done = yield* Deferred.make<void>();
+    const tracer = Tracer.make({
+      span: (options) => {
+        const span = new Tracer.NativeSpan(options);
+        const end = span.end.bind(span);
+        span.end = (...args) => {
+          end(...args);
+          if (span.name === name) Deferred.doneUnsafe(done, Effect.void);
+        };
+        return span;
+      },
+    });
+    const result = yield* work.pipe(Effect.withTracer(tracer));
+    yield* Deferred.await(done);
+    return result;
+  });
+
 const makeService = (input: {
   readonly launches: Ref.Ref<number>;
   readonly consumed: Ref.Ref<number>;
   readonly workers: Map<string, Effect.Effect<void>>;
   readonly launchStarted?: Deferred.Deferred<void>;
   readonly launchGate?: Deferred.Deferred<void>;
+  /** The token check's digest: after the row is read, before any admission write. */
+  readonly digestGate?: Gate;
+  /** The webhook origin read inside a task lookup: after its row is read, before it decodes. */
+  readonly originGate?: Gate;
+  /** A destination thread lookup during a save, and the shell it answers. */
+  readonly shellGate?: Gate;
+  readonly shell?: unknown;
 }) =>
   ScheduledTaskService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.effect(
+          Digest.Digest,
+          Effect.gen(function* () {
+            const real = yield* Digest.Digest;
+            return {
+              ...real,
+              digest: (algorithm: Digest.Algorithm, data: Uint8Array) =>
+                pass(input.digestGate).pipe(Effect.andThen(real.digest(algorithm, data))),
+            } as typeof real;
+          }),
+        ).pipe(Layer.provide(NodeCrypto.layer)),
+        Layer.succeed(
+          ScheduledTaskService.ScheduledTaskWebhookOrigin,
+          pass(input.originGate).pipe(Effect.as({ relayHookBaseUrl: null })),
+        ),
+      ),
+    ),
     Layer.provide(
       Layer.mergeAll(
         ManagedPolicy.layerTest(),
@@ -161,7 +233,8 @@ const makeService = (input: {
           isNonGitProject: () => Effect.succeed(false),
         }),
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadShell: () => Effect.succeed(null),
+          getThreadShell: () =>
+            pass(input.shellGate).pipe(Effect.as((input.shell ?? null) as never)),
           getThreadRecords: () => Effect.succeed({ runs: [], messages: [] } as never),
         }),
         Layer.mock(SecretRequests.SecretRequests)({
@@ -463,6 +536,404 @@ it.effect("a legacy run's late bookkeeping never writes a row that became owned 
       assert.strictEqual(yield* Ref.get(launches), 1);
     }).pipe(
       Effect.provide(makeService({ launches, consumed, workers, launchStarted, launchGate })),
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+// PR76 R1 (F1–F5): a held record's bookkeeping is classified from the current raw task row and
+// the raw saved snapshot at each write, not from an earlier read or a decoded object.
+const plainHook = '{"type":"webhook","signature":null,"maxDeliveryAgeMinutes":null}';
+const coalescingHook =
+  '{"type":"webhook","signature":null,"maxDeliveryAgeMinutes":null,"dedupe":{"coalesceKey":"{{body.pr}}","coalesceWindowSeconds":60}}';
+const replayHook =
+  '{"type":"webhook","signature":null,"maxDeliveryAgeMinutes":null,"dedupe":{"replayKey":"{{body.id}}"}}';
+const ownedOf = (scheduleJson: string) =>
+  writeOwnedSchedule({
+    schedule: JSON.parse(scheduleJson),
+    incarnation: "incarnation-race",
+    policy,
+  });
+const hookRequest = (hookId: string, token: string, body: unknown, relayDeliveryId?: string) => {
+  const bodyText = JSON.stringify(body);
+  return {
+    hookId,
+    token,
+    method: "POST",
+    path: `/api/hooks/${hookId}`,
+    query: "",
+    headers: { "content-type": "application/json" },
+    body: new TextEncoder().encode(bodyText),
+    bodyText,
+    ...(relayDeliveryId === undefined ? {} : { relayDeliveryId }),
+  };
+};
+const insertDelivery = (sql: SqlClient.SqlClient, id: string, taskId: string) =>
+  sql`INSERT INTO scheduled_task_webhook_deliveries ${sql.insert({
+    delivery_id: id,
+    task_id: taskId,
+    received_at: now,
+    method: "POST",
+    query: "",
+    headers_json: "{}",
+    body: "{}",
+    body_bytes: 2,
+    body_truncated: 0,
+    outcome: "accepted",
+    signature_verified: 0,
+    missing_fields_json: "[]",
+    rendered_prompt: null,
+    error: null,
+  })}`;
+const setSchedule = (sql: SqlClient.SqlClient, id: string, scheduleJson: string) =>
+  sql`UPDATE scheduled_tasks SET schedule_json = ${scheduleJson} WHERE task_id = ${id}`;
+const services = Effect.gen(function* () {
+  return {
+    launches: yield* Ref.make(0),
+    consumed: yield* Ref.make(0),
+    workers: new Map<string, Effect.Effect<void>>(),
+  };
+});
+
+it.effect(
+  "F1: a legacy task's held pending snapshots keep their bytes through every worker branch",
+  () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(now));
+      const sql = yield* SqlClient.SqlClient;
+      yield* insertTask(sql, { id: "task:hook", scheduleJson: plainHook, token: "tok-hook" });
+      const deps = yield* services;
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const legacy = (yield* service.list()).tasks.find((task) => task.id === "task:hook")!;
+        const snapshot = JSON.parse(yield* encodePendingTask(legacy)) as Record<string, unknown>;
+        const owned = JSON.stringify({
+          ...snapshot,
+          placement: { incarnation: "incarnation-hook", policy },
+        });
+        const unsupported = JSON.stringify({
+          ...snapshot,
+          placement: { incarnation: "", policy: { ...policy, placement: "everywhere" } },
+        });
+        // Legacy-shaped, but marked as the owned schedule family: still not legacy work.
+        const marked = JSON.stringify({
+          ...snapshot,
+          schedule: { ...(snapshot.schedule as object), format: "t3.scheduled-task.placement" },
+        });
+        const held = [
+          { id: "delivery:held-completed", state: "completed", taskJson: owned },
+          { id: "delivery:relay:held-failed", state: "failed", taskJson: owned },
+          { id: "delivery:held-unsupported", state: "dispatching", taskJson: unsupported },
+          { id: "delivery:held-marked", state: "running", taskJson: marked },
+        ];
+        for (const [index, row] of held.entries()) {
+          yield* insertPending(sql, { ...row, taskId: "task:hook", dueAt: index });
+        }
+        yield* insertDelivery(sql, "delivery:relay:held-failed", "task:hook");
+        yield* sql`INSERT INTO scheduled_task_webhook_replay_keys (task_id, replay_key, delivery_id, expires_at)
+        VALUES ('task:hook', 'key-held', 'delivery:relay:held-failed', ${Date.parse(now) + 60_000})`;
+        yield* sql`INSERT INTO scheduled_task_webhook_relay_deliveries (relay_delivery_id, task_id, seen_at)
+        VALUES ('held-failed', 'task:hook', ${now})`;
+        // An ordinary malformed legacy row behind them is still failed and removed, as before.
+        yield* insertPending(sql, {
+          id: "delivery:malformed",
+          taskId: "task:hook",
+          state: "dispatching",
+          taskJson: "{}",
+          dueAt: 10,
+        });
+        yield* insertDelivery(sql, "delivery:malformed", "task:hook");
+        const heldRows = () =>
+          Effect.all({
+            pending: sql`SELECT * FROM scheduled_task_webhook_pending WHERE delivery_id IN ${sql.in(held.map((row) => row.id))} ORDER BY delivery_id`,
+            delivery: sql`SELECT * FROM scheduled_task_webhook_deliveries WHERE delivery_id = 'delivery:relay:held-failed'`,
+            replay: sql`SELECT * FROM scheduled_task_webhook_replay_keys`,
+            relay: sql`SELECT * FROM scheduled_task_webhook_relay_deliveries`,
+          });
+        const before = yield* heldRows();
+        yield* waitForSpan(
+          deps.workers.get("webhook-coalescing")!,
+          "ScheduledTaskService.dispatchPendingWebhook",
+        );
+        assert.deepStrictEqual(yield* heldRows(), before);
+        assert.strictEqual(yield* Ref.get(deps.launches), 0);
+        assert.lengthOf(
+          yield* sql`SELECT 1 FROM scheduled_task_webhook_pending WHERE delivery_id = 'delivery:malformed'`,
+          0,
+        );
+        const [malformed] = yield* sql<{ outcome: string }>`
+        SELECT outcome FROM scheduled_task_webhook_deliveries WHERE delivery_id = 'delivery:malformed'`;
+        assert.strictEqual(malformed?.outcome, "dispatch_failed");
+      }).pipe(Effect.provide(makeService(deps)));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("F1: a new request never coalesces into a window whose saved snapshot is held", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(Date.parse(now));
+    const sql = yield* SqlClient.SqlClient;
+    yield* insertTask(sql, {
+      id: "task:coalesce",
+      scheduleJson: coalescingHook,
+      token: "tok-coalesce",
+    });
+    const deps = yield* services;
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const first = yield* service.triggerWebhook(
+        hookRequest("task:coalesce", "tok-coalesce", { pr: 1 }),
+      );
+      assert.strictEqual(first._tag, "accepted");
+      const [window] = yield* sql<{
+        task_json: string;
+      }>`SELECT task_json FROM scheduled_task_webhook_pending`;
+      const snapshot = JSON.parse(window!.task_json) as Record<string, unknown>;
+      yield* sql`UPDATE scheduled_task_webhook_pending SET task_json = ${JSON.stringify({ ...snapshot, placement: { incarnation: "incarnation-hook", policy } })}`;
+      const before = yield* heldState(sql, ["task:coalesce"]);
+      const second = yield* service.triggerWebhook(
+        hookRequest("task:coalesce", "tok-coalesce", { pr: 1 }, "relay-second"),
+      );
+      assert.deepStrictEqual(second, { _tag: "disabled" });
+      assert.deepStrictEqual(yield* heldState(sql, ["task:coalesce"]), before);
+      assert.strictEqual(yield* Ref.get(deps.launches), 0);
+    }).pipe(Effect.provide(makeService(deps)));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+for (const admission of ["immediate", "coalescing"] as const) {
+  for (const becomes of ["owned", "unsupported"] as const) {
+    it.effect(
+      `F2: ${admission} admission writes nothing once the task became ${becomes} after its read`,
+      () =>
+        Effect.gen(function* () {
+          yield* TestClock.setTime(Date.parse(now));
+          const sql = yield* SqlClient.SqlClient;
+          const scheduleJson = admission === "immediate" ? replayHook : coalescingHook;
+          yield* insertTask(sql, { id: "task:race", scheduleJson, token: "tok-race" });
+          const deps = yield* services;
+          const digestGate = yield* makeGate;
+          yield* Effect.gen(function* () {
+            const service = yield* ScheduledTaskService.ScheduledTaskService;
+            digestGate.armed = true;
+            const fiber = yield* Effect.forkChild(
+              service.triggerWebhook(
+                hookRequest("task:race", "tok-race", { id: "a", pr: 1 }, "relay-race"),
+              ),
+            );
+            // The row was read as legacy; it changes before any admission write.
+            yield* Deferred.await(digestGate.started);
+            yield* setSchedule(
+              sql,
+              "task:race",
+              becomes === "owned" ? ownedOf(scheduleJson) : newerFormat,
+            );
+            const before = yield* heldState(sql, ["task:race"]);
+            yield* Deferred.succeed(digestGate.release, undefined);
+            assert.deepStrictEqual(yield* Fiber.join(fiber), { _tag: "disabled" });
+            assert.deepStrictEqual(yield* heldState(sql, ["task:race"]), before);
+            assert.strictEqual(yield* Ref.get(deps.launches), 0);
+          }).pipe(Effect.provide(makeService({ ...deps, digestGate })));
+        }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+    );
+  }
+}
+
+it.effect(
+  "F3: a webhook run whose row became owned before it is marked running keeps its delivery",
+  () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(now));
+      const sql = yield* SqlClient.SqlClient;
+      yield* insertTask(sql, { id: "task:late", scheduleJson: replayHook, token: "tok-late" });
+      const deps = yield* services;
+      const originGate = yield* makeGate;
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        originGate.armed = true;
+        const fiber = yield* Effect.forkChild(
+          waitForSpan(
+            service.triggerWebhook(hookRequest("task:late", "tok-late", { id: "x" }, "relay-late")),
+            "ScheduledTaskService.runWebhookDelivery",
+          ),
+        );
+        // The run's fresh lookup has read the legacy row; it becomes owned before markRunning.
+        yield* Deferred.await(originGate.started);
+        yield* setSchedule(sql, "task:late", ownedOf(replayHook));
+        const before = yield* heldState(sql, ["task:late"]);
+        yield* Deferred.succeed(originGate.release, undefined);
+        assert.strictEqual((yield* Fiber.join(fiber))._tag, "accepted");
+        assert.deepStrictEqual(yield* heldState(sql, ["task:late"]), before);
+        assert.strictEqual(yield* Ref.get(deps.launches), 0);
+      }).pipe(Effect.provide(makeService({ ...deps, originGate })));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect(
+  "F3: a pending window whose task became unsupported while it was prepared keeps its delivery",
+  () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(now));
+      const sql = yield* SqlClient.SqlClient;
+      yield* insertTask(sql, { id: "task:late", scheduleJson: coalescingHook, token: "tok-late" });
+      const deps = yield* services;
+      const originGate = yield* makeGate;
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        yield* service.triggerWebhook(
+          hookRequest("task:late", "tok-late", { pr: 1 }, "relay-late"),
+        );
+        yield* TestClock.setTime(Date.parse(now) + 61_000);
+        originGate.armed = true;
+        const fiber = yield* Effect.forkChild(
+          waitForSpan(
+            deps.workers.get("webhook-coalescing")!,
+            "ScheduledTaskService.dispatchPendingWebhook",
+          ),
+        );
+        // The worker's lookup has read the legacy row; it becomes unsupported before dispatch.
+        yield* Deferred.await(originGate.started);
+        yield* setSchedule(sql, "task:late", newerFormat);
+        const before = yield* heldState(sql, ["task:late"]);
+        yield* Deferred.succeed(originGate.release, undefined);
+        yield* Fiber.join(fiber);
+        assert.deepStrictEqual(yield* heldState(sql, ["task:late"]), before);
+        assert.strictEqual(yield* Ref.get(deps.launches), 0);
+      }).pipe(Effect.provide(makeService({ ...deps, originGate })));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+for (const becomes of ["owned", "unsupported"] as const) {
+  it.effect(
+    `F3: a webhook run's late completion leaves a task that became ${becomes} as it is`,
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(now));
+        const sql = yield* SqlClient.SqlClient;
+        yield* insertTask(sql, {
+          id: "task:late",
+          scheduleJson: coalescingHook,
+          token: "tok-late",
+        });
+        const deps = yield* services;
+        const launchStarted = yield* Deferred.make<void>();
+        const launchGate = yield* Deferred.make<void>();
+        yield* Effect.gen(function* () {
+          const service = yield* ScheduledTaskService.ScheduledTaskService;
+          yield* service.triggerWebhook(
+            hookRequest("task:late", "tok-late", { pr: 1 }, "relay-late"),
+          );
+          yield* TestClock.setTime(Date.parse(now) + 61_000);
+          const fiber = yield* Effect.forkChild(
+            waitForSpan(
+              deps.workers.get("webhook-coalescing")!,
+              "ScheduledTaskService.dispatchPendingWebhook",
+            ),
+          );
+          yield* Deferred.await(launchStarted);
+          yield* setSchedule(
+            sql,
+            "task:late",
+            becomes === "owned" ? ownedOf(coalescingHook) : newerFormat,
+          );
+          const before = yield* heldState(sql, ["task:late"]);
+          yield* Deferred.succeed(launchGate, undefined);
+          yield* Fiber.join(fiber);
+          assert.deepStrictEqual(yield* heldState(sql, ["task:late"]), before);
+          assert.strictEqual(yield* Ref.get(deps.launches), 1);
+        }).pipe(Effect.provide(makeService({ ...deps, launchStarted, launchGate })));
+      }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+  );
+}
+
+it.effect("F4: another hook's traffic expires only legacy replay and relay records", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(Date.parse(now));
+    const sql = yield* SqlClient.SqlClient;
+    yield* insertTask(sql, {
+      id: "task:legacy-replay",
+      scheduleJson: replayHook,
+      token: "tok-replay",
+    });
+    yield* insertTask(sql, { id: "task:owned-hook", scheduleJson: ownedHook, token: "tok-owned" });
+    for (const taskId of ["task:legacy-replay", "task:owned-hook"]) {
+      yield* sql`INSERT INTO scheduled_task_webhook_replay_keys (task_id, replay_key, delivery_id, expires_at)
+        VALUES (${taskId}, 'expired', ${`delivery:old:${taskId}`}, 0)`;
+      yield* sql`INSERT INTO scheduled_task_webhook_relay_deliveries (relay_delivery_id, task_id, seen_at)
+        VALUES (${`old:${taskId}`}, ${taskId}, '2026-01-01T00:00:00.000Z')`;
+    }
+    const deps = yield* services;
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const result = yield* service.triggerWebhook(
+        hookRequest("task:legacy-replay", "tok-replay", { id: "fresh" }, "relay-fresh"),
+      );
+      assert.strictEqual(result._tag, "accepted");
+      const replay = yield* sql<{ task_id: string; replay_key: string }>`
+        SELECT task_id, replay_key FROM scheduled_task_webhook_replay_keys ORDER BY task_id, replay_key`;
+      assert.deepStrictEqual(replay, [
+        {
+          task_id: "task:legacy-replay",
+          replay_key: replay.find((row) => row.task_id === "task:legacy-replay")!.replay_key,
+        },
+        { task_id: "task:owned-hook", replay_key: "expired" },
+      ]);
+      assert.notStrictEqual(replay[0]!.replay_key, "expired");
+      const relay = yield* sql<{ relay_delivery_id: string }>`
+        SELECT relay_delivery_id FROM scheduled_task_webhook_relay_deliveries ORDER BY relay_delivery_id`;
+      assert.deepStrictEqual(
+        relay.map((row) => row.relay_delivery_id),
+        ["old:task:owned-hook", "relay-fresh"],
+      );
+    }).pipe(Effect.provide(makeService(deps)));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("F5: a save whose task became owned while its thread was checked spends no secret", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(Date.parse(now));
+    const sql = yield* SqlClient.SqlClient;
+    yield* insertTask(sql, { id: "task:secret", scheduleJson: plainHook, token: "tok-secret" });
+    const deps = yield* services;
+    const shellGate = yield* makeGate;
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      shellGate.armed = true;
+      const fiber = yield* Effect.forkChild(
+        service
+          .upsert(
+            upsertInput("task:secret", {
+              schedule: {
+                type: "webhook",
+                signature: {
+                  header: "x-signature",
+                  encoding: "hex",
+                  prefix: "",
+                  secretRef: SecretRef.make("secret-ref:00000000000000000000000000000002"),
+                },
+              },
+              threadId: ThreadId.make("thread:dest"),
+            }),
+          )
+          .pipe(Effect.flip),
+      );
+      yield* Deferred.await(shellGate.started);
+      yield* setSchedule(sql, "task:secret", ownedOf(plainHook));
+      const before = yield* heldState(sql, ["task:secret"]);
+      yield* Deferred.succeed(shellGate.release, undefined);
+      const refused = yield* Fiber.join(fiber);
+      assert.strictEqual(
+        refused.message,
+        "This task is placed automatically, so it can't be changed with this form.",
+      );
+      assert.strictEqual(yield* Ref.get(deps.consumed), 0);
+      assert.deepStrictEqual(yield* heldState(sql, ["task:secret"]), before);
+    }).pipe(
+      Effect.provide(
+        makeService({
+          ...deps,
+          shellGate,
+          shell: { projectId: ProjectId.make("project:test"), archivedAt: null, deletedAt: null },
+        }),
+      ),
     );
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

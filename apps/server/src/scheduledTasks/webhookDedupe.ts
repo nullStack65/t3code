@@ -4,6 +4,7 @@ import { ScheduledTask, ScheduledTaskError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import { heldSnapshotSql, noHeldTaskSql } from "./storedSchedule.ts";
 import { renderWebhookPrompt, type WebhookRequest } from "./webhookTemplate.ts";
 
 function key(template: string | undefined, request: WebhookRequest): string {
@@ -14,10 +15,14 @@ function key(template: string | undefined, request: WebhookRequest): string {
     : NodeCrypto.createHash("sha256").update(rendered.prompt).digest("hex");
 }
 
+/** In SQL, for replay keys: neither the key's task nor the delivery it was claimed for is held. */
+const KEY_NOT_HELD = `${noHeldTaskSql("scheduled_task_webhook_replay_keys.task_id")} AND NOT EXISTS (SELECT 1 FROM scheduled_task_webhook_pending held_pending WHERE held_pending.delivery_id = scheduled_task_webhook_replay_keys.delivery_id AND ${heldSnapshotSql("held_pending.task_json")})`;
+
 export const releaseWebhookReplay = Effect.fn("ScheduledTaskService.releaseWebhookReplay")(
   function* (deliveryId: string) {
     const sql = yield* SqlClient.SqlClient;
-    yield* sql`DELETE FROM scheduled_task_webhook_replay_keys WHERE delivery_id = ${deliveryId}`;
+    yield* sql`DELETE FROM scheduled_task_webhook_replay_keys WHERE delivery_id = ${deliveryId}
+      AND ${sql.literal(KEY_NOT_HELD)}`;
   },
 );
 
@@ -37,9 +42,13 @@ const claimReplayKey = Effect.fn(function* (
 ) {
   if (replayKey === "") return;
   const sql = yield* SqlClient.SqlClient;
-  yield* sql`DELETE FROM scheduled_task_webhook_replay_keys WHERE expires_at <= ${now}`;
+  // Any hook's traffic expires keys, but never a held task's or a held snapshot's.
+  yield* sql`DELETE FROM scheduled_task_webhook_replay_keys WHERE expires_at <= ${now}
+    AND ${sql.literal(KEY_NOT_HELD)}`;
+  // An expired key a held snapshot keeps can still have this name; it stays as it is.
   yield* sql`INSERT INTO scheduled_task_webhook_replay_keys (task_id, replay_key, delivery_id, expires_at)
-    VALUES (${taskId}, ${replayKey}, ${deliveryId}, ${now + 7 * 24 * 60 * 60 * 1000})`;
+    VALUES (${taskId}, ${replayKey}, ${deliveryId}, ${now + 7 * 24 * 60 * 60 * 1000})
+    ON CONFLICT (task_id, replay_key) DO NOTHING`;
 });
 
 export const acceptWebhookDedupe = Effect.fn("ScheduledTaskService.acceptWebhookDedupe")(function* (
@@ -59,6 +68,11 @@ export const acceptWebhookDedupe = Effect.fn("ScheduledTaskService.acceptWebhook
   if (yield* hasReplayKey(task.id, replayKey, now)) return "duplicate" as const;
   const coalesceKey = key(dedupe.coalesceKey, request);
   if (coalesceKey === "") return "run" as const;
+  // A window a held snapshot saved is never joined, replaced or closed through this path.
+  const held = yield* sql`SELECT 1 FROM scheduled_task_webhook_pending
+    WHERE task_id = ${task.id} AND coalesce_key = ${coalesceKey} AND state = 'pending'
+      AND ${sql.literal(heldSnapshotSql("task_json"))}`;
+  if (held.length > 0) return "held" as const;
   const pending = yield* sql<{
     delivery_id: string;
   }>`SELECT delivery_id FROM scheduled_task_webhook_pending
