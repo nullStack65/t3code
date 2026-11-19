@@ -182,6 +182,17 @@ describe("shared fleet organizational inbox", () => {
     expect(withLegacyPeerInboxReason(reviewed, true)).toBe(reviewed);
     const plain = { title: "x", inboxRouting: undefined };
     expect(withLegacyPeerInboxReason(plain, true)).toBe(plain);
+    // A route that stays in Agents gets no reason stamped on it.
+    for (const agentsOnly of [
+      { inboxRouting: {} },
+      { inboxRouting: { assignee: null } },
+      { inbox: "agents" as const },
+    ])
+      expect(withLegacyPeerInboxReason(agentsOnly, true)).toBe(agentsOnly);
+    // The shared inbox is a founder inbox too: filed as FYI, not rejected.
+    expect(
+      agentLaunchInboxError(withLegacyPeerInboxReason({ inbox: "shared" as const }, true)),
+    ).toBeNull();
   });
   it("shows reason-less agent lanes only to the founder they were routed to, as FYI", () => {
     const people = [null, kameron, jeff] as const;

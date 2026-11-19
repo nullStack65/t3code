@@ -207,7 +207,9 @@ export function withLegacyPeerInboxReason<
   },
 >(input: T, legacyPeer: boolean): T {
   if (!legacyPeer || input.inboxRouting?.reason !== undefined) return input;
-  if (input.inbox === undefined && input.inboxRouting === undefined) return input;
+  // Only a route the strict guard would reject: one that reaches a founder or the shared inbox.
+  // A route that stays in Agents keeps no reason.
+  if (agentLaunchInboxError(input) === null) return input;
   return { ...input, inboxRouting: { ...input.inboxRouting, reason: "fyi" } };
 }
 

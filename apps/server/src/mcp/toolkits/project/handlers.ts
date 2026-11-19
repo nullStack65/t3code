@@ -372,7 +372,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         // A launch already made here replays here. Any other is placed, or reaches the
         // environment its key was placed in, before anything only this checkout checks.
         if (!replaying) {
-          const placedThere = yield* launchPlacedThere(scope, input, {
+          const placedThere = yield* launchPlacedThere(scope, filed, {
             projectId,
             threadId,
             strategy,
