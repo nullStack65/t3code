@@ -85,6 +85,8 @@ export interface ChatMessage {
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly senderThreadId?: ThreadId;
   readonly linkedSender?: OrchestrationV2LinkedSender;
+  /** The signed-in client a person sent it from, stamped by the server. */
+  readonly sentBy?: import("@t3tools/contracts").OrchestrationV2MessageSentBy;
   readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
   readonly createdAt: string;
   readonly updatedAt: string;

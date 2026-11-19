@@ -9,6 +9,10 @@ import {
   type ThreadFindAnnouncement,
 } from "./threadFind";
 import { THREAD_DETAILS_CARD_GAP } from "./threadDetailsCardLayout";
+import type { OrchestrationMessageSenderFilter } from "@t3tools/contracts";
+import { MESSAGE_SENDER_FILTER_LABELS } from "@t3tools/client-runtime/message-sender";
+
+const SENDER_FILTERS = Object.keys(MESSAGE_SENDER_FILTER_LABELS) as OrchestrationMessageSenderFilter[];
 
 interface ThreadFindBarProps {
   readonly open: boolean;
@@ -24,6 +28,9 @@ interface ThreadFindBarProps {
   readonly settled: boolean;
   readonly focusRequestId: number;
   readonly onQueryChange: (query: string) => void;
+  /** Only messages from this sender stay in the timeline while find is open. */
+  readonly sender?: OrchestrationMessageSenderFilter | null;
+  readonly onSenderChange?: (sender: OrchestrationMessageSenderFilter | null) => void;
   readonly onNext: () => void;
   readonly onPrevious: () => void;
   readonly onClose: () => void;
@@ -94,6 +101,7 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
           ref={inputRef}
           type="search"
           size="sm"
+          className="min-w-24"
           value={props.query}
           aria-label="Find in thread"
           placeholder="Find in thread"
@@ -104,6 +112,28 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
           onKeyDown={handleKeyDown}
         />
         <InputGroupAddon align="inline-end" inset="pill">
+          {props.onSenderChange ? (
+            <select
+              aria-label="From"
+              title="Show only messages from"
+              data-thread-find-sender
+              className="h-6 w-20 shrink rounded-md bg-transparent px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none"
+              value={props.sender ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                props.onSenderChange?.(
+                  value === "" ? null : (value as OrchestrationMessageSenderFilter),
+                );
+              }}
+            >
+              <option value="">From anyone</option>
+              {SENDER_FILTERS.map((filter) => (
+                <option key={filter} value={filter}>
+                  {MESSAGE_SENDER_FILTER_LABELS[filter]}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <span aria-live="polite" className="sr-only">
             {announcement.text}
           </span>

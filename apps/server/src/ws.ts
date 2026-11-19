@@ -62,6 +62,7 @@ import {
   SETTINGS_SECRET_REFERENCES_CAPABILITY,
   ORCHESTRATION_PROTOCOL_VERSION,
   OrchestrationV2DispatchCommandError,
+  type OrchestrationV2MessageSentBy,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
@@ -2052,12 +2053,25 @@ export const layerWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
-                        ThreadManagementService.withCreationProvenance(command, {
-                          createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
-                        }),
+                    : (command.type === "message.dispatch" ||
+                      command.type === "queued-run.edit" ||
+                      command.type === "runtime-request.respond"
+                        ? serverAuth.messageSenderOf(currentSessionId).pipe(Effect.asSome)
+                        : Effect.succeed(Option.none<OrchestrationV2MessageSentBy>())
+                      ).pipe(
+                        Effect.flatMap((sentBy) =>
+                          ThreadMessageIntake.dispatchCommand(
+                            ThreadManagementService.withCreationProvenance(command, {
+                              createdBy: "user",
+                              creationSource:
+                                "creationSource" in command ? command.creationSource : "web",
+                              ...Option.match(sentBy, {
+                                onNone: () => ({}),
+                                onSome: (value) => ({ sentBy: value }),
+                              }),
+                            }),
+                          ),
+                        ),
                       )
                   ).pipe(Effect.provide(intakeContext)),
                 )
@@ -2244,6 +2258,11 @@ export const layerWsRpc = (
                     })
                     .pipe(
                       Effect.andThen(
+                        input.initialMessage === undefined
+                          ? Effect.undefined
+                          : serverAuth.messageSenderOf(currentSessionId),
+                      ),
+                      Effect.flatMap((sentBy) =>
                         ThreadMessageIntake.launchThread({
                           commandId: input.commandId,
                           ...(input.inboxOrigin === undefined
@@ -2277,6 +2296,7 @@ export const layerWsRpc = (
                                   ...(input.initialMessage.context === undefined
                                     ? {}
                                     : { context: input.initialMessage.context }),
+                                  ...(sentBy === undefined ? {} : { sentBy }),
                                 },
                               }),
                           createdBy: "user",

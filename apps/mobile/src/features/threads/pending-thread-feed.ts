@@ -7,6 +7,7 @@ import type { ThreadFeedEntry } from "../../lib/threadActivity";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { threadHasCaughtUpTo } from "@t3tools/client-runtime/state/threads";
 import { resolveUserMessageGrouping } from "@t3tools/client-runtime/user-message";
+import { resolveMessageSender, sameMessageSender } from "@t3tools/client-runtime/message-sender";
 import type {
   AcknowledgedThreadMessage,
   QueuedThreadMessage,
@@ -58,6 +59,31 @@ export type GroupedThreadFeedRow = ThreadFeedRow & {
   readonly userMessageGrouping: ReturnType<typeof resolveUserMessageGrouping>;
 };
 
+type GroupingMessage = Parameters<typeof resolveUserMessageGrouping>[0] &
+  Parameters<typeof resolveMessageSender>[0];
+
+/** Messages group only under one sender, so each change of person gets its name line. */
+function bySender(
+  message: GroupingMessage,
+  previous: GroupingMessage | undefined,
+  next: GroupingMessage | undefined,
+  grouping: ReturnType<typeof resolveUserMessageGrouping>,
+): ReturnType<typeof resolveUserMessageGrouping> {
+  const sender = resolveMessageSender(message);
+  const groupedWithPrevious =
+    grouping.groupedWithPrevious &&
+    previous !== undefined &&
+    sameMessageSender(sender, resolveMessageSender(previous));
+  return {
+    groupedWithPrevious,
+    groupedWithNext:
+      grouping.groupedWithNext &&
+      next !== undefined &&
+      sameMessageSender(sender, resolveMessageSender(next)),
+    continuesSteer: grouping.continuesSteer && groupedWithPrevious,
+  };
+}
+
 export function createThreadFeedGrouping() {
   const rows = new WeakMap<ThreadFeedRow, GroupedThreadFeedRow>();
   const ungrouped = resolveUserMessageGrouping(undefined, undefined, undefined);
@@ -76,13 +102,18 @@ export function createThreadFeedGrouping() {
     };
     return feed.map((entry, index) => {
       const message = groupingMessage(index);
+      const previousMessage =
+        index - 1 === options.setupAnchorIndex ? undefined : groupingMessage(index - 1);
+      const nextMessage =
+        index === options.setupAnchorIndex ? undefined : groupingMessage(index + 1);
       const grouping =
         message === undefined
           ? ungrouped
-          : resolveUserMessageGrouping(
+          : bySender(
               message,
-              index - 1 === options.setupAnchorIndex ? undefined : groupingMessage(index - 1),
-              index === options.setupAnchorIndex ? undefined : groupingMessage(index + 1),
+              previousMessage,
+              nextMessage,
+              resolveUserMessageGrouping(message, previousMessage, nextMessage),
             );
       const previous = rows.get(entry);
       if (

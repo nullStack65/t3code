@@ -20,6 +20,8 @@ import {
   type ServerAuthSessionMethod,
   type AuthWebSocketTicketResult,
   type AuthWebSocketTicketUse,
+  type Founder,
+  type OrchestrationV2MessageSentBy,
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
   mcpClientScopes,
@@ -30,6 +32,7 @@ import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -350,6 +353,17 @@ export class ServerAuthConnectDevicesError extends Schema.TaggedError<ServerAuth
   }
 }
 
+export class ServerAuthSessionFounderError extends Schema.TaggedError<ServerAuthSessionFounderError>()(
+  "ServerAuthSessionFounderError",
+  {
+    ...serverAuthInternalErrorContext,
+  },
+) {
+  override get message(): string {
+    return "Failed to read or record who uses a client.";
+  }
+}
+
 export const ServerAuthInternalError = Schema.Union([
   ServerAuthBootstrapCredentialValidationError,
   ServerAuthSessionCredentialValidationError,
@@ -374,6 +388,7 @@ export const ServerAuthInternalError = Schema.Union([
   ServerAuthCloudHealthJwtSigningError,
   ServerAuthCloudMintJwtSigningError,
   ServerAuthConnectDevicesError,
+  ServerAuthSessionFounderError,
 ]);
 export type ServerAuthInternalError = typeof ServerAuthInternalError.Type;
 export const isServerAuthInternalError = Schema.is(ServerAuthInternalError);
@@ -591,6 +606,24 @@ export class EnvironmentAuth extends Context.Service<
     readonly revokeOtherClientSessions: (
       currentSessionId: AuthSessionId,
     ) => Effect.Effect<number, ServerAuthInternalError>;
+    /**
+     * Records who uses another client session, or clears it with null; false when that session is
+     * not live or is a bot. A client may not name itself, so who sent a message is always set by a
+     * different trusted client than the one that sends it.
+     */
+    readonly setClientSessionFounder: (
+      currentSessionId: AuthSessionId,
+      targetSessionId: AuthSessionId,
+      founder: Founder | null,
+    ) => Effect.Effect<boolean, ServerAuthForbiddenOperationError | ServerAuthInternalError>;
+    /**
+     * Who sent a message on this session, read from the server's own record of it. A session it
+     * cannot read still names itself by id with no person, so a message never claims one it lacks
+     * and is never refused for want of a label.
+     */
+    readonly messageSenderOf: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<OrchestrationV2MessageSentBy>;
     readonly authenticateHttpRequest: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
@@ -1424,6 +1457,57 @@ export const make = Effect.gen(function* () {
     return yield* revokeSession(targetSessionId);
   });
 
+  const setClientSessionFounder: EnvironmentAuth["Service"]["setClientSessionFounder"] = Effect.fn(
+    "EnvironmentAuth.setClientSessionFounder",
+  )(function* (currentSessionId, targetSessionId, founder) {
+    if (currentSessionId === targetSessionId) {
+      return yield* new ServerAuthForbiddenOperationError({});
+    }
+    // Another session on the caller's own device key is the same device naming itself.
+    const toFounderError = (cause: unknown) => new ServerAuthSessionFounderError({ cause });
+    const [currentKey, targetKey] = yield* Effect.all([
+      sessions.proofKeyThumbprintOf(currentSessionId),
+      sessions.proofKeyThumbprintOf(targetSessionId),
+    ]).pipe(Effect.mapError(toFounderError));
+    if (Option.isSome(currentKey) && Option.getOrUndefined(targetKey) === currentKey.value) {
+      return yield* new ServerAuthForbiddenOperationError({});
+    }
+    return yield* sessions
+      .setFounder(targetSessionId, founder)
+      .pipe(Effect.mapError(toFounderError));
+  });
+
+  const messageSenderOf: EnvironmentAuth["Service"]["messageSenderOf"] = (sessionId) =>
+    sessions.senderOf(sessionId).pipe(
+      Effect.map((sender): OrchestrationV2MessageSentBy => ({
+        sessionId,
+        device: Option.match(sender, {
+          onNone: () => "",
+          onSome: (value) => value.label ?? "",
+        }),
+        deviceType: Option.match(sender, {
+          onNone: () => "unknown" as const,
+          onSome: (value) => value.deviceType,
+        }),
+        founder: Option.match(sender, {
+          onNone: () => null,
+          onSome: (value) => value.founder,
+        }),
+      })),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Could not read who uses a client; its message names no person.").pipe(
+          Effect.annotateLogs({ sessionId, cause: Cause.pretty(cause) }),
+          Effect.as({
+            sessionId,
+            device: "",
+            deviceType: "unknown" as const,
+            founder: null,
+          }),
+        ),
+      ),
+      Effect.withSpan("EnvironmentAuth.messageSenderOf"),
+    );
+
   const revokeOtherClientSessions: EnvironmentAuth["Service"]["revokeOtherClientSessions"] =
     Effect.fn("EnvironmentAuth.revokeOtherClientSessions")(function* (currentSessionId) {
       const currentProofKey = yield* sessions
@@ -1647,6 +1731,8 @@ export const make = Effect.gen(function* () {
     revokeSession,
     listClientSessions,
     revokeClientSession,
+    setClientSessionFounder,
+    messageSenderOf,
     revokeOtherClientSessions,
     authenticateHttpRequest,
     authenticateWebSocketUpgrade,

@@ -1,3 +1,4 @@
+import type { Founder } from "@t3tools/contracts";
 import { AUTH_SCOPE_OPTIONS as PAIRING_SCOPE_OPTIONS } from "@t3tools/shared/authScopeOptions";
 import { PlugIcon, PlusIcon, QrCodeIcon } from "lucide-react";
 import { type ReactNode, memo, useId, useState } from "react";
@@ -480,6 +481,10 @@ type ConnectedClientListRowProps = {
   clientSession: ServerClientSessionRecord;
   revokingClientSessionId: string | null;
   onRevokeSession: (sessionId: ServerClientSessionRecord["sessionId"]) => void;
+  onSetFounder?: (
+    sessionId: ServerClientSessionRecord["sessionId"],
+    founder: Founder | null,
+  ) => void;
   canRevoke: boolean;
 };
 
@@ -487,6 +492,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
   clientSession,
   revokingClientSessionId,
   onRevokeSession,
+  onSetFounder,
   canRevoke,
 }: ConnectedClientListRowProps) {
   const nowMs = useNowSecond();
@@ -540,6 +546,30 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
           </p>
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          {onSetFounder && clientSession.client.deviceType !== "bot" ? (
+            // Messages sent from this client show this person's name. The server refuses a client
+            // naming itself, so the current one is set from another trusted client.
+            <select
+              aria-label={`Person using ${primaryLabel}`}
+              title={
+                clientSession.current
+                  ? "Set from another client: a client cannot name the person using it"
+                  : "Messages sent from this client show this person's name"
+              }
+              data-client-session-founder
+              className="h-6 rounded-md border border-border/60 bg-transparent px-1 text-xs text-foreground disabled:opacity-60"
+              disabled={!canRevoke || clientSession.current}
+              value={clientSession.founder ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                onSetFounder(clientSession.sessionId, value === "" ? null : (value as Founder));
+              }}
+            >
+              <option value="">Unknown person</option>
+              <option value="kameron">Kameron</option>
+              <option value="jeff">Jeff</option>
+            </select>
+          ) : null}
           {!clientSession.current ? (
             <Button
               size="xs"
@@ -797,6 +827,10 @@ type PairingClientsListProps = {
   revokingClientSessionId: string | null;
   onRevokePairingLink: (id: string) => void;
   onRevokeClientSession: (sessionId: ServerClientSessionRecord["sessionId"]) => void;
+  onSetClientFounder?: (
+    sessionId: ServerClientSessionRecord["sessionId"],
+    founder: Founder | null,
+  ) => void;
   canRevoke: boolean;
 };
 
@@ -814,6 +848,7 @@ export const PairingClientsList = memo(function PairingClientsList({
   revokingClientSessionId,
   onRevokePairingLink,
   onRevokeClientSession,
+  onSetClientFounder,
   canRevoke,
 }: PairingClientsListProps) {
   return (
@@ -840,6 +875,7 @@ export const PairingClientsList = memo(function PairingClientsList({
           clientSession={clientSession}
           revokingClientSessionId={revokingClientSessionId}
           onRevokeSession={onRevokeClientSession}
+          {...(onSetClientFounder ? { onSetFounder: onSetClientFounder } : {})}
           canRevoke={canRevoke}
         />
       ))}

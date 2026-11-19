@@ -1,6 +1,7 @@
 import {
   IsoDateTime,
   MessageId,
+  OrchestrationSearchSenderFilter,
   OrchestrationThreadSearchSource,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ThreadOpens,
@@ -79,6 +80,8 @@ const SearchRequest = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   /** Threads the caller already lists, left out before the hit limit. */
   excludedThreadIds: TokenList,
+  /** Only messages from this sender, or null for anyone's. */
+  sender: Schema.NullOr(OrchestrationSearchSenderFilter),
 });
 const SearchRow = Schema.Struct({
   messageRowid: Schema.Number,
@@ -163,8 +166,13 @@ function accentInsensitiveGlob(token: string): string {
 function buildMessageSearch(
   query: string,
   hasIndex: boolean,
-): Omit<typeof SearchRequest.Type, "projectId" | "excludedThreadIds"> | null {
+  bySender: boolean,
+): Omit<typeof SearchRequest.Type, "projectId" | "excludedThreadIds" | "sender"> | null {
   const { long, short } = messageSearchTokens(query);
+  // With a sender and no words, every one of that sender's newest messages is a hit.
+  if (long.length === 0 && short.length === 0 && bySender) {
+    return { match: null, substrings: [], shortSpellings: [] };
+  }
   if (long.length === 0) return null;
   // Two-character CJK words are too short for trigrams.
   const indexed = hasIndex && long.every((token) => Array.from(token).length >= 3);
@@ -213,13 +221,52 @@ export function buildSearchSnippet(text: string, matchStart: number): string {
   return `${start > 0 ? "…" : ""}${shown.slice(0, end)}${cut ? "…" : ""}`;
 }
 
+/**
+ * Whether the message aliased `messages` is from `sender`, sorted as `resolveMessageSender` in
+ * client-runtime sorts it. Only stored fields count, so an old message names no person: it is
+ * among "people" but never Kameron's or Jeff's. A legacy scheduled-task prompt is known by its
+ * server-made id; a message the server stamped with a person's client is a person's regardless.
+ */
+export const messageSenderCondition = (
+  sql: SqlClient.SqlClient,
+  sender: OrchestrationSearchSenderFilter | null,
+) => {
+  if (sender === null) return sql`1`;
+  if (sender === "model") return sql`messages.role = 'assistant'`;
+  const field = (path: string) => sql`json_extract(messages.payload_json, ${path})`;
+  // The index holds only messages people typed (createdBy 'user') and the model's replies, so
+  // what remains is whether a person typed it, as opposed to a guest, an automation or a relay.
+  const guest = sql`${field("$.context.guest")} IS NOT NULL`;
+  const person = sql`(NOT ${guest}
+    AND ${field("$.idleCompaction")} IS NULL
+    AND ${field("$.scheduledTaskId")} IS NULL
+    AND (${field("$.sentBy")} IS NOT NULL
+      OR ${field("$.id")} NOT LIKE 'scheduled-task-message:%')
+    AND ${field("$.senderThreadId")} IS NULL
+    AND ${field("$.linkedSender")} IS NULL)`;
+  switch (sender) {
+    case "kameron":
+    case "jeff":
+      return sql`(messages.role = 'user' AND ${person} AND ${field("$.sentBy.founder")} = ${sender})`;
+    case "people":
+      return sql`(messages.role = 'user' AND (${guest} OR ${person}))`;
+  }
+};
+
 // Filter hidden subagents and side chats before the hit limit; JS checks word starts and ranking.
 // Both paths narrow ASCII tokens with Latin-1 and Extended-A/B/Additional accent variants.
 // Without FTS5 trigrams, or for two-character CJK words, scan the same eligible messages;
 // accented queries and non-Latin case can still miss: "fermée"/"fermee", "ОШИБКА"/"ошибка".
 export const messageHitsQuery = (
   sql: SqlClient.SqlClient,
-  { match, substrings, shortSpellings, projectId, excludedThreadIds }: typeof SearchRequest.Encoded,
+  {
+    match,
+    substrings,
+    shortSpellings,
+    projectId,
+    excludedThreadIds,
+    sender,
+  }: typeof SearchRequest.Encoded,
 ) => sql`
     WITH eligible AS MATERIALIZED (
       SELECT threads.thread_id, threads.project_id
@@ -280,6 +327,7 @@ export const messageHitsQuery = (
       -- Answers to an agent's question show inside its question card, where
       -- neither find nor a jump can reach them.
       AND messages.message_id NOT LIKE 'async-answer:%'
+      AND ${messageSenderCondition(sql, sender)}
       -- Nor can they reach a rolled-back turn, or a message of a stopped turn
       -- that no shown item carries, such as a queued prompt that never ran.
       AND NOT EXISTS (
@@ -530,13 +578,18 @@ export const make = Effect.gen(function* () {
         const index = yield* sql`
           SELECT 1 FROM sqlite_master WHERE name = 'orchestration_v2_message_search'
         `;
-        const messageSearch = buildMessageSearch(input.query, index.length > 0);
+        const messageSearch = buildMessageSearch(
+          input.query,
+          index.length > 0,
+          input.sender !== undefined,
+        );
         return messageSearch === null
           ? []
           : yield* searchRows({
               ...messageSearch,
               projectId: input.projectId,
               excludedThreadIds: [...(input.excludedThreadIds ?? [])],
+              sender: input.sender ?? null,
             });
       }),
     );
@@ -546,7 +599,8 @@ export const make = Effect.gen(function* () {
     // for "rust") never add to a whole word's count.
     const hitCounts = new Map<ThreadId, number>();
     const hitCount = (threadId: ThreadId) => hitCounts.get(threadId) ?? 1;
-    const matchMessage = messageMatcher(input.query);
+    const anyText = input.sender !== undefined && foldSearchQuery(input.query).trim() === "";
+    const matchMessage = anyText ? () => ({ quality: 1, offset: 0 }) : messageMatcher(input.query);
     for (const row of rows) {
       const text = row.text.replace(MARKDOWN_LINK, "$1");
       const match = matchMessage(text);
@@ -601,11 +655,14 @@ export const make = Effect.gen(function* () {
   });
 
   const search: ThreadSearch["Service"]["search"] = (input) =>
-    searchMessages({ ...input, projectId: null });
+    input.sender === undefined && input.query.trim().length < 2
+      ? Effect.succeed({ matches: [] })
+      : searchMessages({ ...input, projectId: null });
 
   const searchThreads: ThreadSearch["Service"]["searchThreads"] = Effect.fn(
     "ThreadSearch.searchThreads",
   )(function* (input) {
+    if (input.sender === undefined && input.query.trim().length < 2) return { matches: [] };
     const limit = input.limit ?? 50;
     const normalizedQuery = foldSearchQuery(input.query);
     const now = DateTime.toEpochMillis(yield* DateTime.now);
@@ -629,12 +686,17 @@ export const make = Effect.gen(function* () {
         },
       ]),
     );
-    const titleHits: ThreadSearchHit[] = rankSearchItems(candidates, (row, options) =>
-      // An agent's search has no use for the user's palette picks.
-      scoreThreadSearch(normalizedQuery, subjectById.get(row.thread.id)!, now, {
-        ...options,
-        picks: false,
-      }),
+    // A sender filter is about messages, so titles neither match nor take slots.
+    const titleHits: ThreadSearchHit[] = (
+      input.sender === undefined
+        ? rankSearchItems(candidates, (row, options) =>
+            // An agent's search has no use for the user's palette picks.
+            scoreThreadSearch(normalizedQuery, subjectById.get(row.thread.id)!, now, {
+              ...options,
+              picks: false,
+            }),
+          )
+        : []
     )
       .slice(0, limit)
       .map(({ item }) => ({
@@ -650,6 +712,7 @@ export const make = Effect.gen(function* () {
       projectId: input.projectId ?? null,
       excludedThreadIds: shown,
       picks: false,
+      ...(input.sender === undefined ? {} : { sender: input.sender }),
     });
     const messageHits = matches
       .filter((match) => subjectById.has(match.threadId))
@@ -659,7 +722,8 @@ export const make = Effect.gen(function* () {
       }));
     // Titles come first, but a fifth of the slots stay for message matches,
     // as the palette keeps its "In messages" section.
-    const messageSlots = Math.min(messageHits.length, Math.floor(limit / 5));
+    const messageSlots =
+      input.sender === undefined ? Math.min(messageHits.length, Math.floor(limit / 5)) : limit;
     return {
       matches: [...titleHits.slice(0, limit - messageSlots), ...messageHits].slice(0, limit),
     };

@@ -32,6 +32,8 @@ import { readThreadTurnItems } from "../../state/entities";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
 import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts";
+import { messageSenderLabel } from "@t3tools/client-runtime/message-sender";
+import { MessageSenderLine, useRunModelSender } from "./MessageSenderLine";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { vcsEnvironment } from "../../state/vcs";
@@ -48,11 +50,12 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
   const text = liveText ?? row.message.text;
   const messageText =
     text || (row.message.streaming || row.suppressEmptyResponse ? "" : "(empty response)");
+  const sender = useRunModelSender(ctx.activeThreadEnvironmentId, ctx.runs, row.message.runId);
 
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        <MessageAuthorHeading>{messageSenderLabel(sender)}</MessageAuthorHeading>
         <div data-thread-find-text="true">
           <AssistantCitationSource
             messageId={row.message.id}
@@ -92,6 +95,12 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
         {!row.showAssistantMeta && row.projectedItem?.item.status === "interrupted" ? (
           <div className="mt-1.5 flex">
             <AssistantStatusBadge status="interrupted" />
+          </div>
+        ) : null}
+        {/* Who replied stays visible: the provider and model of the run that wrote it. */}
+        {row.showAssistantMeta && !row.message.streaming && sender.kind === "model" && sender.provider !== null ? (
+          <div aria-hidden>
+            <MessageSenderLine sender={sender} align="start" />
           </div>
         ) : null}
         {row.showAssistantMeta ? (

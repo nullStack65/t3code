@@ -12,17 +12,43 @@ import {
 export const OrchestrationThreadSearchSource = Schema.Literals(["user", "assistant"]);
 export type OrchestrationThreadSearchSource = typeof OrchestrationThreadSearchSource.Type;
 
+/**
+ * Whose messages to keep: a founder's own, any person's (founders, people nobody has named yet
+ * and guests), agents' and automations', the model's replies, or T3 Code's own notices.
+ */
+export const OrchestrationMessageSenderFilter = Schema.Literals([
+  "kameron",
+  "jeff",
+  "people",
+  "agents",
+  "model",
+  "system",
+]);
+export type OrchestrationMessageSenderFilter = typeof OrchestrationMessageSenderFilter.Type;
+
+/**
+ * The senders search can filter by. Search indexes only what people typed and the model's replies,
+ * so agents' relays and T3 Code's notices are found only inside a thread.
+ */
+export const OrchestrationSearchSenderFilter = Schema.Literals([
+  "kameron",
+  "jeff",
+  "people",
+  "model",
+]);
+export type OrchestrationSearchSenderFilter = typeof OrchestrationSearchSenderFilter.Type;
+
 /** Longer queries are cut to this before they are sent. */
 export const THREAD_SEARCH_QUERY_MAX_LENGTH = 200;
 
 // The server's SQLite client is synchronous and single-connection. Bound both
 // scan input and response size so a search cannot monopolize that connection.
 export const OrchestrationSearchThreadsInput = Schema.Struct({
-  query: TrimmedString.check(
-    Schema.isMinLength(2),
-    Schema.isMaxLength(THREAD_SEARCH_QUERY_MAX_LENGTH),
-  ),
+  /** At least two characters, or empty with a `sender` to list that sender's newest messages. */
+  query: TrimmedString.check(Schema.isMaxLength(THREAD_SEARCH_QUERY_MAX_LENGTH)),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),
+  /** Only messages from this sender. Older servers ignore it. */
+  sender: Schema.optionalKey(OrchestrationSearchSenderFilter),
 });
 export type OrchestrationSearchThreadsInput = typeof OrchestrationSearchThreadsInput.Type;
 

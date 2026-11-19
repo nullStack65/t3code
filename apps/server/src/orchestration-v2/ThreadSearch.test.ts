@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  AuthSessionId,
   EnvironmentId,
   EventId,
   MessageId,
@@ -9,6 +10,8 @@ import {
   RunId,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2ConversationMessage as ConversationMessage,
+  type OrchestrationSearchSenderFilter,
   type OrchestrationV2DomainEvent,
   type ThreadLinkedPullRequest,
 } from "@t3tools/contracts";
@@ -132,8 +135,11 @@ const message = (
   options: {
     readonly minute?: number;
     readonly streaming?: boolean;
-    readonly createdBy?: "user" | "agent";
+    readonly createdBy?: "user" | "agent" | "system";
     readonly runId?: RunId;
+    readonly extra?: Partial<
+      Pick<ConversationMessage, "sentBy" | "senderThreadId" | "linkedSender" | "creationSource">
+    >;
   } = {},
 ): OrchestrationV2DomainEvent => ({
   id: EventId.make(`message:${id}`),
@@ -154,6 +160,7 @@ const message = (
     streaming: options.streaming ?? false,
     createdAt: at(options.minute ?? 1),
     updatedAt: at(options.minute ?? 1),
+    ...options.extra,
   },
 });
 
@@ -291,7 +298,7 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       for (const match of ['"needle"', null]) {
         const plan = yield* sql<{
           readonly detail: string;
-        }>`EXPLAIN QUERY PLAN ${ThreadSearch.messageHitsQuery(sql, { match, substrings: "[]", shortSpellings: "[]", projectId: null, excludedThreadIds: "[]" })}`;
+        }>`EXPLAIN QUERY PLAN ${ThreadSearch.messageHitsQuery(sql, { match, substrings: "[]", shortSpellings: "[]", projectId: null, excludedThreadIds: "[]", sender: null })}`;
         assert.isFalse(
           plan.some((row) => row.detail.includes("TEMP B-TREE")),
           plan.map((row) => row.detail).join("\n"),
@@ -1499,4 +1506,72 @@ it.effect("searches on the reader worker while the writer is busy", () =>
       );
     }).pipe(Effect.provide(layerFile));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("ThreadSearch filters messages by who sent them, keeping a relay's real sender", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const search = yield* ThreadSearch.ThreadSearch;
+    const project = ProjectId.make("project:senders");
+    const threadId = ThreadId.make("thread:senders");
+    const sentBy = (founder: "kameron" | "jeff" | null) => ({
+      sessionId: AuthSessionId.make(`session:${founder ?? "unassigned"}`),
+      device: `${founder ?? "spare"} laptop`,
+      deviceType: "desktop" as const,
+      founder,
+    });
+    yield* createProject(project);
+    yield* Effect.forEach(
+      [
+        thread(threadId, project),
+        message(threadId, "from-kameron", "user", "deploy the harbor build", {
+          minute: 1,
+          extra: { sentBy: sentBy("kameron") },
+        }),
+        message(threadId, "from-jeff", "user", "harbor invoices are due", {
+          minute: 2,
+          extra: { sentBy: sentBy("jeff") },
+        }),
+        // Pasted in by another thread on Kameron's behalf: still that thread's message.
+        message(threadId, "relayed", "user", "relay: harbor build finished", {
+          minute: 3,
+          createdBy: "agent",
+          extra: {
+            senderThreadId: ThreadId.make("thread:relay"),
+            linkedSender: {
+              environmentId: EnvironmentId.make("environment:local"),
+              threadId: ThreadId.make("thread:relay"),
+              title: "Relay lane",
+            },
+          },
+        }),
+        message(threadId, "legacy", "user", "harbor notes from before stamping", { minute: 4 }),
+        message(threadId, "reply", "assistant", "harbor build is green", { minute: 5 }),
+        message(threadId, "notice", "user", "harbor compacted", {
+          minute: 6,
+          createdBy: "system",
+          extra: { creationSource: "server" },
+        }),
+      ],
+      projections.apply,
+      { discard: true },
+    );
+    const ids = (sender: OrchestrationSearchSenderFilter, query = "") =>
+      search
+        .search({ query, sender })
+        .pipe(Effect.map(({ matches }) => matches.map((match) => match.messageId).toSorted()));
+    assert.deepEqual(yield* ids("kameron"), [MessageId.make("from-kameron")]);
+    assert.deepEqual(yield* ids("jeff", "invoices"), [MessageId.make("from-jeff")]);
+    assert.deepEqual(yield* ids("jeff", "deploy"), []);
+    assert.deepEqual(yield* ids("model"), [MessageId.make("reply")]);
+    // A relay is the sending thread's, never the person it relays for, and a notice is
+    // T3 Code's; neither is a person's. Search keeps one hit per thread: the newest person's,
+    // an unstamped old message that proves no founder.
+    assert.deepEqual(yield* ids("people", "harbor"), [MessageId.make("legacy")]);
+    assert.deepEqual(yield* ids("people", "relay"), []);
+    assert.deepEqual(yield* ids("people", "compacted"), []);
+    assert.deepEqual(yield* ids("kameron", "relay"), []);
+    // Without a sender, a one-letter query still finds nothing.
+    assert.deepEqual((yield* search.search({ query: "h" })).matches, []);
+  }).pipe(Effect.provide(layerTest)),
 );

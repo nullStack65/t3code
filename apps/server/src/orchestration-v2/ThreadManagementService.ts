@@ -28,6 +28,7 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2CreationSource,
   type OrchestrationV2LinkedSender,
+  type OrchestrationV2MessageSentBy,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2ThreadProjection,
@@ -78,6 +79,8 @@ export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** The signed-in client a person typed a message on. Only the server knows it. */
+  readonly sentBy?: OrchestrationV2MessageSentBy;
 }
 
 export function withCreationProvenance(
@@ -95,11 +98,40 @@ export function withCreationProvenance(
       } = command;
       return { ...rest, ...provenance };
     }
-    case "message.dispatch":
+    case "message.dispatch": {
+      // Who sent a message is the server's to say. A client cannot pass itself off as another
+      // thread, a notification, a scheduled task, an idle compaction or another person's device.
+      const {
+        senderThreadId: _senderThreadId,
+        linkedSender: _linkedSender,
+        notification: _notification,
+        scheduledTaskId: _scheduledTaskId,
+        idleCompaction: _idleCompaction,
+        sentBy: _sentBy,
+        ...rest
+      } = command;
+      const { sentBy, ...actor } = provenance;
+      return { ...rest, ...actor, ...(sentBy === undefined ? {} : { sentBy }) };
+    }
+    case "queued-run.edit": {
+      // The editor's own stamp replaces the original sender's, since the words are now theirs.
+      const { sentBy: _sentBy, ...rest } = command;
+      return provenance.sentBy === undefined ? rest : { ...rest, sentBy: provenance.sentBy };
+    }
+    case "runtime-request.respond": {
+      const { sentBy: _sentBy, createdBy: _createdBy, ...rest } = command;
+      return {
+        ...rest,
+        createdBy: provenance.createdBy,
+        ...(provenance.sentBy === undefined ? {} : { sentBy: provenance.sentBy }),
+      };
+    }
     case "thread.fork":
     case "thread.merge_back":
-    case "delegated_task.request":
-      return { ...command, ...provenance };
+    case "delegated_task.request": {
+      const { sentBy: _sentBy, ...actor } = provenance;
+      return { ...command, ...actor };
+    }
     default:
       return command;
   }

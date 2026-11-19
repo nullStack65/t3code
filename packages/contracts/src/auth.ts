@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
+import { Founder } from "./threadInbox.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
   "desktop-managed-local",
@@ -386,6 +387,8 @@ export const AuthClientSession = Schema.Struct({
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtc),
   connected: Schema.Boolean,
   current: Schema.Boolean,
+  /** The person an admin says uses this client; the server stamps it on messages sent from it. */
+  founder: Schema.optionalKey(Founder),
 });
 export type AuthClientSession = typeof AuthClientSession.Type;
 
@@ -477,6 +480,18 @@ export const AuthRevokeClientSessionInput = Schema.Struct({
   sessionId: AuthSessionId,
 });
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
+
+/** Says who uses a client session, or clears it with null. Needs access:write. */
+export const AuthSetClientSessionFounderInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  founder: Schema.NullOr(Founder),
+});
+export type AuthSetClientSessionFounderInput = typeof AuthSetClientSessionFounderInput.Type;
+
+export const AuthSetClientSessionFounderResult = Schema.Struct({
+  updated: Schema.Boolean,
+});
+export type AuthSetClientSessionFounderResult = typeof AuthSetClientSessionFounderResult.Type;
 
 export const AuthApproveConnectDeviceInput = Schema.Struct({
   pairingLinkId: TrimmedNonEmptyString,

@@ -424,6 +424,9 @@ export const layerExecutor: Layer.Layer<
                         ...(message.linkedSender === undefined
                           ? {}
                           : { linkedSender: message.linkedSender }),
+                        ...(message.sentBy === undefined
+                          ? {}
+                          : { sentBy: message.sentBy }),
                       })
                       .pipe(
                         // A disabled instance cannot retry this completed turn; its result stands.

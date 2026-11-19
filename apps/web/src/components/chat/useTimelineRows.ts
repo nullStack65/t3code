@@ -1,3 +1,4 @@
+import type { OrchestrationMessageSenderFilter } from "@t3tools/contracts";
 import { useState } from "react";
 import {
   computeStableMessagesTimelineRows,
@@ -5,6 +6,7 @@ import {
   type MessagesTimelineRowsInput,
   sameRowsInput,
   deriveMessagesTimelineRowsWithState,
+  filterTimelineRowsBySender,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
 } from "./MessagesTimeline.logic";
@@ -75,4 +77,20 @@ export function useStableRows(
   );
   setState({ identity, source: rows, stable });
   return stable.result;
+}
+
+/** Rows kept to one sender's messages; the same array while rows and sender are unchanged. */
+export function useSenderFilteredRows(
+  rows: MessagesTimelineRow[],
+  sender: OrchestrationMessageSenderFilter | null,
+): MessagesTimelineRow[] {
+  const [state, setState] = useState<{
+    readonly source: MessagesTimelineRow[] | null;
+    readonly sender: OrchestrationMessageSenderFilter | null;
+    readonly value: MessagesTimelineRow[];
+  }>({ source: null, sender: null, value: rows });
+  if (state.source === rows && state.sender === sender) return state.value;
+  const value = filterTimelineRowsBySender(rows, sender);
+  setState({ source: rows, sender, value });
+  return value;
 }

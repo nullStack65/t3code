@@ -1,4 +1,5 @@
 import type {
+  OrchestrationMessageSenderFilter,
   OrchestrationThreadSearchMatch,
   OrchestrationV2SearchThreadResult,
   ScopedThreadRef,
@@ -30,6 +31,8 @@ export interface ThreadFindState {
   readonly navigationId: number;
   readonly requestId: number;
   readonly localSelection: ThreadFindLocalSelection | null;
+  /** Show only messages from this sender, or null for everyone's. */
+  readonly sender: OrchestrationMessageSenderFilter | null;
 }
 
 export const CLOSED_THREAD_FIND: ThreadFindState = {
@@ -41,6 +44,7 @@ export const CLOSED_THREAD_FIND: ThreadFindState = {
   navigationId: 0,
   requestId: 0,
   localSelection: null,
+  sender: null,
 };
 
 export const useThreadFindStore = create<ThreadFindState>(() => CLOSED_THREAD_FIND);
@@ -140,6 +144,15 @@ export function setThreadFindQuery(threadKey: string, query: string): void {
     navigationId: previous.navigationId + 1,
     requestId: previous.navigationId + 1,
   }));
+}
+
+export function setThreadFindSender(
+  threadKey: string,
+  sender: OrchestrationMessageSenderFilter | null,
+): void {
+  useThreadFindStore.setState((previous) =>
+    previous.threadKey === threadKey ? { sender } : previous,
+  );
 }
 
 export function closeThreadFind(): void {

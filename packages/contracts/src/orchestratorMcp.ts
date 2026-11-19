@@ -44,6 +44,8 @@ import {
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2WorkerAlert,
+  OrchestrationV2LinkedSender,
+  OrchestrationV2MessageSentBy,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
@@ -548,6 +550,13 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
   createdBy: Schema.NullOr(OrchestrationV2Actor),
   creationSource: Schema.NullOr(OrchestrationV2CreationSource),
   senderThreadId: Schema.optional(ThreadId),
+  /** The thread in a linked environment that sent it, by id and title. */
+  linkedSender: Schema.optional(OrchestrationV2LinkedSender),
+  /**
+   * The signed-in client a person typed it on, stamped by the server; `founder` names who uses
+   * it, or is null when nobody has said. Absent on messages from before senders were recorded.
+   */
+  sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   type: Schema.String,
   status: OrchestrationV2TurnItemStatus,
   title: Schema.NullOr(Schema.String),
