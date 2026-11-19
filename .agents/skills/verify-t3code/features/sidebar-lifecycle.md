@@ -6,11 +6,11 @@ work. A person moves a thread between these with its menu or by dragging.
 
 ## Sub-features
 
-- `threads.pin`: Pin thread puts a pin on the row; `threads.unpin` removes it.
-- `threads.settle`: Settle thread moves the row to the Settled shelf and the count
-  goes up; `threads.unsettle` brings it back to the active list.
-- `threads.snooze`: Snooze > In 1 hour moves the row to the Snoozed shelf.
-- `threads.wake`: Wake thread now returns a snoozed row to the active list.
+- `sidebar-lifecycle.pin`: Pin thread puts a pin on the row; `sidebar-lifecycle.unpin` removes it.
+- `sidebar-lifecycle.settle`: Settle thread moves the row to the Settled shelf and the count
+  goes up; `sidebar-lifecycle.unsettle` brings it back to the active list.
+- `sidebar-lifecycle.snooze`: Snooze > In 1 hour moves the row to the Snoozed shelf.
+- `sidebar-lifecycle.wake`: Wake thread now returns a snoozed row to the active list.
 
 ## How to get to it (user POV)
 
@@ -45,8 +45,8 @@ Preconditions: baseline from [README.md](README.md); one active thread.
 - Wake and Un-settle are `opacity-0 pointer-events-none` until the row is hovered. A
   browser without hover capability (stock headless Chromium reports `hover: none`) can
   never reveal them, and a click then times out. `browser.mjs` launches Chromium with
-  hover and fine-pointer settings and Doctor-level checks should read
-  `matchMedia("(hover: hover)")`. Do not "fix" this by force-clicking the hidden
+  hover and fine-pointer settings; if Wake still never shows, read
+  `matchMedia("(hover: hover)")` in the page. Do not "fix" this by force-clicking the hidden
   button: that proves nothing about what a user sees.
 - Snoozing or settling can leave a shelf open already; only click its toggle when
   `aria-expanded` is `false`, or you close it.

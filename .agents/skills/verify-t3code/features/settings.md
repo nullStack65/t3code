@@ -39,7 +39,7 @@ Preconditions: baseline from [README.md](README.md).
   (Appearance, Connections), followed by the section's content. The log line for each
   carries the first 220 characters (`settings.<slug>`).
 - Providers must list `Codex v…` and `Claude v…` with a state (`Available`) and "Checked
-  <n> ago".
+  <n> ago"; the script asserts the two version strings.
 
 ## Gotchas
 

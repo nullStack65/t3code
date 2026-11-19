@@ -2,38 +2,21 @@
 // settings sections, Archive (restore), command palette search, Usage, Pull Requests,
 // terminal drawer, project filter. Run after drive-threads.mjs (one archived thread).
 //   node drive-surfaces.mjs RUN_DIR
-// Each step appends "<id>: <action> -> <observed>" to RUN_DIR/evidence/observed.log.
-import { connect } from "./browser.mjs";
+// Each step logs "<id>: <action> -> <observed>" and throws (FAIL) when the end state is not
+// reached; exits 1 if any step failed.
+import { start, ROW, rowTitles, check, searchPalette, mainText as mainTextOf } from "./lib.mjs";
 
-const run = process.argv[2];
-if (!run) throw new Error("usage: node drive-surfaces.mjs RUN_DIR");
-const t = await connect(run);
-const p = t.page;
-p.setDefaultTimeout(60000);
-
-const mainText = async (n = 220) =>
-  (await p.evaluate(() => (document.querySelector("main")?.innerText ?? document.body.innerText).replace(/\s+/g, " ").trim())).slice(0, n);
-
-async function step(id, action, fn) {
-  try {
-    const seen = await fn();
-    t.note(`${id}: ${action} -> ${seen}`);
-    console.log("OK  ", id, "|", seen);
-  } catch (e) {
-    const why = String(e.message ?? e).split("\n")[0].slice(0, 160);
-    t.note(`${id}: ${action} -> FAIL ${why}`);
-    console.log("FAIL", id, "|", why);
-  }
-  await t.shot(id.replace(/[^a-z0-9.]+/gi, "-"));
-}
+const { run, p, step, finish } = await start("drive-surfaces.mjs", 60000);
+const mainText = (n) => mainTextOf(p, n);
 
 const LABELS = { general: "General", appearance: "Appearance", keybindings: "Keybindings", providers: "Providers", integrations: "Integrations", "source-control": "Source Control", storage: "Storage", connections: "Connections", archived: "Archive" };
 
-// Settings has its own sidebar of buttons; enter it once from the footer gear.
 // A string only this section's body contains; the header and URL change before the body.
 const MARKER = { general: "New threads", appearance: "Colors & themes", keybindings: "Appearance: Cycle", providers: "Refresh provider status", integrations: "Agent browser access", "source-control": "Repositories", storage: "Worktrees", connections: "Network access", archived: "Archived" };
 
 // Settings has its own sidebar of buttons; enter it once from the footer gear.
+const STEP_ID = { archived: "archive.page", connections: "connections.page" };
+const EXTRA = { providers: ["Codex v", "Claude v"], keybindings: [" bindings"] };
 const settingsRoute = (slug) => async () => {
   if (!new URL(p.url()).pathname.startsWith("/settings")) {
     await p.locator('button[aria-label="Settings"], li button:has-text("Settings")').first().click();
@@ -46,60 +29,53 @@ const settingsRoute = (slug) => async () => {
   await p.waitForFunction((m) => (document.querySelector("main")?.innerText ?? "").includes(m), MARKER[slug], { timeout: 90000 });
   const bodyMs = Date.now() - t0;
   await p.waitForTimeout(500);
+  const body = await mainText(4000);
+  for (const needle of EXTRA[slug] ?? []) check(body.includes(needle), `section body lacks "${needle}"`);
   return `${new URL(p.url()).pathname} | body after ${bodyMs} ms | ${await mainText()}`;
 };
 
 for (const slug of ["general", "appearance", "keybindings", "providers", "connections", "storage", "source-control", "integrations", "archived"]) {
-  await step(`settings.${slug}`, `open Settings > ${LABELS[slug]}`, settingsRoute(slug));
+  await step(STEP_ID[slug] ?? `settings.${slug}`, `open Settings > ${LABELS[slug]}`, settingsRoute(slug));
   if (slug === "archived") {
-    await step("threads.archived.restore", "Archive page: unarchive the archived thread", async () => {
+    await step("archive.restore", "Archive page: unarchive the archived thread", async () => {
       await p.getByRole("button", { name: /unarchive|restore/i }).first().click();
       await p.waitForTimeout(1500);
-      return await mainText(160);
+      const text = await mainText(160);
+      check(text.includes("No archived threads"), "Archive page still lists a thread after Unarchive");
+      return text;
     });
   }
 }
 
 // Leave Settings through its Back button before using the thread sidebar again.
-await p.locator("button", { hasText: /^Back$/ }).first().click();
-await p.waitForTimeout(1500);
-
-await step("threads.archived.returns", "after Unarchive, leave Settings and read the sidebar", async () => {
-  const rows = await p
-    .locator('[data-testid="sidebar-row-card"], [data-testid="sidebar-row-slim"]')
-    .evaluateAll((els) => els.map((e) => e.innerText.replace(/\s+/g, " ").trim()));
+await step("archive.returns", "after Unarchive, click Back and read the sidebar", async () => {
+  await p.locator("button", { hasText: /^Back$/ }).first().click();
+  await p.waitForTimeout(1500);
+  const rows = await rowTitles(p);
+  check(rows.length === 1 && rows[0].includes("renamed"), `expected the unarchived thread in the sidebar, got ${JSON.stringify(rows)}`);
   return JSON.stringify(rows);
 });
 
 await step("search.palette", "Control+K, type the thread title (after archive + unarchive)", async () => {
-  await p.keyboard.press("Escape");
-  await p.mouse.click(800, 200);
-  await p.keyboard.press("Control+k");
-  await p.locator('input[placeholder^="Search commands"]').first().fill("renamed");
-  for (let i = 0; i < 12; i++) {
-    await p.waitForTimeout(1000);
-    if (await p.locator('[role="option"]').count()) break;
-  }
-  const opts = (await p.locator('[role="option"]').allInnerTexts()).map((s) => s.replace(/\s+/g, " "));
-  await p.keyboard.press("Escape");
-  if (!opts.length) throw new Error('palette says "No matching commands, projects, or threads" for a thread that is in the sidebar');
+  const opts = await searchPalette(p, "renamed");
+  check(opts.some((o) => o.includes("verify-t3code: renamed")), 'palette has no result for a thread that is in the sidebar');
   return JSON.stringify(opts.slice(0, 4));
 });
 
-const home = async () => {
-  await p.locator('a[aria-label="Go to threads"], a[href="/"]').first().click();
-  await p.waitForTimeout(2000);
-};
+const home = () =>
+  p.locator('a[aria-label="Go to threads"], a[href="/"]').first().click().then(() => p.waitForTimeout(2000)).catch(() => {});
 
 await step("usage.page", "open Usage from sidebar footer", async () => {
   await p.getByRole("button", { name: "Usage", exact: true }).click();
   await p.waitForURL(/\/usage$/);
   await p.waitForTimeout(2500);
-  return `${new URL(p.url()).pathname} | ${await mainText()}`;
+  const text = await mainText();
+  for (const w of ["Cost", "Tokens", "Limits"]) check(text.includes(w), `Usage page lacks "${w}"`);
+  return `${new URL(p.url()).pathname} | ${text}`;
 });
 await home();
 
-await step("pullrequests.page", "open Pull Requests from sidebar footer", async () => {
+await step("pull-requests.page", "open Pull Requests from sidebar footer", async () => {
   await p.getByRole("button", { name: "Pull Requests", exact: true }).click();
   await p.waitForURL(/\/pull-requests(\?.*)?$/);
   // The list is a skeleton first: wait for either rows ("#<number>") or the error.
@@ -113,16 +89,19 @@ await home();
 await step("projects.filter", "open 'Filter threads by project' and read the options", async () => {
   await p.locator('[aria-label="Filter threads by project"]').first().click();
   await p.waitForTimeout(1200);
-  const opts = await p.locator('[role="option"]').allInnerTexts();
+  const opts = (await p.locator('[role="option"]').allInnerTexts()).map((s) => s.replace(/\s+/g, " "));
   await p.keyboard.press("Escape");
-  return JSON.stringify(opts.map((s) => s.replace(/\s+/g, " ")));
+  check(opts.some((o) => o.includes("demo-app")) && opts.some((o) => o.includes("server")), "filter lacks demo-app or server");
+  return JSON.stringify(opts);
 });
 
 await step("threads.new", "click New thread", async () => {
   await p.locator('[data-testid="new-thread-button"], button[aria-label="New thread"]').first().click();
   await p.waitForURL(/\/draft\//);
   await p.waitForTimeout(1500);
-  return `${new URL(p.url()).pathname.split("/")[1]} | ${await mainText(120)}`;
+  const text = await mainText(160);
+  check(text.includes("What should we build in demo-app"), "draft heading does not name demo-app");
+  return `${new URL(p.url()).pathname.split("/")[1]} | ${text}`;
 });
 
 await p.keyboard.press("Escape");
@@ -130,6 +109,10 @@ await p.waitForTimeout(500);
 await step("terminal.drawer", "toggle the terminal drawer, run a command that writes a file", async () => {
   await p.locator('button[aria-label="Toggle terminal drawer"]').first().click();
   await p.waitForTimeout(4000);
+  // Keystrokes must reach the shell. If the composer has focus instead, Enter would send a
+  // turn with the default (real, paid) model, so refuse to type.
+  const inComposer = await p.evaluate(() => !!document.querySelector('[data-testid="composer-editor"]')?.contains(document.activeElement));
+  check(!inComposer, "composer has focus, not the terminal; refusing to type");
   const marker = `${run}/fixture/terminal-proof-${Date.now()}.txt`;
   await p.keyboard.type(`echo verify-t3code-terminal > ${marker}`);
   await p.keyboard.press("Enter");
@@ -143,4 +126,4 @@ await step("terminal.drawer", "toggle the terminal drawer, run a command that wr
   return `file written by the drawer shell: ${marker.split("/").slice(-1)[0]} = "${body}"`;
 });
 
-process.exit(0);
+finish();

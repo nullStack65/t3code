@@ -4,6 +4,7 @@
 # Usage: cleanup.sh RUN_DIR [--keep-home]
 set -euo pipefail
 RUN=${1:?usage: cleanup.sh RUN_DIR [--keep-home]}
+RUN=$(cd "$RUN" && pwd)   # same normalized path launch.sh and browser.mjs recorded
 [ -f "$RUN/instance.env" ] || { echo "no $RUN/instance.env" >&2; exit 1; }
 # shellcheck disable=SC1091
 . "$RUN/instance.env"
@@ -26,8 +27,8 @@ if [ -f "$RUN/browser.env" ]; then
 fi
 
 if kill -0 "$RUNNER_PID" 2>/dev/null; then
-  # Only trust the recorded PID if it still runs our dev runner from this checkout.
-  if tr '\0' ' ' < "/proc/$RUNNER_PID/cmdline" | grep -q 'dev-runner.ts dev'; then
+  # Only trust the recorded PID while its command line still has this run's --home-dir.
+  if tr '\0' ' ' < "/proc/$RUNNER_PID/cmdline" | grep -q -- "--home-dir $RUN/home"; then
     PIDS="$(descendants "$RUNNER_PID" | tac | tr '\n' ' ') $RUNNER_PID"
     # shellcheck disable=SC2086
     kill $PIDS 2>/dev/null || true
@@ -43,8 +44,11 @@ if kill -0 "$RUNNER_PID" 2>/dev/null; then
 fi
 
 for port in "$SERVER_PORT" "$WEB_PORT"; do
+  [ "$port" != 0 ] || continue
   if ss -H -ltn "sport = :$port" | grep -q .; then echo "WARNING: port $port still listening (not ours to kill by name)" >&2; fi
 done
 [ "${2:-}" = "--keep-home" ] || rm -rf "$RUN/home"
-rm -f "$RUN/instance.env" "$RUN/dev.pid"
+# dev.log holds the pairing URL token; keep the log but redact the credential.
+[ ! -f "$RUN/dev.log" ] || sed -i -E 's/token=[0-9A-Za-z]+/token=<redacted>/g' "$RUN/dev.log"
+rm -f "$RUN/instance.env"
 echo "stopped; evidence kept in $RUN/evidence"

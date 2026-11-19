@@ -3,6 +3,7 @@
 # Usage: doctor.sh RUN_DIR      Exit 0 = healthy, 1 = fix before driving.
 set -uo pipefail
 RUN=${1:?usage: doctor.sh RUN_DIR}
+RUN=$(cd "$RUN" 2>/dev/null && pwd) || { echo "FAIL no such run dir"; exit 1; }
 [ -f "$RUN/instance.env" ] || { echo "FAIL no $RUN/instance.env (run launch.sh)"; exit 1; }
 # shellcheck disable=SC1090
 . "$RUN/instance.env"

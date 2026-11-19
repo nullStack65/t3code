@@ -16,7 +16,13 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 "$HERE/doctor.sh" "$RUN"
-node "$HERE/seed.mjs" "$RUN"
-node "$HERE/drive-threads.mjs" "$RUN"
-node "$HERE/drive-surfaces.mjs" "$RUN"
-echo "evidence: $RUN/evidence (observed.log + screenshots)"
+rc=0
+node "$HERE/seed.mjs" "$RUN" || rc=1
+if [ $rc = 0 ]; then
+  node "$HERE/drive-threads.mjs" "$RUN" || rc=1
+  node "$HERE/drive-surfaces.mjs" "$RUN" || rc=1
+else
+  echo "seed failed: the thread and surface drives need its baseline, so they were skipped" >&2
+fi
+echo "evidence: $RUN/evidence (observed.log + screenshots); FAIL lines: $(grep -c ' -> FAIL ' "$RUN/evidence/observed.log" 2>/dev/null || echo 0)"
+exit $rc

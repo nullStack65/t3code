@@ -5,7 +5,7 @@ this computer, whether network access is on, and lets a person add other environ
 
 ## Sub-features
 
-- `settings.connections`: the local environment is listed with its version and update
+- `connections.page`: the local environment is listed with its version and update
   state, network access is described, and an Add environment control exists.
 
 ## How to get to it (user POV)

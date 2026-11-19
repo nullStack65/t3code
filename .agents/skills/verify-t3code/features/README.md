@@ -11,13 +11,13 @@ to a sub-feature.
 | composer | Model picker, send, agent reply | `scripts/seed.mjs` |
 | threads | New, rename, mark unread, list | `scripts/drive-threads.mjs`, `scripts/drive-surfaces.mjs` (`threads.new`) |
 | sidebar-lifecycle | Pin, settle, snooze, wake | `scripts/drive-threads.mjs` |
-| archive | Archive, Archive page, unarchive | `scripts/drive-threads.mjs`, `scripts/drive-surfaces.mjs` |
+| archive | Archive, Archive page, unarchive | `scripts/drive-threads.mjs` (`archive.thread`), `scripts/drive-surfaces.mjs` |
 | search | Command palette thread search | `scripts/drive-threads.mjs` (`search.snoozed`), `scripts/drive-surfaces.mjs` (`search.palette`) |
 | terminal | Terminal drawer | `scripts/drive-surfaces.mjs` (`terminal.drawer`) |
-| settings | Settings sections | `scripts/drive-surfaces.mjs` (`settings.*`) |
-| connections | Environments and network access | `scripts/drive-surfaces.mjs` (`settings.connections`) |
+| settings | Settings sections | `scripts/drive-surfaces.mjs` (`settings.<section>`) |
+| connections | Environments and network access | `scripts/drive-surfaces.mjs` (`connections.page`) |
 | usage | Usage page | `scripts/drive-surfaces.mjs` (`usage.page`) |
-| pull-requests | Pull Requests page | `scripts/drive-surfaces.mjs` (`pullrequests.page`) |
+| pull-requests | Pull Requests page | `scripts/drive-surfaces.mjs` (`pull-requests.page`) |
 
 ## Baseline preconditions
 
@@ -30,7 +30,12 @@ to a sub-feature.
   controls such as Wake and Un-settle do not exist without it.
 - Order matters for the shipped drive: `seed.mjs`, then `drive-threads.mjs`, then
   `drive-surfaces.mjs`. `drive-surfaces.mjs` expects the thread archived by the previous
-  script.
+  script. Each script exits 1 if any step logged FAIL; `run-all.sh` runs all of them and
+  exits non-zero.
+- Isolation is partial: only `T3CODE_*` is scrubbed and `HOME` is the real one. The instance
+  probes the host's real Claude and Codex CLIs for status, and the Pull Requests page reads
+  GitHub through the host's `gh` (PR titles land in the screenshots). Do not put the
+  evidence folder anywhere public.
 
 ## Proof and skip reporting
 

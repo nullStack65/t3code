@@ -8,9 +8,9 @@ creates a worktree.
 
 - `composer.model-picker`: the model button opens a dialog with provider tabs
   (Favorites, Codex, Claude, Cursor) and a searchable model list.
-- `threads.send`: sending creates the thread, moves the URL to the real thread, and
+- `composer.send`: sending creates the thread, moves the URL to the real thread, and
   shows the user's message and the reply.
-- `threads.worktree`: the first send in a "Coding · isolated worktree" draft creates a
+- `composer.worktree`: the first send in a "Coding · isolated worktree" draft creates a
   branch `t3code/<id>` and a worktree under `$RUN/home/worktrees/<project>/`.
 
 ## How to get to it (user POV)
@@ -32,9 +32,9 @@ Preconditions: baseline from [README.md](README.md); draft open for `demo-app`.
 - Click "Auto", click `[data-testid="composer-editor"]`, type the prompt, click "Send
   message" → within seconds the URL is `/<environmentId>/<threadId>`, the thread shows
   "You" with the prompt and "T3 Code" with `verify-t3code mock reply`, and the sidebar
-  has a row titled with the prompt (`threads.send`).
+  has a row titled with the prompt (`composer.send`).
 - Read `git -C $RUN/fixture/demo-app worktree list` → a second entry
-  `$RUN/home/worktrees/demo-app/t3code-<id> [t3code/<id>]` (`threads.worktree`).
+  `$RUN/home/worktrees/demo-app/t3code-<id> [t3code/<id>]` (`composer.worktree`).
 
 ## Gotchas
 

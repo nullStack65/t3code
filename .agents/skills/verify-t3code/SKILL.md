@@ -11,6 +11,13 @@ T3 Code before and is reading it mid-task. For the in-app Browser panel route an
 fixture seeding, see [test-t3-app](../test-t3-app/SKILL.md); this skill adds the
 feature map, a mock provider and a scripted drive that works headless on ASUS.
 
+## Isolation, and what it does not cover
+
+The instance has its own home directory, ports, browser profile and `T3CODE_*` environment,
+but `HOME` is the real one: it probes the host's real Claude and Codex CLIs for status, and
+the Pull Requests page reads GitHub through the host's `gh` (read-only). The dev runner also
+bootstraps this checkout's `apps/server` as a project named `server`; never send a turn there.
+
 ## Rules that keep the live server safe
 
 This host runs the T3 server that hosts your own thread. Read the "three ways to hurt
@@ -41,7 +48,7 @@ is a 15 GB tmpfs shared with other sessions and the install fails with `-122` th
 The dev runner needs Node 24 or newer to run TypeScript; `/usr/bin/node` is 22.
 `launch.sh` picks `$T3_VERIFY_NODE`, then `node` on PATH, then `~/.cache/ship-live-node/bin/node`.
 
-One command does the whole run (launch, browser, readiness wait, Doctor, seed, drive):
+One command does the whole run (launch, browser, readiness wait, Doctor, seed, drive). Every drive step asserts its end state; a step that does not reach it logs `FAIL` and the script exits 1, so `run-all.sh` exits non-zero:
 
 ```bash
 .agents/skills/verify-t3code/scripts/run-all.sh ~/.cache/verify-t3code/<run-name>
@@ -117,10 +124,10 @@ the CSS handles above and give clicks 45 s.
 ## Evidence
 
 Everything lands in `$RUN/evidence/`: `observed.log` (one line per claim), one PNG per
-step, and `dev.log` / `browser.log` in `$RUN`. Each claim needs the head SHA
+step, and `dev.log` / `browser.log` in `$RUN`. `launch.sh` rejects paths with spaces. Each claim needs the head SHA
 (`git rev-parse HEAD`), the sub-feature ID, the action and the observed end state, as in
-[features/README.md](features/README.md). Copy the evidence folder out before Cleanup if
-it must outlive `$RUN`: Cleanup keeps `evidence/` but deletes the rest.
+[features/README.md](features/README.md). Cleanup keeps `evidence/`, so it survives; keep the folder private: the screenshots can show
+host paths and, on the Pull Requests page, GitHub PR titles read through the host's `gh`.
 
 ## Cleanup
 
@@ -130,10 +137,12 @@ $S/cleanup.sh $RUN
 
 Stops only what this run started: the browser by the PID in `$RUN/browser.env` (only while
 its command line still has `--user-data-dir=$RUN/profile`) and the dev runner with its
-descendants by the PID in `instance.env` (only while its command line is still our dev
-runner). It never matches by process name. It then deletes `home/`, `profile/` and the env
-files and keeps `evidence/`. Afterwards confirm `tailscale serve status` still shows the
-live mapping and that no process mentions `$RUN`.
+descendants by the PID in `instance.env` (only while its command line still has
+`--home-dir $RUN/home`). It never matches by process name. It then deletes `home/`,
+`profile/` and the env files, redacts the pairing token in `dev.log`, and keeps `evidence/`,
+`dev.log`, `browser.log`, `bin/` and `fixture/`. `launch.sh` also calls it if the launch fails.
+Afterwards confirm `tailscale serve status` still shows the live mapping and that no process
+mentions `$RUN`.
 
 ## Features
 

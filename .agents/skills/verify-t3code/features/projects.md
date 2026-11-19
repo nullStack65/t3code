@@ -11,7 +11,6 @@ starts threads in it and can filter the thread list down to it.
 - `projects.add.local`: choosing Local folder and a path adds the project and opens a
   draft for it.
 - `projects.filter`: the "Filter threads by project" control lists every project.
-- `projects.settings`: the row menu has "Project settings" (opens the Project page).
 
 ## How to get to it (user POV)
 
@@ -36,7 +35,8 @@ Preconditions: baseline from [README.md](README.md), wizard finished.
 
 ## Gotchas
 
-- The Git URL, GitHub and other clone sources and "Project settings" were not driven:
+- The Git URL, GitHub and other clone sources, and the row menu's "Project settings" page,
+  were not driven:
   they need network or credentials, so they are unverified.
 - The filter control opens a listbox; read `[role="option"]` text, then press Escape.
   Selecting an option and checking that other projects' threads disappear is not in

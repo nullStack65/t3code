@@ -5,8 +5,9 @@ environments and runs commands. A person types part of a title and picks the thr
 
 ## Sub-features
 
-- `search.palette`: typing a thread title lists that thread, with project, environment,
-  branch and age, and a status prefix such as "Completed".
+- `search.active`: typing an active thread's title lists it.
+- `search.palette`: after archive and Unarchive, typing the title lists the thread (the
+  result shows project, environment, branch, age and a status prefix such as "Completed").
 - `search.snoozed`: a snoozed thread is still found.
 
 ## How to get to it (user POV)

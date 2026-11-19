@@ -5,7 +5,7 @@ one in the right panel.
 
 ## Sub-features
 
-- `pullrequests.page`: the page lists open pull requests with number, title, author,
+- `pull-requests.page`: the page lists open pull requests with number, title, author,
   repository and age, under Sort and Filters.
 
 ## How to get to it (user POV)
@@ -22,7 +22,7 @@ Preconditions: baseline from [README.md](README.md); the host's `gh` is logged i
 
 - Click "Pull Requests" → the URL is `/pull-requests?involvement=all&state=open` and the
   main text starts "Pull Requests Sort Filters All Authored" followed by rows such as
-  "#100 feat(server): … nullStack65 nullstack65/t3code 5m ago" (`pullrequests.page`).
+  "#100 feat(server): … nullStack65 nullstack65/t3code 5m ago" (`pull-requests.page`).
   Observed on three fresh instances: the first visit fails (see Gotchas); after Retry
   the same list appears.
 
@@ -30,12 +30,12 @@ Preconditions: baseline from [README.md](README.md); the host's `gh` is logged i
 
 - This is a live read of GitHub through the host's `gh` credentials, not the fixture.
   It is read-only; do not drive linking or any write from a verify run.
-- BUG, reproduced on three of four fresh instances (the fourth showed the list, but its
-  check then only read the loading skeleton): the first visit to the page (after opening
+- BUG, reproduced on four of five fresh instances (the fifth passed a check that only read
+  the loading skeleton): the first visit to the page (after opening
   Usage) shows "Could not load pull requests" with the internal text "All fibers
   interrupted without error" and a Retry button. Retry lists the PRs, and later visits in
   the same instance list them at once. `drive-surfaces.mjs` records this as `FAIL
-  pullrequests.page`. Do not click Retry to make the step pass or wait it out. The
+  pull-requests.page`. Do not click Retry to make the step pass or wait it out. The
   nullStack65/t3code repo has issues disabled, so the report lives here and in the PR that
   added this file.
 

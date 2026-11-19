@@ -7,8 +7,10 @@ set -euo pipefail
 
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 RUN=${1:-$HOME/.cache/verify-t3code/$(date -u +%Y%m%dT%H%M%SZ)}
+umask 077   # dev.log carries the pairing URL (a credential); keep everything owner-only
 mkdir -p "$RUN/home" "$RUN/evidence"
 RUN=$(cd "$RUN" && pwd)
+case "$RUN$REPO" in *[[:space:]]*) echo "paths with spaces are not supported (RUN=$RUN REPO=$REPO)" >&2; exit 1;; esac
 
 # Node: the repo wants ^24; /usr/bin/node 22 cannot run the TypeScript dev runner.
 NODE_BIN=""
@@ -49,7 +51,8 @@ fi
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'; }
 SERVER_PORT=$(free_port)
 # Reusable per-instance credential: lets every throwaway browser profile pair with the
-# same startup URL. It stays in RUN_DIR/instance.env (mode 600) and is never printed.
+# same startup URL. The URL carries it, so it lives in RUN_DIR/instance.env and dev.log
+# (both mode 600); cleanup.sh redacts it from dev.log. It is never printed.
 DEV_TOKEN=$(openssl rand -hex 32)
 
 # Scrub every ambient T3CODE_* variable. A parent T3 session exports
@@ -67,26 +70,31 @@ while IFS= read -r name; do unset_args+=(-u "$name"); done < <(compgen -e | grep
 ) &
 RUNNER_PID=$!
 
-for _ in $(seq 1 120); do
-  grep -q 'pairingUrl:' "$RUN/dev.log" 2>/dev/null && break
-  kill -0 "$RUNNER_PID" 2>/dev/null || { echo "dev runner exited; see $RUN/dev.log" >&2; exit 1; }
-  sleep 1
-done
-PAIR_URL=$(grep -o 'pairingUrl: .*' "$RUN/dev.log" | head -1 | sed 's/pairingUrl: //')
-WEB_PORT=$(grep -o 'webPort=[0-9]*' "$RUN/dev.log" | head -1 | cut -d= -f2)
-[ -n "$PAIR_URL" ] && [ -n "$WEB_PORT" ] || { echo "no pairing URL or web port in $RUN/dev.log" >&2; exit 1; }
-if grep -q 'Tailscale Serve configured' "$RUN/dev.log"; then
-  echo "ABORT: instance configured Tailscale Serve; stop it and restore the live mapping" >&2; exit 2
-fi
-
-umask 077
-cat > "$RUN/instance.env" <<EOT
+write_env() {
+  cat > "$RUN/instance.env" <<EOT
 RUN_DIR=$RUN
 REPO=$REPO
 NODE_BIN=$NODE_BIN
 SERVER_PORT=$SERVER_PORT
-WEB_PORT=$WEB_PORT
+WEB_PORT=${WEB_PORT:-0}
 RUNNER_PID=$RUNNER_PID
-PAIR_URL=$PAIR_URL
+PAIR_URL=${PAIR_URL:-}
 EOT
+}
+# Record the runner at once so a failed launch can still be stopped by cleanup.sh.
+write_env
+fail() { echo "$1" >&2; "$(dirname "$0")/cleanup.sh" "$RUN" --keep-home >&2 || true; exit "${2:-1}"; }
+
+for _ in $(seq 1 120); do
+  grep -q 'pairingUrl:' "$RUN/dev.log" 2>/dev/null && break
+  kill -0 "$RUNNER_PID" 2>/dev/null || fail "dev runner exited; see $RUN/dev.log"
+  sleep 1
+done
+PAIR_URL=$(grep -o 'pairingUrl: .*' "$RUN/dev.log" | head -1 | sed 's/pairingUrl: //' || true)
+WEB_PORT=$(grep -o 'webPort=[0-9]*' "$RUN/dev.log" | head -1 | cut -d= -f2 || true)
+[ -n "$PAIR_URL" ] && [ -n "$WEB_PORT" ] || fail "no pairing URL or web port in $RUN/dev.log within 120 s"
+if grep -q 'Tailscale Serve configured' "$RUN/dev.log"; then
+  fail "ABORT: instance configured Tailscale Serve (stopped it); check 'tailscale serve status' and restore the live mapping" 2
+fi
+write_env
 echo "$RUN"

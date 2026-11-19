@@ -41,7 +41,9 @@ function loadPlaywright(repo) {
 
 function chromiumPath() {
   const root = join(homedir(), ".cache/ms-playwright");
-  const dirs = readdirSync(root).filter((d) => d.startsWith("chromium-")).sort();
+  // chromium-<revision> only: chromium_headless_shell-* and chromium-headless-shell-* have no chrome-linux64/chrome.
+  const dirs = readdirSync(root).filter((d) => /^chromium-\d+$/.test(d)).sort((a, b) => Number(a.slice(9)) - Number(b.slice(9)));
+  if (!dirs.length) throw new Error("no chromium-<revision> in " + root);
   const p = join(root, dirs.at(-1), "chrome-linux64/chrome");
   if (!existsSync(p)) throw new Error("no Chromium at " + p);
   return p;
