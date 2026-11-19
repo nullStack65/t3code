@@ -6,10 +6,11 @@ import {
   type ModelAlertWatcher,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
+  type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2WorkerAlertReason,
   OrchestratorMcpThreadSendResult,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import { runModelSignals, workerAlert } from "@t3tools/provider-core/server/subagentProjection";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
@@ -39,6 +40,7 @@ import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   judgeThread,
@@ -49,6 +51,16 @@ import {
   type ThreadEventTrigger,
   type ThreadFinding,
 } from "./ThreadEventAlerts.ts";
+import {
+  alertIsStale,
+  expectsAutoResume,
+  incidentGroupKey,
+  incidentMessage,
+  type IncidentMember,
+  replacedBySibling,
+  UsageLimitIncident,
+  withIncidentMember,
+} from "./UsageLimitIncidents.ts";
 
 export const ModelAlert = Schema.Struct({
   type: Schema.Literal("model-degraded"),
@@ -70,8 +82,8 @@ export const ModelAlert = Schema.Struct({
 });
 export type ModelAlert = typeof ModelAlert.Type;
 
-/** Everything the watcher thread hears: model alerts and deterministic thread events. */
-export const WatcherAlert = Schema.Union([ModelAlert, ThreadEventAlert]);
+/** Everything the watcher thread hears: model alerts, thread events and usage limit incidents. */
+export const WatcherAlert = Schema.Union([ModelAlert, ThreadEventAlert, UsageLimitIncident]);
 export type WatcherAlert = typeof WatcherAlert.Type;
 
 const Destination = Schema.Literals(["watcher", "webhook"]);
@@ -94,6 +106,18 @@ export const ModelAlertState = Schema.Struct({
   reported: Schema.Record(Schema.String, Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /**
+   * Threads that hit a usage limit the server will resume at the reset. Lead hears of one only if
+   * it fails to come back.
+   */
+  resuming: Schema.Record(
+    Schema.String,
+    Schema.Struct({ runId: Schema.String, resetAt: Schema.String, since: Schema.Number }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  /** When each incident group last reached its destination, so later members wait a group interval. */
+  incidentSentAt: Schema.Record(Schema.String, Schema.Number).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   outbox: Schema.Array(Delivery),
 });
 export type ModelAlertState = typeof ModelAlertState.Type;
@@ -102,12 +126,23 @@ export const EMPTY_MODEL_ALERT_STATE: ModelAlertState = {
   version: 1,
   degraded: {},
   reported: {},
+  resuming: {},
+  incidentSentAt: {},
   outbox: [],
 };
 
 const MAX_DEGRADED_THREADS = 1_000;
 const MAX_REPORTED = 2_000;
 const MAX_OUTBOX = 200;
+const MAX_RESUMING = 2_000;
+const MAX_INCIDENT_GROUPS = 200;
+/** New incident members wait this long for the rest of the storm before the digest goes out. */
+export const INCIDENT_GROUP_WAIT_MS = 30_000;
+/** A group that just reported waits this long before it reports its stragglers. */
+export const INCIDENT_GROUP_INTERVAL_MS = 5 * 60 * 1000;
+/** How long past its reset a resumable thread may stay stopped before Lead hears it did not come back. */
+export const RESUME_GRACE_MS = 30 * 60 * 1000;
+const HOLD_RECHECK_MS = 5 * 60 * 1000;
 const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RETRY_BASE_MS = 15_000;
 const RETRY_MAX_MS = 15 * 60 * 1000;
@@ -190,11 +225,16 @@ export function recordModelAlert(
 ): { readonly state: ModelAlertState; readonly enqueued: boolean } {
   const { alert } = outcome;
   if (alert === undefined) {
-    if (!outcome.healthy || state.degraded[outcome.threadId] === undefined) {
+    if (
+      !outcome.healthy ||
+      (state.degraded[outcome.threadId] === undefined &&
+        state.resuming[outcome.threadId] === undefined)
+    ) {
       return { state, enqueued: false };
     }
     const { [outcome.threadId]: _cleared, ...degraded } = state.degraded;
-    return { state: { ...state, degraded }, enqueued: false };
+    const { [outcome.threadId]: _resumed, ...resuming } = state.resuming;
+    return { state: { ...state, degraded, resuming }, enqueued: false };
   }
   const next = signature(alert);
   if (state.degraded[alert.threadId] === next) return { state, enqueued: false };
@@ -295,18 +335,64 @@ const pruneOutbox = (outbox: ReadonlyArray<Delivery>, nowMs: number) =>
 const sameDelivery = (left: Delivery, right: Delivery) =>
   left.alert.id === right.alert.id && left.destination === right.destination;
 
-/** The state after one delivery attempt: a delivered entry leaves, a failed one waits longer. */
+/** The members of a stored incident that a delivered snapshot did not carry. */
+const lateMembers = (stored: UsageLimitIncident, sent: UsageLimitIncident) =>
+  stored.members.filter(
+    (member) =>
+      !sent.members.some(
+        (known) => known.threadId === member.threadId && known.runId === member.runId,
+      ),
+  );
+
+/**
+ * The state after one delivery attempt: a delivered entry leaves, a failed one waits longer. An
+ * incident that gained members while it was being sent keeps those for a later digest.
+ */
 export function afterDeliveryAttempt(
   state: ModelAlertState,
   entry: Delivery,
   delivered: boolean,
   nowMs: number,
 ): ModelAlertState {
+  const sentIncident = delivered && entry.alert.type === "usage-limit-incident";
+  const incidentSentAt =
+    sentIncident && entry.destination === "watcher"
+      ? Object.fromEntries(
+          Object.entries({
+            ...state.incidentSentAt,
+            [entry.alert.groupKey]: nowMs,
+          }).slice(-MAX_INCIDENT_GROUPS),
+        )
+      : state.incidentSentAt;
   return {
     ...state,
+    incidentSentAt,
     outbox: pruneOutbox(state.outbox, nowMs).flatMap((candidate) => {
       if (!sameDelivery(candidate, entry)) return [candidate];
-      if (delivered) return [];
+      if (delivered) {
+        if (
+          candidate.alert.type === "usage-limit-incident" &&
+          entry.alert.type === "usage-limit-incident"
+        ) {
+          const late = lateMembers(candidate.alert, entry.alert);
+          if (late.length > 0) {
+            return [
+              {
+                ...candidate,
+                // A new id: the delivery key hashes it, and a second digest must not replay the first.
+                alert: {
+                  ...candidate.alert,
+                  id: `${candidate.alert.groupKey}:${nowMs}`,
+                  members: late,
+                },
+                attempts: 0,
+                nextAttemptAt: nowMs + INCIDENT_GROUP_INTERVAL_MS,
+              },
+            ];
+          }
+        }
+        return [];
+      }
       const attempts = candidate.attempts + 1;
       return [
         {
@@ -318,6 +404,157 @@ export function afterDeliveryAttempt(
     }),
   };
 }
+
+/**
+ * An entry nobody needs any more leaves without counting as sent. An incident keeps the members
+ * that joined after the snapshot was judged, under a new id.
+ */
+export const afterDrop = (
+  state: ModelAlertState,
+  entry: Delivery,
+  nowMs: number,
+): ModelAlertState => ({
+  ...state,
+  outbox: state.outbox.flatMap((candidate) => {
+    if (!sameDelivery(candidate, entry)) return [candidate];
+    if (
+      candidate.alert.type !== "usage-limit-incident" ||
+      entry.alert.type !== "usage-limit-incident"
+    ) {
+      return [];
+    }
+    const late = lateMembers(candidate.alert, entry.alert);
+    return late.length === 0
+      ? []
+      : [
+          {
+            ...candidate,
+            alert: {
+              ...candidate.alert,
+              id: `${candidate.alert.groupKey}:${nowMs}`,
+              members: late,
+            },
+          },
+        ];
+  }),
+});
+
+/** An entry held back, not failed: it waits for `untilMs` without counting an attempt. */
+export function afterHold(
+  state: ModelAlertState,
+  entry: Delivery,
+  untilMs: number,
+): ModelAlertState {
+  return {
+    ...state,
+    outbox: state.outbox.map((candidate) =>
+      sameDelivery(candidate, entry) ? { ...candidate, nextAttemptAt: untilMs } : candidate,
+    ),
+  };
+}
+
+/**
+ * Records a thread that stopped at a usage limit. The server resumes it at the reset, so Lead
+ * hears nothing unless it does not come back; otherwise every thread of one provider account
+ * joins one queued incident, which waits briefly for the rest of the storm.
+ */
+export function recordUsageLimit(
+  state: ModelAlertState,
+  input: {
+    readonly member: IncidentMember;
+    readonly environmentId: string;
+    readonly environmentLabel: string;
+    readonly providerInstanceId: string;
+    readonly resetAt: string | null;
+    readonly resumeFailed: boolean;
+    readonly willResume: boolean;
+    /** Repeats of the same problem on the same run stay quiet. */
+    readonly signature: string;
+    readonly occurredAt: string;
+  },
+  destinations: ReadonlyArray<Destination>,
+  nowMs: number,
+): { readonly state: ModelAlertState; readonly enqueued: boolean } {
+  const { member } = input;
+  if (state.degraded[member.threadId] === input.signature) return { state, enqueued: false };
+  const { [member.threadId]: _previous, ...restDegraded } = state.degraded;
+  const { [member.threadId]: _resumed, ...restResuming } = state.resuming;
+  const degraded = {
+    ...Object.fromEntries(Object.entries(restDegraded).slice(-(MAX_DEGRADED_THREADS - 1))),
+    [member.threadId]: input.signature,
+  };
+  if (input.willResume && input.resetAt !== null) {
+    return {
+      state: {
+        ...state,
+        degraded,
+        resuming: {
+          ...Object.fromEntries(Object.entries(restResuming).slice(-(MAX_RESUMING - 1))),
+          [member.threadId]: { runId: member.runId, resetAt: input.resetAt, since: nowMs },
+        },
+      },
+      enqueued: false,
+    };
+  }
+  const groupKey = incidentGroupKey(input);
+  let outbox = pruneOutbox(state.outbox, nowMs);
+  let created = false;
+  for (const destination of destinations) {
+    const index = outbox.findIndex(
+      (entry) =>
+        entry.destination === destination &&
+        entry.alert.type === "usage-limit-incident" &&
+        entry.alert.groupKey === groupKey,
+    );
+    const queued = index === -1 ? undefined : outbox[index];
+    const queuedAlert = queued?.alert;
+    if (queued !== undefined && queuedAlert?.type === "usage-limit-incident") {
+      outbox = outbox.map((entry, at) =>
+        at === index
+          ? { ...queued, alert: withIncidentMember(queuedAlert, member, input.resetAt) }
+          : entry,
+      );
+      continue;
+    }
+    created = true;
+    const sentAt = state.incidentSentAt[groupKey];
+    const notBefore = Math.max(
+      nowMs + INCIDENT_GROUP_WAIT_MS,
+      sentAt === undefined ? 0 : sentAt + INCIDENT_GROUP_INTERVAL_MS,
+    );
+    outbox = [
+      ...outbox,
+      {
+        destination,
+        alert: {
+          type: "usage-limit-incident" as const,
+          id: `${groupKey}:${nowMs}`,
+          groupKey,
+          environmentId: input.environmentId,
+          environmentLabel: input.environmentLabel,
+          providerInstanceId: input.providerInstanceId,
+          resumeFailed: input.resumeFailed,
+          resetAt: input.resetAt,
+          members: [member],
+          occurredAt: input.occurredAt,
+        },
+        attempts: 0,
+        nextAttemptAt: notBefore,
+        createdAt: nowMs,
+      },
+    ].slice(-MAX_OUTBOX);
+  }
+  return {
+    state: { ...state, degraded, resuming: restResuming, outbox },
+    enqueued: created,
+  };
+}
+
+/** Threads whose usage limit reset long enough ago that they should have been resumed. */
+export const overdueResumes = (state: ModelAlertState, nowMs: number) =>
+  Object.entries(state.resuming).filter(
+    ([, entry]) => Date.parse(entry.resetAt) + RESUME_GRACE_MS < nowMs,
+  );
 
 const REASON_TEXT: Record<ModelAlert["reasons"][number], (alert: ModelAlert) => string> = {
   model_substituted: (alert) =>
@@ -337,8 +574,16 @@ function modelAlertMessage(alert: ModelAlert): string {
   ].join("\n\n");
 }
 
-export const watcherAlertMessage = (alert: WatcherAlert) =>
-  alert.type === "thread-event" ? threadEventMessage(alert) : modelAlertMessage(alert);
+export const watcherAlertMessage = (alert: WatcherAlert) => {
+  switch (alert.type) {
+    case "thread-event":
+      return threadEventMessage(alert);
+    case "usage-limit-incident":
+      return incidentMessage(alert);
+    case "model-degraded":
+      return modelAlertMessage(alert);
+  }
+};
 
 /**
  * Puts an alert in the watcher thread, here or on the linked machine that owns it. The retry key is
@@ -357,7 +602,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   const message = watcherAlertMessage(alert);
   // Run ids can be long; a retry key must stay under the 256 characters the peer accepts.
   const identity = `${alert.id}\n${watcher.environmentId}\n${watcher.threadId}`;
-  const key = `${alert.type === "thread-event" ? "thread-event" : "model-alert"}:${yield* deps.sha256Hex(identity)}`;
+  const key = `${alert.type === "model-degraded" ? "model-alert" : alert.type}:${yield* deps.sha256Hex(identity)}`;
   if (watcher.environmentId === here) {
     yield* deps.dispatch({
       type: "message.dispatch",
@@ -457,21 +702,139 @@ export const make = Effect.gen(function* () {
       here,
     );
 
+  const WatcherThreadStatus = Schema.Struct({
+    thread: Schema.Struct({ status: Schema.String, providerInstanceId: Schema.String }),
+  });
+
+  /**
+   * Whether the parent already started a replacement for this delegated child: a later child of
+   * the same parent with the same task title.
+   */
+  const replacedByParent = Effect.fnUntraced(function* (shell: OrchestrationV2ThreadShell) {
+    const parentId = shell.lineage.parentThreadId;
+    if (parentId === null || shell.lineage.relationshipToParent !== "subagent") return false;
+    const children = yield* projections.listAppOwnedChildThreadIds(parentId);
+    const at = children.indexOf(shell.id);
+    if (at === -1) return false;
+    const later = yield* Effect.forEach(children.slice(at + 1, at + 21), (id) =>
+      projections.getThreadShell(id),
+    );
+    return replacedBySibling(
+      shell,
+      later.flatMap((sibling) => (sibling === null ? [] : [sibling])),
+    );
+  });
+
+  /**
+   * The alert as it stands now: threads that moved on leave it, and null means nothing is left to
+   * say. A thread moved on when it has a newer run that runs or finished, is settled, archived or
+   * on another provider, or its parent replaced it.
+   */
+  const currentAlert = Effect.fnUntraced(function* (alert: WatcherAlert) {
+    const stillCurrent = Effect.fnUntraced(function* (
+      threadId: string,
+      runId: string | null,
+      about: { readonly providerInstanceId: string } | undefined,
+    ) {
+      const shell = yield* projections.getThreadShell(ThreadId.make(threadId));
+      if (alertIsStale(shell, runId, about)) return false;
+      return about === undefined || shell === null || !(yield* replacedByParent(shell));
+    });
+    if (alert.type === "usage-limit-incident") {
+      const fresh = yield* Effect.filter(alert.members, (member) =>
+        stillCurrent(member.threadId, member.runId, {
+          providerInstanceId: alert.providerInstanceId,
+        }),
+      );
+      if (fresh.length === 0) return null;
+      return fresh.length === alert.members.length ? alert : { ...alert, members: fresh };
+    }
+    const about =
+      alert.type === "model-degraded"
+        ? { providerInstanceId: alert.providerInstanceId }
+        : undefined;
+    return (yield* stillCurrent(alert.threadId, alert.runId, about)) ? alert : null;
+  });
+
+  /**
+   * When the watcher's own thread is stopped at the same account limit, the time to look again.
+   * Anything sent now would only queue a turn that fails the same way.
+   */
+  const holdUntil = Effect.fnUntraced(function* (
+    watcher: ModelAlertWatcher,
+    here: EnvironmentId,
+    alert: WatcherAlert,
+    nowMs: number,
+  ) {
+    const providerInstanceId =
+      alert.type === "usage-limit-incident" ||
+      (alert.type === "model-degraded" && alert.reasons.includes("usage_limit"))
+        ? alert.providerInstanceId
+        : null;
+    if (providerInstanceId === null) return null;
+    let down = false;
+    let resetAt: string | null = alert.type === "usage-limit-incident" ? alert.resetAt : null;
+    if (watcher.environmentId === here) {
+      const shell = yield* projections.getThreadShell(watcher.threadId);
+      down =
+        shell !== null &&
+        shell.status === "failed" &&
+        shell.providerInstanceId === providerInstanceId &&
+        shell.lastErrorClass === "usage_limit";
+      resetAt = shell?.usageLimitResetAt ?? resetAt;
+    } else {
+      // The read result carries no error class, so a remote watcher counts as down only while
+      // the reset this alert reports is still ahead.
+      down = yield* peers
+        .call({
+          environmentId: watcher.environmentId,
+          tool: "t3_thread_read",
+          arguments: { threadId: watcher.threadId, limit: 1, runLimit: 1 },
+          limits: { runtimeMode: "full-access", interactionMode: "default" },
+          success: WatcherThreadStatus,
+        })
+        .pipe(
+          Effect.map(
+            ({ thread }) =>
+              thread.status === "failed" && thread.providerInstanceId === providerInstanceId,
+          ),
+          // An unreadable watcher is the delivery's problem, not a reason to hold.
+          Effect.orElseSucceed(() => false),
+        );
+    }
+    if (!down) return null;
+    // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
+    const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
+    if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
+    return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
+  });
+
+  type DeliveryResult =
+    | { readonly _tag: "sent" }
+    | { readonly _tag: "dropped" }
+    | { readonly _tag: "held"; readonly until: number };
+
   const deliver = Effect.fnUntraced(function* (entry: Delivery) {
     const current = yield* settings.getSettings;
+    const alert = yield* currentAlert(entry.alert);
+    if (alert === null) return { _tag: "dropped" } satisfies DeliveryResult;
     if (entry.destination === "webhook") {
       const url = current.modelAlertWebhookUrl.trim();
-      if (url === "") return;
+      if (url === "") return { _tag: "sent" } satisfies DeliveryResult;
       // A webhook URL can embed a credential, so its failure names only the host.
       const host = URL.canParse(url) ? new URL(url).host : "an unparsable URL";
       yield* http
-        .execute(HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(entry.alert)))
+        .execute(HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(alert)))
         .pipe(Effect.catchCause(() => Effect.fail(`model alert webhook POST to ${host} failed`)));
-      return;
+      return { _tag: "sent" } satisfies DeliveryResult;
     }
     const watcher = current.modelAlertWatcher;
-    if (watcher === null) return;
-    yield* deliverToWatcher(entry.alert, watcher, yield* environment.getEnvironmentId);
+    if (watcher === null) return { _tag: "sent" } satisfies DeliveryResult;
+    const here = yield* environment.getEnvironmentId;
+    const until = yield* holdUntil(watcher, here, alert, yield* Clock.currentTimeMillis);
+    if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
+    yield* deliverToWatcher(alert, watcher, here);
+    return { _tag: "sent" } satisfies DeliveryResult;
   });
 
   const flush: ModelAlertReactor["Service"]["flush"] = Effect.gen(function* () {
@@ -481,26 +844,102 @@ export const make = Effect.gen(function* () {
       due,
       (entry) =>
         Effect.gen(function* () {
-          const delivered = yield* deliver(entry).pipe(
+          const result = yield* deliver(entry).pipe(
             Effect.timeout("30 seconds"),
-            Effect.as(true),
             Effect.catchCause((cause) =>
               Effect.logWarning("delivering a model alert failed; it will be retried", {
                 alertId: entry.alert.id,
                 destination: entry.destination,
                 attempts: entry.attempts + 1,
                 cause,
-              }).pipe(Effect.as(false)),
+              }).pipe(Effect.as(undefined)),
             ),
           );
           const attemptedAt = yield* Clock.currentTimeMillis;
           yield* update((current) => [
             undefined,
-            afterDeliveryAttempt(current, entry, delivered, attemptedAt),
+            result === undefined
+              ? afterDeliveryAttempt(current, entry, false, attemptedAt)
+              : result._tag === "held"
+                ? afterHold(current, entry, result.until)
+                : result._tag === "dropped"
+                  ? afterDrop(current, entry, attemptedAt)
+                  : afterDeliveryAttempt(current, entry, true, attemptedAt),
           ]);
         }),
       { concurrency: 4, discard: true },
     );
+  });
+
+  /** Folds a thread that stopped at a usage limit into its provider account's one incident. */
+  const handleUsageLimit = Effect.fnUntraced(function* (
+    event: Extract<OrchestrationV2DomainEvent, { readonly type: "run.updated" }>,
+    alert: ModelAlert,
+  ) {
+    const current = yield* settings.getSettings;
+    const shell = yield* projections.getThreadShell(event.threadId);
+    const nowMs = yield* Clock.currentTimeMillis;
+    const resumeFailed = event.payload.usageLimitContinuationOfRunId !== undefined;
+    const resetMs =
+      shell?.usageLimitResetAt == null ? Number.NaN : Date.parse(shell.usageLimitResetAt);
+    // New launches on this provider are refused until the reset, so they alert nobody.
+    if (Number.isFinite(resetMs) && resetMs > nowMs) {
+      ProviderExhaustion.mark(alert.providerInstanceId, resetMs);
+    }
+    const parentId = shell?.lineage.parentThreadId ?? null;
+    const parent =
+      parentId !== null && shell?.lineage.relationshipToParent === "subagent"
+        ? yield* projections.getThreadShell(parentId)
+        : undefined;
+    const willResume = expectsAutoResume({
+      autoResumeEnabled: current.autoResumeLimitedThreads,
+      runWasResume: resumeFailed,
+      shell,
+      parentClosed:
+        parent !== undefined &&
+        (parent === null || parent.archivedAt !== null || parent.settledOverride === "settled"),
+      nowMs,
+      graceMs: RESUME_GRACE_MS,
+    });
+    const here = yield* environment.getEnvironmentId;
+    const destinations = modelAlertDestinations({
+      watcher: current.modelAlertWatcher,
+      webhookUrl: current.modelAlertWebhookUrl,
+      here,
+      lineage: shell?.lineage ?? { parentThreadId: null, relationshipToParent: null },
+    });
+    const label = (yield* environment.getDescriptor).label;
+    const enqueued = yield* update((state) => {
+      const result = recordUsageLimit(
+        state,
+        {
+          member: {
+            threadId: alert.threadId,
+            threadTitle: alert.threadTitle,
+            threadLink: alert.threadLink,
+            runId: alert.runId,
+          },
+          environmentId: here,
+          environmentLabel: label,
+          providerInstanceId: alert.providerInstanceId,
+          resetAt: shell?.usageLimitResetAt ?? null,
+          resumeFailed,
+          willResume,
+          signature: `usage_limit:${resumeFailed ? "resume-failed" : "limit"}:${alert.runId}`,
+          occurredAt: alert.occurredAt,
+        },
+        destinations,
+        nowMs,
+      );
+      return [result.enqueued, result.state];
+    });
+    if (willResume) {
+      yield* Effect.logInfo("a usage limit stopped a thread; it resumes by itself at the reset", {
+        threadId: alert.threadId,
+        resetAt: shell?.usageLimitResetAt,
+      });
+    }
+    if (enqueued) yield* Queue.offer(wake, undefined);
   });
 
   /** Queues a run's model alert, and says whether it reported a usage limit. */
@@ -526,7 +965,14 @@ export const make = Effect.gen(function* () {
       projection: records,
       occurredAt: DateTime.formatIso(yield* DateTime.now),
     });
+    if (judged.alert === undefined && judged.healthy) {
+      ProviderExhaustion.clear(run.providerInstanceId);
+    }
     if (judged.alert === undefined && !judged.healthy) return { usageLimited: false };
+    if (judged.alert?.reasons.every((reason) => reason === "usage_limit") === true) {
+      yield* handleUsageLimit(event, judged.alert);
+      return { usageLimited: true };
+    }
     const outcome =
       judged.alert === undefined
         ? judged
@@ -683,7 +1129,75 @@ export const make = Effect.gen(function* () {
   });
 
   /** Looks at every thread that may be live for the time-based kinds no event announces. */
+  /**
+   * A thread the server was to resume is still stopped long after its reset: that is the one
+   * usage limit outcome Lead hears about.
+   */
+  const sweepResumes = Effect.gen(function* () {
+    const nowMs = yield* Clock.currentTimeMillis;
+    const overdue = overdueResumes(yield* Ref.get(state), nowMs);
+    if (overdue.length === 0) return;
+    const current = yield* settings.getSettings;
+    const here = yield* environment.getEnvironmentId;
+    const label = (yield* environment.getDescriptor).label;
+    const occurredAt = DateTime.formatIso(yield* DateTime.now);
+    yield* Effect.forEach(
+      overdue,
+      ([threadId, entry]) =>
+        Effect.gen(function* () {
+          const shell = yield* projections.getThreadShell(ThreadId.make(threadId));
+          const notResumed =
+            shell !== null &&
+            shell.latestRunId === entry.runId &&
+            shell.status === "failed" &&
+            shell.archivedAt === null &&
+            shell.settledOverride !== "settled";
+          const destinations = modelAlertDestinations({
+            watcher: current.modelAlertWatcher,
+            webhookUrl: current.modelAlertWebhookUrl,
+            here,
+            lineage: shell?.lineage ?? { parentThreadId: null, relationshipToParent: null },
+          });
+          const enqueued = yield* update((state) => {
+            const { [threadId]: _done, ...resuming } = state.resuming;
+            const cleared = { ...state, resuming };
+            if (!notResumed) return [false, cleared];
+            const result = recordUsageLimit(
+              cleared,
+              {
+                member: {
+                  threadId,
+                  threadTitle: shell.title,
+                  threadLink: formatThreadLink(
+                    { environmentId: here, threadId: shell.id },
+                    shell.title,
+                  ),
+                  runId: entry.runId,
+                },
+                environmentId: here,
+                environmentLabel: label,
+                providerInstanceId: shell.providerInstanceId,
+                resetAt: entry.resetAt,
+                resumeFailed: true,
+                willResume: false,
+                signature: `usage_limit:resume-missed:${entry.runId}`,
+                occurredAt,
+              },
+              destinations,
+              nowMs,
+            );
+            return [result.enqueued, result.state];
+          });
+          if (enqueued) yield* Queue.offer(wake, undefined);
+        }),
+      { discard: true },
+    );
+  });
+
   const sweep: ModelAlertReactor["Service"]["sweep"] = Effect.gen(function* () {
+    yield* sweepResumes.pipe(
+      Effect.catchCause((cause) => Effect.logWarning("resume sweep failed", { cause })),
+    );
     const index = yield* projections.listActiveShellIndex();
     // One scan of the delegated tasks for the whole sweep, not one per thread.
     const remoteTasks = new Map<string, number>();
