@@ -197,11 +197,16 @@ it.effect("applies the installed thread type policy when a turn starts", () =>
         });
       }).pipe(Effect.provide(layerWithPolicy(undefined, path)));
 
+    for (const model of ["gpt-6-astra", "openai.gpt-6-astra", "openai/gpt-6-astra-fast", "openai/codex/gpt-6-astra"]) {
+      const spelled = yield* resolve("Lead", model).pipe(Effect.flip);
+      assert.equal(spelled._tag, "ThreadTypeModelRefusedError");
+      assert.equal(spelled.model, "gpt-6-astra");
+    }
     const refused = yield* resolve("Lead", "gpt-6-astra").pipe(Effect.flip);
     assert.equal(refused._tag, "ThreadTypeModelRefusedError");
     assert.equal(
       refused.message,
-      "gpt-6-astra is refused on standing threads by the Closura thread type policy. Pick another model to continue.",
+      "gpt-6-astra is refused on standing threads by the Closura thread type policy. Pick another model, or tag the title with a type that allows it, such as [coding].",
     );
 
     const standing = yield* resolve("Lead", "gpt-6.1-sol");
@@ -223,6 +228,16 @@ it.effect("applies the installed thread type policy when a turn starts", () =>
     const coding = yield* resolve("CLO-924 per-thread-type policy", "gpt-6-astra");
     assert.equal(coding.threadType?.type, "coding");
     assert.equal(coding.threadType?.compactAt, 168_000);
+    const research = yield* resolve("Token burn analysis and plan", "gpt-6.1-sol");
+    assert.equal(research.threadType?.type, "research");
+    assert.equal(research.threadType?.compactAt, 168_000);
+    assert.equal(research.threadType?.cacheTtl, "1h");
+    const ops = yield* resolve("OPS-1:ASTRA — R720 CI & Grafana alert delivery", "gpt-6.1-sol");
+    assert.equal(ops.threadType?.type, "ops");
+    assert.equal(ops.threadType?.cacheTtl, "5m");
+    const conversational = yield* resolve("KSS ----> analyses with Kameron", "gpt-6.1-sol");
+    assert.equal(conversational.threadType?.type, "conversational");
+    assert.equal(conversational.threadType?.compactAt, 168_000);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

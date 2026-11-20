@@ -1509,7 +1509,6 @@ export function codexThreadTypeConfig(
   return threadType === undefined
     ? {}
     : {
-        model_context_window: threadType.contextWindow,
         model_auto_compact_token_limit: threadType.compactAt,
       };
 }

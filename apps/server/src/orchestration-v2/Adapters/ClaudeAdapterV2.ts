@@ -278,26 +278,53 @@ function isClaudeEnvTruthy(value: string | undefined): boolean {
   return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
+const CLAUDE_COMPACT_OUTPUT_RESERVE = 20_000;
+const CLAUDE_COMPACT_FLOOR_GAP = 13_000;
+
+function claudeCompactEffectiveWindow(contextWindow: number, modelMaxTokens: number | null): number {
+  const window = modelMaxTokens === null ? contextWindow : Math.min(modelMaxTokens, contextWindow);
+  return window - CLAUDE_COMPACT_OUTPUT_RESERVE;
+}
+
+export function claudeAutoCompactPercent(
+  threadType: { readonly contextWindow: number; readonly compactAt: number },
+  modelMaxTokens: number | null = null,
+): string {
+  const effective = claudeCompactEffectiveWindow(threadType.contextWindow, modelMaxTokens);
+  if (effective <= 0) return "0.00";
+  const hundredths = Math.ceil((threadType.compactAt * 10_000) / effective);
+  return (hundredths / 100).toFixed(2);
+}
+
+export function claudeAppliedCompactAt(
+  threadType: { readonly contextWindow: number; readonly compactAt: number },
+  modelMaxTokens: number | null = null,
+): number {
+  const effective = claudeCompactEffectiveWindow(threadType.contextWindow, modelMaxTokens);
+  if (effective <= 0) return threadType.compactAt;
+  const hundredths = Math.ceil((threadType.compactAt * 10_000) / effective);
+  const applied = Math.floor((effective * hundredths) / 10_000);
+  return Math.min(applied, effective - CLAUDE_COMPACT_FLOOR_GAP);
+}
+
 function claudeAutoCompactThreshold(
   autoCompactWindow: string,
   maxTokens: number | null,
   compactAt?: number,
 ) {
   const windowTokens = Number(autoCompactWindow);
-  return windowTokens > 0 && (maxTokens === null || windowTokens < maxTokens)
-    ? {
-        autoCompactThreshold: Math.min(
-          windowTokens - CLAUDE_AUTO_COMPACT_RESERVE_TOKENS,
-          compactAt ?? Number.POSITIVE_INFINITY,
-        ),
-      }
+  if (!(windowTokens > 0)) return {};
+  if (compactAt !== undefined) {
+    return {
+      autoCompactThreshold: claudeAppliedCompactAt(
+        { contextWindow: windowTokens, compactAt },
+        maxTokens,
+      ),
+    };
+  }
+  return maxTokens === null || windowTokens < maxTokens
+    ? { autoCompactThreshold: windowTokens - CLAUDE_AUTO_COMPACT_RESERVE_TOKENS }
     : {};
-}
-
-export function claudeAutoCompactPercent(
-  threadType: NonNullable<ProviderAdapter.ProviderAdapterV2RuntimePolicy["threadType"]>,
-): string {
-  return String(Math.round((threadType.compactAt * 10_000) / threadType.contextWindow) / 100);
 }
 
 function claudeMessageInputTokens(usage: {
@@ -2257,6 +2284,10 @@ export function makeClaudeQueryOptions(input: {
         ? ({ ...input.sdkSettings, ...selectionSettings } as ClaudeSdkSettings)
         : selectionSettings;
   const threadType = input.threadType;
+  const modelMaxTokens =
+    input.modelCatalog === undefined
+      ? null
+      : (resolveClaudeCatalogContextWindowTokens(input.modelCatalog, input.modelSelection) ?? null);
   const autoCompactWindow =
     threadType !== undefined
       ? String(threadType.contextWindow)
@@ -2299,7 +2330,13 @@ export function makeClaudeQueryOptions(input: {
               : { CLAUDE_CODE_AUTO_COMPACT_WINDOW: autoCompactWindow }),
             ...(threadType === undefined
               ? {}
-              : { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: claudeAutoCompactPercent(threadType) }),
+              : {
+                  CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: claudeAutoCompactPercent(
+                    threadType,
+                    modelMaxTokens,
+                  ),
+                  CLAUDE_CODE_PROMPT_CACHE_TTL: threadType.cacheTtl,
+                }),
             ...(input.toolSearchOverride === undefined
               ? {}
               : { ENABLE_TOOL_SEARCH: input.toolSearchOverride }),
@@ -2353,7 +2390,16 @@ export function makeClaudeQueryOptions(input: {
     ...(input.settings?.binaryPath
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
-    ...(input.environment === undefined ? {} : { env: input.environment }),
+    ...(input.environment === undefined && threadType === undefined
+      ? {}
+      : {
+          env: {
+            ...input.environment,
+            ...(threadType === undefined
+              ? {}
+              : { CLAUDE_CODE_PROMPT_CACHE_TTL: threadType.cacheTtl }),
+          },
+        }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
     systemPrompt: {
       type: "preset" as const,
@@ -13147,13 +13193,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     );
             const querySession = yield* openQuery(turnInput, nativeThreadId, queryPolicy);
             yield* applySessionTitle(querySession.query, nativeThreadId, turnInput.appThread.title);
+            const resolvedAutoCompactWindow = yield* resolveAutoCompactWindow(
+              querySession.settingsCwd,
+              turnInput.modelSelection,
+              querySession.launchArgSettings,
+            );
             const autoCompactWindow =
-              turnInput.runtimePolicy.threadType === undefined
-                ? yield* resolveAutoCompactWindow(
-                    querySession.settingsCwd,
-                    turnInput.modelSelection,
-                    querySession.launchArgSettings,
-                  )
+              turnInput.runtimePolicy.threadType === undefined || resolvedAutoCompactWindow === ""
+                ? resolvedAutoCompactWindow
                 : String(turnInput.runtimePolicy.threadType.contextWindow);
             const context: ActiveClaudeTurnContext = {
               input: turnInput,

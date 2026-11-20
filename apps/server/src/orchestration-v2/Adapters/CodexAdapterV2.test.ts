@@ -91,7 +91,7 @@ const isProviderAdapterEventStreamError = Schema.is(
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 describe("CodexAdapterV2 thread type policy", () => {
-  it("sets the thread type compaction limit and the context cap on thread start", () => {
+  it("sets the thread type compaction limit without raising the context window", () => {
     const params = CodexAdapterV2.codexThreadRuntimeParams({
       threadId: null,
       mcpSession: undefined,
@@ -103,7 +103,7 @@ describe("CodexAdapterV2 thread type policy", () => {
       },
     });
     assert.equal(params.config.model_auto_compact_token_limit, 120_000);
-    assert.equal(params.config.model_context_window, 272_000);
+    assert.isUndefined(params.config.model_context_window);
   });
 
   it("leaves Codex defaults alone without a thread type", () => {

@@ -42,7 +42,17 @@ describe("ThreadTypePolicy", () => {
 
   it.effect("refuses gpt-6-astra on standing threads in any provider spelling", () =>
     Effect.gen(function* () {
-      for (const model of ["gpt-6-astra", "codex/gpt-6-astra", " OpenAI/GPT-6-Astra "]) {
+      for (const model of [
+        "gpt-6-astra",
+        "codex/gpt-6-astra",
+        " OpenAI/GPT-6-Astra ",
+        "openai.gpt-6-astra",
+        "openai/gpt-6-astra-fast",
+        "openrouter/openai/gpt-6-astra",
+        "magpie/gpt-6-astra",
+        "openai/codex/gpt-6-astra",
+        "gpt-6-astra[1m]",
+      ]) {
         const refused = yield* ThreadTypePolicy.resolveThreadTypeLaunch(
           THREAD_TYPE_POLICY_FIXTURE,
           threadTypeThread("Lead"),
@@ -96,6 +106,15 @@ describe("ThreadTypePolicy", () => {
       );
       assert.isUndefined(yield* ThreadTypePolicy.readThreadTypePolicy(invalid));
       assert.isUndefined(yield* ThreadTypePolicy.readThreadTypePolicy(`${dir}/missing.json`));
+      const possessive = `${dir}/possessive.json`;
+      yield* fileSystem.writeFileString(
+        possessive,
+        JSON.stringify({
+          ...THREAD_TYPE_POLICY_FIXTURE,
+          classify: [{ type: "standing", top_level_only: true, title: "a*+" }],
+        }),
+      );
+      assert.isUndefined(yield* ThreadTypePolicy.readThreadTypePolicy(possessive));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 

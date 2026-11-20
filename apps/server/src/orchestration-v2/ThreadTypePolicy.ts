@@ -62,21 +62,22 @@ export class ThreadTypeModelRefusedError extends Schema.TaggedError<ThreadTypeMo
   },
 ) {
   override get message(): string {
-    return `${this.model} is refused on ${this.threadType} threads by the Closura thread type policy. Pick another model to continue.`;
+    return `${this.model} is refused on ${this.threadType} threads by the Closura thread type policy. Pick another model, or tag the title with a type that allows it, such as [coding].`;
   }
 }
 
 export const isThreadTypeModelRefusedError = Schema.is(ThreadTypeModelRefusedError);
 
-const MODEL_PREFIXES = ["codex/", "claude/", "openai/", "anthropic/", "magpie-go/"];
 const TITLE_TAG = /^\s*\[([a-z]+)\]/;
 
 export function normalizeModel(model: string): string {
   let value = model.trim().toLowerCase();
-  for (const prefix of MODEL_PREFIXES) {
-    if (value.startsWith(prefix)) value = value.slice(prefix.length);
-  }
-  return value.replaceAll("[1m]", "");
+  const slash = value.lastIndexOf("/");
+  if (slash >= 0) value = value.slice(slash + 1);
+  if (value.startsWith("openai.")) value = value.slice("openai.".length);
+  value = value.replaceAll("[1m]", "");
+  if (value.endsWith("-fast")) value = value.slice(0, -"-fast".length);
+  return value;
 }
 
 const isThreadType = (value: string): value is ThreadType =>
@@ -93,7 +94,11 @@ export function classifyThread(
   const child = isDelegatedAppThread(thread);
   for (const rule of policy.classify) {
     if (rule.top_level_only && child) continue;
-    if (new RegExp(rule.title, "i").test(title)) return rule.type;
+    try {
+      if (new RegExp(rule.title, "i").test(title)) return rule.type;
+    } catch {
+      continue;
+    }
   }
   return policy.default_type;
 }
@@ -127,6 +132,25 @@ export function threadTypePolicyPath(environment: NodeJS.ProcessEnv = process.en
 }
 
 const decodePolicy = Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadTypePolicyFile));
+const policyWarningKeys = new Set<string>();
+
+const warnPolicyOnce = (path: string, state: string, message: string, detail?: unknown) => {
+  const key = `${state}|${path}`;
+  if (policyWarningKeys.has(key)) return Effect.void;
+  policyWarningKeys.add(key);
+  return Effect.logWarning(message, detail === undefined ? { path, state } : { path, state, detail });
+};
+
+const classifyRulesCompile = (policy: ThreadTypePolicyFile): boolean => {
+  for (const rule of policy.classify) {
+    try {
+      new RegExp(rule.title, "i");
+    } catch {
+      return false;
+    }
+  }
+  return true;
+};
 
 export const readThreadTypePolicy = Effect.fn("ThreadTypePolicy.read")(function* (path: string) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -134,19 +158,33 @@ export const readThreadTypePolicy = Effect.fn("ThreadTypePolicy.read")(function*
     Effect.map((value): string | undefined => value),
     Effect.catch((error) =>
       error.reason._tag === "NotFound"
-        ? Effect.undefined
-        : Effect.logWarning("Could not read the thread type policy", { path, error }).pipe(
+        ? warnPolicyOnce(
+            path,
+            "missing",
+            "No thread type policy is installed; turns keep their current behavior",
+          ).pipe(Effect.as(undefined))
+        : warnPolicyOnce(path, "unreadable", "Could not read the thread type policy", error).pipe(
             Effect.as(undefined),
           ),
     ),
   );
   if (text === undefined) return undefined;
-  return yield* decodePolicy(text).pipe(
+  const decoded = yield* decodePolicy(text).pipe(
     Effect.map((value): ThreadTypePolicyFile | undefined => value),
     Effect.catch((error) =>
-      Effect.logWarning("Ignoring an invalid thread type policy", { path, error }).pipe(
+      warnPolicyOnce(path, "invalid", "Ignoring an invalid thread type policy", error).pipe(
         Effect.as(undefined),
       ),
     ),
   );
+  if (decoded === undefined) return undefined;
+  if (!classifyRulesCompile(decoded)) {
+    yield* warnPolicyOnce(
+      path,
+      "uncompilable",
+      "Ignoring a thread type policy whose title pattern JavaScript cannot compile",
+    );
+    return undefined;
+  }
+  return decoded;
 });
