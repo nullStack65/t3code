@@ -87,6 +87,8 @@ import {
   TIMELINE_MINIMAP_TARGET_OFFSET,
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
+  collapseTimelineActivity,
+  activityPillIdForEntry,
   type MessagesTimelineRow,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
@@ -332,6 +334,12 @@ interface MessagesTimelineProps {
   activeFindMatch?: ThreadFindMatch | null;
   findNavigationId?: number;
   findSender?: OrchestrationMessageSenderFilter | null;
+  /**
+   * Collapse runs of agent, automation and system activity into expandable
+   * pills, leaving the founder's messages and the model's replies to them.
+   * Off by default; a standing thread turns it on.
+   */
+  collapseActivity?: boolean;
 }
 
 export function MessagesTimeline(props: MessagesTimelineProps) {
@@ -379,6 +387,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   activeFindMatch = null,
   findNavigationId = 0,
   findSender = null,
+  collapseActivity = false,
   latestRun,
   announcedRun = null,
   detailBehindShell = false,
@@ -562,6 +571,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
   };
 
   // Turn and attempt folds reveal later rows rather than growing their own row.
+  const onToggleActivity = (id: string) => {
+    preserveDisclosurePosition(id);
+    setExpandedActivity((existing) => {
+      const ids = new Set(existing.threadKey === listIdentityKey ? existing.ids : []);
+      if (ids.has(id)) {
+        ids.delete(id);
+      } else {
+        ids.add(id);
+      }
+      return { threadKey: listIdentityKey, ids };
+    });
+  };
   const onToggleTurnFold = (runId: RunId) => {
     preserveDisclosurePosition(`turn-fold:${runId}`);
     setExpandedRunIds((existing) => {
@@ -762,7 +783,42 @@ const ConversationTimeline = memo(function ConversationTimeline({
     revealedMessageId,
   });
   const stableRows = useStableRows(rawRows, listIdentityKey);
-  const rows = useSenderFilteredRows(stableRows, findSender);
+  const senderRows = useSenderFilteredRows(stableRows, findSender);
+  // A sender filter already removed every other message, so collapsing what it
+  // kept would hide the very rows it was asked to show.
+  const collapseRows = collapseActivity && findSender === null;
+  const [expandedActivity, setExpandedActivity] = useState<{
+    readonly threadKey: string;
+    readonly ids: ReadonlySet<string>;
+  }>(() => ({ threadKey: listIdentityKey, ids: new Set() }));
+  // Pill ids repeat across threads (`activity:` plus a message id can coincide,
+  // and a live turn's rows share constant ids), so expansion belongs to one thread.
+  const expandedActivityIds =
+    expandedActivity.threadKey === listIdentityKey ? expandedActivity.ids : new Set<string>();
+  if (collapseRows && expandedActivity.threadKey !== listIdentityKey) {
+    setExpandedActivity({ threadKey: listIdentityKey, ids: expandedActivityIds });
+  }
+  // A search hit or a restored scroll position inside a collapsed run opens that
+  // run, the way a find match opens the turn fold that hides it.
+  const revealedEntryId =
+    (findActive ? activeFindMatch?.entryId : undefined) ??
+    (restoringThreadPosition && rememberedPosition?.atEnd === false
+      ? rememberedPosition.rowId
+      : undefined);
+  const revealedPillId =
+    collapseRows && revealedEntryId !== undefined
+      ? activityPillIdForEntry(senderRows, revealedEntryId)
+      : undefined;
+  if (
+    revealedPillId !== undefined &&
+    expandedActivity.threadKey === listIdentityKey &&
+    !expandedActivity.ids.has(revealedPillId)
+  ) {
+    const ids = new Set(expandedActivity.ids);
+    ids.add(revealedPillId);
+    setExpandedActivity({ threadKey: listIdentityKey, ids });
+  }
+  const rows = collapseRows ? collapseTimelineActivity(senderRows, expandedActivityIds) : senderRows;
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =
@@ -1140,6 +1196,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     workflowOpening,
     onForkFromRun,
     onToggleTurnFold,
+    onToggleActivity,
     onToggleAttemptFold,
     onToggleWorkGroup,
     onToggleWorkEntry: (anchorKey, collapsed, entryId) =>
@@ -1626,7 +1683,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       className={cn(
         isWorkLogRow || isSubagentGroup
           ? undefined
-          : row.kind === "turn-fold" || row.kind === "working"
+          : row.kind === "turn-fold" || row.kind === "activity" || row.kind === "working"
             ? "pb-1.5"
             : row.kind === "message" && row.groupedWithNext
               ? "pb-1"
@@ -1678,6 +1735,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
           {row.kind === "thinking" ? <ThinkingTimelineRow row={row} /> : null}
         </WorkLogBlock>
       ) : null}
+      {row.kind === "activity" ? <ActivityTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow key={row.id} row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
@@ -1823,6 +1881,31 @@ function WorkHistorySkeleton() {
           />
         </div>
       ))}
+    </div>
+  );
+}
+
+function ActivityTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "activity" }> }) {
+  const ctx = use(TimelineRowCtx);
+  return (
+    <div className="group/timeline-row border-b border-border/60 pb-2 pe-0.5 pt-1">
+      <button
+        type="button"
+        aria-expanded={row.expanded}
+        data-scroll-anchor-ignore
+        onClick={() => ctx.onToggleActivity(row.id)}
+        className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+      >
+        <span>
+          {row.summary}
+          {row.expanded ? "" : " · click to expand"}
+        </span>
+        {row.expanded ? (
+          <ChevronDownIcon className="size-3.5" />
+        ) : (
+          <ChevronRightIcon className="size-3.5" />
+        )}
+      </button>
     </div>
   );
 }

@@ -117,7 +117,7 @@ The prompt decides what the agent sees. Placeholders pull values out of the
 request: `{{body.path}}` for a JSON or form field, `{{headers.name}}`,
 `{{query.name}}`, `{{body}}` for the raw body, and `{{request}}` for everything.
 For example, `Review this PR: {{body.pull_request.html_url}}` sends only the
-pull request link. A placeholder with no value is left empty.
+pull request link. A placeholder with no value is left empty. A prompt that names nothing from the request still gets the request appended, with credential headers and query parameters redacted, so the agent never runs without seeing what arrived.
 
 Each value reaches the agent wrapped in `<webhook-data-…>` tags and marked as
 untrusted request data. This helps the agent tell it apart from your

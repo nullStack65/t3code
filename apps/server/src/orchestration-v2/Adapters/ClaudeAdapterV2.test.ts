@@ -496,25 +496,38 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
       cwd: "/workspace",
       settings: { ...DEFAULT_CLAUDE_SETTINGS, autoCompactWindow: "400000" },
       environment: { CLAUDE_CODE_PROMPT_CACHE_TTL: "5m" },
-      threadType: { type: "standing", contextWindow: 272_000, compactAt: 100_000, cacheTtl: "1h" },
+      threadType: {
+        type: "standing",
+        claudeContextWindow: 200_000,
+        codexContextWindow: 272_000,
+        compactAt: 165_000,
+        cacheTtl: "1h",
+        summaryCap: 8_000,
+      },
     });
     const settings = options.settings as {
       autoCompactWindow?: number;
       promptCacheTtl?: string;
       env?: Record<string, string>;
     };
-    assert.equal(settings.autoCompactWindow, 272_000);
+    assert.equal(settings.autoCompactWindow, 200_000);
     assert.equal(settings.promptCacheTtl, "1h");
-    assert.equal(settings.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "272000");
-    assert.equal(settings.env?.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "39.69");
+    assert.equal(settings.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "200000");
+    assert.equal(settings.env?.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "91.66");
     assert.equal(settings.env?.CLAUDE_CODE_PROMPT_CACHE_TTL, "1h");
     assert.equal(options.env?.CLAUDE_CODE_PROMPT_CACHE_TTL, "1h");
+    const append = (options.systemPrompt as { append?: string }).append ?? "";
+    assert.match(append, /within 8000 tokens/);
     assert.equal(
-      ClaudeAdapterV2.claudeAutoCompactPercent(
-        { contextWindow: 272_000, compactAt: 100_000 },
+      ClaudeAdapterV2.claudeAppliedCompactAt({ contextWindow: 200_000, compactAt: 165_000 }),
+      164_988,
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeAppliedCompactAt(
+        { contextWindow: 200_000, compactAt: 168_000 },
         200_000,
       ),
-      "55.56",
+      166_986,
     );
   });
 
@@ -527,7 +540,7 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
       undefined,
       120_000,
     );
-    assert.equal(usage.autoCompactThreshold, 120_002);
+    assert.equal(usage.autoCompactThreshold, 119_977);
     assert.equal(
       ClaudeAdapterV2.claudeProviderTurnTokenUsage(
         { input_tokens: 10, output_tokens: 5 },

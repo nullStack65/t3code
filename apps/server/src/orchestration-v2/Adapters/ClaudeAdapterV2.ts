@@ -30,6 +30,8 @@ import {
   addClaudeLedgerUsage,
   claudeLedgerDelta,
   claudeModelLedger,
+  claudeResumedLedgerDelta,
+  mergeOmittedLedgerModels,
   claudeReportedContextWindows,
   normalizeClaudeTurnTokenUsage,
   type ClaudeLedgerUsage,
@@ -162,6 +164,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import * as ThreadTypePolicy from "../ThreadTypePolicy.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { snapshotMcpApp } from "../../mcpApps/McpAppSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
@@ -292,7 +295,9 @@ export function claudeAutoCompactPercent(
 ): string {
   const effective = claudeCompactEffectiveWindow(threadType.contextWindow, modelMaxTokens);
   if (effective <= 0) return "0.00";
-  const hundredths = Math.ceil((threadType.compactAt * 10_000) / effective);
+  const reachable = effective - CLAUDE_COMPACT_FLOOR_GAP;
+  const target = Math.min(threadType.compactAt, reachable);
+  const hundredths = Math.floor((target * 10_000) / effective);
   return (hundredths / 100).toFixed(2);
 }
 
@@ -302,7 +307,7 @@ export function claudeAppliedCompactAt(
 ): number {
   const effective = claudeCompactEffectiveWindow(threadType.contextWindow, modelMaxTokens);
   if (effective <= 0) return threadType.compactAt;
-  const hundredths = Math.ceil((threadType.compactAt * 10_000) / effective);
+  const hundredths = Number(claudeAutoCompactPercent(threadType, modelMaxTokens)) * 100;
   const applied = Math.floor((effective * hundredths) / 10_000);
   return Math.min(applied, effective - CLAUDE_COMPACT_FLOOR_GAP);
 }
@@ -2290,7 +2295,7 @@ export function makeClaudeQueryOptions(input: {
       : (resolveClaudeCatalogContextWindowTokens(input.modelCatalog, input.modelSelection) ?? null);
   const autoCompactWindow =
     threadType !== undefined
-      ? String(threadType.contextWindow)
+      ? String(threadType.claudeContextWindow)
       : input.settings?.autoCompactWindow === undefined ||
           input.settings.autoCompactWindow.length === 0
         ? undefined
@@ -2332,7 +2337,7 @@ export function makeClaudeQueryOptions(input: {
               ? {}
               : {
                   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: claudeAutoCompactPercent(
-                    threadType,
+                    { contextWindow: threadType.claudeContextWindow, compactAt: threadType.compactAt },
                     modelMaxTokens,
                   ),
                   CLAUDE_CODE_PROMPT_CACHE_TTL: threadType.cacheTtl,
@@ -2405,7 +2410,10 @@ export function makeClaudeQueryOptions(input: {
       type: "preset" as const,
       preset: "claude_code" as const,
       append: [
-        buildRuntimeInstructions({ harness: "Claude Code" }) +
+        (threadType?.summaryCap === undefined
+          ? ""
+          : ThreadTypePolicy.carriedSummaryInstruction(threadType.summaryCap) + "\n\n") +
+          buildRuntimeInstructions({ harness: "Claude Code" }) +
           (input.mcpServers === undefined
             ? ""
             : T3_CODE_ORCHESTRATION_INSTRUCTIONS +
@@ -5203,6 +5211,7 @@ interface ClaudeLiveQueryContext {
   handedOffSubagents: ReadonlySet<ActiveClaudeSubagent>;
   // The SDK's per-process model ledger at the last result; a new process starts at zero.
   modelLedger: ClaudeModelLedger | undefined;
+  resumedLedgerPending: boolean;
   // Per process, not per session: a relative temp dir follows the cwd this CLI
   // was launched in, and a later turn's cwd can differ.
   readonly taskOutputRoot: string | undefined;
@@ -5942,6 +5951,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         // Wake buffers replay result frames, so ledger growth is measured once on arrival.
         const resultLedgerUsage = new WeakMap<SDKMessage, ClaudeLedgerUsage>();
+        const lastModelLedgers = new Map<string, ClaudeModelLedger | null>();
         const resultsReportingNewContextWindow = new WeakSet<SDKMessage>();
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
@@ -6316,9 +6326,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const budget = pdfBudgets.get(nativeThreadId);
           const hasAppliedTitle = appliedSessionTitles.has(nativeThreadId);
           const recordedTitle = providerThread.nativeMetadata?.title;
-          if (budget === undefined && !hasAppliedTitle && recordedTitle === undefined) {
+          const hasModelLedger = lastModelLedgers.has(nativeThreadId);
+          if (
+            budget === undefined &&
+            !hasAppliedTitle &&
+            recordedTitle === undefined &&
+            !hasModelLedger
+          ) {
             return providerThread;
           }
+          const modelLedger = lastModelLedgers.get(nativeThreadId);
           return {
             ...providerThread,
             nativeMetadata: {
@@ -6337,6 +6354,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 : recordedTitle === undefined
                   ? {}
                   : { title: null }),
+              ...(hasModelLedger
+                ? {
+                    claudeModelLedger:
+                      modelLedger === null || modelLedger === undefined
+                        ? null
+                        : Object.fromEntries(modelLedger),
+                  }
+                : {}),
             },
           };
         };
@@ -12984,6 +13009,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ),
             ),
             modelLedger: new Map(),
+            resumedLedgerPending: shouldResume,
             taskOutputRoot: claudeTaskOutputRoot(
               adapterOptions.environment,
               path,
@@ -13036,13 +13062,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   }
                   if (message.type === "result") {
                     const ledger = claudeModelLedger(message.modelUsage);
-                    const growth = claudeLedgerDelta(context.modelLedger, ledger);
+                    const resumedFirstResult = context.resumedLedgerPending;
+                    context.resumedLedgerPending = false;
+                    const growth = resumedFirstResult
+                      ? claudeResumedLedgerDelta(
+                          lastModelLedgers.get(context.nativeThreadId) ?? undefined,
+                          ledger,
+                          message.usage,
+                        )
+                      : claudeLedgerDelta(context.modelLedger, ledger);
                     if (growth !== undefined) resultLedgerUsage.set(message, growth);
-                    // A ledger that went backwards cannot anchor the next turn's growth.
-                    context.modelLedger =
-                      growth === undefined && context.modelLedger !== undefined
+                    const resumedBaseline = resumedFirstResult
+                      ? mergeOmittedLedgerModels(
+                          lastModelLedgers.get(context.nativeThreadId) ?? undefined,
+                          ledger,
+                        )
+                      : undefined;
+                    context.modelLedger = resumedFirstResult
+                      ? resumedBaseline
+                      : growth === undefined && context.modelLedger !== undefined
                         ? undefined
                         : ledger;
+                    lastModelLedgers.set(
+                      context.nativeThreadId,
+                      resumedFirstResult ? (resumedBaseline ?? null) : (ledger ?? null),
+                    );
                     for (const [model, window] of claudeReportedContextWindows(
                       message.modelUsage,
                     )) {
@@ -13168,6 +13212,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const used = turnInput.providerThread.nativeMetadata?.claudeAttachmentBudget;
               pdfBudgets.set(nativeThreadId, makeClaudeAttachmentBudget(used));
             }
+            if (!lastModelLedgers.has(nativeThreadId)) {
+              const recordedLedger = turnInput.providerThread.nativeMetadata?.claudeModelLedger;
+              if (recordedLedger !== undefined) {
+                lastModelLedgers.set(
+                  nativeThreadId,
+                  recordedLedger === null ? null : new Map(Object.entries(recordedLedger)),
+                );
+              }
+            }
             if (!appliedSessionTitles.has(nativeThreadId)) {
               const recordedTitle = turnInput.providerThread.nativeMetadata?.title;
               if (recordedTitle !== undefined && recordedTitle !== null) {
@@ -13232,7 +13285,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const autoCompactWindow =
               turnInput.runtimePolicy.threadType === undefined || resolvedAutoCompactWindow === ""
                 ? resolvedAutoCompactWindow
-                : String(turnInput.runtimePolicy.threadType.contextWindow);
+                : String(turnInput.runtimePolicy.threadType.claudeContextWindow);
             const context: ActiveClaudeTurnContext = {
               input: turnInput,
               autoCompactWindow,

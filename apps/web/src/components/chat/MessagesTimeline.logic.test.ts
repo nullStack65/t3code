@@ -1,4 +1,4 @@
-import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
+import { ScheduledTaskId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
   NodeId,
@@ -30,6 +30,9 @@ import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
   filterTimelineRowsBySender,
+  collapseTimelineActivity,
+  activityUpdateSummary,
+  activityPillIdForEntry,
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   deriveMessagesTimelineRowsWithState,
@@ -5221,5 +5224,183 @@ describe("message senders in the timeline", () => {
     const kameron = filterTimelineRowsBySender(rows, "kameron");
     expect(kameron.map((row) => row.id)).toEqual(["kameron-1", "kameron-2"]);
     expect(kameron[1]).toMatchObject({ groupedWithPrevious: false });
+  });
+});
+
+describe("collapsing non-human activity", () => {
+  const runId = RunId.make("activity-run");
+  const time = (second: number) => new Date(Date.UTC(2026, 0, 2, 0, 0, second)).toISOString();
+  const messageRow = (
+    id: string,
+    second: number,
+    extra: Record<string, unknown> = {},
+  ): MessagesTimelineRow => ({
+    kind: "message",
+    id,
+    createdAt: time(second),
+    showAssistantMeta: false,
+    showAssistantCopyButton: false,
+    assistantCopyStreaming: false,
+    message: {
+      id: MessageId.make(id),
+      role: "user",
+      text: id,
+      runId,
+      createdAt: time(second),
+      updatedAt: time(second),
+      streaming: false,
+      ...extra,
+    },
+  });
+  const workRow = (id: string, second: number): MessagesTimelineRow => ({
+    kind: "work",
+    id,
+    createdAt: time(second),
+    groupedEntries: [],
+    isExpandedToolGroup: false,
+  });
+  const person = (founder: "kameron" | "jeff") => ({
+    sentBy: {
+      sessionId: AuthSessionId.make(`session:${founder}`),
+      device: "laptop",
+      deviceType: "desktop" as const,
+      founder,
+    },
+  });
+  const rows: MessagesTimelineRow[] = [
+    messageRow("kameron", 0, person("kameron")),
+    messageRow("reply", 1, { role: "assistant" }),
+    messageRow("agent-1", 2, { createdBy: "agent", senderThreadId: ThreadId.make("child") }),
+    workRow("work-1", 3),
+    messageRow("agent-2", 4, { createdBy: "agent" }),
+    messageRow("jeff", 5, person("jeff")),
+    messageRow("system-1", 6, { createdBy: "system" }),
+  ];
+
+  it("collapses the activity between human turns into one pill", () => {
+    const collapsed = collapseTimelineActivity(rows, new Set());
+    expect(collapsed.map((row) => row.id)).toEqual([
+      "kameron",
+      "reply",
+      "activity:reply",
+      "jeff",
+      "activity:jeff",
+    ]);
+    expect(collapsed[2]).toMatchObject({
+      kind: "activity",
+      count: 3,
+      summary: "2 agent updates",
+      expanded: false,
+    });
+    expect(collapsed[4]).toMatchObject({ kind: "activity", count: 1, summary: "1 system notice" });
+  });
+
+  it("puts the collapsed rows back exactly when the pill expands", () => {
+    const expanded = collapseTimelineActivity(rows, new Set(["activity:reply"]));
+    expect(expanded.map((row) => row.id)).toEqual([
+      "kameron",
+      "reply",
+      "activity:reply",
+      "agent-1",
+      "work-1",
+      "agent-2",
+      "jeff",
+      "activity:jeff",
+    ]);
+    expect(expanded[2]).toMatchObject({ expanded: true });
+  });
+
+  it("keeps a thread of only activity as one pill", () => {
+    const activity = rows.slice(2, 5);
+    expect(collapseTimelineActivity(activity, new Set()).map((row) => row.id)).toEqual([
+      "activity:agent-1",
+    ]);
+    expect(activityUpdateSummary(activity)).toBe("2 agent updates");
+  });
+
+  it("names mixed activity by kind", () => {
+    expect(
+      activityUpdateSummary([
+        messageRow("a", 0, { createdBy: "agent" }),
+        messageRow("b", 1, { createdBy: "system" }),
+        messageRow("c", 2, { scheduledTaskId: ScheduledTaskId.make("task-1") }),
+      ]),
+    ).toBe("1 agent update and 1 system notice and 1 automation");
+  });
+
+  it("keeps a plan, a render and viewed images on screen", () => {
+    const plan: MessagesTimelineRow = {
+      kind: "proposed-plan",
+      id: "plan-1",
+      createdAt: time(7),
+      proposedPlan: {
+        id: "plan-1" as never,
+        runId,
+        planMarkdown: "Do the thing",
+        status: "active",
+        createdAt: time(7),
+        updatedAt: time(7),
+      },
+    };
+    const images: MessagesTimelineRow = {
+      kind: "viewed-images",
+      id: "images-1",
+      createdAt: time(8),
+      paths: ["shot.png"],
+    };
+    const withCards = [rows[0]!, plan, rows[2]!, images, rows[5]!];
+    expect(collapseTimelineActivity(withCards, new Set()).map((row) => row.id)).toEqual([
+      "kameron",
+      "plan-1",
+      "activity:plan-1",
+      "images-1",
+      "jeff",
+    ]);
+  });
+
+  it("keeps a secret request and a link request on screen", () => {
+    const request = (id: string, type: "secret_request" | "link_request"): MessagesTimelineRow => ({
+      kind: "event",
+      id,
+      createdAt: time(9),
+      projectedItem: { item: { type } } as never,
+    });
+    const withRequests = [
+      rows[0]!,
+      rows[2]!,
+      request("secret-1", "secret_request"),
+      request("link-1", "link_request"),
+      rows[5]!,
+    ];
+    expect(collapseTimelineActivity(withRequests, new Set()).map((row) => row.id)).toEqual([
+      "kameron",
+      "activity:kameron",
+      "secret-1",
+      "link-1",
+      "jeff",
+    ]);
+  });
+
+  it("names the pill after the message it follows, so streaming rows do not rename it", () => {
+    const grown = [...rows.slice(0, 5), workRow("work-2", 9), ...rows.slice(5)];
+    expect(collapseTimelineActivity(grown, new Set()).map((row) => row.id)).toEqual(
+      collapseTimelineActivity(rows, new Set()).map((row) => row.id),
+    );
+  });
+
+  it("finds the pill hiding a row", () => {
+    expect(activityPillIdForEntry(rows, "work-1")).toBe("activity:reply");
+    expect(activityPillIdForEntry(rows, "system-1")).toBe("activity:jeff");
+    expect(activityPillIdForEntry(rows, "kameron")).toBeUndefined();
+    expect(activityPillIdForEntry(rows.slice(2, 5), "agent-2")).toBe("activity:agent-1");
+  });
+
+  it("leaves a human conversation untouched", () => {
+    const conversation = [rows[0]!, rows[1]!, rows[5]!];
+    expect(collapseTimelineActivity(conversation, new Set()).map((row) => row.id)).toEqual([
+      "kameron",
+      "reply",
+      "jeff",
+    ]);
   });
 });

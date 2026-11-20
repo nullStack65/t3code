@@ -405,6 +405,10 @@ import {
   makeThreadErrorSetter,
 } from "./ChatView.logic";
 
+const activityCollapsedThreadsSchema = Schema.NullOr(
+  Schema.Record(Schema.String, Schema.Boolean),
+);
+
 const EMPTY_SEEN_MESSAGES: ReadonlyArray<SeenMessage> = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
@@ -1840,6 +1844,24 @@ export default function ChatView(props: ChatViewProps) {
       selectThreadPanelOpen(state.threadPanelVisibilityByThreadKey, activeThreadRef, "inline"),
   );
   const isStandingBot = activeStanding !== null;
+  // A coordinator thread buries the founder under agent relays, so those collapse
+  // until he asks for everything. Remembered per thread; ordinary threads stay flat.
+  const [activityCollapsedThreads, setActivityCollapsedThreads] = useLocalStorage(
+    "t3code:activity-collapsed-threads",
+    null,
+    activityCollapsedThreadsSchema,
+  );
+  const activityCollapsed =
+    activeThreadKey === null ||
+    activityCollapsedThreads === null ||
+    activityCollapsedThreads[activeThreadKey] !== false;
+  const toggleActivityCollapsed = () => {
+    if (activeThreadKey === null) return;
+    setActivityCollapsedThreads((stored) => ({
+      ...stored,
+      [activeThreadKey]: !activityCollapsed,
+    }));
+  };
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- folds a bot's details card (branch, worktree, PR) the first time this client shows that bot; the panel toggle reopens it and that choice persists
   useEffect(() => {
     if (!isStandingBot || !activeThreadRef || !activeThreadKey) return;
@@ -3448,6 +3470,11 @@ export default function ChatView(props: ChatViewProps) {
               {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
               standing={activeStanding}
               botAvatarState={activeBotAvatarState}
+              activityCollapsed={
+                isStandingBot && activeThreadKey !== null
+                  ? { on: activityCollapsed, onToggle: toggleActivityCollapsed }
+                  : null
+              }
             />
           </header>
         )}
@@ -3505,6 +3532,7 @@ export default function ChatView(props: ChatViewProps) {
                   entriesInput={timelineEntriesInput}
                   draftEntries={isServerThread ? null : draftTimelineEntries}
                   activeThreadKey={activeThreadKey}
+                  collapseActivity={isStandingBot && activityCollapsed}
                   syncing={threadSyncPhase !== null}
                   detailLoading={threadDetailLoading}
                   citationRequest={citationRequest}
