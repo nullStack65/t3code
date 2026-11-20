@@ -80,6 +80,7 @@ import {
   TurnItemId,
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
+  DEFAULT_DELEGATION_NUDGE_THRESHOLDS,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -642,6 +643,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.active.reorder":
     case "thread.tag.set":
     case "thread.standing.set":
+    case "thread.delegation-nudge.set":
     case "thread.visit":
     case "thread.mark-unread":
     case "thread.metadata.update":
@@ -4177,6 +4179,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.pin.reorder"
           | "thread.tag.set"
           | "thread.standing.set"
+          | "thread.delegation-nudge.set"
           | "thread.active.reorder"
           | "thread.mark-unread"
           | "thread.metadata.update"
@@ -4868,6 +4871,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           // Standing is identity, not activity: it never bumps updatedAt.
           return { ...thread, standing: command.standing };
         }
+        case "thread.delegation-nudge.set": {
+          const thresholds =
+            command.thresholds ??
+            thread.delegationNudge?.thresholds ??
+            [...DEFAULT_DELEGATION_NUDGE_THRESHOLDS];
+          return {
+            ...thread,
+            delegationNudge: {
+              enabled: command.enabled,
+              thresholds,
+              changedBy: command.changedBy ?? { kind: "user" },
+              changedAt: DateTime.formatIso(now),
+            },
+          };
+        }
         case "thread.tag.set": {
           const current = thread.tags ?? [];
           return {
@@ -5304,6 +5322,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return "thread.tags-updated" as const;
         case "thread.standing.set":
           return "thread.standing-updated" as const;
+        case "thread.delegation-nudge.set":
+          return "thread.delegation-nudge-updated" as const;
         case "thread.mark-unread":
           return "thread.marked-unread" as const;
         case "thread.metadata.update":
@@ -7344,11 +7364,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         dispatchMode = { type: "queue_after_active" };
       }
     }
-    // Steer mailbox deliveries, delegated task questions, and command notices
-    // into an active goal under the thread lock: queued behind a long turn or a
-    // goal run, they are never seen. Never interrupt/restart a turn for one.
+    // Steer mailbox deliveries, delegated task questions, command notices, and
+    // delegation reminders into an active turn: queued behind a long turn they
+    // are never seen. Never interrupt/restart a turn for one.
     const noticeKind = command.notification?.source.kind;
     const commandNotice = noticeKind === "command" && command.creationSource === "server";
+    const delegationReminder = noticeKind === "system" && command.creationSource === "server";
     if (
       !freshContext &&
       (delegatedCompletion !== undefined
@@ -7356,7 +7377,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (id) =>
               projection.subagents.find((task) => task.id === id)?.completionWake === "always",
           )
-        : noticeKind === "delegated_task" || commandNotice)
+        : noticeKind === "delegated_task" || commandNotice || delegationReminder)
     ) {
       const active = projection.runs.find((run) => run.status === "running");
       const providerThread = projection.providerThreads.find(
@@ -15170,6 +15191,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.active.reorder":
       case "thread.tag.set":
       case "thread.standing.set":
+      case "thread.delegation-nudge.set":
       case "thread.mark-unread":
       case "thread.pull-request.link":
       case "thread.pull-request.unlink":

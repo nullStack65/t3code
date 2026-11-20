@@ -67,9 +67,10 @@ function metadataCommand(input: {
   readonly commandId: CommandId;
   readonly threadId: ThreadId;
   readonly update: ThreadMetadataMcpUpdateInput;
+  readonly actorThreadId: ThreadId | undefined;
 }): Extract<
   OrchestrationV2Command,
-  { readonly type: "thread.metadata.update" | "thread.standing.set" }
+  { readonly type: "thread.metadata.update" | "thread.standing.set" | "thread.delegation-nudge.set" }
 > {
   switch (input.update.action) {
     case "set_standing":
@@ -78,6 +79,20 @@ function metadataCommand(input: {
         commandId: input.commandId,
         threadId: input.threadId,
         standing: input.update.standing ?? null,
+      };
+    case "set_delegation_nudge":
+      return {
+        type: "thread.delegation-nudge.set",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        enabled: input.update.delegationNudge?.enabled ?? false,
+        ...(input.update.delegationNudge?.thresholds === undefined
+          ? {}
+          : { thresholds: input.update.delegationNudge.thresholds }),
+        changedBy:
+          input.actorThreadId === undefined
+            ? { kind: "mcp_client" }
+            : { kind: "agent", threadId: input.actorThreadId },
       };
     case "route":
       return {
@@ -123,12 +138,15 @@ function resultFromThread(input: {
   readonly sequence: number;
   readonly thread: Pick<
     OrchestrationV2AppThread,
-    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt" | "inbox" | "standing"
+    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt" | "inbox" | "standing" | "delegationNudge"
   >;
 }): ThreadMetadataMcpUpdateResult {
   return {
     ...(input.thread.inbox === undefined ? {} : { inbox: input.thread.inbox }),
     ...(input.thread.standing === undefined ? {} : { standing: input.thread.standing }),
+    ...(input.thread.delegationNudge === undefined
+      ? {}
+      : { delegationNudge: input.thread.delegationNudge }),
     threadId: input.thread.id,
     action: input.action,
     commandId: input.commandId,
@@ -196,6 +214,15 @@ const make = Effect.gen(function* () {
             input.inboxRouting,
           );
     if (inboxError !== null) return yield* failure("invalid_request", inboxError);
+    if (
+      input.action === "set_delegation_nudge" &&
+      scope.thread?.threadId === threadId
+    ) {
+      return yield* failure(
+        "invalid_request",
+        "A thread cannot change its own delegation nudge. Ask from another thread or the client.",
+      );
+    }
     const requestKey =
       input.clientRequestId === undefined ? yield* random.uuidV4() : input.clientRequestId;
     const updateCommandId = commandId({
@@ -210,6 +237,7 @@ const make = Effect.gen(function* () {
           commandId: updateCommandId,
           threadId,
           update: input,
+          actorThreadId: scope.thread?.threadId,
         }),
       )
       .pipe(
@@ -223,12 +251,14 @@ const make = Effect.gen(function* () {
     const metadataEvent = dispatched.storedEvents.find(
       (stored) =>
         stored.event.type === "thread.metadata-updated" ||
-        stored.event.type === "thread.standing-updated",
+        stored.event.type === "thread.standing-updated" ||
+        stored.event.type === "thread.delegation-nudge-updated",
     );
     // Retries may find stored events compacted away; answer from the projection.
     const thread =
       metadataEvent?.event.type === "thread.metadata-updated" ||
-      metadataEvent?.event.type === "thread.standing-updated"
+      metadataEvent?.event.type === "thread.standing-updated" ||
+      metadataEvent?.event.type === "thread.delegation-nudge-updated"
         ? metadataEvent.event.payload
         : yield* threadManagement
             .getThreadShell(threadId)

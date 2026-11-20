@@ -412,6 +412,10 @@ still waits on after its run completed. A subagent or `background_task` holds
 the thread. A command or monitor holds it only with `awaited: true`, since agents
 often leave a dev server running.
 
+Each run reports `delegationNudge` when the thread had the delegation nudge on
+during it: counted tool calls, delegations, nudges fired, the most-used counted
+tools, and a note still waiting to be delivered. Absent means the nudge was off.
+
 ### `t3_thread_update`
 
 Updates metadata for the calling thread or any other thread in the environment.
@@ -419,6 +423,14 @@ The typed actions are `rename`, which requires `title`, and `regenerate_title`,
 which rejects one. Pull request links go through the separate
 `link_pull_request` and `unlink_pull_request` tools. Branch and workspace
 changes are outside this tool.
+
+`set_delegation_nudge` turns the delegation nudge on or off for a thread and
+optionally replaces its thresholds. It is off unless set. While on, a root run
+that keeps calling tools without handing work off is reminded, once per
+threshold, to delegate. The reminder steers the running turn when the provider
+can take a steer without interrupting the tool in progress, and otherwise waits
+for the next run. The stored setting records who changed it. A thread cannot
+change its own: the caller has to be another thread or a client.
 
 The result includes the command ID and durable event sequence together with the
 resultant title, title-regeneration marker, and linked pull request. Reusing a

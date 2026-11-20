@@ -118,12 +118,14 @@ function shouldPublishAgentAwarenessEvent(
     case "thread.active-reordered":
     case "thread.tags-updated":
     case "thread.standing-updated":
+    case "thread.delegation-nudge-updated":
     case "thread.visited":
     case "thread.visit-recorded":
     case "thread.marked-unread":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
     case "run.background-work-cancelled":
+    case "run.delegation-nudge-recorded":
     case "run-attempt.created":
     case "run-attempt.updated":
     case "node.updated":

@@ -268,7 +268,7 @@ const ThreadReadTool = Tool.make("t3_thread_read", {
 
 const ThreadUpdateTool = Tool.make("t3_thread_update", {
   description:
-    "Update a thread; omit `threadId` for this one. When a founder must decide, review or approve, use `action:'request_decision'` with `decision`: the thread shows in their inbox until they reply there, `resolve_decision`, or settle. `action:'route'` refiles it with `inboxRouting`; a founder's or the shared inbox needs `inboxRouting.reason`. `rename` takes `title`; `regenerate_title`. `set_standing` takes `standing` (bot persona, or null for an ordinary thread). Workspace and branch cannot change here.",
+    "Update a thread; omit `threadId` for this one. When a founder must decide, review or approve, use `action:'request_decision'` with `decision`: the thread shows in their inbox until they reply there, `resolve_decision`, or settle. `action:'route'` refiles it with `inboxRouting`; a founder's or the shared inbox needs `inboxRouting.reason`. `rename` takes `title`; `regenerate_title`. `set_standing` takes `standing` (bot persona, or null for an ordinary thread). `set_delegation_nudge` takes `delegationNudge` ({enabled, thresholds?}, default [5, 10]); a thread cannot change its own. Workspace and branch cannot change here.",
   // Keeps the input's action/field check, which rebuilding the struct would drop.
   parameters: ThreadMetadataMcpUpdateInput.mapFields(
     Struct.assign({ environmentId: OrchestratorMcpEnvironmentTarget }),

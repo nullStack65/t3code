@@ -56,6 +56,12 @@ import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
 import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
+import {
+  DelegationNudgeChangedBy,
+  DelegationNudgeUpdate,
+  RunDelegationNudgeStats,
+  StoredThreadDelegationNudge,
+} from "./delegationNudge.ts";
 import { ThreadTitleRegenerationOutcome } from "./threadTitle.ts";
 import {
   OrchestrationSearchThreadsInput,
@@ -542,6 +548,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   tags: Schema.optional(StoredThreadTags),
   /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
   standing: Schema.optional(StoredThreadStanding),
+  /** Opt-in reminder to delegate once the thread does work itself; absent or null is off. */
+  delegationNudge: Schema.optional(StoredThreadDelegationNudge),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -786,8 +794,17 @@ export const OrchestrationV2Run = Schema.Struct({
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
+  /** Tool and delegation counts while the thread's delegation nudge was on. */
+  delegationNudge: Schema.optional(RunDelegationNudgeStats),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
+
+export const OrchestrationV2RunDelegationNudgeRecorded = Schema.Struct({
+  runId: RunId,
+  stats: RunDelegationNudgeStats,
+});
+export type OrchestrationV2RunDelegationNudgeRecorded =
+  typeof OrchestrationV2RunDelegationNudgeRecorded.Type;
 
 export function orchestrationV2RunWorkStartedAt(
   run: Pick<OrchestrationV2Run, "workStartedAt" | "startedAt" | "requestedAt">,
@@ -2069,6 +2086,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.active-reordered",
       "thread.tags-updated",
       "thread.standing-updated",
+      "thread.delegation-nudge-updated",
       "thread.visited",
       "thread.marked-unread",
       "thread.metadata-updated",
@@ -2105,6 +2123,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("run.delegation-nudge-recorded"),
+    payload: OrchestrationV2RunDelegationNudgeRecorded,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2340,6 +2363,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   tags: Schema.optional(StoredThreadTags),
   /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
   standing: Schema.optional(StoredThreadStanding),
+  /** Opt-in reminder to delegate; absent or null is off. */
+  delegationNudge: Schema.optional(StoredThreadDelegationNudge),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
@@ -3045,6 +3070,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.active-reordered",
       "thread.tags-updated",
       "thread.standing-updated",
+      "thread.delegation-nudge-updated",
       "thread.visited",
       "thread.marked-unread",
       "thread.pull-request-synced",
@@ -3081,6 +3107,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("run.delegation-nudge-recorded"),
+    payload: OrchestrationV2RunDelegationNudgeRecorded,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -3319,6 +3350,14 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     /** The persona to show, or null to make it an ordinary thread again. */
     standing: Schema.NullOr(ThreadStanding),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.delegation-nudge.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ...DelegationNudgeUpdate.fields,
+    /** Who asked; absent means the user. */
+    changedBy: Schema.optional(DelegationNudgeChangedBy),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.tag.set"),
