@@ -668,7 +668,7 @@ describe("Antigravity subscription limits", () => {
       const signedOutLimits = yield* signedOut.probe;
       expect(signedOutLimits.unavailable).toEqual({
         reason: "unsupported",
-        message: "Sign in with Google to see Antigravity limits.",
+        message: "Sign in with Google to see limits.",
       });
       expect(signedOut.requests).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),

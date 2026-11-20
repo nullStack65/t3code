@@ -62,6 +62,20 @@ const entries = [
     error:
       "this key has no OpenCode Go subscription: Go belongs to the member who subscribed, in that workspace",
   },
+  {
+    provider: "magpie-go",
+    name: "Magpie Go",
+    kind: "plan",
+    user: "oc-billed",
+    error: "Payment Required",
+  },
+  {
+    provider: "magpie-go",
+    name: "Magpie Go",
+    kind: "plan",
+    user: "oc-other",
+    error: "no workspace subscription on this account",
+  },
   { provider: "claude", user: "second@example.com", error: "upstream timed out" },
 ];
 
@@ -106,14 +120,27 @@ describe("magpieQuotasToAccounts", () => {
       "claude:first@example.com",
       "codex:first@example.com",
       "codex:first@example.com · Team",
+      "magpie-go:oc-billed",
+      "magpie-go:oc-other",
       "claude:second@example.com",
     ]);
     const team = accounts[2]!;
-    const timedOut = accounts[3]!;
+    const billed = accounts[3]!;
+    const other = accounts[4]!;
+    const timedOut = accounts[5]!;
     expect(team.email).toBe("first@example.com · Team");
     expect(team.usageLimits.unavailable).toEqual({
       reason: "unsupported",
       message: "Payment Required.",
+    });
+    expect(billed.driver).toBe("opencode");
+    expect(billed.usageLimits.unavailable).toEqual({
+      reason: "unsupported",
+      message: "Payment Required.",
+    });
+    expect(other.usageLimits.unavailable).toEqual({
+      reason: "unsupported",
+      message: "No workspace subscription on this account.",
     });
     expect(timedOut.usageLimits.unavailable?.reason).toBe("probeFailed");
   });

@@ -246,7 +246,7 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "unsupported",
-        message: "Sign in with Google to see Antigravity limits.",
+        message: "Sign in with Google to see limits.",
       });
     }
     const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));

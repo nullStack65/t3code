@@ -151,6 +151,11 @@ function isStandingRefusal(error: string): boolean {
   );
 }
 
+/** OpenCode's own sentence for a key that was never subscribed. */
+function isDeadGoSubscription(error: string): boolean {
+  return /this key has no opencode go subscription/i.test(error);
+}
+
 /** Magpie's sentences run long; the first clause names the reason. */
 function shortReason(error: string): string {
   const first = error.split(/[:;]\s/)[0]!.trim();
@@ -167,12 +172,7 @@ export function magpieQuotasToAccounts(
   for (const entry of entries) {
     const driver = driverFor(entry.provider);
     if (!driver) continue;
-    if (
-      driver === "opencode" &&
-      entry.error &&
-      isStandingRefusal(entry.error) &&
-      !/payment required/i.test(entry.error)
-    ) {
+    if (driver === "opencode" && entry.error && isDeadGoSubscription(entry.error)) {
       continue;
     }
     const user = entry.user?.trim() || entry.name?.trim() || entry.provider;
