@@ -43,6 +43,7 @@ import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
 import { useStableCallback } from "../hooks/useStableCallback";
+import { useSeenMarkerTracking } from "../hooks/useSeenMarkerTracking";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
@@ -116,6 +117,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
+import { type SeenMessage } from "@t3tools/client-runtime/seen-marker";
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
 import { projectScriptCwd, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -400,6 +402,7 @@ import {
   makeThreadErrorSetter,
 } from "./ChatView.logic";
 
+const EMPTY_SEEN_MESSAGES: ReadonlyArray<SeenMessage> = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
@@ -1618,6 +1621,11 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timelineEmpty = timelineEntries.length === 0 && !hasStreamedTimelineRows;
   const displayedTimelineKey = activeThreadKey ?? routeThreadKey;
+  useSeenMarkerTracking({
+    threadKey: isServerThread ? activeThreadKey : null,
+    getScrollNode: () => legendListRef.current?.getScrollableNode() ?? null,
+    messages: serverProjection?.messages ?? EMPTY_SEEN_MESSAGES,
+  });
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const {
     worktreeSetup,
@@ -2970,6 +2978,7 @@ export default function ChatView(props: ChatViewProps) {
     activeProjectIsScratch,
     activeProjectDefaultModelSelection,
     activeMessageCount,
+    seenMessages: serverProjection?.messages ?? EMPTY_SEEN_MESSAGES,
     isServerThread,
     isLocalDraftThread,
     isGitRepo,

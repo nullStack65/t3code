@@ -198,6 +198,7 @@ export interface StartThreadTurnInput extends ThreadCommandInput {
   readonly interactionMode: ProviderInteractionMode;
   readonly bootstrap?: StartThreadBootstrap;
   readonly sourceProposedPlan?: { readonly threadId: ThreadId; readonly planId: PlanId };
+  readonly seenMarker?: import("@t3tools/contracts").ThreadSeenMarker;
   readonly dispatchMode?: "auto" | "queue" | "steer" | "restart" | "start";
   /** Start a new provider session; needs the server's `freshContext` capability. */
   readonly freshContext?: boolean;
@@ -855,6 +856,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
           ? {}
           : { sourcePlanRef: input.sourceProposedPlan }),
         ...(input.freshContext ? { freshContext: true } : {}),
+        ...(input.seenMarker === undefined ? {} : { seenMarker: input.seenMarker }),
         dispatchMode: { type: "start_immediately" },
       },
       resendAfterSocketLoss,
@@ -885,6 +887,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
         ? {}
         : { sourcePlanRef: input.sourceProposedPlan }),
       ...(input.freshContext ? { freshContext: true } : {}),
+      ...(input.seenMarker === undefined ? {} : { seenMarker: input.seenMarker }),
       ...(requestedMode !== "queue" ? { deliveryIntent: requestedMode } : {}),
       dispatchMode,
     },

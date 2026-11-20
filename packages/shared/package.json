@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./seenMarker": {
+      "types": "./src/seenMarker.ts",
+      "import": "./src/seenMarker.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"

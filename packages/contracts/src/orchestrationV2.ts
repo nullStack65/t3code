@@ -1427,6 +1427,13 @@ export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Typ
 export const OrchestrationV2IdleCompaction = Schema.Literals(["beforeCacheExpires", "onReturn"]);
 export type OrchestrationV2IdleCompaction = typeof OrchestrationV2IdleCompaction.Type;
 
+export const ThreadSeenMarker = Schema.Struct({
+  lastSeenMessageId: MessageId,
+  seenAt: IsoDateTime,
+  unseenCount: NonNegativeInt,
+});
+export type ThreadSeenMarker = typeof ThreadSeenMarker.Type;
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
@@ -1437,6 +1444,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   linkedSender: Schema.optional(OrchestrationV2LinkedSender),
   sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+  seenMarker: Schema.optional(ThreadSeenMarker),
   /**
    * The message is the script a provider-native workflow run executes, not prose. Clients show
    * the workflow's opening instead and keep the script behind a disclosure.
@@ -3450,6 +3458,7 @@ export const OrchestrationV2Command = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    seenMarker: Schema.optional(ThreadSeenMarker),
     /** Start a new provider session without the thread's earlier context. Never steers. */
     freshContext: Schema.optional(Schema.Boolean),
     commandId: CommandId,

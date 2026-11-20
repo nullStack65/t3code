@@ -30,6 +30,7 @@ import {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
+import { buildSeenMarker, type SeenMessage } from "@t3tools/client-runtime/seen-marker";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   declinePendingApprovals,
@@ -186,6 +187,7 @@ interface ComposerSendInput {
   readonly draftId: DraftId | null;
   readonly draftThread: DraftSessionState | null;
   readonly activeThread: EnvironmentThreadShell | undefined;
+  readonly seenMessages: ReadonlyArray<SeenMessage>;
   readonly activeThreadKey: string | null;
   readonly activeThreadBranch: string | null;
   readonly activeProject: EnvironmentProject | null;
@@ -273,6 +275,11 @@ interface ComposerSendInput {
   readonly linkCheckoutPullRequest: (threadRef: ScopedThreadRef, url: string) => void;
 }
 
+function seenMarkerForSend(threadKey: string, messages: ReadonlyArray<SeenMessage>) {
+  const seenMarker = buildSeenMarker({ threadKey, messages });
+  return seenMarker ? { seenMarker } : {};
+}
+
 /**
  * Everything the composer's send button can start: a turn on this thread or a new one,
  * a multiple-model start, a queued or steering message, a plan follow-up or implementation
@@ -293,6 +300,7 @@ export function useComposerSend(input: ComposerSendInput) {
     activeProjectIsScratch,
     activeProjectDefaultModelSelection,
     activeMessageCount,
+    seenMessages,
     isServerThread,
     isLocalDraftThread,
     isGitRepo,
@@ -1470,6 +1478,10 @@ export function useComposerSend(input: ComposerSendInput) {
               dispatchMode: turnDispatchMode,
               ...(freshArm === undefined ? {} : { freshContext: true }),
               ...(bootstrap ? { bootstrap } : {}),
+              ...seenMarkerForSend(
+                scopedThreadKey(scopeThreadRef(environmentId, threadIdForSend)),
+                seenMessages,
+              ),
               createdAt: messageCreatedAt,
             },
           }
