@@ -12956,20 +12956,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                         )
                       : claudeLedgerDelta(context.modelLedger, ledger);
                     if (growth !== undefined) resultLedgerUsage.set(message, growth);
-                    context.modelLedger =
-                      !resumedFirstResult &&
-                      growth === undefined &&
-                      context.modelLedger !== undefined
+                    const resumedBaseline = resumedFirstResult
+                      ? mergeOmittedLedgerModels(
+                          lastModelLedgers.get(context.nativeThreadId) ?? undefined,
+                          ledger,
+                        )
+                      : undefined;
+                    context.modelLedger = resumedFirstResult
+                      ? resumedBaseline
+                      : growth === undefined && context.modelLedger !== undefined
                         ? undefined
                         : ledger;
                     lastModelLedgers.set(
                       context.nativeThreadId,
-                      resumedFirstResult
-                        ? (mergeOmittedLedgerModels(
-                            lastModelLedgers.get(context.nativeThreadId) ?? undefined,
-                            ledger,
-                          ) ?? null)
-                        : (ledger ?? null),
+                      resumedFirstResult ? (resumedBaseline ?? null) : (ledger ?? null),
                     );
                     for (const [model, window] of claudeReportedContextWindows(
                       message.modelUsage,
