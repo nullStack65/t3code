@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import { collectComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
+
 import { renderWebhookPrompt, type WebhookRequest } from "./webhookTemplate.ts";
 
 const githubPullRequest: WebhookRequest = {
@@ -204,11 +206,41 @@ describe("renderWebhookPrompt", () => {
   it("marks an appended request that exceeds the copy limit", () => {
     const rendered = renderWebhookPrompt(
       "Triage this event.",
-      { ...githubPullRequest, bodyText: "x".repeat(40_000) },
+      { ...githubPullRequest, bodyText: "x".repeat(200_000) },
       "id",
     );
     assert.include(rendered.prompt, "[truncated]</webhook-data-id>");
-    assert.isBelow(rendered.prompt.length, 40_000);
+    assert.isAtMost(rendered.prompt.length, PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+  });
+
+  it("keeps an appended request inside the send cap, even for a prompt near it", () => {
+    const bare: WebhookRequest = {
+      method: "POST",
+      path: "/api/hooks/task-1",
+      query: "",
+      headers: {},
+      bodyText: "x".repeat(1_000),
+    };
+    const rendered = renderWebhookPrompt("a".repeat(119_780), bare, "id");
+    assert.isAtMost(rendered.prompt.length, PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    assert.include(rendered.prompt, "[truncated]");
+  });
+
+  it("does not split a surrogate pair when the copy is cut", () => {
+    const rendered = renderWebhookPrompt(
+      "Triage.",
+      {
+        method: "POST",
+        path: "/api/hooks/task-1",
+        query: "",
+        headers: {},
+        bodyText: `${"x".repeat(119_900)}😀tail`,
+      },
+      "id",
+    );
+    assert.isTrue(rendered.prompt.isWellFormed());
+    assert.include(rendered.prompt, "[truncated]");
+    assert.notInclude(rendered.prompt, "tail");
   });
 
   it("does not resolve inherited object properties", () => {
