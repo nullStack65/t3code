@@ -186,6 +186,27 @@ jobs:
             apps/server/src/ws.test.ts \
             packages/contracts/src/environment.test.ts
 
+      - name: Gate interaction latency at 400 ms
+        shell: bash
+        working-directory: apps/web
+        run: |
+          set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ms-playwright"
+          vp exec playwright install --only-shell chromium
+          missing=$(vp exec playwright install-deps --dry-run chromium 2>&1 \
+            | sed -n 's/^  \([a-z0-9][a-z0-9.+-]*\)$/\1/p' | grep -Ev '^x?fonts-' || true)
+          if test -n "$missing"; then
+            apt_dir="$RUNNER_TEMP/chromium-apt"
+            mkdir -p "$apt_dir/lists/partial" "$apt_dir/cache/archives/partial" "$apt_dir/debs" "$apt_dir/root"
+            apt_options=(-o "Dir::State::Lists=$apt_dir/lists" -o "Dir::Cache=$apt_dir/cache" -o Debug::NoLocking=1 -o "APT::Sandbox::User=$(id -un)")
+            apt-get "${apt_options[@]}" update -qq
+            closure=$(apt-get "${apt_options[@]}" install -s --no-install-recommends $missing | awk '/^Inst /{print $2}')
+            (cd "$apt_dir/debs" && apt-get "${apt_options[@]}" download $closure)
+            for deb in "$apt_dir"/debs/*.deb; do dpkg-deb -x "$deb" "$apt_dir/root"; done
+            export LD_LIBRARY_PATH="$apt_dir/root/usr/lib/x86_64-linux-gnu:$apt_dir/root/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          vp run test:latency
+
       - name: Test mobile new-task placement, outbox and uploads
         shell: bash
         working-directory: apps/mobile
