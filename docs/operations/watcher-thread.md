@@ -1,6 +1,6 @@
 # Watcher thread
 
-One thread, by default Lead's on the laptop, hears everything that needs attention from every linked environment. The server decides each event from thread state with no agent judgment, queues it durably, and retries until the watcher's machine answers.
+One thread, by default Lead's on the laptop, hears model, usage-limit and link alerts from every linked environment. The thread events below go instead to the thread that launched the lane, read from the lane's `inbox.origin`, else `inbox.requestedBy`. When that thread is archived, deleted or unknown, a thread event reaches no thread, only `modelAlertWebhookUrl` when set, so a founder-facing watcher never hears about a lane it did not launch. The server decides each event from thread state with no agent judgment, queues it durably, and retries until the receiving machine answers.
 
 | Event                  | Fires when                                                                                                                                                                                                                     |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
