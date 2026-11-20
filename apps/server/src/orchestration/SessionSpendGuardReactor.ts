@@ -72,6 +72,7 @@ export const make = Effect.gen(function* () {
     if (settings.sessionSpendGuard.mode === "off") return;
     const thread = yield* snapshots.getThreadDetailById(threadId, {
       activityKinds: SPEND_GUARD_ACTIVITY_KINDS,
+      unboundedActivities: true,
     });
     if (Option.isNone(thread)) return;
     const evaluation = evaluateThreadSpend(thread.value, settings);
@@ -99,7 +100,11 @@ export const make = Effect.gen(function* () {
         },
       );
       const session = thread.value.session;
-      if (session !== null && (session.status === "running" || session.status === "starting")) {
+      if (
+        evaluation.stopReason === "ceiling" &&
+        session !== null &&
+        (session.status === "running" || session.status === "starting")
+      ) {
         const uuid = yield* crypto.randomUUIDv4;
         yield* engine.dispatch({
           type: "thread.turn.interrupt",
@@ -110,6 +115,20 @@ export const make = Effect.gen(function* () {
       }
       return;
     }
+    if (evaluation.level === "flag" && evaluation.stopReason === "ceiling") {
+      if (evaluation.flaggedForCeiling) return;
+      yield* appendGuardActivity(
+        threadId,
+        SPEND_GUARD_FLAGGED_KIND,
+        "Session spend ceiling reached",
+        {
+          ...amounts,
+          reason: "ceiling",
+          detail: describeSpendStop(evaluation, settings.sessionSpendGuard),
+        },
+      );
+      return;
+    }
     if (evaluation.level === "flag" && !evaluation.flaggedSinceIdle) {
       yield* appendGuardActivity(
         threadId,
@@ -117,6 +136,7 @@ export const make = Effect.gen(function* () {
         "Spending with no pull request or file changes",
         {
           ...amounts,
+          reason: "idle",
           detail: `This thread has spent about $${amounts.idleUsd.toFixed(2)} since its last linked pull request or file-changing turn. It stops at $${settings.sessionSpendGuard.idleStopUsd.toFixed(2)}.`,
         },
       );

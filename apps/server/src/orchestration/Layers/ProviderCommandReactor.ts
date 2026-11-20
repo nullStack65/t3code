@@ -363,17 +363,20 @@ const make = Effect.gen(function* () {
       resumedTurnStarts.set(commandId, { event, queued, sent });
       const { messageId, ...request } = event.payload;
       yield* orchestrationEngine
-        .dispatch({
-          type: "thread.turn.start",
-          commandId,
-          ...request,
-          message: {
-            messageId,
-            role: "user",
-            text: turnStart.value.message.text,
-            attachments: turnStart.value.message.attachments ?? [],
+        .dispatch(
+          {
+            type: "thread.turn.start",
+            commandId,
+            ...request,
+            message: {
+              messageId,
+              role: "user",
+              text: turnStart.value.message.text,
+              attachments: turnStart.value.message.attachments ?? [],
+            },
           },
-        })
+          event.metadata.origin === undefined ? undefined : { origin: event.metadata.origin },
+        )
         .pipe(
           Effect.onError(() =>
             Effect.sync(() => {
@@ -1392,7 +1395,7 @@ const make = Effect.gen(function* () {
       titleSeed: event.payload.titleSeed,
       executionScope: thread.executionScope,
       hasOtherUserMessages,
-      fromClientSurface: event.metadata.origin?.surface !== undefined,
+      clientSurface: event.metadata.origin?.surface,
       mode: guardSettings.sessionSpendGuard.mode,
     });
     if (launchRefusal !== null) {
@@ -1404,6 +1407,7 @@ const make = Effect.gen(function* () {
     if (guardSettings.sessionSpendGuard.mode === "enforce") {
       const guardThread = yield* projectionSnapshotQuery.getThreadDetailById(thread.id, {
         activityKinds: SPEND_GUARD_ACTIVITY_KINDS,
+        unboundedActivities: true,
       });
       const spend = Option.isSome(guardThread)
         ? evaluateThreadSpend(guardThread.value, guardSettings)

@@ -1084,6 +1084,113 @@ describe("ProviderCommandReactor", () => {
       }),
   );
 
+  effectIt.effect(
+    "counts context-window rows older than the thread detail cap toward the session ceiling",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            serverSettingsOverrides: {
+              sessionSpendGuard: {
+                mode: "enforce",
+                sessionCeilingUsd: 1,
+                idleStopUsd: 100,
+                idleFlagUsd: 50,
+              },
+              usagePriceOverrides: {
+                "gpt-5-codex": {
+                  inputCostPerMillionTokens: 1_000_000,
+                  outputCostPerMillionTokens: 0,
+                  cacheReadCostPerMillionTokens: 0,
+                },
+              },
+            },
+          }),
+        );
+        const threadId = ThreadId.make("thread-cap");
+        NodeFS.mkdirSync("/tmp/provider-project", { recursive: true });
+        const workspacePath = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "crown-cap-"));
+        yield* Effect.gen(function* () {
+          yield* harness.engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-cap-thread"),
+            threadId,
+            projectId: asProjectId("project-1"),
+            title: "Manager work",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: workspacePath,
+            executionScope: "coordinator",
+            createdAt: "2099-01-01T00:00:00.000Z",
+          });
+          yield* Effect.promise(() =>
+            harness.runEffect(
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                for (let sequence = 1; sequence <= 501; sequence += 1) {
+                  const costly = sequence === 1;
+                  yield* sql`
+                    INSERT INTO projection_thread_activities (
+                      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+                    ) VALUES (
+                      ${`activity-cap-${sequence}`},
+                      ${threadId},
+                      NULL,
+                      'info',
+                      'context-window.updated',
+                      'Context window updated',
+                      ${costly
+                        ? '{"totalProcessedTokens":1,"lastInputTokens":1,"lastOutputTokens":0}'
+                        : '{"totalProcessedTokens":0,"lastInputTokens":0,"lastOutputTokens":0}'},
+                      ${sequence},
+                      '2099-01-01T00:00:00.000Z'
+                    )
+                  `;
+                }
+              }),
+            ),
+          );
+          yield* harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-cap-turn"),
+            threadId,
+            message: {
+              messageId: MessageId.make("message-cap-turn"),
+              role: "user",
+              text: "Status?",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: "2099-01-01T00:01:00.000Z",
+          });
+          yield* Effect.promise(() => harness.drain());
+          const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+            (entry) => entry.id === threadId,
+          );
+          const refusal = thread?.activities.find(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          );
+          expect(refusal).toMatchObject({
+            summary: "Turn refused by the session spend guard",
+          });
+          expect(
+            String(refusal?.payload && (refusal.payload as { detail?: string }).detail),
+          ).toContain("session ceiling");
+          expect(harness.sendTurn).not.toHaveBeenCalled();
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => NodeFS.rmSync(workspacePath, { recursive: true, force: true })),
+          ),
+        );
+      }),
+  );
+
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

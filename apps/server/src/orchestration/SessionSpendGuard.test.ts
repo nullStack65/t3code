@@ -168,7 +168,7 @@ describe("evaluateSpendGuard", () => {
       settings: { ...settings, mode: "flag" },
       activities: [priced("2026-01-01T00:01:00.000Z", 6)],
     });
-    expect(result).toMatchObject({ level: "flag", stopReason: null, idleUsd: 6 });
+    expect(result).toMatchObject({ level: "flag", stopReason: "idle", idleUsd: 6 });
   });
 
   it("stops for the session ceiling ahead of the idle limit", () => {
@@ -213,6 +213,36 @@ describe("evaluateSpendGuard", () => {
     expect(idle.flaggedSinceIdle).toBe(true);
     expect(idle.stoppedSinceIdle).toBe(false);
     expect(idle.stoppedForCeiling).toBe(true);
+    expect(idle.flaggedForCeiling).toBe(false);
+  });
+
+  it("keeps a ceiling flag visible when an earlier idle flag is already recorded", () => {
+    const flagged = evaluate({
+      settings: { ...settings, mode: "flag" },
+      workSignalAts: ["2026-01-01T00:02:00.000Z"],
+      activities: [
+        activity("spend-guard.flagged", "2026-01-01T00:03:00.000Z", { reason: "idle" }),
+        priced("2026-01-01T00:01:00.000Z", 6),
+        priced("2026-01-01T00:04:00.000Z", 4),
+      ],
+    });
+    expect(flagged).toMatchObject({
+      level: "flag",
+      stopReason: "ceiling",
+      flaggedSinceIdle: true,
+      flaggedForCeiling: false,
+      idleUsd: 4,
+      sessionUsd: 10,
+    });
+    const recorded = evaluate({
+      settings: { ...settings, mode: "flag" },
+      activities: [
+        priced("2026-01-01T00:01:00.000Z", 10),
+        activity("spend-guard.flagged", "2026-01-01T00:02:00.000Z", { reason: "ceiling" }),
+      ],
+    });
+    expect(recorded.flaggedForCeiling).toBe(true);
+    expect(recorded.stopReason).toBe("ceiling");
   });
 });
 
@@ -222,7 +252,7 @@ describe("launch and stop copy", () => {
     titleSeed: undefined,
     executionScope: "coding" as const,
     hasOtherUserMessages: true,
-    fromClientSurface: false,
+    clientSurface: undefined,
     mode: "enforce" as const,
   };
 
@@ -234,7 +264,8 @@ describe("launch and stop copy", () => {
     expect(checkLaunch({ ...base, title: "Named thread" })).toBeNull();
     expect(checkLaunch({ ...base, titleSeed: "seed" })).toBeNull();
     expect(checkLaunch({ ...base, hasOtherUserMessages: false })).toBeNull();
-    expect(checkLaunch({ ...base, fromClientSurface: true })).toBeNull();
+    expect(checkLaunch({ ...base, clientSurface: "desktop" })).toBeNull();
+    expect(checkLaunch({ ...base, clientSurface: "cli" })).toBe("untitled");
     expect(checkLaunch({ ...base, mode: "flag" })).toBeNull();
   });
 

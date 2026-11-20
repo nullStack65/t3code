@@ -1,4 +1,5 @@
 import type {
+  ClientSurface,
   OrchestrationCheckpointSummary,
   OrchestrationThread,
   OrchestrationThreadActivity,
@@ -40,6 +41,7 @@ export interface SpendGuardEvaluation {
   readonly idleUsd: number;
   readonly idleSince: string | null;
   readonly flaggedSinceIdle: boolean;
+  readonly flaggedForCeiling: boolean;
   readonly stoppedSinceIdle: boolean;
   readonly stoppedForCeiling: boolean;
 }
@@ -163,6 +165,9 @@ export function evaluateSpendGuard(input: SpendGuardInput): SpendGuardEvaluation
       ? (activity.payload as Record<string, unknown>).reason
       : undefined;
   const flaggedSinceIdle = guardActivities(SPEND_GUARD_FLAGGED_KIND, afterIdle).length > 0;
+  const flaggedForCeiling = guardActivities(SPEND_GUARD_FLAGGED_KIND, afterRelease).some(
+    (activity) => stoppedPayloadReason(activity) === "ceiling",
+  );
   const stoppedSinceIdle = guardActivities(SPEND_GUARD_STOPPED_KIND, afterIdle).some(
     (activity) => stoppedPayloadReason(activity) === "idle",
   );
@@ -175,6 +180,7 @@ export function evaluateSpendGuard(input: SpendGuardInput): SpendGuardEvaluation
     idleUsd,
     idleSince,
     flaggedSinceIdle,
+    flaggedForCeiling,
     stoppedSinceIdle,
     stoppedForCeiling,
   };
@@ -185,7 +191,7 @@ export function evaluateSpendGuard(input: SpendGuardInput): SpendGuardEvaluation
     return { ...base, level: "stop", stopReason };
   }
   if (stopReason !== null || idleUsd >= idleFlagUsd) {
-    return { ...base, level: "flag", stopReason: null };
+    return { ...base, level: "flag", stopReason };
   }
   return { ...base, level: "ok", stopReason: null };
 }
@@ -215,8 +221,8 @@ export function describeSpendStop(
 ): string {
   const usd = (value: number) => `$${value.toFixed(2)}`;
   return evaluation.stopReason === "ceiling"
-    ? `This thread has spent about ${usd(evaluation.sessionUsd)}, past its ${usd(settings.sessionCeilingUsd)} session ceiling. Append a spend-guard.released activity or raise sessionSpendGuard.sessionCeilingUsd to continue.`
-    : `This thread has spent about ${usd(evaluation.idleUsd)} with no linked pull request or file-changing turn, past the ${usd(settings.idleStopUsd)} idle limit. Link a pull request, change files, or append a spend-guard.released activity to continue.`;
+    ? `This thread has spent about ${usd(evaluation.sessionUsd)}, past its ${usd(settings.sessionCeilingUsd)} session ceiling. Raise sessionSpendGuard.sessionCeilingUsd to continue.`
+    : `This thread has spent about ${usd(evaluation.idleUsd)} with no linked pull request or file-changing turn, past the ${usd(settings.idleStopUsd)} idle limit. Link a pull request or change files to continue.`;
 }
 
 export type LaunchRefusal = "untitled" | "ownerless";
@@ -226,12 +232,16 @@ export interface LaunchCheckInput {
   readonly titleSeed: string | undefined;
   readonly executionScope: ThreadExecutionScope | null | undefined;
   readonly hasOtherUserMessages: boolean;
-  readonly fromClientSurface: boolean;
+  readonly clientSurface: ClientSurface | undefined;
   readonly mode: SessionSpendGuardSettings["mode"];
 }
 
+const INTERACTIVE_SURFACES: ReadonlySet<ClientSurface> = new Set(["web", "desktop", "mobile"]);
+
 export function checkLaunch(input: LaunchCheckInput): LaunchRefusal | null {
-  if (input.mode !== "enforce" || input.fromClientSurface) return null;
+  const interactive =
+    input.clientSurface !== undefined && INTERACTIVE_SURFACES.has(input.clientSurface);
+  if (input.mode !== "enforce" || interactive) return null;
   if (input.executionScope === null || input.executionScope === undefined) return "ownerless";
   const untitled = input.title.trim() === "" || input.title.trim() === DEFAULT_THREAD_TITLE;
   if (untitled && input.titleSeed === undefined && input.hasOtherUserMessages) return "untitled";
