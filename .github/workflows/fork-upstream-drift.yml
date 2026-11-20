@@ -1,0 +1,44 @@
+name: Upstream release arrival drift
+
+# A receiver is not an upstream subscription. Ingress activation is separately owned.
+# ISO-week cohorts update only on arrivals; intentionally no schedule or fork release trigger.
+on:
+  repository_dispatch:
+    types: [upstream-release-published]
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Canonical pingdotgg/t3code published release ID (manual recovery only)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# Serialize arrivals so retained-artifact reconciliation precedes the next report.
+concurrency:
+  group: fork-upstream-release-drift
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify canonical release and produce weekly cohort
+        id: report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/fork_delta/release_report.py --event "$GITHUB_EVENT_PATH"
+      - uses: actions/upload-artifact@v7
+        if: steps.report.outputs.duplicate == 'false'
+        with:
+          name: ${{ steps.report.outputs.artifact }}
+          path: fork-drift-report/
+          retention-days: 90
+          if-no-files-found: error
