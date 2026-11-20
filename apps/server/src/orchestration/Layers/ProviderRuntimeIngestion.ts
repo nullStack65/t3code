@@ -53,7 +53,11 @@ import {
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
-import { describeCompactionLoop, recordCompaction } from "../CompactionLoopGuard.ts";
+import {
+  CODEX_COMPACTION_LOOP_LIMIT,
+  describeCompactionLoop,
+  recordCompaction,
+} from "../CompactionLoopGuard.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -1038,15 +1042,22 @@ const make = Effect.gen(function* () {
     );
 
   const compactionHistoryByThread = new Map<ThreadId, ReadonlyArray<number>>();
+  const manualCompactionAtByThread = new Map<ThreadId, number>();
   const guardCompactionLoop = Effect.fn("guardCompactionLoop")(function* (
     threadId: ThreadId,
     event: ProviderRuntimeEvent,
     activeTurnId: TurnId | null,
   ) {
-    const result = recordCompaction(
-      compactionHistoryByThread.get(threadId) ?? [],
-      Date.parse(event.createdAt),
-    );
+    const previous = compactionHistoryByThread.get(threadId) ?? [];
+    const atMs = Date.parse(event.createdAt);
+    const result = recordCompaction(previous, atMs);
+    if (result.tripped && activeTurnId === null) {
+      compactionHistoryByThread.set(threadId, [
+        ...previous.filter((at) => atMs - at < CODEX_COMPACTION_LOOP_LIMIT.windowMs),
+        atMs,
+      ]);
+      return;
+    }
     compactionHistoryByThread.set(threadId, result.history);
     if (!result.tripped || activeTurnId === null) return;
     yield* orchestrationEngine.dispatch({
@@ -2760,12 +2771,19 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
-      if (
-        isCompactedThreadState &&
-        event.provider === "codex" &&
-        activityEvent.requestId === undefined
-      ) {
-        yield* guardCompactionLoop(thread.id, event, activeTurnId);
+      if (isCompactedThreadState && event.provider === "codex") {
+        const atMs = Date.parse(event.createdAt);
+        if (activityEvent.requestId !== undefined) {
+          manualCompactionAtByThread.set(thread.id, atMs);
+        } else {
+          const manualAt = manualCompactionAtByThread.get(thread.id);
+          const pairedManualSignal =
+            manualAt !== undefined &&
+            Math.abs(atMs - manualAt) < CODEX_COMPACTION_LOOP_LIMIT.duplicateSignalMs;
+          if (!pairedManualSignal) {
+            yield* guardCompactionLoop(thread.id, event, activeTurnId);
+          }
+        }
       }
       // The turn is over: drop the live observation so the settled shell does
       // not keep advertising provider progress. Only the accepted lifecycle
@@ -2773,6 +2791,7 @@ const make = Effect.gen(function* () {
       // must not erase the current turn's evidence.
       if (event.type === "session.exited") {
         compactionHistoryByThread.delete(thread.id);
+        manualCompactionAtByThread.delete(thread.id);
         threadPostStartActivity.clearThread(thread.id);
       } else if (isTerminalTurn && shouldApplyThreadLifecycle) {
         threadPostStartActivity.clearThread(thread.id, observationTurnId);
