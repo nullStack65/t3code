@@ -24,13 +24,19 @@ const ThreadTypeEntry = Schema.Struct({
   compact_at: TokenCount,
   cache_ttl: CacheTtl,
   refused_models: Schema.Array(Schema.String),
+  summary_cap: Schema.optional(TokenCount),
+});
+
+const ContextWindows = Schema.Struct({
+  claude: TokenCount,
+  codex: TokenCount,
 });
 
 export const ThreadTypePolicyFile = Schema.Struct({
   schema: Schema.Literal("thread-type-policy-v1"),
   source: Schema.String,
   decision: Schema.String,
-  context_window: TokenCount,
+  context_window: ContextWindows,
   default_type: ThreadTypeName,
   classify: Schema.Array(
     Schema.Struct({ type: ThreadTypeName, top_level_only: Schema.Boolean, title: Schema.String }),
@@ -48,9 +54,11 @@ export type ThreadTypePolicyFile = typeof ThreadTypePolicyFile.Type;
 
 export interface ThreadTypeLaunch {
   readonly type: ThreadType;
-  readonly contextWindow: number;
+  readonly claudeContextWindow: number;
+  readonly codexContextWindow: number;
   readonly compactAt: number;
   readonly cacheTtl: "5m" | "1h";
+  readonly summaryCap?: number;
 }
 
 export class ThreadTypeModelRefusedError extends Schema.TaggedError<ThreadTypeModelRefusedError>()(
@@ -68,7 +76,7 @@ export class ThreadTypeModelRefusedError extends Schema.TaggedError<ThreadTypeMo
 
 export const isThreadTypeModelRefusedError = Schema.is(ThreadTypeModelRefusedError);
 
-const TITLE_TAG = /^\s*\[([a-z]+)\]/;
+const TITLE_TAG = /^\s*\[([a-z]+)\]/i;
 
 export function normalizeModel(model: string): string {
   let value = model.trim().toLowerCase();
@@ -89,7 +97,7 @@ export function classifyThread(
 ): ThreadType {
   if (thread.standing != null) return "standing";
   const title = thread.title ?? "";
-  const tag = TITLE_TAG.exec(title)?.[1];
+  const tag = TITLE_TAG.exec(title)?.[1]?.toLowerCase();
   if (tag !== undefined && isThreadType(tag)) return tag;
   const child = isDelegatedAppThread(thread);
   for (const rule of policy.classify) {
@@ -118,10 +126,26 @@ export function resolveThreadTypeLaunch(
   }
   return Effect.succeed({
     type,
-    contextWindow: policy.context_window,
+    claudeContextWindow: policy.context_window.claude,
+    codexContextWindow: policy.context_window.codex,
     compactAt: entry.compact_at,
     cacheTtl: entry.cache_ttl,
+    ...(entry.summary_cap === undefined ? {} : { summaryCap: entry.summary_cap }),
   });
+}
+
+export const SUMMARY_CAP_CHARS_PER_TOKEN = 2;
+
+export function carriedSummaryWithinCap(summaryCap: number, text: string): boolean {
+  return Math.ceil(text.length / SUMMARY_CAP_CHARS_PER_TOKEN) <= summaryCap;
+}
+
+export function carriedSummaryInstruction(summaryCap: number): string {
+  return [
+    `The carried summary of this compaction must stay within ${summaryCap} tokens.`,
+    `Count one token per ${SUMMARY_CAP_CHARS_PER_TOKEN} characters and stop at ${summaryCap * SUMMARY_CAP_CHARS_PER_TOKEN} characters.`,
+    "Keep decisions, open work and exact identifiers; drop narration.",
+  ].join(" ");
 }
 
 export function threadTypePolicyPath(environment: NodeJS.ProcessEnv = process.env): string {

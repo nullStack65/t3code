@@ -59,9 +59,11 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
   threadType: Schema.optional(
     Schema.Struct({
       type: Schema.String,
-      contextWindow: Schema.Number,
+      claudeContextWindow: Schema.Number,
+      codexContextWindow: Schema.Number,
       compactAt: Schema.Number,
       cacheTtl: Schema.Literals(["5m", "1h"]),
+      summaryCap: Schema.optional(Schema.Number),
     }),
   ),
 });

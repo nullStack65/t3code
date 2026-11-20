@@ -162,6 +162,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import * as ThreadTypePolicy from "../ThreadTypePolicy.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { snapshotMcpApp } from "../../mcpApps/McpAppSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
@@ -292,7 +293,9 @@ export function claudeAutoCompactPercent(
 ): string {
   const effective = claudeCompactEffectiveWindow(threadType.contextWindow, modelMaxTokens);
   if (effective <= 0) return "0.00";
-  const hundredths = Math.ceil((threadType.compactAt * 10_000) / effective);
+  const reachable = effective - CLAUDE_COMPACT_FLOOR_GAP;
+  const target = Math.min(threadType.compactAt, reachable);
+  const hundredths = Math.floor((target * 10_000) / effective);
   return (hundredths / 100).toFixed(2);
 }
 
@@ -302,7 +305,7 @@ export function claudeAppliedCompactAt(
 ): number {
   const effective = claudeCompactEffectiveWindow(threadType.contextWindow, modelMaxTokens);
   if (effective <= 0) return threadType.compactAt;
-  const hundredths = Math.ceil((threadType.compactAt * 10_000) / effective);
+  const hundredths = Number(claudeAutoCompactPercent(threadType, modelMaxTokens)) * 100;
   const applied = Math.floor((effective * hundredths) / 10_000);
   return Math.min(applied, effective - CLAUDE_COMPACT_FLOOR_GAP);
 }
@@ -2290,7 +2293,7 @@ export function makeClaudeQueryOptions(input: {
       : (resolveClaudeCatalogContextWindowTokens(input.modelCatalog, input.modelSelection) ?? null);
   const autoCompactWindow =
     threadType !== undefined
-      ? String(threadType.contextWindow)
+      ? String(threadType.claudeContextWindow)
       : input.settings?.autoCompactWindow === undefined ||
           input.settings.autoCompactWindow.length === 0
         ? undefined
@@ -2332,7 +2335,7 @@ export function makeClaudeQueryOptions(input: {
               ? {}
               : {
                   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: claudeAutoCompactPercent(
-                    threadType,
+                    { contextWindow: threadType.claudeContextWindow, compactAt: threadType.compactAt },
                     modelMaxTokens,
                   ),
                   CLAUDE_CODE_PROMPT_CACHE_TTL: threadType.cacheTtl,
@@ -2405,7 +2408,10 @@ export function makeClaudeQueryOptions(input: {
       type: "preset" as const,
       preset: "claude_code" as const,
       append: [
-        buildRuntimeInstructions({ harness: "Claude Code" }) +
+        (threadType?.summaryCap === undefined
+          ? ""
+          : ThreadTypePolicy.carriedSummaryInstruction(threadType.summaryCap) + "\n\n") +
+          buildRuntimeInstructions({ harness: "Claude Code" }) +
           (input.mcpServers === undefined
             ? ""
             : T3_CODE_ORCHESTRATION_INSTRUCTIONS +
@@ -13232,7 +13238,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const autoCompactWindow =
               turnInput.runtimePolicy.threadType === undefined || resolvedAutoCompactWindow === ""
                 ? resolvedAutoCompactWindow
-                : String(turnInput.runtimePolicy.threadType.contextWindow);
+                : String(turnInput.runtimePolicy.threadType.claudeContextWindow);
             const context: ActiveClaudeTurnContext = {
               input: turnInput,
               autoCompactWindow,
