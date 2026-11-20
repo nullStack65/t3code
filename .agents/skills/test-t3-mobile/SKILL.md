@@ -5,6 +5,9 @@ description: Test T3 Code's native iOS and Android app through its Device panel 
 
 # Test T3 Mobile
 
+Name what you test with [the feature map](../test-t3-app/references/feature-map.md);
+its Mobile section covers the app's screens.
+
 ## Open the device
 
 Call `device_list`, then `device_open` with the selected host and device IDs.

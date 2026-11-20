@@ -184,7 +184,8 @@ jobs:
             apps/web/src/components/chat/draftUploadReconcile.test.ts \
             apps/web/src/lib/attachmentUploadQueue.test.ts \
             apps/server/src/ws.test.ts \
-            packages/contracts/src/environment.test.ts
+            packages/contracts/src/environment.test.ts \
+            scripts/feature-map.test.ts
 
       - name: Test mobile new-task placement, outbox and uploads
         shell: bash

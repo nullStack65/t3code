@@ -66,6 +66,7 @@ We need to be on the same page with terminology. When communicating, use this la
 
 The most common defect in this repo is a change that works on the path you tested and is missing everywhere else. Before calling frontend work done, walk this list and say which entries applied:
 
+- **Feature map.** [The feature map](.agents/skills/test-t3-app/references/feature-map.md) names every surface the way users see it. Use its names when you talk about UI, and add a new route or keybinding command to it; `scripts/feature-map.test.ts` fails until you do.
 - **Entry points.** A behavior reachable from the chat view is usually also reachable from Settings, the command palette, and a keybinding. Fixing one is not fixing the feature.
 - **Clients.** Web, desktop (wraps web, adds Electron shell/IPC), and mobile (React Native, separate navigation). Shared logic lives in `packages/client-runtime`
 - **Providers.** Codex, Claude, Cursor, Grok, OpenCode, Antigravity, Kiro, Pi, Muse Code, fx, and ACP Registry each have an adapter. Provider-shaped features need a decision per adapter, even if the decision is "not supported here".
