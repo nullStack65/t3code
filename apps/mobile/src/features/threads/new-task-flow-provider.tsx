@@ -1,4 +1,5 @@
 import { ActiveNewTaskContext } from "../../state/active-new-task";
+import { optionsForModelSwitch } from "@t3tools/client-runtime/model-traits";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { useNowMinuteMs } from "../../lib/clock";
 import * as Dialog from "../../components/ui/Dialog";
@@ -647,9 +648,18 @@ export function NewTaskFlowProvider(
     if (!option) {
       return;
     }
-    const selection = withRememberedModelOptions(
+    const remembered = withRememberedModelOptions(
       options ? { ...option.selection, options } : option.selection,
     );
+    const nextOptions = optionsForModelSwitch({
+      fromOptions: selectedModel?.options,
+      fromCapabilities: selectedModelOption?.capabilities,
+      toCapabilities: option.capabilities,
+      baseOptions: remembered.options,
+    });
+    const selection = nextOptions
+      ? { ...remembered, options: nextOptions }
+      : { instanceId: remembered.instanceId, model: remembered.model };
     updateComposerDraftSettings(selectedProjectDraftKey, { modelSelection: selection });
     setStickyComposerModelSelection(selection);
   };
