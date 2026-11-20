@@ -124,6 +124,7 @@ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { findServedModel, unservedModelMessage } from "../provider/servedModel.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -369,42 +370,8 @@ function listCapabilityModels(input: {
   return { listed, omitted: visible.length - listed.length };
 }
 
-/** Names advertised slugs to retry with: same last `/` segment first, else a short list. */
-function advertisedModelsHint(models: ReadonlyArray<ServerProviderModel>, requested: string) {
-  const lastSegment = (slug: string) => slug.slice(slug.lastIndexOf("/") + 1).toLowerCase();
-  const wanted = lastSegment(requested);
-  const close = models.filter((model) => lastSegment(model.slug) === wanted);
-  if (close.length > 0) {
-    return `Did you mean ${close
-      .slice(0, LISTED_MODEL_LIMIT)
-      .map((model) => model.slug)
-      .join(", ")}?`;
-  }
-  const listed = models
-    .toSorted((a, b) => Number(a.isLegacy ?? false) - Number(b.isLegacy ?? false))
-    .slice(0, LISTED_MODEL_LIMIT);
-  const omitted = models.length - listed.length;
-  return `Advertised models: ${listed.map((model) => model.slug).join(", ")}${
-    omitted > 0 ? ` and ${omitted} more; orchestrator_capabilities with search finds them` : ""
-  }.`;
-}
-
-/** Option ids and allowed values are all a delegating agent needs; labels are UI copy. */
-function capabilityModelOption(descriptor: ProviderOptionDescriptor): OrchestratorMcpModelOption {
-  const defaultValue = getProviderOptionCurrentValue(descriptor);
-  return {
-    id: descriptor.id,
-    values:
-      descriptor.type === "boolean" ? [false, true] : descriptor.options.map((choice) => choice.id),
-    ...(defaultValue === undefined ? {} : { default: defaultValue }),
-  };
-}
-
 const advertisedModel = (provider: ServerProvider, model: string) =>
-  provider.models.find((candidate) => candidate.slug === model) ??
-  provider.models.find((candidate) =>
-    candidate.aliases?.some((alias) => alias.toLowerCase() === model.toLowerCase()),
-  );
+  findServedModel(provider.models, model);
 
 const withV = (version: string) => (version.startsWith("v") ? version : `v${version}`);
 
@@ -421,11 +388,23 @@ export const requireAdvertisedModel = (provider: ServerProvider, model: string) 
     failure(
       "model_unavailable",
       updateRequired === undefined
-        ? `Model ${model} is not advertised by provider ${provider.instanceId}. ${advertisedModelsHint(provider.models, model)}`
+        ? (unservedModelMessage(provider.instanceId, model, provider.models) ??
+            `Model ${model} is not advertised by provider ${provider.instanceId}.`)
         : `Model ${model} needs provider ${provider.instanceId} at ${withV(updateRequired.minVersion)} or newer, but the detected CLI is ${detectedVersion === null ? "an unknown version" : withV(detectedVersion)}. Ask the user to update it or point the provider's binary path at a newer install.`,
     ),
   );
 };
+
+/** Option ids and allowed values are all a delegating agent needs; labels are UI copy. */
+function capabilityModelOption(descriptor: ProviderOptionDescriptor): OrchestratorMcpModelOption {
+  const defaultValue = getProviderOptionCurrentValue(descriptor);
+  return {
+    id: descriptor.id,
+    values:
+      descriptor.type === "boolean" ? [false, true] : descriptor.options.map((choice) => choice.id),
+    ...(defaultValue === undefined ? {} : { default: defaultValue }),
+  };
+}
 
 function providerConstraints(
   provider: ServerProvider | undefined,

@@ -36,7 +36,9 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import type { ServerProvider } from "@t3tools/contracts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import {
@@ -94,8 +96,10 @@ const layerReceiptsTest = CommandReceiptStore.layer.pipe(
 );
 
 const layerDispatchChokepointTest =
-  (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>
+  (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) =>
+  (dispatched: Array<string>, providers: ReadonlyArray<ServerProvider> = []) =>
     ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer(providers)),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -211,6 +215,68 @@ it.effect(
   },
 );
 
+it.effect(
+  "the dispatch chokepoint refuses a Grok model on claudeAgent and accepts a model that instance serves",
+  () => {
+    const threadId = ThreadId.make("thread:thread-management:chokepoint");
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    const dispatched: Array<string> = [];
+    const provider = {
+      instanceId,
+      driver: ProviderDriverKind.make("claudeAgent"),
+      enabled: true,
+      installed: true,
+      status: "ready",
+      version: "test",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      models: [
+        {
+          slug: "claude-opus",
+          name: "Opus",
+          aliases: ["Opus"],
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+      slashCommands: [],
+      skills: [],
+    } as ServerProvider;
+    const layerTest = layerDispatchChokepointTest(ServerSettings.layerTest())(dispatched, [
+      provider,
+    ]);
+    const send = (commandId: string, model: string) =>
+      ThreadManagementService.ThreadManagementService.pipe(
+        Effect.flatMap((threads) =>
+          threads.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(commandId),
+            threadId,
+            messageId: MessageId.make(`message:${commandId}`),
+            text: "Continue.",
+            attachments: [],
+            modelSelection: { instanceId, model },
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          }),
+        ),
+      );
+
+    return Effect.gen(function* () {
+      const refused = yield* send("command:grok-on-claude", "grok/grok-4.7").pipe(Effect.flip);
+      expect(refused).toBeInstanceOf(Orchestrator.OrchestratorCommandRejectedError);
+      expect(String(refused.cause)).toContain("grok/grok-4.7");
+      expect(String(refused.cause)).toContain("claudeAgent");
+      expect(String(refused.cause)).toContain("claude-opus");
+      expect(dispatched).toEqual([]);
+
+      yield* send("command:opus-on-claude", "claude-opus");
+      expect(dispatched).toEqual(["message.dispatch"]);
+    }).pipe(Effect.provide(layerTest));
+  },
+);
+
 it.effect.each([
   { label: "fails a send that starts a turn", running: false },
   { label: "still steers a running turn", running: true },
@@ -219,6 +285,7 @@ it.effect.each([
   const threadId = ThreadId.make("thread:thread-management:worktree-gone");
   const dispatched: Array<string> = [];
   const layerTest = ThreadManagementService.layerWithLegacyImporter.pipe(
+    Layer.provide(ProviderRegistryMock.layer()),
     Layer.provide(
       Layer.succeed(ThreadWorktreeRestore, {
         restore: () =>
@@ -323,6 +390,7 @@ it.effect("waitForThread follows a restart continuation instead of the cut run",
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -400,6 +468,7 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -478,6 +547,7 @@ it.effect("waitForThread settles delegated work on a thread rolled back past its
       completedAt: DateTime.makeUnsafe(1_000),
     } as unknown as OrchestrationV2Run;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -531,6 +601,7 @@ it.effect("waitForThread returns the cut run once its continuation is declined",
     const declined = yield* Deferred.make<void>();
     let pending = true;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -626,6 +697,7 @@ it.effect.each([
             }),
       } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
       const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(ProviderRegistryMock.layer()),
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
@@ -720,6 +792,7 @@ it.effect.each([
     // The notification starts after the completed run was observed, before settlement commits.
     let raced = false;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -888,6 +961,7 @@ it.effect.each([
     const teardowns: Array<string> = [];
     const tornDown = yield* Deferred.make<void>();
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           isLive: () => Effect.succeed(true),
@@ -969,6 +1043,7 @@ it.effect("Force stop refuses once a newer run has started, before killing anyth
     const threadId = ThreadId.make("thread:thread-management:force-stop-superseded");
     let killed = false;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(ProviderRegistryMock.layer()),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -1016,6 +1091,7 @@ it.effect(
         ]),
       );
       const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(ProviderRegistryMock.layer()),
         Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
         Layer.provide(
           Layer.mock(Orchestrator.OrchestratorV2)({

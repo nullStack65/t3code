@@ -102,6 +102,7 @@ import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const layerPlatformTest = Layer.merge(
   Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
@@ -124,6 +125,7 @@ const layerVcsDriverRegistryTest = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProcess.layer),
   Layer.provide(layerServerConfig),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 const layerCheckpointStoreTest = CheckpointStore.layer.pipe(
@@ -361,6 +363,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 const layerLegacyImportTest = Layer.merge(RuntimeLayer.layer, layerProjectionReplayTest).pipe(
@@ -374,9 +377,11 @@ const layerLegacyImportTest = Layer.merge(RuntimeLayer.layer, layerProjectionRep
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 const layerScheduledTasksTest = ScheduledTaskService.layer.pipe(
+  Layer.provide(ProviderRegistryMock.layer()),
   Layer.provide(
     Layer.mergeAll(
       ManagedPolicy.layerTest(),
@@ -501,6 +506,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provideMerge(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 it.layer(layerProjectDeletionTest)("project deletion during thread commands", (it) => {
@@ -1381,6 +1387,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
@@ -3764,7 +3771,10 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const standingShell = shellOf(yield* orchestrator.getShellSnapshot());
       assert.deepEqual(standingShell.standing, persona);
-      assert.deepEqual((yield* orchestrator.getThreadProjection(threadId)).thread.standing, persona);
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.standing,
+        persona,
+      );
       // Standing is identity, not activity: the thread keeps its place.
       assert.equal(
         DateTime.toEpochMillis(standingShell.updatedAt),
@@ -12743,6 +12753,7 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 it.layer(layerQueueResumeDisabledInstanceTest)(

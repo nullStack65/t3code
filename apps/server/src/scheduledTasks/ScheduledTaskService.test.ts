@@ -6,8 +6,10 @@ import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ScheduledTaskError,
+  type ServerProvider,
   ScheduledTaskId,
   type ScheduledTaskUpsertInput,
   SecretRef,
@@ -36,6 +38,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
 
@@ -201,6 +204,7 @@ it.effect(
             Layer.provideMerge(
               ScheduledTaskService.layer,
               Layer.mergeAll(
+                ProviderRegistryMock.layer(),
                 ManagedPolicy.layerTest(),
                 Layer.mock(ThreadLaunchService.ThreadLaunchService)({
                   launch: () =>
@@ -295,6 +299,7 @@ it.effect(
             Layer.provideMerge(
               ScheduledTaskService.layer,
               Layer.mergeAll(
+                ProviderRegistryMock.layer(),
                 ManagedPolicy.layerTest(),
                 Layer.mock(ThreadLaunchService.ThreadLaunchService)({
                   launch: () =>
@@ -360,6 +365,7 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -434,6 +440,7 @@ it.effect.each([
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -520,6 +527,7 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -590,6 +598,7 @@ it.effect("a fresh-session task launches one thread, then starts each later run 
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             launch: () =>
@@ -684,6 +693,7 @@ it.effect("a refused dispatch records its refusal, and opaque causes stay generi
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -731,6 +741,7 @@ it.effect("a first run whose thread was deleted before it bound removes the task
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             launch: () =>
@@ -784,6 +795,7 @@ it.effect.each(["recreated under the same id", "moved to another project"] as co
       const layer = ScheduledTaskService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            ProviderRegistryMock.layer(),
             ManagedPolicy.layerTest(),
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({
               launch: () =>
@@ -845,6 +857,7 @@ it.effect("refuses saving an enabled task above the policy ceiling", () =>
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest({
             schemaVersion: 1,
             organization: "Example Corp",
@@ -928,6 +941,7 @@ it.effect("checks a task's destination thread only when the destination changes"
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -1006,6 +1020,7 @@ it.effect("a run interrupted right after it reserves the task does not block the
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             launch: () =>
@@ -1066,4 +1081,84 @@ it.effect("a run interrupted right after it reserves the task does not block the
       assert.equal(yield* Ref.get(launches), 1);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect(
+  "refuses a Grok model on claudeAgent when a schedule is saved and accepts a served model",
+  () =>
+    Effect.gen(function* () {
+      const provider = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        enabled: true,
+        installed: true,
+        status: "ready",
+        version: "test",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        models: [
+          {
+            slug: "claude-opus",
+            name: "Opus",
+            isCustom: false,
+            capabilities: null,
+          },
+        ],
+        slashCommands: [],
+        skills: [],
+      } as ServerProvider;
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ProviderRegistryMock.layer([provider]),
+            ManagedPolicy.layerTest(),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            NodeCrypto.layer,
+            Scheduler.layer,
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const input = {
+          title: "Nightly",
+          prompt: "Check the lane.",
+          enabled: false,
+          schedule: { type: "interval" as const, everyMs: 60_000 },
+          projectId: ProjectId.make("project:test"),
+          workspaceStrategy: { type: "root" as const },
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+        };
+        const refused = yield* service
+          .upsert({
+            ...input,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "grok/grok-4.7",
+            },
+          })
+          .pipe(Effect.flip);
+        assert.isTrue(isScheduledTaskError(refused));
+        assert.include(refused.message, "grok/grok-4.7");
+        assert.include(refused.message, "claudeAgent");
+        assert.include(refused.message, "claude-opus");
+
+        const { task } = yield* service.upsert({
+          ...input,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-opus",
+          },
+        });
+        assert.equal(task.modelSelection.model, "claude-opus");
+        assert.equal(task.modelSelection.instanceId, "claudeAgent");
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

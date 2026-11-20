@@ -10,6 +10,8 @@ import {
   EventId,
   GuestMessageId,
   MessageId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -17,6 +19,7 @@ import {
   type OrchestrationV2Command,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
+  type ServerProvider,
   type UserInputAttachments,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -31,8 +34,10 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
+  OrchestratorCommandRejectedError,
   OrchestratorDispatchError,
 } from "./Orchestrator.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { dispatchCommand } from "./ThreadMessageIntake.ts";
 
@@ -41,6 +46,7 @@ const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
 }).pipe(
   Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
   Layer.provideMerge(ServerSettings.layerTest()),
+  Layer.provideMerge(ProviderRegistryMock.layer()),
 );
 
 const layerFailingDispatchHandler =
@@ -474,4 +480,69 @@ it.effect("refuses a queued edit that keeps a file another edit already deleted"
     yield* edit([kept]);
     expect(captured).toHaveLength(2);
   }).pipe(Effect.provide(layerIntakeTest)),
+);
+
+const claudeCatalog = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  driver: ProviderDriverKind.make("claudeAgent"),
+  enabled: true,
+  installed: true,
+  status: "ready",
+  version: "test",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-01-01T00:00:00.000Z",
+  models: [
+    {
+      slug: "claude-opus",
+      name: "Opus",
+      aliases: ["Opus"],
+      isCustom: false,
+      capabilities: null,
+    },
+  ],
+  slashCommands: [],
+  skills: [],
+} as ServerProvider;
+
+it.effect(
+  "refuses a Grok model on claudeAgent before a send and accepts a model that instance serves",
+  () =>
+    Effect.gen(function* () {
+      const captured: OrchestrationV2ServerCommand[] = [];
+      const layer = Layer.mergeAll(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          dispatch: layerFailingDispatchHandler(captured),
+        }),
+        ProviderRegistryMock.layer([claudeCatalog]),
+      );
+      const send = (commandId: string, model: string) =>
+        dispatchCommand({
+          type: "message.dispatch",
+          commandId: CommandId.make(commandId),
+          threadId: ThreadId.make("thread-model-guard"),
+          messageId: MessageId.make(`message-${commandId}`),
+          text: "Continue.",
+          attachments: [],
+          modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model },
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "user",
+          creationSource: "web",
+        }).pipe(Effect.provide(layer));
+
+      const refused = yield* send("send-grok", "grok/grok-4.7").pipe(Effect.flip);
+      expect(refused).toBeInstanceOf(OrchestratorCommandRejectedError);
+      expect(String(refused.cause)).toContain("grok/grok-4.7");
+      expect(String(refused.cause)).toContain("claudeAgent");
+      expect(String(refused.cause)).toContain("claude-opus");
+      expect(captured).toHaveLength(0);
+
+      const accepted = yield* send("send-opus", "claude-opus").pipe(Effect.result);
+      expect(accepted._tag).toBe("Failure");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toMatchObject({
+        type: "message.dispatch",
+        modelSelection: { instanceId: "claudeAgent", model: "claude-opus" },
+      });
+    }).pipe(Effect.provide(layerIntakeTest)),
 );

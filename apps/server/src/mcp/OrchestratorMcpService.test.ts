@@ -78,6 +78,7 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
@@ -2573,6 +2574,126 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  it.effect("refuses a Grok model on claudeAgent and accepts a model that instance serves", () =>
+    Effect.gen(function* () {
+      const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+      const claude = providerSnapshot({
+        instanceId: claudeInstanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        model: "claude-opus",
+      });
+      const dispatched = yield* Ref.make<
+        ReadonlyArray<{ modelSelection?: { instanceId: string; model: string } }>
+      >([]);
+      let delegated = false;
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: claudeInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Summarize the diff.",
+        title: null,
+        model: "claude-opus",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: (threadId) =>
+            Effect.succeed(
+              threadId === parentThreadId
+                ? parentProjection(delegated ? [task] : [])
+                : childProjection,
+            ),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command as never]).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  delegated = true;
+                }),
+              ),
+              Effect.as({
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: null,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never),
+            ),
+        }),
+        ServerSettings.layerTest(),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+          {
+            ...claude,
+            models: [
+              {
+                slug: "claude-opus",
+                name: "Opus",
+                aliases: ["Opus"],
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
+          },
+        ]),
+        adapterRegistryLayer([codexInstanceId, claudeInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const refused = yield* service
+          .delegateTask(scope, {
+            task: "Summarize the diff.",
+            target: { providerInstanceId: claudeInstanceId, model: "grok/grok-4.7" },
+            mode: "async",
+            clientRequestId: "delegate-grok-on-claude",
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused.code, "model_unavailable");
+        assert.include(refused.message, "grok/grok-4.7");
+        assert.include(refused.message, "claudeAgent");
+        assert.include(refused.message, "claude-opus");
+        assert.equal((yield* Ref.get(dispatched)).length, 0);
+
+        const accepted = yield* service.delegateTask(scope, {
+          task: "Summarize the diff.",
+          target: { providerInstanceId: claudeInstanceId, model: "Opus" },
+          mode: "async",
+          clientRequestId: "delegate-opus-on-claude",
+        });
+        assert.equal(accepted.status, "running");
+        const commands = yield* Ref.get(dispatched);
+        assert.equal(commands.length, 1);
+        assert.equal(commands[0]?.modelSelection?.instanceId, claudeInstanceId);
+        assert.equal(commands[0]?.modelSelection?.model, "Opus");
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("driver-only delegation skips an instance the project turned off", () =>
     Effect.gen(function* () {
       const altInstanceId = ProviderInstanceId.make("codex-alt");
@@ -2835,6 +2956,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           },
         });
         const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provideMerge(layerOrchestrator),
           Layer.provide(
             LegacyV1ThreadImporter.layer.pipe(
@@ -3017,6 +3139,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           providerInstances: { [codexInstanceId]: { driver: "codex", enabled: true } },
         });
         const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provideMerge(layerOrchestrator),
           Layer.provide(
             LegacyV1ThreadImporter.layer.pipe(

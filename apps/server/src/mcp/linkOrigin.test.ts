@@ -48,6 +48,7 @@ import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 // A linked environment's session drives this one's real orchestrator through
 // its real T3 tools. What the link starts carries its origin, and the link
@@ -73,6 +74,7 @@ const layerOrchestrator = Layer.mergeAll(
   ),
 );
 const layerOrchestration = ThreadManagement.layer.pipe(
+  Layer.provide(ProviderRegistryMock.layer()),
   Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
 );

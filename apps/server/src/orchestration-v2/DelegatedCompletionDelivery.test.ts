@@ -68,6 +68,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { PROVIDER_STOP_REASON_SIGNAL } from "@t3tools/provider-core/server/subagentProjection";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const layerPlatformTest = Layer.merge(
   Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
@@ -89,6 +90,7 @@ const layerVcsDriverRegistryTest = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProcess.layer),
   Layer.provide(layerServerConfig),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 const layerCheckpointStoreTest = CheckpointStore.layer.pipe(
@@ -172,6 +174,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
 );
 
 // ProviderContinuationService consumes the orchestrator's continuation queue, as in production.

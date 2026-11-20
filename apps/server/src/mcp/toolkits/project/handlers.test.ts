@@ -398,6 +398,7 @@ it.effect("a launch with a model its provider does not advertise creates no thre
 
     for (const [instanceId, model] of [
       ["claudeAgent", "claude-unadvertised"],
+      ["claudeAgent", "grok/grok-4.7"],
       ["codex", "opus"],
     ] as const) {
       expect(yield* launchWith(instanceId, model)).toMatchObject({

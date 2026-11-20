@@ -72,6 +72,8 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { modelSelectionFromCommand, refuseUnservedModel } from "../provider/servedModel.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -663,6 +665,7 @@ const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 const INTENT_RECEIPT_TYPE = "intent.bind:";
 
 const make = Effect.gen(function* () {
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -931,9 +934,34 @@ const make = Effect.gen(function* () {
     }
   };
 
+  const assertModelServed = (command: OrchestrationV2ServerCommand) => {
+    const selection = modelSelectionFromCommand(command);
+    if (selection === undefined) return Effect.void;
+    return receipts.getByCommandId(command.commandId).pipe(
+      Effect.orElseSucceed(() => Option.none()),
+      Effect.flatMap((receipt) =>
+        Option.isSome(receipt)
+          ? Effect.void
+          : providerRegistry.getProviders.pipe(
+              Effect.flatMap((providers) => {
+                const detail = refuseUnservedModel(providers, selection);
+                return detail === undefined
+                  ? Effect.void
+                  : new Orchestrator.OrchestratorCommandRejectedError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause: detail,
+                    });
+              }),
+            ),
+      ),
+    );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
+      Effect.andThen(assertModelServed(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );
 
@@ -1937,6 +1965,7 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProviderRegistry.ProviderRegistry
 > = Layer.effect(ThreadManagementService, make).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(layerThreadWorktreeRestoreNoop),
@@ -1952,4 +1981,5 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProviderRegistry.ProviderRegistry
 > = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));

@@ -50,6 +50,8 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { refuseUnservedModel } from "../provider/servedModel.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -483,6 +485,7 @@ export const layer = Layer.effect(
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
+    const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
     const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
     const webhookPolicyOrganization = ManagedPolicy.deniedBy(managedPolicy, "webhookTasks");
     // Existing webhook tasks stay stored but report why they do not run.
@@ -1427,6 +1430,11 @@ export const layer = Layer.effect(
         ScheduledTaskId.make(
           input.commandId ? `scheduled-task:${input.commandId}` : `scheduled-task:${uuid}`,
         );
+      const detail = refuseUnservedModel(
+        yield* providerRegistry.getProviders,
+        input.modelSelection,
+      );
+      if (detail !== undefined) return yield* taskError(detail, { taskId: id });
       // Look up by the *resolved* id so idempotent creates (commandId replays)
       // keep their run history, and so real load failures propagate instead
       // of silently resetting an existing row.

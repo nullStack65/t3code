@@ -46,6 +46,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const sessionId = "automatic-delivery-session";
 const settings = Schema.decodeSync(ClaudeSettings)({});
@@ -353,6 +354,7 @@ it.effect.each(deliveries)(
                 Layer.provide(
                   Layer.mergeAll(NodeCrypto.layer, Scheduler.layer, SqlitePersistence.layerMemory),
                 ),
+                Layer.provide(ProviderRegistryMock.layer()),
               ),
             ),
           );

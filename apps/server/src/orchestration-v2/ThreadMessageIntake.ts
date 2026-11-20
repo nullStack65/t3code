@@ -11,6 +11,9 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as AttachmentClaims from "./AttachmentClaims.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { modelSelectionFromCommand, refuseUnservedModel } from "../provider/servedModel.ts";
+import { OrchestratorCommandRejectedError } from "./Orchestrator.ts";
 
 // These failures precede commitCommand; generic dispatch errors can follow commits and remain ambiguous.
 function dispatchWasNotAccepted(
@@ -91,6 +94,23 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
   const command =
     incoming.type === "message.dispatch" ? yield* withGuestAttachments(incoming) : incoming;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const selection = modelSelectionFromCommand(command);
+  if (
+    selection !== undefined &&
+    !(yield* threads.hasReceipt(command.commandId).pipe(Effect.orElseSucceed(() => false)))
+  ) {
+    const detail = refuseUnservedModel(
+      yield* (yield* ProviderRegistry.ProviderRegistry).getProviders,
+      selection,
+    );
+    if (detail !== undefined) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: detail,
+      });
+    }
+  }
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
     const incomingByQuestionId = command.attachmentsByQuestionId;
@@ -277,6 +297,7 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
         const notAccepted =
           error.operation === "resolve-project" ||
           error.operation === "read-receipt" ||
+          error.operation === "reject-model" ||
           ((error.operation === "create-thread" || error.operation === "dispatch-message") &&
             (isOrchestratorError(error.cause) || isThreadManagementError(error.cause)) &&
             // Projection errors under create-thread can occur after the message commit.

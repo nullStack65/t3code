@@ -40,6 +40,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const driver = ProviderDriverKind.make("codex");
 const instanceId = ProviderInstanceId.make("codex");
@@ -3063,6 +3064,7 @@ it.effect("reports a restart that stops the running turn as restarted", () =>
     }).pipe(
       Effect.provide(
         ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provideMerge(layer),
           Layer.provide(ServerSettings.layerTest()),
           Layer.provide(
