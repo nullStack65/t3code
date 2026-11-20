@@ -1759,17 +1759,55 @@ it.effect(
         expect(behind.isError).toBe(true);
         expect(JSON.stringify(behind.content)).toContain("no-eligible-environment");
         expect(yield* Ref.get(localLaunches)).toBe(0);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
 
-        yield* Ref.set(thread.resources, { ...loadOf(0.1), runningAgents: 18, activeRuns: 2 });
-        const idleScopes = yield* launchUnplaced(a, {
-          clientRequestId: "idle-scopes",
+it.effect(
+  "sequential launches fill every active lane once the host reports them, and launches on one sample cannot share the last",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+          localLaunch: Effect.void,
+        });
+        yield* linkTo(a.links, b, "full-access");
+        yield* a.settings.updateSettings({
+          automaticPlacementHosts: [
+            { environmentId: box.environmentId, maxLanes: 4, minAvailableMemoryGiB: 4 },
+            { environmentId: laptop.environmentId, maxLanes: 0, minAvailableMemoryGiB: 4 },
+          ],
+        });
+        const fresh = { type: "worktree", baseRef: "main", startFromOrigin: true };
+        for (const active of [0, 1, 2, 3]) {
+          yield* Ref.set(thread.resources, {
+            ...loadOf(0.1),
+            runningAgents: 18,
+            activeRuns: active,
+          });
+          const placed = yield* launchUnplaced(a, {
+            clientRequestId: `lane-${active}`,
+            workspaceStrategy: fresh,
+          });
+          expect(placed.isError, JSON.stringify(placed.content)).toBe(false);
+          expect(placed.structuredContent).toMatchObject({ environmentId: box.environmentId });
+        }
+        const behind = yield* launchUnplaced(a, {
+          clientRequestId: "lane-same-sample",
           workspaceStrategy: fresh,
         });
-        expect(idleScopes.isError, JSON.stringify(idleScopes.content)).toBe(false);
-        expect(idleScopes.structuredContent).toMatchObject({ environmentId: box.environmentId });
+        expect(behind.isError).toBe(true);
+        expect(JSON.stringify(behind.content)).toContain("no-eligible-environment");
 
+        yield* Ref.set(thread.resources, { ...loadOf(0.1), runningAgents: 18, activeRuns: 4 });
         const full = yield* launchUnplaced(a, {
-          clientRequestId: "active-full",
+          clientRequestId: "lane-full",
           workspaceStrategy: fresh,
         });
         expect(full.isError).toBe(true);
