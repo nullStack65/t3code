@@ -209,7 +209,8 @@ function heldForLimitRecovery(
     now - resetMs > MAX_OVERDUE_ARM_MS
   )
     return false;
-  return settings.autoResumeLimitedThreads || (settings.snoozeLimitedThreads && resetMs > now);
+  // A usage limit no longer snoozes the thread, so that setting does not hold the checkout.
+  return settings.autoResumeLimitedThreads;
 }
 
 /** PR metadata refreshes must not reset the inactivity clock. */

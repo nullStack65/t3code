@@ -107,7 +107,6 @@ export function AutoSettleSettingsRows(props: {
   const writeToAll = (
     patch: Partial<AutoSettleSettings> & {
       autoResumeLimitedThreads?: boolean;
-      snoozeLimitedThreads?: boolean;
     },
   ) => props.write(patch);
 
@@ -141,14 +140,6 @@ export function AutoSettleSettingsRows(props: {
             value={uniformMobileSetting(displayTargets, "autoResumeLimitedThreads")}
             disabled={disabledFor("autoResumeLimitedThreads")}
             onValueChange={(value) => writeToAll({ autoResumeLimitedThreads: value })}
-          />
-          <SettingsSwitchRow
-            icon="clock"
-            label="Snooze until limits reset"
-            subtitle="Snooze threads until their usage limits reset. Enable auto-resume to continue the agent after the reset."
-            value={uniformMobileSetting(displayTargets, "snoozeLimitedThreads")}
-            disabled={disabledFor("snoozeLimitedThreads")}
-            onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
           />
         </SettingsSection>
       ) : null}
