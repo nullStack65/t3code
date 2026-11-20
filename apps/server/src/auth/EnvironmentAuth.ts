@@ -2,6 +2,7 @@ import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthAdministrativeScopes,
+  mcpClientScopes,
   AuthStandardClientScopes,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
@@ -982,10 +983,16 @@ export const make = Effect.gen(function* () {
 
   const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (input) =>
     issuePairingCredentialForSubject({
-      scopes: input?.scopes ?? AuthStandardClientScopes,
+      scopes:
+        input?.scopes ?? (input?.access ? mcpClientScopes(input.access) : AuthStandardClientScopes),
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
-    }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
+    }).pipe(
+      Effect.map((issued) =>
+        input?.access === undefined ? issued : { ...issued, access: input.access },
+      ),
+      Effect.withSpan("EnvironmentAuth.issuePairingCredential"),
+    );
 
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =
     () => {

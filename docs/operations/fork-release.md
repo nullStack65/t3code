@@ -353,6 +353,40 @@ The fork release attaches `linux-x64` and `win32-x64` self-contained archives.
 Other platform keys are rejected clearly by the installers and `t3 update`
 rather than producing a predictable missing-asset error.
 
+## Installing the Connect fix on an Apple Silicon Mac
+
+The fork diverged from upstream before T3 0.1.8 added MCP pairing scopes, so a
+build from that base cannot advertise `/.well-known/oauth-authorization-server`
+or exchange a pairing code for `orchestration:read` and `orchestration:operate`.
+Another machine, including the MacBook Air signed in as `kara3`, cannot link
+and drive this environment until it runs a fork build that includes that
+endpoint.
+
+This fork does not follow upstream's update channel. Do not install a
+`pingdotgg/t3code` release, the Homebrew cask, or `t3 update` from `t3.codes`.
+Desktop in-app update is not on: releases do not attach `latest.yml` or
+`latest-mac.yml`, and an unsigned macOS build cannot apply a Squirrel.Mac
+update. Install by downloading the artifact.
+
+1. After this change is on `main`, run **Fork release** with `include_macos_arm64`
+   set. The default release builds the Intel DMG only. The Air is Apple Silicon
+   and needs the arm64 artifact. That build is reported untested.
+2. Download `T3-Code-<version>-arm64.dmg` from the `nullStack65/t3code` GitHub
+   Release for that version. Check it against `SHA256SUMS` on the same release.
+3. Open the DMG and copy T3 Code into Applications. The build is unsigned unless
+   Apple signing secrets were present, so the first launch needs Gatekeeper's
+   Open action (right-click the app, choose Open).
+4. Install over the existing app. The `appId` and user-data path are unchanged,
+   so projects, credentials, and pairings already on the Air stay in place.
+5. On the host that should be driven, open **Settings → Connections**, sign in,
+   and enable **T3 Connect**. On the Air, sign in to the same account and choose
+   that environment. A one-time code from **Settings → Connections** on the host
+   can also be redeemed at `/pair` or exchanged at `/oauth/mcp/token`. The host's
+   `/.well-known/oauth-authorization-server` document lists the MCP pairing scopes.
+
+Later installs are the same download. There is no automatic update feed to
+subscribe the Air to.
+
 ## Signing and updates
 
 Three distinct support levels:
