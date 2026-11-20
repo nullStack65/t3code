@@ -1191,11 +1191,14 @@ export const ModelAlertWatcher = Schema.Struct({
 });
 export type ModelAlertWatcher = typeof ModelAlertWatcher.Type;
 
-// Closura: Lead's thread on the laptop hears every machine's alerts and thread events. Moving Lead
-// to an always-on machine means changing this one value (or `modelAlertWatcher` on each machine).
+// Closura: Kameron's CoS thread on the laptop hears every machine's alerts (the old CoS thread
+// retired on 2026-11-20). Moving the watcher means changing this one value (or `modelAlertWatcher`
+// on each machine).
 const DEFAULT_MODEL_ALERT_WATCHER: ModelAlertWatcher = {
   environmentId: EnvironmentId.make("2f360b2e-0386-498a-b9cd-62999f3525ba"),
-  threadId: ThreadId.make("0ff5603d-8291-4f56-adaf-5132c62016cf"),
+  threadId: ThreadId.make(
+    "mcp:launch:4c07a2ef8bc6157f99fbae20642807c05a8a57c53eaec25dd4abfa16bc5b242e",
+  ),
 };
 
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);

@@ -1,6 +1,6 @@
 # Watcher thread
 
-One thread, by default Lead's on the laptop, hears model, usage-limit and link alerts from every linked environment. The thread events below go instead to the thread that launched the lane, read from the lane's `inbox.origin`, else `inbox.requestedBy`. When that thread is archived, deleted or unknown, a thread event reaches no thread, only `modelAlertWebhookUrl` when set, so a founder-facing watcher never hears about a lane it did not launch. The server decides each event from thread state with no agent judgment, queues it durably, and retries until the receiving machine answers.
+One thread, by default Kameron's CoS on the laptop, hears model, usage-limit and link alerts from every linked environment. The thread events below go instead to the thread that launched the lane, read from the lane's `inbox.origin`, else `inbox.requestedBy`. When that thread is archived, deleted or unknown, a thread event reaches no thread, only `modelAlertWebhookUrl` when set, so a founder-facing watcher never hears about a lane it did not launch. The server decides each event from thread state with no agent judgment, queues it durably, and retries until the receiving machine answers.
 
 | Event                  | Fires when                                                                                                                                                                                                                     |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -14,4 +14,4 @@ Each event reports once per thread and kind until its state changes: a new run, 
 
 ## Moving the watcher
 
-The watcher is the `modelAlertWatcher` server setting (`{ environmentId, threadId }`, or `null` for none). Its Closura default is in `packages/contracts/src/settings.ts` (`DEFAULT_MODEL_ALERT_WATCHER`). To move Lead to an always-on machine such as the R720, change that one default and ship a build, or set `modelAlertWatcher` in each machine's settings to override it. `modelAlertWebhookUrl` additionally POSTs every alert as JSON.
+The watcher is the `modelAlertWatcher` server setting (`{ environmentId, threadId }`, or `null` for none). Its Closura default is in `packages/contracts/src/settings.ts` (`DEFAULT_MODEL_ALERT_WATCHER`). To move the watcher, for example to an always-on machine such as the R720, change that one default and ship a build, or set `modelAlertWatcher` in each machine's settings to override it. `modelAlertWebhookUrl` additionally POSTs every alert as JSON.
