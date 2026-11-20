@@ -3,13 +3,19 @@ import {
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
 import {
+  attributionOfSender,
+  type FounderByEnvironmentId,
+} from "@t3tools/client-runtime/state/thread-attribution";
+import type { OlderSettled, OlderSettledScope } from "@t3tools/client-runtime/state/threads";
+import {
   effectiveInboxFilter,
+  isOlderSettledThreadShell,
   founderInboxLane,
   Founder,
   InboxChoice,
   primaryInbox,
   type EnvironmentId,
-  type OrchestrationV2OlderSettledGroup,
+  type OrchestrationV2ThreadShell,
   type ThreadInbox,
 } from "@t3tools/contracts";
 import type { ThreadAttribution } from "@t3tools/contracts/settings";
@@ -66,16 +72,57 @@ export const EMPTY_THREAD_LIST_FILTER_BUCKETS: ThreadListFilterBucketCounts = {
   settled: 0,
 };
 
-export interface OlderSettledCounts<T> {
-  readonly groups: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly group: OrchestrationV2OlderSettledGroup;
-  }>;
-  readonly attributionOf: (
-    environmentId: EnvironmentId,
-    group: OrchestrationV2OlderSettledGroup,
-  ) => ThreadAttribution;
-  readonly covers: (thread: T) => boolean;
+export interface OlderSettledGroupCount {
+  readonly environmentId: EnvironmentId;
+  readonly inbox: InboxChoice | null;
+  readonly agentCreated: boolean;
+  readonly attribution: ThreadAttribution;
+  readonly count: number;
+}
+
+export function olderSettledFilterCounts(
+  scopes: ReadonlyArray<OlderSettledScope>,
+  olderOf: (environmentId: EnvironmentId) => OlderSettled | null,
+  owners: FounderByEnvironmentId,
+) {
+  const grouped = scopes.flatMap((scope) => {
+    const older = olderOf(scope.environmentId);
+    return older?.groups == null ? [] : [{ scope, older, groups: older.groups }];
+  });
+  const groups: ReadonlyArray<OlderSettledGroupCount> = grouped.flatMap(({ scope, groups }) =>
+    (scope.projectIds ?? [...groups.keys()]).flatMap((projectId) =>
+      (groups.get(projectId) ?? []).map((group) => ({
+        environmentId: scope.environmentId,
+        inbox: group.inbox,
+        agentCreated: group.agentCreated,
+        attribution: attributionOfSender(group, owners[scope.environmentId]),
+        count: group.count,
+      })),
+    ),
+  );
+  const lowerBound = scopes.some((scope) => {
+    const older = olderOf(scope.environmentId);
+    if (older === null || older.groups !== null) return false;
+    return (scope.projectIds ?? [...older.counts.keys()]).some(
+      (projectId) => (older.counts.get(projectId) ?? 0) > 0,
+    );
+  });
+  return {
+    groups,
+    lowerBound,
+    covers: (thread: {
+      readonly environmentId: EnvironmentId;
+      readonly source: Pick<
+        OrchestrationV2ThreadShell,
+        "lineage" | "settledOverride" | "settledAt"
+      >;
+    }) =>
+      grouped.some(
+        ({ scope, older }) =>
+          scope.environmentId === thread.environmentId &&
+          isOlderSettledThreadShell(thread.source, older.beforeMs),
+      ),
+  };
 }
 
 const activityStatus = (thread: FilterableThread) =>
@@ -185,7 +232,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
   filter: ThreadListFilter,
   attributionOf: (thread: T) => ThreadAttribution,
   viewingFounder?: Founder,
-  older?: OlderSettledCounts<T>,
+  olderGroups: ReadonlyArray<OlderSettledGroupCount> = [],
 ) {
   const inboxes = new Map<InboxChoice, ThreadListFilterBucketCounts>();
   const environments = new Map<EnvironmentId, ThreadListFilterBucketCounts>();
@@ -220,7 +267,6 @@ export function threadListFilterCounts<T extends FilterableThread>(
     }
   };
   for (const thread of threads) {
-    if (older?.covers(thread) === true) continue;
     tally({
       environmentId: thread.environmentId,
       inbox: primaryInbox(thread.source.inbox),
@@ -230,15 +276,8 @@ export function threadListFilterCounts<T extends FilterableThread>(
       amount: 1,
     });
   }
-  for (const { environmentId, group } of older?.groups ?? []) {
-    tally({
-      environmentId,
-      inbox: group.inbox,
-      agentCreated: group.agentCreated,
-      attribution: older?.attributionOf(environmentId, group) ?? "unknown",
-      bucket: "settled",
-      amount: group.count,
-    });
+  for (const group of olderGroups) {
+    tally({ ...group, bucket: "settled", amount: group.count });
   }
   return { inboxes, environments, from, unclassified };
 }

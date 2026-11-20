@@ -1,10 +1,12 @@
-import { EnvironmentId, makeThreadInbox } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId, makeThreadInbox } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   changedThreadListFilters,
   inboxMenuOrder,
   matchesThreadListFilter,
+  olderSettledFilterCounts,
   threadListFilterBucket,
   threadListFilterCounts,
   threadListFilterOf,
@@ -260,12 +262,22 @@ describe("thread list filter", () => {
   });
 
   it("counts older settled threads from the servers' groups instead of the loaded rows", () => {
-    const settledRow = (environmentId: EnvironmentId, older: boolean) => ({
+    const beforeMs = Date.parse("2026-11-18T00:00:00.000Z");
+    const lineage = {
+      relationshipToParent: null,
+      parentThreadId: null,
+      rootThreadId: ThreadId.make("root"),
+    };
+    const settledRow = (environmentId: EnvironmentId, settledAt: string) => ({
       ...thread(environmentId, kameron),
       settledOverride: "settled" as const,
-      older,
+      source: {
+        ...thread(environmentId, kameron).source,
+        lineage,
+        settledOverride: "settled" as const,
+        settledAt: DateTime.makeUnsafe(settledAt),
+      },
     });
-    const loaded = [settledRow(laptop, false), settledRow(laptop, true), settledRow(crown, true)];
     const group = (inbox: "kameron" | "jeff" | null, count: number, agentCreated = false) => ({
       inbox,
       agentCreated,
@@ -273,21 +285,57 @@ describe("thread list filter", () => {
       byAgent: false,
       count,
     });
+    const project = ProjectId.make("app");
+    const other = ProjectId.make("other");
+    const older = new Map([
+      [
+        laptop,
+        {
+          before: new Date(beforeMs).toISOString(),
+          beforeMs,
+          counts: new Map([
+            [project, 55],
+            [other, 9],
+          ]),
+          groups: new Map([
+            [
+              project,
+              [group("kameron", 40), group("jeff", 7), group(null, 5), group(null, 3, true)],
+            ],
+            [other, [group("kameron", 9)]],
+          ]),
+        },
+      ],
+      [
+        crown,
+        {
+          before: new Date(beforeMs).toISOString(),
+          beforeMs,
+          counts: new Map([[project, 12]]),
+          groups: null,
+        },
+      ],
+    ]);
+    const source = olderSettledFilterCounts(
+      [
+        { environmentId: laptop, projectIds: [project] },
+        { environmentId: crown, projectIds: null },
+      ],
+      (environmentId) => older.get(environmentId) ?? null,
+      {},
+    );
+    expect(source.lowerBound).toBe(true);
+    const loaded = [
+      settledRow(laptop, "2026-11-19T00:00:00.000Z"),
+      settledRow(laptop, "2026-11-17T00:00:00.000Z"),
+      settledRow(crown, "2026-11-17T00:00:00.000Z"),
+    ];
     const counts = threadListFilterCounts(
-      loaded,
+      loaded.filter((row) => !source.covers(row)),
       threadListFilterOf({ founderInboxOwner: "kameron" }),
       () => "kameron" as const,
       "kameron",
-      {
-        groups: [
-          { environmentId: laptop, group: group("kameron", 40) },
-          { environmentId: laptop, group: group("jeff", 7) },
-          { environmentId: laptop, group: group(null, 5) },
-          { environmentId: laptop, group: group(null, 3, true) },
-        ],
-        attributionOf: () => "kameron",
-        covers: (candidate) => candidate.environmentId === laptop && candidate.older,
-      },
+      source.groups,
     );
     expect(counts.inboxes.get("kameron")?.settled).toBe(1 + 40 + 1);
     expect(counts.inboxes.get("jeff")?.settled).toBe(7);

@@ -31,11 +31,11 @@ import {
   changedThreadListFilters,
   EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
+  type olderSettledFilterCounts,
   threadListFilterCounts,
   threadListFilterOf,
   toggleFilterOption,
   toggleHiddenEnvironment,
-  type OlderSettledCounts,
   type ThreadListFilter,
   type ThreadListFilterBucketCounts,
 } from "./threadListFilter.logic";
@@ -47,7 +47,8 @@ const INBOX_LABELS: Record<InboxChoice, string> = {
   shared: "Shared",
 };
 
-type CountedThread = Parameters<typeof threadListFilterCounts>[0][number];
+type CountedThread = Parameters<typeof threadListFilterCounts>[0][number] &
+  Parameters<ReturnType<typeof olderSettledFilterCounts>["covers"]>[0];
 const LAST_OPTION_NOTE = ", the last one shown, so it stays checked";
 
 /** Chooses which inboxes and environments the thread list shows. Search still finds every thread. */
@@ -58,7 +59,7 @@ export function SidebarThreadFilterMenu<T extends CountedThread>({
 }: {
   /** Called only while the menu is open. */
   countedThreads: () => ReadonlyArray<T>;
-  olderSettled: () => OlderSettledCounts<T>;
+  olderSettled: () => ReturnType<typeof olderSettledFilterCounts>;
   attributionOf: (thread: T) => ThreadAttribution;
 }) {
   const filter = useClientSettings(threadListFilterOf);
@@ -115,7 +116,7 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
   isChanged,
 }: {
   countedThreads: () => ReadonlyArray<T>;
-  olderSettled: () => OlderSettledCounts<T>;
+  olderSettled: () => ReturnType<typeof olderSettledFilterCounts>;
   attributionOf: (thread: T) => ThreadAttribution;
   filter: ThreadListFilter;
   owner: Founder | undefined;
@@ -124,12 +125,13 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
 }) {
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const inboxOrder = inboxMenuOrder(owner);
+  const older = olderSettled();
   const counts = threadListFilterCounts(
-    countedThreads(),
+    countedThreads().filter((thread) => !older.covers(thread)),
     filter,
     attributionOf,
     owner,
-    olderSettled(),
+    older.groups,
   );
   const allInboxesShown = inboxOrder.every((inbox) => filter.inboxes.includes(inbox));
   const shownAttributions = THREAD_ATTRIBUTIONS.filter(
@@ -243,7 +245,10 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
         {!allInboxesShown && counts.unclassified > 0
           ? `${counts.unclassified} thread${counts.unclassified === 1 ? " has" : "s have"} no inbox and ${counts.unclassified === 1 ? "shows" : "show"} only with every inbox checked. `
           : null}
-        Delegated and subagent threads are not counted here; open them from their parent thread.
+        {older.lowerBound
+          ? "Some servers send settled totals only, so settled counts are minimums. "
+          : null}
+        Subagent threads open from their parent and are not counted.
       </p>
       {isChanged ? (
         <>
