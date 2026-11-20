@@ -239,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
           vp exec playwright install --only-shell chromium
-          vp test run --project browser \
+          vp test run --project browser -t "records within 400 ms" \
             src/speech/voiceInputLatency.browser.test.ts \
             src/speech/useEnvironmentSpeechInput.browser.test.tsx
 
