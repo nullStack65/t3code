@@ -1,3 +1,6 @@
+import { resolveBotPresence } from "./bots/botPresence";
+import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "./Sidebar.logic";
+import { useUiStateStore } from "../uiStateStore";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -1816,6 +1819,25 @@ export default function ChatView(props: ChatViewProps) {
           reportedModelSelection,
         );
   const activeStanding = activeThreadShell?.standing ?? null;
+  const activeLocalLastVisitedAt = useUiStateStore((state) =>
+    activeThreadKey === null ? undefined : state.threadLastVisitedAtById[activeThreadKey],
+  );
+  const activeBotAvatarState = (() => {
+    if (!activeStanding || activeThreadShell === null) return undefined;
+    const pill = resolveThreadStatusPill({
+      thread: {
+        ...activeThreadShell,
+        lastVisitedAt: resolveThreadLastVisitedAt(
+          activeThreadShell.lastVisitedAt,
+          activeLocalLastVisitedAt,
+        ),
+      },
+    });
+    return resolveBotPresence(
+      pill === null ? null : { ...pill, errorClass: activeThreadShell.runtime?.lastErrorClass },
+      activeStanding.role,
+    ).avatarState;
+  })();
   const botDetailsOpen = useRightPanelStore(
     (state) =>
       activeStanding !== null &&
@@ -3447,6 +3469,7 @@ export default function ChatView(props: ChatViewProps) {
                 : {})}
               {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
               standing={activeStanding}
+              botAvatarState={activeBotAvatarState}
               activityCollapsed={
                 isStandingBot && activeThreadKey !== null
                   ? { on: activityCollapsed, onToggle: toggleActivityCollapsed }

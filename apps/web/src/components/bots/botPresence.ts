@@ -1,3 +1,5 @@
+import type { OrchestrationV2ProviderFailureClass } from "@t3tools/contracts";
+
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { BotAvatarState } from "./BotAvatar";
 
@@ -11,9 +13,14 @@ export interface BotPresence {
 
 const NEEDS_YOU = new Set(["Pending Approval", "Awaiting Input", "Guest Request", "Plan Ready"]);
 
+/** The pill plus the failure class, which the pill label does not carry. */
+export type BotPresenceInput = Pick<ThreadStatusPill, "label"> & {
+  readonly errorClass?: OrchestrationV2ProviderFailureClass | null | undefined;
+};
+
 /** Maps the thread's status pill onto a bot's quieter vocabulary. */
 export function resolveBotPresence(
-  pill: Pick<ThreadStatusPill, "label"> | null,
+  pill: BotPresenceInput | null,
   role: string | null | undefined,
 ): BotPresence {
   const label = pill?.label ?? null;
@@ -21,10 +28,13 @@ export function resolveBotPresence(
     return { avatarState: "needs-you", line: label, badge: "needs-you" };
   if (label === "Working" || label === "Connecting")
     return { avatarState: "running", line: label, badge: null };
+  // A usage limit is the bot waiting, not a failure: a calm glow, no failure ring.
+  if (label === "Failed" && pill?.errorClass === "usage_limit")
+    return { avatarState: "waiting", line: "Limited", badge: null };
   if (label === "Failed") return { avatarState: "failed", line: "Failed", badge: null };
   if (label === "Completed")
     return { avatarState: "idle", line: role ?? "New reply", badge: "unread" };
-  if (label === "Waiting") return { avatarState: "idle", line: "Waiting", badge: null };
+  if (label === "Waiting") return { avatarState: "waiting", line: "Waiting", badge: null };
   return { avatarState: "idle", line: role ?? null, badge: null };
 }
 
