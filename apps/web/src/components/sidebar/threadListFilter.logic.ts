@@ -4,6 +4,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-list-filter";
 import {
   effectiveInboxFilter,
+  founderInboxLane,
   Founder,
   InboxChoice,
   primaryInbox,
@@ -20,10 +21,91 @@ export {
 
 interface FilterableThread {
   readonly environmentId: EnvironmentId;
+  readonly settledOverride?: "settled" | "active" | null;
+  readonly hasPendingApprovals?: boolean;
+  readonly hasPendingUserInput?: boolean;
+  readonly pendingSubagentRequest?: "approval" | "user_input" | null;
+  readonly runtime?: { readonly status: string } | null;
+  readonly latestRun?: { readonly status: string } | null;
   readonly source: {
     readonly inbox?: ThreadInbox | null | undefined;
     readonly createdBy?: string | undefined;
   };
+}
+
+const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "preparing",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+const FINISHED_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+
+export type ThreadListFilterBucket = "working" | "done" | "needsMe";
+
+export interface ThreadListFilterBucketCounts {
+  readonly working: number;
+  readonly done: number;
+  readonly needsMe: number;
+}
+
+export const EMPTY_THREAD_LIST_FILTER_BUCKETS: ThreadListFilterBucketCounts = {
+  working: 0,
+  done: 0,
+  needsMe: 0,
+};
+
+const activityStatus = (thread: FilterableThread) =>
+  thread.runtime?.status ?? thread.latestRun?.status ?? null;
+
+const waitsOnHuman = (thread: FilterableThread, viewingFounder: Founder | undefined) => {
+  if (
+    thread.hasPendingApprovals === true ||
+    thread.hasPendingUserInput === true ||
+    thread.pendingSubagentRequest != null
+  ) {
+    return true;
+  }
+  const inbox = thread.source.inbox;
+  if (inbox?.pendingHumanRequest === true) {
+    if (viewingFounder === undefined || inbox.owner === viewingFounder || inbox.owner === null) {
+      return true;
+    }
+  }
+  const ask = inbox?.decisionRequest;
+  return ask !== undefined && (viewingFounder === undefined || ask.founder === viewingFounder);
+};
+
+const attentionForFounder = (thread: FilterableThread, viewingFounder: Founder | undefined) => {
+  if (viewingFounder === undefined) return false;
+  const inbox = thread.source.inbox;
+  return inbox?.attentionKind === "action" && founderInboxLane(inbox, viewingFounder) === "action";
+};
+
+export function threadListFilterBucket(
+  thread: FilterableThread,
+  viewingFounder?: Founder,
+): ThreadListFilterBucket | null {
+  if (thread.settledOverride === "settled") return null;
+  const status = activityStatus(thread);
+  if (waitsOnHuman(thread, viewingFounder)) return "needsMe";
+  if (status !== null && ACTIVE_RUN_STATUSES.has(status)) return "working";
+  if (attentionForFounder(thread, viewingFounder)) return "needsMe";
+  if (
+    (status !== null && FINISHED_RUN_STATUSES.has(status)) ||
+    (thread.latestRun != null && FINISHED_RUN_STATUSES.has(thread.latestRun.status))
+  ) {
+    return "done";
+  }
+  return null;
 }
 
 const matchesInboxes = (thread: FilterableThread, inboxes: ReadonlyArray<InboxChoice>) =>
@@ -75,33 +157,41 @@ export function changedThreadListFilters(
   };
 }
 
-const increment = <K>(counts: Map<K, number>, key: K) =>
-  counts.set(key, (counts.get(key) ?? 0) + 1);
-
 /**
  * Faceted counts: each section counts threads that pass the other two sections, so a count
  * is what checking that option would add.
  */
+const addBucket = <K>(
+  counts: Map<K, ThreadListFilterBucketCounts>,
+  key: K,
+  bucket: ThreadListFilterBucket | null,
+) => {
+  const current = counts.get(key) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
+  counts.set(key, bucket === null ? current : { ...current, [bucket]: current[bucket] + 1 });
+};
+
 export function threadListFilterCounts<T extends FilterableThread>(
   threads: ReadonlyArray<T>,
   filter: ThreadListFilter,
   attributionOf: (thread: T) => ThreadAttribution,
+  viewingFounder?: Founder,
 ) {
-  const inboxes = new Map<InboxChoice, number>();
-  const environments = new Map<EnvironmentId, number>();
-  const from = new Map<ThreadAttribution, number>();
+  const inboxes = new Map<InboxChoice, ThreadListFilterBucketCounts>();
+  const environments = new Map<EnvironmentId, ThreadListFilterBucketCounts>();
+  const from = new Map<ThreadAttribution, ThreadListFilterBucketCounts>();
   for (const thread of threads) {
+    const bucket = threadListFilterBucket(thread, viewingFounder);
     const attribution = attributionOf(thread);
     const environmentShown = !filter.hiddenEnvironmentIds.includes(thread.environmentId);
     const fromShown = !filter.hiddenAttributions.includes(attribution);
     const inboxShown = matchesInboxes(thread, filter.inboxes);
     if (environmentShown && fromShown) {
       for (const choice of InboxChoice.literals) {
-        if (matchesInboxes(thread, [choice])) increment(inboxes, choice);
+        if (matchesInboxes(thread, [choice])) addBucket(inboxes, choice, bucket);
       }
     }
-    if (inboxShown && fromShown) increment(environments, thread.environmentId);
-    if (inboxShown && environmentShown) increment(from, attribution);
+    if (inboxShown && fromShown) addBucket(environments, thread.environmentId, bucket);
+    if (inboxShown && environmentShown) addBucket(from, attribution, bucket);
   }
   return { inboxes, environments, from };
 }
