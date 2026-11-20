@@ -4,7 +4,7 @@ import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entitie
 import { visibilityParentKey } from "@t3tools/client-runtime/state/threads";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { Navigate, useNavigate } from "@tanstack/react-router";
+import { Link, Navigate, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import ChatView from "./ChatView";
@@ -18,6 +18,7 @@ import {
   useQuietThreadShell,
 } from "../state/entities";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { readLinkedSidebarThreadShell, useLinkedOnlyEnvironment } from "../state/linkedSidebar";
 import { useEnvironmentShellStatus } from "../state/shell";
 import { environmentThreadShells, threadFamilies, useEnvironmentThread } from "../state/threads";
 import {
@@ -45,6 +46,27 @@ function useOpenThreadFamily(threadRef: ScopedThreadRef | null, missing: boolean
   }, [mountedKey]);
 }
 
+function LinkedOnlyThreadNotice({ hostLabel, title }: { hostLabel: string; title: string | null }) {
+  return (
+    <div
+      className="flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center"
+      data-testid="linked-only-thread-notice"
+    >
+      <h2 className="text-base font-medium text-foreground">{title ?? "Thread"}</h2>
+      <p className="max-w-md text-sm text-muted-foreground">
+        This thread lives on {hostLabel}, which this device sees through a server link but is not
+        connected to. Add {hostLabel} as a connection to open it here.
+      </p>
+      <Link
+        to="/settings/connections"
+        className="text-sm font-medium text-foreground underline underline-offset-4"
+      >
+        Open connection settings
+      </Link>
+    </div>
+  );
+}
+
 /**
  * Unkeyed so navigating between server threads reuses one ChatView. Rendered by the `_chat`
  * layout, since an element only survives a route swap when the same parent renders it. Draft
@@ -67,6 +89,7 @@ export function ThreadRouteView({
     draftId === null ? null : store.getPromotedDraftRedirect(draftId),
   );
   const serverThreadRef = target.kind === "server" ? target.threadRef : null;
+  const linkedOnlyEnvironment = useLinkedOnlyEnvironment(serverThreadRef?.environmentId ?? null);
   const serverThreadShell = useQuietThreadShell(serverThreadRef);
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
@@ -101,7 +124,10 @@ export function ThreadRouteView({
   // decides whether it exists. Read only then: once listed, ChatView keeps
   // this stream open and its updates need not re-render the route.
   const unlistedThreadRef =
-    target.kind === "server" && serverThreadShell === null && draftThread === null
+    target.kind === "server" &&
+    serverThreadShell === null &&
+    draftThread === null &&
+    linkedOnlyEnvironment === null
       ? target.threadRef
       : null;
   const unlistedThreadDetail = useEnvironmentThread(
@@ -156,7 +182,14 @@ export function ThreadRouteView({
 
   let view: React.ReactNode = null;
   let redirect: React.ReactNode = null;
-  if (target.kind === "draft") {
+  if (target.kind === "server" && linkedOnlyEnvironment !== null) {
+    view = (
+      <LinkedOnlyThreadNotice
+        hostLabel={linkedOnlyEnvironment.label}
+        title={readLinkedSidebarThreadShell(target.threadRef)?.title ?? null}
+      />
+    );
+  } else if (target.kind === "draft") {
     if (
       draftSession &&
       hiddenKeys.has(

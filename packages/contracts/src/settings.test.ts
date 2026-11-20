@@ -411,9 +411,9 @@ describe("ServerSettings.sourceControlWritingStyle", () => {
 });
 
 describe("session spend guard", () => {
-  it("enforces the idle and session ceilings by default", () => {
+  it("only flags idle and session spend by default", () => {
     expect(decodeServerSettings({}).sessionSpendGuard).toMatchObject({
-      mode: "enforce",
+      mode: "flag",
       idleFlagUsd: 25,
       idleStopUsd: 50,
       sessionCeilingUsd: 200,
@@ -427,8 +427,8 @@ describe("session spend guard", () => {
   });
 
   it("patches one field and rejects a non-positive amount", () => {
-    expect(decodeServerSettingsPatch({ sessionSpendGuard: { mode: "flag" } })).toEqual({
-      sessionSpendGuard: { mode: "flag" },
+    expect(decodeServerSettingsPatch({ sessionSpendGuard: { mode: "enforce" } })).toEqual({
+      sessionSpendGuard: { mode: "enforce" },
     });
     expect(() => decodeServerSettings({ sessionSpendGuard: { idleStopUsd: 0 } })).toThrow();
     expect(() =>

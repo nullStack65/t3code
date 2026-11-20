@@ -3,6 +3,7 @@ import type {
   OrchestrationV2Checkpoint,
   OrchestrationV2ConversationMessage,
   OrchestrationV2ProviderTurn,
+  OrchestrationV2Run,
   OrchestrationV2TurnItem,
   ServerSettings,
   SessionSpendGuardSettings,
@@ -97,11 +98,14 @@ export function priceProviderTurns(
     const input = usage.inputTokens ?? 0;
     const cached = Math.min(usage.cachedInputTokens ?? 0, input);
     const other = turn.turnTokenUsage?.otherUsage;
+    const cachedShare = input > 0 ? cached / input : 0;
+    const otherInputRate =
+      (1 - cachedShare) * rate.inputCostPerToken + cachedShare * rate.cacheReadCostPerToken;
     const usd =
       (input - cached) * rate.inputCostPerToken +
       cached * rate.cacheReadCostPerToken +
       (usage.outputTokens ?? 0) * rate.outputCostPerToken +
-      (other?.inputTokens ?? 0) * rate.inputCostPerToken +
+      (other?.inputTokens ?? 0) * otherInputRate +
       (other?.outputTokens ?? 0) * rate.outputCostPerToken;
     const at = turn.startedAt ?? turn.completedAt;
     const createdAt = at === null ? (turn.tokenUsage?.updatedAt ?? null) : DateTime.formatIso(at);
@@ -219,7 +223,11 @@ export function describeSpendStop(
   const usd = (value: number) => `$${value.toFixed(2)}`;
   return evaluation.stopReason === "ceiling"
     ? `This thread has spent about ${usd(evaluation.sessionUsd)}, past its ${usd(settings.sessionCeilingUsd)} session ceiling. Raise sessionSpendGuard.sessionCeilingUsd to continue.`
-    : `This thread has spent about ${usd(evaluation.idleUsd)} with no linked pull request or file-changing turn, past the ${usd(settings.idleStopUsd)} idle limit. Link a pull request or change files to continue.`;
+    : `This thread has spent about ${usd(evaluation.idleUsd)} ${
+        evaluation.idleSince === null
+          ? "with no linked pull request or file-changing turn"
+          : "since its last linked pull request or file-changing turn"
+      }, past the ${usd(settings.idleStopUsd)} idle limit. Link a pull request or change files to continue.`;
 }
 
 export interface LaunchCheckInput {
@@ -238,6 +246,34 @@ export function refusesAutomatedTurn(
   creationSource: OrchestrationV2ConversationMessage["creationSource"],
 ) {
   return mode === "enforce" && !INTERACTIVE_SOURCES.has(creationSource);
+}
+
+const MAX_ORIGIN_CHAIN = 50;
+
+export function originCreationSource(input: {
+  readonly run: Pick<
+    OrchestrationV2Run,
+    "userMessageId" | "restartContinuationOfRunId" | "usageLimitContinuationOfRunId"
+  >;
+  readonly runs: ReadonlyArray<
+    Pick<
+      OrchestrationV2Run,
+      "id" | "userMessageId" | "restartContinuationOfRunId" | "usageLimitContinuationOfRunId"
+    >
+  >;
+  readonly messages: ReadonlyArray<
+    Pick<OrchestrationV2ConversationMessage, "id" | "creationSource">
+  >;
+}): OrchestrationV2ConversationMessage["creationSource"] | undefined {
+  let current = input.run;
+  for (let depth = 0; depth < MAX_ORIGIN_CHAIN; depth += 1) {
+    const sourceRunId = current.restartContinuationOfRunId ?? current.usageLimitContinuationOfRunId;
+    if (sourceRunId === undefined) break;
+    const source = input.runs.find((candidate) => candidate.id === sourceRunId);
+    if (source === undefined) break;
+    current = source;
+  }
+  return input.messages.find((message) => message.id === current.userMessageId)?.creationSource;
 }
 
 export function checkLaunch(input: LaunchCheckInput): "untitled" | null {
