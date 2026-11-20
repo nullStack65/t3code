@@ -187,12 +187,18 @@ const latencyProject = {
   test: {
     ...browserTestProject.test,
     name: "latency",
-    include: ["test/*.latency.tsx", "src/**/*Latency.browser.test.{ts,tsx}"],
+    include: ["test/*.latency.tsx", "src/**/*.latency.{ts,tsx}"],
     hookTimeout: 60_000,
     testTimeout: 60_000,
     browser: {
       ...browserTestProject.test.browser,
       instances: [{ browser: "chromium" }],
+      commands: {
+        ...browserTestProject.test.browser.commands,
+        reportLatency: async (_context, line: string) => {
+          process.stdout.write(`${line}\n`);
+        },
+      },
     },
   },
 } satisfies TestProjectInlineConfiguration;

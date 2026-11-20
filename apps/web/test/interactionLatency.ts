@@ -1,4 +1,11 @@
 import { expect } from "vite-plus/test";
+import { commands } from "vite-plus/test/browser";
+
+declare module "vite-plus/test/browser" {
+  interface BrowserCommands {
+    reportLatency: (line: string) => Promise<void>;
+  }
+}
 
 const INTERACTION_BUDGET_MS = 400;
 const SAMPLES = 5;
@@ -34,35 +41,33 @@ export async function timeInteraction(
   isDone: () => boolean,
   { from = "input" }: { readonly from?: "input" | "call" } = {},
 ): Promise<number> {
+  expect(isDone(), "the result already shows before the interaction").toBe(false);
   let start: number | null = from === "call" ? performance.now() : null;
   const onInput = (event: Event) => {
     start ??= event.timeStamp;
   };
-  let finish!: (at: number) => void;
-  const finished = new Promise<number>((resolve) => {
-    finish = resolve;
+  let stopped = false;
+  const painted = new Promise<number>((resolve) => {
+    const frame = () => {
+      if (stopped) return;
+      if (start === null || !isDone()) {
+        requestAnimationFrame(frame);
+        return;
+      }
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => resolve(performance.now());
+      channel.port2.postMessage(null);
+    };
+    requestAnimationFrame(frame);
   });
-  let seen = false;
-  const check = () => {
-    if (seen || start === null || !isDone()) return;
-    seen = true;
-    void nextFrame().then(finish);
-  };
-  const observer = new MutationObserver(check);
   for (const type of INPUT_EVENTS) window.addEventListener(type, onInput, { capture: true });
-  observer.observe(document.body, {
-    subtree: true,
-    childList: true,
-    characterData: true,
-    attributes: true,
-  });
   try {
     await action();
-    check();
-    const end = await finished;
-    return end - (start ?? end);
+    const began = start;
+    if (began === null) throw new Error("the interaction dispatched no pointerdown or keydown");
+    return (await painted) - began;
   } finally {
-    observer.disconnect();
+    stopped = true;
     for (const type of INPUT_EVENTS) window.removeEventListener(type, onInput, { capture: true });
   }
 }
@@ -70,7 +75,7 @@ export async function timeInteraction(
 export async function expectWithinBudget(
   interaction: string,
   sample: (index: number) => Promise<number>,
-  { knownOverBudget = false }: { readonly knownOverBudget?: boolean } = {},
+  { ungated }: { readonly ungated?: string } = {},
 ): Promise<void> {
   const samples: number[] = [];
   for (let index = 0; index < SAMPLES; index++) samples.push(await sample(index));
@@ -78,10 +83,7 @@ export async function expectWithinBudget(
   const report = `${interaction}: median ${median.toFixed(1)} ms, samples ${samples
     .map((value) => value.toFixed(1))
     .join(", ")} ms, budget ${INTERACTION_BUDGET_MS} ms`;
-  if (knownOverBudget) {
-    console.warn(`known over budget, not gated: ${report}`);
-    return;
-  }
-  console.info(report);
+  await commands.reportLatency(ungated ? `not gated, ${ungated}: ${report}` : report);
+  if (ungated) return;
   expect(median, report).toBeLessThanOrEqual(INTERACTION_BUDGET_MS);
 }

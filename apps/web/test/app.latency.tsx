@@ -116,24 +116,20 @@ it("app launch: mounting the app shows the open thread and its composer", async 
       app?.[Symbol.dispose]();
       return elapsed;
     },
-    { knownOverBudget: true },
+    { ungated: "about 350 ms on an idle ASUS, too close to the budget for a shared runner" },
   );
 });
 
 it("thread switch: clicking a sidebar row shows that thread", async () => {
   using app = await openThread(A);
-  await expectWithinBudget(
-    "thread switch",
-    async (index) => {
-      const target = index % 2 === 0 ? B : A;
-      await settle();
-      return timeInteraction(
-        () => userEvent.click(page.getByText(`Thread ${target}`, { exact: true }).first()),
-        threadOpen(app.router, target),
-      );
-    },
-    { knownOverBudget: true },
-  );
+  await expectWithinBudget("thread switch", async (index) => {
+    const target = index % 2 === 0 ? B : A;
+    await settle();
+    return timeInteraction(
+      () => userEvent.click(page.getByText(`Thread ${target}`, { exact: true }).first()),
+      threadOpen(app.router, target),
+    );
+  });
 });
 
 it("composer send: Enter puts the message in the thread", async () => {
