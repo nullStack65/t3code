@@ -28,7 +28,7 @@ function LinkedSidebarFromHost({ hostId }: { readonly hostId: EnvironmentId }) {
     () => {
       if (!known.isPending) known.refresh();
     },
-    { key: `linked-sidebar:${hostId}`, intervalMs: null, refreshOnReconnect: true },
+    { key: `linked-sidebar:${hostId}`, refreshOnReconnect: true },
   );
   const publish = useEffectEvent((data: LinkedSidebarResult | null) => {
     const current = appAtomRegistry.get(linkedSidebarByHostAtom);
@@ -46,6 +46,7 @@ function LinkedSidebarFromHost({ hostId }: { readonly hostId: EnvironmentId }) {
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- publishes this host's server-side links into the sidebar when its list changes
   useEffect(() => {
+    if (known.data === undefined) return;
     publish(known.data);
   }, [known.data]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops this host's server-side links when it disconnects

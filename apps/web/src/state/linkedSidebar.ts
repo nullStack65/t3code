@@ -5,6 +5,7 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, LinkedSidebarResult } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
 import { environmentSummaries } from "./presentation";
@@ -31,9 +32,15 @@ const sameThread = (left: EnvironmentThreadShell, right: EnvironmentThreadShell)
   left.id === right.id &&
   left.title === right.title &&
   left.updatedAt === right.updatedAt &&
-  left.projectId === right.projectId;
+  left.projectId === right.projectId &&
+  left.settledOverride === right.settledOverride &&
+  left.snoozedUntil === right.snoozedUntil &&
+  left.runtime?.status === right.runtime?.status &&
+  left.source.inbox?.owner === right.source.inbox?.owner &&
+  left.source.inbox?.audience === right.source.inbox?.audience &&
+  left.source.inbox?.attentionKind === right.source.inbox?.attentionKind;
 
-export const linkedSidebarSupplementAtom = Atom.make((get) => {
+const linkedSidebarSupplementAtom = Atom.make((get) => {
   const catalog = get(environmentSummaries.identitiesAtom).map(
     (identity) => identity.environmentId,
   );
@@ -97,3 +104,15 @@ export const sidebarThreadShellsAtom = Atom.make((get) => {
     ? previous
     : next;
 }).pipe(Atom.withLabel("linked-sidebar:threads"));
+
+export function useSidebarEnvironmentIdentities() {
+  return useAtomValue(sidebarEnvironmentIdentitiesAtom);
+}
+
+export function useSidebarProjects() {
+  return useAtomValue(sidebarProjectsAtom);
+}
+
+export function useSidebarThreadShells() {
+  return useAtomValue(sidebarThreadShellsAtom);
+}

@@ -15,7 +15,6 @@ import {
   environmentSummaries,
   useEnvironmentPresentation,
 } from "./presentation";
-import { sidebarEnvironmentIdentitiesAtom } from "./linkedSidebar";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { relayEnvironmentDiscovery } from "./relay";
 import { usePreparedConnection } from "./session";
@@ -107,7 +106,7 @@ export function useRelayEnvironmentDiscovery(): Discovery.RelayEnvironmentDiscov
 }
 
 export function useEnvironmentIdentities() {
-  return useAtomValue(sidebarEnvironmentIdentitiesAtom);
+  return useAtomValue(environmentSummaries.identitiesAtom);
 }
 
 export function usePullRequestsSupported() {

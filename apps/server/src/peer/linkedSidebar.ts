@@ -19,10 +19,10 @@ import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 
 const THREAD_PAGE_LIMIT = 100;
-const MAX_THREAD_PAGES = 30;
+const MAX_THREAD_PAGES = 8;
 const PROJECT_PAGE_LIMIT = 100;
-const MAX_PROJECT_PAGES = 10;
-const PAGE_BUDGET = Duration.seconds(8);
+const MAX_PROJECT_PAGES = 3;
+const PAGE_BUDGET = Duration.seconds(3);
 
 const READ_LIMITS = {
   runtimeMode: "approval-required",

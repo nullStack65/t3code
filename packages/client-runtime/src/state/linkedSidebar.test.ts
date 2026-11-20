@@ -78,4 +78,27 @@ describe("sidebarFromServerLinks", () => {
     expect(matchesThreadListFilter(linked, filter)).toBe(false);
     expect(matchesThreadListFilter(linked, { ...filter, inboxes: ["jeff"] })).toBe(true);
   });
+
+  it("lists one copy when two hosts report the same server-only link", () => {
+    const listed = sidebarFromServerLinks({
+      catalogEnvironmentIds: [laptop],
+      environments: [
+        {
+          environmentId: omarcy,
+          label: "omarcy-desktop",
+          projects: [],
+          threads: [jeffThread],
+        },
+        {
+          environmentId: omarcy,
+          label: "omarcy-desktop",
+          projects: [],
+          threads: [jeffThread],
+        },
+      ],
+    });
+    expect(listed.identities).toEqual([{ environmentId: omarcy, label: "omarcy-desktop" }]);
+    expect(listed.threads.map((thread) => thread.id)).toEqual([threadId]);
+    expect(listed.projects).toHaveLength(1);
+  });
 });

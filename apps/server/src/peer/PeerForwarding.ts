@@ -124,7 +124,6 @@ export class PeerForwarding extends Context.Service<
     readonly links: (
       scope: Scope,
     ) => Effect.Effect<OrchestratorMcpEnvironmentLinksResult, OrchestratorMcpFailure>;
-    /** Projects and threads on reachable links that this client has not connected itself. */
     readonly linkedSidebar: (input: {
       readonly catalogEnvironmentIds?: ReadonlyArray<EnvironmentId> | undefined;
     }) => Effect.Effect<LinkedSidebarResult, PeerLinkError>;

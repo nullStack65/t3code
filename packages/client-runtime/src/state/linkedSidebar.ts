@@ -29,7 +29,7 @@ const utcOrNull = (value: string | null) => (value === null ? null : utc(value))
 
 const ACTIVE_STATUS = new Set(["preparing", "starting", "running", "waiting"]);
 
-export function threadShellFromLinkedThread(
+function threadShellFromLinkedThread(
   environmentId: EnvironmentId,
   thread: LinkedSidebarThread,
 ): EnvironmentThreadShell | null {
@@ -147,18 +147,28 @@ export function sidebarFromServerLinks(input: {
   const projects: Array<EnvironmentProject> = [];
   const threads: Array<EnvironmentThreadShell> = [];
   const seenProjects = new Set<string>();
+  const seenEnvironments = new Set<EnvironmentId>();
+  const seenThreads = new Set<string>();
   for (const environment of input.environments) {
     if (catalog.has(environment.environmentId)) continue;
-    identities.push({ environmentId: environment.environmentId, label: environment.label });
+    if (!seenEnvironments.has(environment.environmentId)) {
+      seenEnvironments.add(environment.environmentId);
+      identities.push({ environmentId: environment.environmentId, label: environment.label });
+    }
     for (const project of environment.projects) {
+      const projectKey = `${environment.environmentId}\0${project.id}`;
+      if (seenProjects.has(projectKey)) continue;
       const shell = projectShell(environment.environmentId, project);
       if (shell === null) continue;
       projects.push(shell);
-      seenProjects.add(`${environment.environmentId}\0${project.id}`);
+      seenProjects.add(projectKey);
     }
     for (const thread of environment.threads) {
+      const threadKey = `${environment.environmentId}\0${thread.threadId}`;
+      if (seenThreads.has(threadKey)) continue;
       const shell = threadShellFromLinkedThread(environment.environmentId, thread);
       if (shell === null) continue;
+      seenThreads.add(threadKey);
       threads.push(shell);
       const key = `${environment.environmentId}\0${thread.projectId}`;
       if (seenProjects.has(key)) continue;
