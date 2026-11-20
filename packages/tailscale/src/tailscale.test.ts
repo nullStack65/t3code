@@ -509,7 +509,9 @@ describe("tailscale", () => {
       serveHost: "127.0.0.1",
     };
 
-    function serveHarness(serveStatusResults: ReadonlyArray<{ code?: number; hang?: boolean }>) {
+    function serveHarness(
+      serveStatusResults: ReadonlyArray<{ code?: number; hang?: boolean; stdout?: string }>,
+    ) {
       const state = { serveStatusReads: 0, serveEnabled: false };
       const layer = Layer.merge(
         layerMockSpawner((_command, args) => {
@@ -521,7 +523,9 @@ describe("tailscale", () => {
               Math.min(state.serveStatusReads, serveStatusResults.length - 1)
             ] ?? { code: 1 };
             state.serveStatusReads += 1;
-            return result.hang === true || (result.code ?? 0) !== 0 ? result : { stdout: "null" };
+            return result.hang === true || (result.code ?? 0) !== 0
+              ? result
+              : { stdout: result.stdout ?? "null" };
           }
           if (args[0] === "serve" && args[1] === "--bg") {
             state.serveEnabled = true;
@@ -575,6 +579,18 @@ describe("tailscale", () => {
         assert.strictEqual(outcome, "configured");
         assert.isAbove(state.serveStatusReads, 2);
         assert.isTrue(state.serveEnabled);
+      });
+    });
+
+    it.effect("leaves Serve off when the route read succeeds with output it cannot parse", () => {
+      const { state, layer } = serveHarness([{ stdout: "not json" }]);
+      return Effect.gen(function* () {
+        const outcome = yield* ensureTailscaleServeAtStartup(startupInput).pipe(
+          Effect.provide(layer),
+        );
+        assert.strictEqual(outcome, "unknown");
+        assert.strictEqual(state.serveStatusReads, 1);
+        assert.isFalse(state.serveEnabled);
       });
     });
   });

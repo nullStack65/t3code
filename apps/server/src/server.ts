@@ -1027,7 +1027,9 @@ const layerMakeServer = Layer.unwrap(
                         "Tailscale Serve left off; its port already serves another server or app",
                         { localPort, servePort: config.tailscaleServePort },
                       )
-                    : Effect.logInfo("Tailscale Serve configured", {
+                    : outcome === "unknown"
+                      ? Effect.void
+                      : Effect.logInfo("Tailscale Serve configured", {
                         localPort,
                         servePort: config.tailscaleServePort,
                       }),
@@ -1093,6 +1095,7 @@ const layerMakeServer = Layer.unwrap(
                     ),
                   )
                 : Effect.void,
+            { interruptible: true },
           ).pipe(
             // Startup is not the only time the route can go stale, so whoever finds it on a dead
             // port takes it back.
