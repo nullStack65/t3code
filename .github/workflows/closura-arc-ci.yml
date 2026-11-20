@@ -71,9 +71,16 @@ jobs:
 
       - name: Fork drift receipt
         run: |
+          # The checkout is shallow and sparse and only has the triggering ref,
+          # so neither comparison ref exists with enough history. Fetch just
+          # the two refs, and fail the step if either fetch fails.
+          git fetch --no-tags origin "${{ github.base_ref || github.ref_name }}:refs/remotes/origin/${{ github.base_ref || github.ref_name }}"
           git fetch --no-tags https://github.com/pingdotgg/t3code.git main:refs/remotes/upstream/main
           node --test scripts/fork-drift-receipt.test.mjs
-          node scripts/fork-drift-receipt.mjs --base "origin/${{ github.base_ref || github.ref_name }}" || true
+          # Exit 1 means the release line is past its drift budget, which is
+          # reported rather than failed. Exit 2 means the receipt itself broke.
+          node scripts/fork-drift-receipt.mjs --base "origin/${{ github.base_ref || github.ref_name }}" || rc=$?
+          if [ "${rc:-0}" -eq 2 ]; then exit 2; fi
         shell: bash
 
       - name: Prove exact ARC repository and worker
