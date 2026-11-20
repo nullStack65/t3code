@@ -234,14 +234,19 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     const startedGeneration = generation;
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
     if (input.authMethod !== "oauth-personal" && input.authMethod !== "oauth-business") {
-      return makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
+      return makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "unsupported",
+        message:
+          "Not applicable: Antigravity API keys and Agent Platform are billed by Google. T3 has no quota window for them.",
+      });
     }
     if (!(yield* fs.exists(tokenPath))) {
       cached = undefined;
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "unsupported",
-        message: "Sign in with Google to see Antigravity limits.",
+        message: "Sign in with Google to see limits.",
       });
     }
     const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
