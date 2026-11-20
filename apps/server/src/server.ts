@@ -1030,9 +1030,9 @@ const layerMakeServer = Layer.unwrap(
                     : outcome === "unknown"
                       ? Effect.void
                       : Effect.logInfo("Tailscale Serve configured", {
-                        localPort,
-                        servePort: config.tailscaleServePort,
-                      }),
+                          localPort,
+                          servePort: config.tailscaleServePort,
+                        }),
                 ),
                 Effect.as(route),
                 Effect.catch((cause) =>

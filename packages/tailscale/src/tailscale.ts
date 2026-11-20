@@ -791,12 +791,12 @@ export const ensureTailscaleServeAtStartup = Effect.fn("tailscale.ensureTailscal
       }),
       Effect.catch((cause) =>
         isSlowTailscaledError(cause)
-          ? Effect.logWarning("Tailscale Serve routes could not be read; configuring Serve anyway", {
+          ? Effect.logWarning("Tailscale Serve routes could not be read; applying Serve anyway", {
               cause,
               localPort: input.localPort,
               servePort: input.servePort,
             }).pipe(Effect.as("unreadable" as const))
-          : Effect.logWarning("Tailscale Serve routes could not be understood; leaving Serve off", {
+          : Effect.logWarning("Tailscale Serve routes could not be checked; leaving Serve off", {
               cause,
               localPort: input.localPort,
               servePort: input.servePort,
