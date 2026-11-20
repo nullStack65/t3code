@@ -25,6 +25,8 @@ import {
   commandProgramName,
 } from "@t3tools/client-runtime/work-log/command-label";
 import {
+  commandlessCommandLabel,
+  genericCommandStatusLabel,
   liveActivityToolStatus,
   normalizeCompactToolLabel,
   resolveWorkEntryToolPresentation,
@@ -151,6 +153,11 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   const toolPresentation = resolveWorkEntryToolPresentation(entry);
   if (toolPresentation) return toolPresentation.displayName;
   if (entry.command?.trim()) return commandDisplayText(entry.command);
+  const commandless = commandlessCommandLabel(
+    entry,
+    liveActivityToolStatus(entry.toolLifecycleStatus, false),
+  );
+  if (commandless) return commandless;
   const action = toolGroupAction(entry);
   if (action === "code-search" || action === "search") {
     const searchLabel =
@@ -261,6 +268,10 @@ export function liveWorkEntryLabel(
   if (toolPresentation) return toolPresentation.displayName;
   const command = entry.command?.trim();
   if (command) {
+    const program = commandProgramName(command);
+    if (program == null) {
+      return genericCommandStatusLabel(status);
+    }
     const verb =
       status === "inProgress"
         ? "Running"
@@ -271,9 +282,9 @@ export function liveWorkEntryLabel(
             : status === "stopped"
               ? "Stopped"
               : "Ran";
-    return `${verb} ${commandProgramName(command) ?? "command"}`;
+    return `${verb} ${program}`;
   }
-  return workEntryDisplayLabel(entry, workspaceRoot);
+  return commandlessCommandLabel(entry, status) ?? workEntryDisplayLabel(entry, workspaceRoot);
 }
 
 export function workEntryIsVisibleInGroup(

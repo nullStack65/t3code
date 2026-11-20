@@ -2027,7 +2027,7 @@ it.layer(
         installed: true,
         auth: { status: "authenticated", type: "oauth-personal", label: "Google account" },
         checkedAt: "2026-09-05T00:00:00.000Z",
-        version: "agy_acp_server_1.1.1",
+        version: "1.5.12",
         models: [
           {
             slug: "gemini-3.7-flash-high",
@@ -2101,6 +2101,55 @@ it.layer(
           }).auth,
           signedIn.auth,
         );
+      });
+
+      it("keeps scanned folders through health checks until Antigravity cannot run", () => {
+        const scanned = ["/project", "/plain"].reduce<ServerProvider>(
+          (provider, cwd) =>
+            ProviderRegistry.upsertProviderWorkspaceSnapshot(provider, cwd, {
+              ...signedIn,
+              skills: [{ name: "review", path: `${cwd}/SKILL.md`, enabled: true }],
+            }),
+          signedIn,
+        );
+        const healthCheck = { ...signedIn, checkedAt: "2026-09-05T00:01:00.000Z" };
+        const sessionFolder = {
+          cwd: "/project",
+          checkedAt: healthCheck.checkedAt,
+          slashCommands: [{ name: "swarm" }],
+          skills: [],
+        };
+        const kept = [
+          healthCheck,
+          restartProbe,
+          { ...restartProbe, installed: false, version: null },
+        ] satisfies ReadonlyArray<ServerProvider>;
+        for (const next of kept) {
+          assert.deepStrictEqual(
+            ProviderRegistry.mergeProviderSnapshot(scanned, { ...next, workspaceSnapshots: [] })
+              .workspaceSnapshots,
+            scanned.workspaceSnapshots,
+          );
+        }
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(scanned, {
+            ...healthCheck,
+            workspaceSnapshots: [sessionFolder],
+          }).workspaceSnapshots,
+          [...scanned.workspaceSnapshots!.slice(1), sessionFolder],
+        );
+        const cleared = [
+          { ...healthCheck, auth: { status: "unauthenticated" } },
+          { ...healthCheck, status: "disabled", enabled: false },
+          { ...healthCheck, status: "error", installed: false },
+        ] satisfies ReadonlyArray<ServerProvider>;
+        for (const next of cleared) {
+          assert.deepStrictEqual(
+            ProviderRegistry.mergeProviderSnapshot(scanned, { ...next, workspaceSnapshots: [] })
+              .workspaceSnapshots,
+            [],
+          );
+        }
       });
     });
 
