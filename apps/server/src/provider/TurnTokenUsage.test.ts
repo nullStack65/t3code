@@ -227,7 +227,9 @@ describe("billable native turn usage", () => {
     const ledger = (input: number, output: number) =>
       claudeModelLedger({ "claude-sonnet-4-6": { inputTokens: input, outputTokens: output } });
     const result = { input_tokens: 40, output_tokens: 5 };
-    expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_040, 105), result)).toBeUndefined();
+    expect(
+      claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_040, 105), result),
+    ).toBeUndefined();
     expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_000, 100), {})).toBeUndefined();
     expect(claudeResumedLedgerDelta(undefined, ledger(1_040, 105), result)).toBeUndefined();
     expect(claudeResumedLedgerDelta(ledger(30, 4), ledger(40, 5), result)).toEqual({
