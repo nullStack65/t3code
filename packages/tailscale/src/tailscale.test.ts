@@ -11,9 +11,11 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@t3tools/shared/Net";
 
 import {
   ensureTailscaleServe,
+  ensureTailscaleServeAtStartup,
   parseTailscaleExitNode,
   parseTailscaleServeRootHolders,
   parseTailscaleServeRoutesTo,
@@ -59,10 +61,13 @@ function assertCarriesNoSecret(error: object, secret: string): void {
 }
 const tailscaleStatusJson = `{"Self":{"DNSName":"desktop.tail.ts.net.","TailscaleIPs":["100.100.100.100","fd7a:115c:a1e0::1","192.168.1.20"]}}`;
 
-function mockHandle(result: { stdout?: string; stderr?: string; code?: number }) {
+function mockHandle(result: { stdout?: string; stderr?: string; code?: number; hang?: boolean }) {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
-    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(result.code ?? 0)),
+    exitCode:
+      result.hang === true
+        ? Effect.never
+        : Effect.succeed(ChildProcessSpawner.ExitCode(result.code ?? 0)),
     isRunning: Effect.succeed(false),
     kill: () => Effect.void,
     unref: Effect.succeed(Effect.void),
@@ -88,7 +93,7 @@ function layerMockSpawner(
   handler: (
     command: string,
     args: ReadonlyArray<string>,
-  ) => { stdout?: string; stderr?: string; code?: number },
+  ) => { stdout?: string; stderr?: string; code?: number; hang?: boolean },
 ) {
   return layerSpawner(
     ChildProcessSpawner.make((command) => {
@@ -493,6 +498,100 @@ describe("tailscale", () => {
       yield* readTailscaleSshEnabled.pipe(Effect.provide(layer));
       yield* ensureTailscaleServe({ localPort: 45_678 }).pipe(Effect.provide(layer));
       assert.deepEqual(killGraces, [500, 500, 500, 500]);
+    });
+  });
+
+  describe("ensureTailscaleServeAtStartup", () => {
+    const startupInput = {
+      localPort: 45_678,
+      servePort: 443,
+      localHost: "127.0.0.1",
+      serveHost: "127.0.0.1",
+    };
+
+    function serveHarness(
+      serveStatusResults: ReadonlyArray<{ code?: number; hang?: boolean; stdout?: string }>,
+    ) {
+      const state = { serveStatusReads: 0, serveEnabled: false };
+      const layer = Layer.merge(
+        layerMockSpawner((_command, args) => {
+          if (args[0] === "status") {
+            return { stdout: tailscaleStatusJson };
+          }
+          if (args[0] === "serve" && args[1] === "status") {
+            const result = serveStatusResults[
+              Math.min(state.serveStatusReads, serveStatusResults.length - 1)
+            ] ?? { code: 1 };
+            state.serveStatusReads += 1;
+            return result.hang === true || (result.code ?? 0) !== 0
+              ? result
+              : { stdout: result.stdout ?? "null" };
+          }
+          if (args[0] === "serve" && args[1] === "--bg") {
+            state.serveEnabled = true;
+          }
+          return { stdout: "" };
+        }),
+        NetService.layer,
+      );
+      return { state, layer };
+    }
+
+    it.effect("enables Serve after the first route read hangs past its timeout", () => {
+      const { state, layer } = serveHarness([{ hang: true }, {}]);
+      return Effect.gen(function* () {
+        const fiber = yield* ensureTailscaleServeAtStartup(startupInput).pipe(
+          Effect.provide(layer),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(Duration.seconds(10));
+        const outcome = yield* Fiber.join(fiber);
+        assert.strictEqual(outcome, "configured");
+        assert.strictEqual(state.serveStatusReads, 2);
+        assert.isTrue(state.serveEnabled);
+      });
+    });
+
+    it.effect("enables Serve after several failed route reads", () => {
+      const { state, layer } = serveHarness([{ code: 1 }, { code: 1 }, { code: 1 }, {}]);
+      return Effect.gen(function* () {
+        const fiber = yield* ensureTailscaleServeAtStartup(startupInput).pipe(
+          Effect.provide(layer),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(Duration.seconds(10));
+        const outcome = yield* Fiber.join(fiber);
+        assert.strictEqual(outcome, "configured");
+        assert.strictEqual(state.serveStatusReads, 4);
+        assert.isTrue(state.serveEnabled);
+      });
+    });
+
+    it.effect("enables Serve anyway when every route read fails", () => {
+      const { state, layer } = serveHarness([{ hang: true }]);
+      return Effect.gen(function* () {
+        const fiber = yield* ensureTailscaleServeAtStartup(startupInput).pipe(
+          Effect.provide(layer),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(Duration.seconds(120));
+        const outcome = yield* Fiber.join(fiber);
+        assert.strictEqual(outcome, "configured");
+        assert.isAbove(state.serveStatusReads, 2);
+        assert.isTrue(state.serveEnabled);
+      });
+    });
+
+    it.effect("leaves Serve off when the route read succeeds with output it cannot parse", () => {
+      const { state, layer } = serveHarness([{ stdout: "not json" }]);
+      return Effect.gen(function* () {
+        const outcome = yield* ensureTailscaleServeAtStartup(startupInput).pipe(
+          Effect.provide(layer),
+        );
+        assert.strictEqual(outcome, "unknown");
+        assert.strictEqual(state.serveStatusReads, 1);
+        assert.isFalse(state.serveEnabled);
+      });
     });
   });
 });
