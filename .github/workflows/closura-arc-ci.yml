@@ -193,17 +193,25 @@ jobs:
           set -euo pipefail
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ms-playwright"
           vp exec playwright install --only-shell chromium
-          missing=$(vp exec playwright install-deps --dry-run chromium 2>&1 \
-            | sed -n 's/^  \([a-z0-9][a-z0-9.+-]*\)$/\1/p' | grep -Ev '^x?fonts-' || true)
-          if test -n "$missing"; then
-            apt_dir="$RUNNER_TEMP/chromium-apt"
-            mkdir -p "$apt_dir/lists/partial" "$apt_dir/cache/archives/partial" "$apt_dir/debs" "$apt_dir/root"
-            apt_options=(-o "Dir::State::Lists=$apt_dir/lists" -o "Dir::Cache=$apt_dir/cache" -o Debug::NoLocking=1 -o "APT::Sandbox::User=$(id -un)")
-            apt-get "${apt_options[@]}" update -qq
-            closure=$(apt-get "${apt_options[@]}" install -s --no-install-recommends $missing | awk '/^Inst /{print $2}')
+          shell=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -name chrome-headless-shell | head -1)
+          test -x "$shell"
+          packages=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2
+            libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0
+            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2)
+          apt_dir="$RUNNER_TEMP/chromium-apt"
+          mkdir -p "$apt_dir/lists/partial" "$apt_dir/cache/archives/partial" "$apt_dir/debs" "$apt_dir/root"
+          apt_options=(-o "Dir::State::Lists=$apt_dir/lists" -o "Dir::Cache=$apt_dir/cache" -o Debug::NoLocking=1 -o "APT::Sandbox::User=$(id -un)")
+          apt-get "${apt_options[@]}" update -qq
+          closure=$(apt-get "${apt_options[@]}" install -s --no-install-recommends "${packages[@]}" | awk '/^Inst /{print $2}')
+          printf 'Chromium libraries to extract: %s\n' "${closure:-none}"
+          if test -n "$closure"; then
             (cd "$apt_dir/debs" && apt-get "${apt_options[@]}" download $closure)
             for deb in "$apt_dir"/debs/*.deb; do dpkg-deb -x "$deb" "$apt_dir/root"; done
             export LD_LIBRARY_PATH="$apt_dir/root/usr/lib/x86_64-linux-gnu:$apt_dir/root/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          if ldd "$shell" | grep 'not found'; then
+            echo "::error::Headless Chromium still misses the libraries above."
+            exit 1
           fi
           vp run test:latency
 
