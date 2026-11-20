@@ -93,6 +93,18 @@ const failedThread = (failedAgoMs: number, resetAgoMs: number) => {
 };
 
 describe("limitRecoveryCommand arming", () => {
+  it("does not snooze a thread when a usage limit stops it", () => {
+    const thread = failedThread(-HOUR_MS, -2 * HOUR_MS);
+    const asked = limitRecoveryCommand(thread, false, nowMs, true);
+    assert.isNull(asked);
+    const armed = limitRecoveryCommand(thread, true, nowMs, true);
+    assert.equal(armed?.type, "thread.metadata.update");
+    if (armed?.type === "thread.metadata.update") {
+      assert.equal(armed.limitRecovery?.snooze, false);
+      assert.equal(armed.limitRecovery?.autoResume, true);
+    }
+  });
+
   it("does not freshly arm a failure whose reset passed days ago", () => {
     const thread = failedThread(5 * 24 * HOUR_MS, 4 * 24 * HOUR_MS);
     assert.isNull(limitRecoveryCommand(thread, true, nowMs));

@@ -448,12 +448,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
-    id: "snooze-limited-threads",
-    title: "Snooze until limits reset",
-    to: "/settings/threads",
-    searchTerms: ["usage quota rate limit reset wake recover continue"],
-  },
-  {
     id: "auto-resume-limited-threads",
     title: "Resume after usage limits",
     to: "/settings/threads",

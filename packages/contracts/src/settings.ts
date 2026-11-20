@@ -1571,6 +1571,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   idleCompaction: Schema.optionalKey(IdleCompactionMode),
+  // Closura: a usage limit must leave the thread visible. Plans are pooled across providers,
+  // so hiding the thread until the reset hides the reason to switch models. The per-thread
+  // "Snooze until reset" button still writes this field's recovery flag.
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Closura: a usage limit resets for every thread on the account at once. Resuming them is
   // the server's job, so Lead is told only about a thread that does not come back.

@@ -205,7 +205,12 @@ describe("V2 storage cleanup eligibility", () => {
       resetIn: -1_000,
       idle: true,
     },
-    { name: "not yet armed by the recovery worker", armed: false, resetIn: DAY_MS, idle: false },
+    {
+      name: "not yet armed, and the snooze setting no longer holds it",
+      armed: false,
+      resetIn: DAY_MS,
+      idle: true,
+    },
     {
       name: "not yet armed, auto-resume after reset",
       armed: false,
@@ -3684,7 +3689,7 @@ describe("storage cleanup reports and local file policies", () => {
 });
 
 describe("settled worktree rechecks", () => {
-  it.effect.each(["autoResumeLimitedThreads", "snoozeLimitedThreads"] as const)(
+  it.effect.each(["autoResumeLimitedThreads"] as const)(
     "keeps a usage-limited checkout when %s is enabled during measurement",
     (preference) =>
       runCleanupTest(
