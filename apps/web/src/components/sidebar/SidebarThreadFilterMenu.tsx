@@ -274,7 +274,7 @@ function FilterOptionRow({
             <span
               key={key}
               className={cn(
-                "text-[10px] leading-tight tabular-nums",
+                "text-3xs leading-tight tabular-nums",
                 value === 0
                   ? "text-muted-foreground/40"
                   : key === "working"
