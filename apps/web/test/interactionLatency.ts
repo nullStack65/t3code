@@ -1,6 +1,6 @@
 import { expect } from "vite-plus/test";
 
-export const INTERACTION_BUDGET_MS = 400;
+const INTERACTION_BUDGET_MS = 400;
 const SAMPLES = 5;
 const QUIET_MS = 150;
 const INPUT_EVENTS = ["pointerdown", "keydown"] as const;
