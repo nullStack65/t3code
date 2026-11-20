@@ -43,6 +43,8 @@ export const LinkedSidebarThread = Schema.Struct({
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /** Absent from linked environments that predate it. */
+  lastVisitedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type LinkedSidebarThread = typeof LinkedSidebarThread.Type;
 

@@ -3,12 +3,14 @@ import {
   makeThreadInbox,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   type LinkedSidebarThread,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { sidebarFromServerLinks } from "./linkedSidebar.ts";
+import { hasUnseenRunFailure } from "./threadSettled.ts";
 import { matchesThreadListFilter, threadListFilterOf } from "./threadListFilter.ts";
 
 const laptop = EnvironmentId.make("primary-mac-laptop");
@@ -100,5 +102,51 @@ describe("sidebarFromServerLinks", () => {
     expect(listed.identities).toEqual([{ environmentId: omarcy, label: "omarcy-desktop" }]);
     expect(listed.threads.map((thread) => thread.id)).toEqual([threadId]);
     expect(listed.projects).toHaveLength(1);
+  });
+
+  it("keeps a failed run unseen until the host records a later visit", () => {
+    const failed = {
+      ...jeffThread,
+      status: "failed" as const,
+      latestRunId: RunId.make("run-eval"),
+      updatedAt: "2026-11-20T05:00:00.000Z",
+    } satisfies LinkedSidebarThread;
+    const listed = (thread: LinkedSidebarThread) =>
+      sidebarFromServerLinks({
+        catalogEnvironmentIds: [laptop],
+        environments: [
+          { environmentId: omarcy, label: "omarcy-desktop", projects: [], threads: [thread] },
+        ],
+      }).threads[0]!;
+    const unseen = listed(failed);
+    expect(unseen.latestRun?.status).toBe("failed");
+    expect(hasUnseenRunFailure(unseen)).toBe(true);
+    const seen = listed({ ...failed, lastVisitedAt: "2026-11-20T05:01:00.000Z" });
+    expect(hasUnseenRunFailure(seen)).toBe(false);
+    const failedAgain = listed({ ...failed, lastVisitedAt: "2026-11-20T04:59:00.000Z" });
+    expect(hasUnseenRunFailure(failedAgain)).toBe(true);
+  });
+
+  it("drops the failed pill once the host completes the thread", () => {
+    const listed = sidebarFromServerLinks({
+      catalogEnvironmentIds: [laptop],
+      environments: [
+        {
+          environmentId: omarcy,
+          label: "omarcy-desktop",
+          projects: [],
+          threads: [
+            {
+              ...jeffThread,
+              status: "idle",
+              latestRunId: RunId.make("run-eval"),
+              lastVisitedAt: "2026-11-20T04:30:00.000Z",
+            },
+          ],
+        },
+      ],
+    }).threads[0]!;
+    expect(listed.latestRun?.status).toBe("completed");
+    expect(hasUnseenRunFailure(listed)).toBe(false);
   });
 });

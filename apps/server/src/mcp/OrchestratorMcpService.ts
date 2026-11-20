@@ -957,6 +957,10 @@ function listItemFromShell(
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
     updatedAt: DateTime.formatIso(shell.updatedAt),
+    lastVisitedAt:
+      shell.lastVisitedAt === undefined || shell.lastVisitedAt === null
+        ? null
+        : DateTime.formatIso(shell.lastVisitedAt),
   };
 }
 

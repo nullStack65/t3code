@@ -449,6 +449,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /** Absent from linked environments that predate it. */
+  lastVisitedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type OrchestratorMcpThreadListItem = typeof OrchestratorMcpThreadListItem.Type;
 

@@ -94,6 +94,7 @@ const slimThread = (
   itemCount: thread.itemCount,
   createdAt: thread.createdAt,
   updatedAt: thread.updatedAt,
+  ...(thread.lastVisitedAt === undefined ? {} : { lastVisitedAt: thread.lastVisitedAt }),
 });
 
 export const collectLinkedSidebar = Effect.fn("linkedSidebar.collect")(function* (input: {

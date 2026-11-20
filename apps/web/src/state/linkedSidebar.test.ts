@@ -11,7 +11,11 @@ import {
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { linkedSidebarByHostAtom, readLinkedSidebarThreadShell } from "./linkedSidebar";
+import {
+  linkedSidebarByHostAtom,
+  linkedSidebarEnvironmentIds,
+  readLinkedSidebarThreadShell,
+} from "./linkedSidebar";
 
 const laptop = EnvironmentId.make("primary-mac-laptop");
 const omarcy = EnvironmentId.make("omarcy-desktop");
@@ -65,5 +69,12 @@ describe("readLinkedSidebarThreadShell", () => {
       readLinkedSidebarThreadShell({ environmentId: omarcy, threadId: ThreadId.make("other") }),
     ).toBeNull();
     expect(readLinkedSidebarThreadShell({ environmentId: laptop, threadId })).toBeNull();
+  });
+});
+
+describe("linkedSidebarEnvironmentIds", () => {
+  it("reports a server-only link, which the filter paints connected", () => {
+    appAtomRegistry.set(linkedSidebarByHostAtom, new Map([[laptop, hostResult]]));
+    expect(linkedSidebarEnvironmentIds()).toEqual([omarcy]);
   });
 });

@@ -116,6 +116,12 @@ export function readLinkedSidebarThreadShell(ref: ScopedThreadRef): EnvironmentT
   );
 }
 
+export function linkedSidebarEnvironmentIds(): ReadonlyArray<EnvironmentId> {
+  return appAtomRegistry
+    .get(linkedSidebarSupplementAtom)
+    .identities.map((identity) => identity.environmentId);
+}
+
 export function useLinkedOnlyEnvironment(environmentId: EnvironmentId | null) {
   const identities = useAtomValue(linkedSidebarSupplementAtom).identities;
   return environmentId === null

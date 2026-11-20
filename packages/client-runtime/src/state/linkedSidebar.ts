@@ -70,6 +70,9 @@ function threadShellFromLinkedThread(
       visibleItemCount: thread.itemCount,
       createdAt: utc(thread.createdAt),
       updatedAt: utc(thread.updatedAt),
+      ...(thread.lastVisitedAt === undefined
+        ? {}
+        : { lastVisitedAt: utcOrNull(thread.lastVisitedAt) }),
       archivedAt: null,
       settledOverride: thread.settled ? "settled" : null,
       settledAt: utcOrNull(thread.settledAt),
