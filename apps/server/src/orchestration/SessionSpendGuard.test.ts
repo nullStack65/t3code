@@ -178,6 +178,20 @@ describe("evaluateSpendGuard", () => {
     expect(result).toMatchObject({ level: "stop", stopReason: "ceiling", sessionUsd: 10 });
   });
 
+  it("stops at the session ceiling when a recent pull request keeps idle spend under the idle limit", () => {
+    const result = evaluate({
+      workSignalAts: ["2026-01-01T00:02:00.000Z"],
+      activities: [
+        priced("2026-01-01T00:01:00.000Z", 6),
+        priced("2026-01-01T00:03:00.000Z", 4),
+      ],
+    });
+    expect(result.idleUsd).toBe(4);
+    expect(result.sessionUsd).toBe(10);
+    expect(result.level).toBe("stop");
+    expect(result.stopReason).toBe("ceiling");
+  });
+
   it("does not stop or flag when the guard is off", () => {
     const result = evaluate({
       settings: { ...settings, mode: "off" },

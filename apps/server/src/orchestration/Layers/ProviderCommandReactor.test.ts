@@ -943,6 +943,147 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  effectIt.effect(
+    "refuses the next user turn at the session ceiling even after a linked pull request",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            serverSettingsOverrides: {
+              sessionSpendGuard: {
+                mode: "enforce",
+                sessionCeilingUsd: 1,
+                idleStopUsd: 50,
+                idleFlagUsd: 25,
+              },
+              usagePriceOverrides: {
+                "gpt-5-codex": {
+                  inputCostPerMillionTokens: 1_000_000,
+                  outputCostPerMillionTokens: 0,
+                  cacheReadCostPerMillionTokens: 0,
+                },
+              },
+            },
+          }),
+        );
+        const threadId = ThreadId.make("thread-crown");
+        const modelSelection = {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        };
+        NodeFS.mkdirSync("/tmp/provider-project", { recursive: true });
+        const workspacePath = NodeFS.mkdtempSync(
+          NodePath.join(NodeOS.tmpdir(), "crown-coordinator-"),
+        );
+        yield* harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-crown-thread"),
+          threadId,
+          projectId: asProjectId("project-1"),
+          title: "Manager work",
+          modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: workspacePath,
+          executionScope: "coordinator",
+          createdAt: "2099-01-01T00:00:00.000Z",
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.pull-request.link",
+          commandId: CommandId.make("cmd-crown-pr"),
+          threadId,
+          host: "github.com",
+          repository: "nullStack65/t3code",
+          number: 1,
+          url: "https://github.com/nullStack65/t3code/pull/1",
+          source: "created",
+        });
+        const nudges = [
+          ["message-crown-status", "Status? Move all work forward.", "2099-01-01T00:00:01.000Z"],
+          ["message-crown-callback", "Here is another handoff.", "2099-01-01T00:00:02.000Z"],
+        ] as const;
+        for (const [messageId, text, createdAt] of nudges) {
+          yield* harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-${messageId}`),
+            threadId,
+            message: {
+              messageId: MessageId.make(messageId),
+              role: "user",
+              text,
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt,
+          });
+          yield* Effect.promise(() => harness.drain());
+        }
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        for (const [index, createdAt] of [
+          ["1", "2099-01-01T00:00:03.000Z"],
+          ["2", "2099-01-01T00:00:04.000Z"],
+        ] as const) {
+          yield* harness.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`cmd-crown-context-${index}`),
+            threadId,
+            activity: {
+              id: EventId.make(`activity-crown-context-${index}`),
+              tone: "info",
+              kind: "context-window.updated",
+              summary: "Context window updated",
+              payload: {
+                totalProcessedTokens: Number(index),
+                lastInputTokens: 1,
+                lastCachedInputTokens: 0,
+                lastOutputTokens: 0,
+              },
+              turnId: null,
+              createdAt,
+            },
+            createdAt,
+          });
+        }
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-crown-after-ceiling"),
+          threadId,
+          message: {
+            messageId: MessageId.make("message-crown-after-ceiling"),
+            role: "user",
+            text: "Status?",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2099-01-01T00:00:05.000Z",
+        });
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        expect(thread?.pullRequests).toEqual(
+          expect.arrayContaining([expect.objectContaining({ number: 1, source: "created" })]),
+        );
+        const refusal = thread?.activities.find(
+          (activity) => activity.kind === "provider.turn.start.failed",
+        );
+        expect(refusal).toMatchObject({
+          summary: "Turn refused by the session spend guard",
+        });
+        expect(String(refusal?.payload && (refusal.payload as { detail?: string }).detail)).toContain(
+          "session ceiling",
+        );
+        expect(String(refusal?.payload && (refusal.payload as { detail?: string }).detail)).not.toContain(
+          "idle limit",
+        );
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        NodeFS.rmSync(workspacePath, { recursive: true, force: true });
+      }),
+  );
+
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
