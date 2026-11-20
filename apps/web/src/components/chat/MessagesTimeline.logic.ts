@@ -573,6 +573,18 @@ type MessagesTimelineRowContent =
       paths: ReadonlyArray<string>;
     }
   | {
+      /**
+       * Consecutive non-human turns (agent relays, automations, system notices
+       * and the work between them) collapsed into one expandable pill.
+       */
+      kind: "activity";
+      id: string;
+      createdAt: string | null;
+      count: number;
+      summary: string;
+      expanded: boolean;
+    }
+  | {
       kind: "turn-fold";
       deferredWorkItemIds?: ReadonlyArray<string>;
       id: string;
@@ -2387,6 +2399,106 @@ export function deriveMessagesTimelineRows(input: {
  * The timeline with only `sender`'s messages, for find's "From" filter. Tool calls, plans and
  * other rows say nothing about who sent them, so they drop out too.
  */
+/**
+ * A message a person wrote, or the model's reply to one. Everything else in a
+ * coordinator thread (agent relays, automations, T3 Code notices, and the work
+ * between them) is activity that buries where the founder left off.
+ */
+export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
+  if (row.kind !== "message" && row.kind !== "assistant-meta") return false;
+  const sender = resolveMessageSender(row.message);
+  return sender.kind === "person" || sender.kind === "guest" || sender.kind === "model";
+}
+
+/**
+ * The short word for one kind of collapsed activity, pluralized with a count.
+ * Kinds the row does not record stay "update".
+ */
+function activityUpdateWord(row: MessagesTimelineRow): string {
+  if (row.kind !== "message" && row.kind !== "assistant-meta") return "update";
+  switch (resolveMessageSender(row.message).kind) {
+    case "agent":
+      return "agent update";
+    case "automation":
+      return "automation";
+    case "system":
+      return "system notice";
+    default:
+      return "update";
+  }
+}
+
+/** `14 agent updates`, `3 automations and 1 system notice`. */
+export function activityUpdateSummary(rows: ReadonlyArray<MessagesTimelineRow>): string {
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+  for (const row of rows) {
+    if (row.kind !== "message" && row.kind !== "assistant-meta") continue;
+    const word = activityUpdateWord(row);
+    if (!counts.has(word)) order.push(word);
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  if (order.length === 0) {
+    return rows.length === 1 ? "1 update" : `${rows.length} updates`;
+  }
+  return order
+    .map((word) => {
+      const count = counts.get(word) ?? 0;
+      const plural =
+        word === "automation" ? (count === 1 ? "automation" : "automations") : `${word}s`;
+      return `${count} ${count === 1 ? word : plural}`;
+    })
+    .join(" and ");
+}
+
+/**
+ * Collapse each run of activity between human turns into one expandable pill,
+ * so the founder's messages and the model's replies to them stay in place.
+ * Expanding a run shows exactly the rows it replaced; nothing is dropped.
+ */
+export function collapseTimelineActivity(
+  rows: MessagesTimelineRow[],
+  expandedIds: ReadonlySet<string>,
+): MessagesTimelineRow[] {
+  const collapsed: MessagesTimelineRow[] = [];
+  let run: MessagesTimelineRow[] = [];
+  const flush = () => {
+    if (run.length === 0) return;
+    const id = `activity:${run[0]!.id}`;
+    if (expandedIds.has(id)) {
+      collapsed.push({
+        kind: "activity",
+        id,
+        createdAt: run[0]!.createdAt,
+        count: run.length,
+        summary: activityUpdateSummary(run),
+        expanded: true,
+      });
+      for (const row of run) collapsed.push(row);
+    } else {
+      collapsed.push({
+        kind: "activity",
+        id,
+        createdAt: run[run.length - 1]!.createdAt,
+        count: run.length,
+        summary: activityUpdateSummary(run),
+        expanded: false,
+      });
+    }
+    run = [];
+  };
+  for (const row of rows) {
+    if (timelineRowIsHumanConversation(row)) {
+      flush();
+      collapsed.push(row);
+    } else {
+      run.push(row);
+    }
+  }
+  flush();
+  return collapsed;
+}
+
 export function filterTimelineRowsBySender(
   rows: MessagesTimelineRow[],
   sender: OrchestrationMessageSenderFilter | null,
@@ -2859,6 +2971,16 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.toolSurface === bw.toolSurface &&
         Equal.equals(a.toolIcon, bw.toolIcon) &&
         a.hasFailure === bw.hasFailure
+      );
+    }
+
+    case "activity": {
+      const ba = b as typeof a;
+      return (
+        a.createdAt === ba.createdAt &&
+        a.count === ba.count &&
+        a.summary === ba.summary &&
+        a.expanded === ba.expanded
       );
     }
 
