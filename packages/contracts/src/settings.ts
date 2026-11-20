@@ -726,6 +726,29 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
   );
 }
 
+export const SessionSpendGuardMode = Schema.Literals(["off", "flag", "enforce"]);
+export type SessionSpendGuardMode = typeof SessionSpendGuardMode.Type;
+
+const SpendGuardUsd = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0));
+
+export const SessionSpendGuardSettings = Schema.Struct({
+  mode: SessionSpendGuardMode.pipe(Schema.withDecodingDefault(Effect.succeed("enforce" as const))),
+  idleFlagUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(25))),
+  idleStopUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(50))),
+  sessionCeilingUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(200))),
+  fallbackRate: UsageModelPriceOverride.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({
+        inputCostPerMillionTokens: 10,
+        outputCostPerMillionTokens: 50,
+        cacheReadCostPerMillionTokens: 1,
+        cacheWriteCostPerMillionTokens: 12.5,
+      }),
+    ),
+  ),
+});
+export type SessionSpendGuardSettings = typeof SessionSpendGuardSettings.Type;
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     setupMode: Schema.optionalKey(Schema.Literals(["managed", "existing"])).pipe(
@@ -1664,6 +1687,13 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
 
+  /**
+   * Closura: idle sessions stop spending by default. `enforce` refuses the
+   * next automated turn past the idle or session ceiling. `flag` records the
+   * warning without stopping, and `off` disables the guard.
+   */
+  sessionSpendGuard: SessionSpendGuardSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+
   // Schema.Unknown preserves unknown-driver configs across versions; see providerInstance.ts.
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -2069,6 +2099,15 @@ export const ServerSettingsPatch = Schema.Struct({
   reviewGuideModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   reviewGuideInstructions: Schema.optionalKey(TrimmedString),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
+  sessionSpendGuard: Schema.optionalKey(
+    Schema.Struct({
+      mode: Schema.optionalKey(SessionSpendGuardMode),
+      idleFlagUsd: Schema.optionalKey(SpendGuardUsd),
+      idleStopUsd: Schema.optionalKey(SpendGuardUsd),
+      sessionCeilingUsd: Schema.optionalKey(SpendGuardUsd),
+      fallbackRate: Schema.optionalKey(UsageModelPriceOverride),
+    }),
+  ),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),

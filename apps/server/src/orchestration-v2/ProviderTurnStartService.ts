@@ -66,6 +66,13 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import {
+  checkLaunch,
+  describeSpendStop,
+  evaluateThreadSpend,
+  SPEND_GUARD_REFUSAL_TITLE,
+  UNTITLED_LAUNCH_REFUSAL,
+} from "./SessionSpendGuard.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import {
   isRestartNoteContinuation,
@@ -197,6 +204,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
     const restoreMissingWorktree = yield* makeRestoreMissingWorktree;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
 
@@ -552,6 +560,47 @@ export const layer: Layer.Layer<
           });
         },
       );
+      const guardSettings = yield* serverSettings.getSettings;
+      const launchRefusal = checkLaunch({
+        title: projection.thread.title,
+        titlePending: projection.thread.titleRegeneration != null,
+        hasOtherUserMessages: projection.runs.some((candidate) => candidate.ordinal < run.ordinal),
+        creationSource: message.creationSource,
+        mode: guardSettings.sessionSpendGuard.mode,
+      });
+      if (launchRefusal !== null) {
+        yield* settleStartFailure({
+          signal: "spend-guard-refused",
+          title: SPEND_GUARD_REFUSAL_TITLE,
+          error: new Error(UNTITLED_LAUNCH_REFUSAL),
+          message: UNTITLED_LAUNCH_REFUSAL,
+        });
+        return;
+      }
+      if (guardSettings.sessionSpendGuard.mode === "enforce") {
+        const { checkpoints } = yield* projectionStore.getThreadRecords(input.threadId, [
+          "checkpoints",
+        ]);
+        const spend = evaluateThreadSpend(
+          {
+            thread: projection.thread,
+            providerTurns: projection.providerTurns,
+            checkpoints,
+            turnItems: [],
+          },
+          guardSettings,
+        );
+        if (spend.level === "stop") {
+          const detail = describeSpendStop(spend, guardSettings.sessionSpendGuard);
+          yield* settleStartFailure({
+            signal: "spend-guard-refused",
+            title: SPEND_GUARD_REFUSAL_TITLE,
+            error: new Error(detail),
+            message: detail,
+          });
+          return;
+        }
+      }
       if (
         providerMessage.attachments.length === 0 &&
         providerMessage.text.trimStart().startsWith("/")

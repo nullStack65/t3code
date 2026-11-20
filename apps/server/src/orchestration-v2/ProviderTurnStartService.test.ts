@@ -96,7 +96,7 @@ const layerWorktreeLocation = (worktreesDir = managedWorktreesDir) =>
   Layer.mergeAll(
     Path.layer,
     Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as ServerConfig.ServerConfig["Service"]),
-    ServerSettings.layerTest(),
+    ServerSettings.layerTest({ sessionSpendGuard: { mode: "off" } }),
   );
 
 function startWithMissingWorktree(
@@ -292,6 +292,134 @@ it.each([
   await harness.start;
   expect(harness.createWorktree).toHaveBeenCalledTimes(input.recreated ? 1 : 0);
 });
+
+function startWithSpendGuard(input: {
+  readonly title: string;
+  readonly creationSource: "web" | "mcp";
+  readonly pullRequestLinkedAt?: string;
+  readonly providerTurns: ReadonlyArray<{ readonly startedAt: string; readonly inputTokens: number }>;
+}) {
+  const threadId = ThreadId.make("thread_provider_turn_start_spend_guard");
+  const runId = RunId.make("run_provider_turn_start_spend_guard");
+  const attemptId = RunAttemptId.make("attempt_provider_turn_start_spend_guard");
+  const rootNodeId = NodeId.make("node_provider_turn_start_spend_guard");
+  const providerThreadId = ProviderThreadId.make("provider_thread_provider_turn_start_spend_guard");
+  const messageId = MessageId.make("message_provider_turn_start_spend_guard");
+  const projection = {
+    thread: {
+      id: threadId,
+      projectId: ProjectId.make("project_provider_turn_start_spend_guard"),
+      title: input.title,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      worktreePath: "/tmp/provider-turn-start-spend-guard",
+      pullRequests:
+        input.pullRequestLinkedAt === undefined
+          ? []
+          : [{ number: 1, source: "created", linkedAt: input.pullRequestLinkedAt }],
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+    },
+    runs: [
+      { id: RunId.make("run_provider_turn_start_spend_guard_first"), ordinal: 1 },
+      {
+        id: runId,
+        status: "starting",
+        rootNodeId,
+        activeAttemptId: attemptId,
+        providerThreadId,
+        userMessageId: messageId,
+        ordinal: 2,
+      },
+    ],
+    nodes: [{ id: rootNodeId, checkpointScopeId: CheckpointScopeId.make("scope_spend_guard") }],
+    attempts: [{ id: attemptId }],
+    providerThreads: [{ id: providerThreadId, providerSessionId: ProviderSessionId.make("s") }],
+    providerTurns: input.providerTurns.map((turn) => ({
+      startedAt: DateTime.makeUnsafe(turn.startedAt),
+      completedAt: null,
+      tokenUsage: { usedTokens: 0, inputTokens: turn.inputTokens, updatedAt: turn.startedAt },
+    })),
+    messages: [
+      {
+        id: messageId,
+        role: "user",
+        text: "Status?",
+        attachments: [],
+        creationSource: input.creationSource,
+      },
+    ],
+    checkpointScopes: [{ id: CheckpointScopeId.make("scope_spend_guard") }],
+    checkpoints: [],
+    contextHandoffs: [],
+    contextTransfers: [],
+    turnItems: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const writeIfRunCurrent = vi.fn<EventSink.EventSinkV2["Service"]["writeIfRunCurrent"]>(() =>
+    Effect.succeed({ committed: true, storedEvents: [] }),
+  );
+  const startRootRun = vi.fn(() => Effect.void);
+  const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
+        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        IdAllocator.layer,
+        Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({}),
+        Layer.succeed(FileSystem.FileSystem, {
+          realPath: (target: string) => Effect.succeed(target),
+        } as never),
+        Path.layer,
+        Layer.mock(ServerConfig.ServerConfig)({
+          worktreesDir: managedWorktreesDir,
+        } as ServerConfig.ServerConfig["Service"]),
+        ServerSettings.layerTest({
+          sessionSpendGuard: { mode: "enforce", sessionCeilingUsd: 1, idleStopUsd: 50 },
+          usagePriceOverrides: {
+            "gpt-5-codex": { inputCostPerMillionTokens: 1_000_000, outputCostPerMillionTokens: 0 },
+          },
+        }),
+        Layer.mock(GitWorkflow.GitWorkflowService)({}),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadRecords: () => Effect.succeed(projection),
+          getTurnStartContext: () => Effect.succeed({ ...projection, hasConversation: true }),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+        Layer.mock(ProviderAuthService.ProviderAuthService)({}),
+        Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
+      ),
+    ),
+  );
+  const refusal = () => {
+    const item = writeIfRunCurrent.mock.calls[0]?.[0].events.find(
+      (event) => event.type === "turn-item.updated",
+    )?.payload;
+    return item?.type === "error" ? item : undefined;
+  };
+  return {
+    start: Effect.gen(function* () {
+      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
+    }).pipe(Effect.provide(layer)),
+    refusal,
+    startRootRun,
+  };
+}
+
+effectIt.effect("refuses an automated follow-up on a thread that still has the default title", () =>
+  Effect.gen(function* () {
+    const harness = startWithSpendGuard({
+      title: "New thread",
+      creationSource: "mcp",
+      providerTurns: [],
+    });
+    yield* harness.start;
+    expect(harness.refusal()).toMatchObject({
+      title: "Turn refused by the session spend guard",
+      failure: { message: expect.stringContaining("default title") },
+    });
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+  }),
+);
 
 const restoreLeaseExists = vi.fn(() => Effect.succeed(false));
 const restoreLeaseCreateWorktree = vi.fn(() => Effect.succeed({} as never));
