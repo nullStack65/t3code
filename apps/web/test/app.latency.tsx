@@ -79,9 +79,11 @@ const threadOpen = (router: AppRouter, threadId: ThreadId) => () =>
   composerEditor() !== null;
 
 async function openThread(threadId: ThreadId) {
-  const app = await mountApp(threadPath(threadId));
+  using stack = new DisposableStack();
+  const app = stack.use(await mountApp(threadPath(threadId)));
   await expect.element(page.getByText(lastAnswer(threadId))).toBeVisible();
   await settle();
+  stack.move();
   return app;
 }
 
@@ -96,6 +98,12 @@ it("warm up on production React", async () => {
     React.act,
     "run through `vp run test:latency`, which sets NODE_ENV=production",
   ).toBeUndefined();
+  {
+    using _cold = await mountApp(threadPath(A));
+    await vi
+      .waitFor(() => expect(bodyText()).toContain(lastAnswer(A)), { timeout: 20_000 })
+      .catch(() => undefined);
+  }
   using _app = await openThread(A);
   await document.fonts.ready;
   await settle();
