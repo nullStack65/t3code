@@ -252,9 +252,9 @@ function isCarriedReasoningOption(
   id: string,
   capabilities: ModelCapabilities | null | undefined,
 ): boolean {
-  if (REASONING_DESCRIPTOR_IDS.has(id)) return true;
   const descriptor = capabilities?.optionDescriptors?.find((candidate) => candidate.id === id);
-  return descriptor ? isReasoningControl(descriptor) : false;
+  if (!descriptor) return REASONING_DESCRIPTOR_IDS.has(id);
+  return isReasoningSelect(descriptor);
 }
 
 export function optionsForModelSwitch(input: {

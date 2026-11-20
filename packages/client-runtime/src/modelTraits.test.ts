@@ -183,6 +183,28 @@ describe("optionsForModelSwitch", () => {
     ).toEqual([{ id: "reasoningEffort", value: "high" }]);
   });
 
+  it("keeps a boolean thinking toggle the next model offers", () => {
+    const next = effortCapabilities({
+      values: ["low", "high"],
+      defaultValue: "high",
+      extra: [{ id: "thinking", label: "Thinking", type: "boolean" }],
+    });
+    expect(
+      optionsForModelSwitch({
+        fromOptions: [{ id: "effort", value: "high" }],
+        fromCapabilities: effortCapabilities({ values: ["low", "high"], defaultValue: "high" }),
+        toCapabilities: next,
+        baseOptions: [
+          { id: "thinking", value: false },
+          { id: "effort", value: "low" },
+        ],
+      }),
+    ).toEqual([
+      { id: "thinking", value: false },
+      { id: "effort", value: "high" },
+    ]);
+  });
+
   it("keeps stored options when the next model has no catalog", () => {
     const stored = [{ id: "reasoningEffort", value: "high" }];
     expect(
