@@ -16,8 +16,7 @@ const commandNames = [
 ].toSorted();
 const commandNamespaces = new Set(commandNames.map((command) => command.split(".")[0]!));
 
-const looksLikeRoute = (token: string) =>
-  /^\/([a-z$][a-z0-9$-]*(\/[a-z$][a-z0-9$-]*)*)?$/.test(token);
+const looksLikeRoute = (token: string) => /^\/([A-Za-z0-9$_-]+(\/[A-Za-z0-9$_-]+)*)?$/.test(token);
 const looksLikeCommand = (token: string) =>
   /^[a-z][A-Za-z]*\.[A-Za-z0-9.<>]+$/.test(token) &&
   commandNamespaces.has(token.split(".")[0]!) &&
@@ -29,13 +28,13 @@ const loadMap = Effect.gen(function* () {
   const root = path.resolve(import.meta.dirname, "..");
   const mapText = yield* fs.readFileString(path.join(root, MAP));
   const named = new Set([...mapText.matchAll(/`([^`\s]+)`/g)].map((match) => match[1]!));
-  const files = (yield* fs.readDirectory(path.join(root, ROUTES))).filter((file) =>
-    file.endsWith(".tsx"),
+  const files = (yield* fs.readDirectory(path.join(root, ROUTES), { recursive: true })).filter(
+    (file) => file.endsWith(".tsx"),
   );
   const routePaths: string[] = [];
   for (const file of files) {
     const source = yield* fs.readFileString(path.join(root, ROUTES, file));
-    const declared = /createFileRoute\("([^"]+)"\)/.exec(source)?.[1];
+    const declared = /createFileRoute\(\s*"([^"]+)"/.exec(source)?.[1];
     if (declared === undefined) continue;
     const route = declared.replace(/^\/_chat(?=\/|$)/, "").replace(/(.)\/$/, "$1");
     if (route !== "") routePaths.push(route);

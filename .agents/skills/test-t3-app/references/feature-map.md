@@ -5,7 +5,8 @@ precisely ("the **Settle thread** item in **sidebar.thread-menu**") instead of d
 
 Conventions:
 
-- **area.feature** is a stable id. Quoted text is the exact visible label.
+- **area.feature** is a stable id, always written in bold. Quoted text is the exact visible label.
+- Code formatting is only for routes, keybinding commands, keys and file names; `scripts/feature-map.test.ts` checks every backticked route and command against the code.
 - `mod` is Command on macOS and Ctrl elsewhere. Defaults come from the built-in keybindings;
   "no default" means the command exists but is unbound until you bind it in
   **Settings → Keybindings**.
@@ -42,7 +43,7 @@ Code: apps/web/src/components/sidebar/
 - **sidebar.thread-status** — row status labels: "Working", "Waiting", "Needs you", "Needs action", "Usage limit reached", "Failed", "Woke", "Unsent draft".
 - **sidebar.thread-hover-actions** — "Settle", "Un-settle", "Wake" buttons; press and drag to apply to a range.
 - **sidebar.draft-row** — unsent draft; "Discard draft" (with Undo).
-- **sidebar.thread-menu** — right-click or "More thread actions":
+- **sidebar.thread-menu** — right-click a thread row:
   "Rename thread", "Pin thread" / "Unpin thread", "Settle thread" / "Un-settle thread",
   "Snooze thread" (presets and "Custom…"), "Wake thread now", "Mark unread",
   "Regenerate title", "Auto-settle behavior" ("Follow settings", "Never"), "Route to inbox"
@@ -64,7 +65,7 @@ Code: apps/web/src/components/sidebar/
 Code: apps/web/src/components/chat/ChatHeader.tsx
 
 - **thread.breadcrumb** — "Thread breadcrumb": project and thread title; click the title to rename ("Thread title").
-- **thread.lineage** — "Lineage" / "Related threads": "Parent thread", "Parent agent", "Subagent", "Side chats", "Fork", "Merge back to source conversation".
+- **thread.lineage** — "Lineage" / "Related threads": "Parent thread", "Parent agent", "Subagent", "Side chats", "Fork", "Merge back to source conversation"; "More thread actions" opens the rest.
 - **thread.project-actions** — "Project actions" / "Project scripts": run a project script, "Add action". Each script is `script.<id>.run` ("Run Script: …").
 - **thread.open-in-editor** — "Open in editor" with "Choose editor". `editor.openFavorite` (`mod+o`).
 - **thread.git-actions** — "Git actions": "Commit", "Push", "Publish repository", "Initialize Git", "Git action options".
@@ -81,7 +82,7 @@ Code: apps/web/src/components/chat/MessagesTimeline.tsx
 - **timeline.assistant-reply** — agent replies with markdown, code blocks, math, Mermaid, file and thread links.
 - **timeline.work-group** — collapsed tool calls and commands; "Show more" / "Show less".
 - **timeline.approval** — "Command approval", "File change approval", "File read approval", "Permission request": "Approve", "Decline", "Always allow this session", "More approval options".
-- **timeline.user-input** — agent questions: "Type your answer", "Previous question" / "Next question", "Submit answer(s)".
+- **timeline.user-input** — agent questions: "Type your answer", "Previous question" / "Next question", "Submit answer" (one question) or "Submit answers".
 - **timeline.proposed-plan** — "Proposed plan" card: "Expand plan" / "Collapse plan", "Plan actions", save to workspace.
 - **timeline.minimap** — turn navigator: "Previous turn" / "Next turn".
 - **timeline.background-work** — "Background work" details for subagents and monitors.
@@ -169,7 +170,7 @@ Code: apps/web/src/components/CommandPalette.tsx
 - **page.home** — `/`. Empty state with recent work, or the no-projects hero ("Add project").
 - **page.thread** — `/$environmentId/$threadId`. One thread on one environment.
 - **page.draft** — `/draft/$draftId`. An unsent new thread.
-- **page.new-thread-link** — `/new`. Opens a prompt link ("Prompt from a link") as a new draft; may clone the repo first ("Check out").
+- **page.new-thread-link** — `/new`. Opens a prompt link as a new draft ("Opening the link...", "This link is open", "Could not open the link"); may clone the repo first ("Check out").
 - **page.thread-link** — `/threads/$environmentId/$threadId`. Shareable thread link that redirects to the thread.
 - **page.project-link** — `/projects/$projectKey`. Project link that redirects to that project's settings.
 - **page.pull-requests** — `/pull-requests`. "Pull requests" across servers: filters "Authored", "Reviewing", "Blocked on me", "Open", "Merged", "Closed"; "Sort pull requests". Opened from the sidebar or "Open pull requests".
@@ -230,9 +231,9 @@ Old links that redirect:
 
 - **onboard.welcome** — `/welcome`, "Welcome": "Set up an agent" (Codex, Claude Code), "Import projects and their threads", "Set up T3 Connect", mobile app pointer.
 - **onboard.pair** — `/pair`, "Pair with this environment": "Paste a one-time token or pairing secret".
-- **onboard.connect** — `/connect`, "Connecting your terminal": approves a `t3` CLI sign-in through T3 Connect.
-- **onboard.connect-agent** — `/connect-agent`, "Use T3 Code in another app": lets an outside agent connect.
-- **onboard.approve-agent** — `/approve-agent`, "Agent sign-in" / "Authorization request": "Choose what it may do", "Read only", "Continue", "Deny".
+- **onboard.connect** — `/connect`, "Authorization request", "Connecting your terminal": approves a `t3` CLI sign-in through T3 Connect.
+- **onboard.connect-agent** — `/connect-agent`, "Agent sign-in", "Connect <client>": lets an outside agent connect. Reached from the code made by "Use T3 Code in another app (MCP)".
+- **onboard.approve-agent** — `/approve-agent`, "Agent sign-in": "Choose what it may do", "Read only", "Continue", "Deny".
 - **onboard.guest** — `/guest`, guest view of a shared thread: "Message", "Attach files", "Send", "Waiting for approval", "This link has ended".
 
 ## Desktop-only shell
@@ -274,18 +275,6 @@ Code: apps/mobile/src/features/
 - **mobile.notifications** — "Agent alerts" and "Agent work in progress" (Live Activity).
 - **mobile.updates** — "Update ready": "Install Now", "Later".
 - **mobile.diagnostics** — "Diagnostics": "Crash reports", "Copy crash report".
-
-## Route index
-
-`/`, `/$environmentId/$threadId`, `/draft/$draftId`, `/new`, `/pull-requests`, `/usage`,
-`/settings`, `/settings/about`, `/settings/access`, `/settings/appearance`, `/settings/archived`,
-`/settings/beta`, `/settings/browser`, `/settings/chat`, `/settings/connections`, `/settings/devices`,
-`/settings/diagnostics`, `/settings/diffs`, `/settings/general`, `/settings/integrations`,
-`/settings/keybindings`, `/settings/labs`, `/settings/maintenance`, `/settings/open-source-licenses`,
-`/settings/projects`, `/settings/providers`, `/settings/scheduled-tasks`, `/settings/secrets`,
-`/settings/snap-shot`, `/settings/source-control`, `/settings/storage`, `/settings/threads`,
-`/settings/voice`, `/settings/worktrees`, `/approve-agent`, `/connect`, `/connect-agent`, `/guest`,
-`/pair`, `/projects/$projectKey`, `/threads/$environmentId/$threadId`, `/welcome`.
 
 ## Unverified
 
