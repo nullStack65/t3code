@@ -233,6 +233,7 @@ import * as RelayClient from "@t3tools/shared/relayClient";
 import {
   disableTailscaleServe,
   ensureTailscaleServe,
+  ensureTailscaleServeAtStartup,
   readTailscaleServeRootHolder,
   readTailscaleServeRoutesTo,
   readTailscaleStatus,
@@ -1014,31 +1015,24 @@ const layerMakeServer = Layer.unwrap(
                 localHost: localHost.replace(/^\[|\]$/gu, ""),
                 servePort: config.tailscaleServePort,
               };
-              const holder = yield* tailscaleServeRootHolder({
-                host: route.localHost,
-                port: localPort,
-              }).pipe(Effect.orElseSucceed(() => "unreadable" as const));
-              if (holder === "other" || holder === "unreadable") {
-                yield* Effect.logWarning(
-                  holder === "other"
-                    ? "Tailscale Serve left off; its port already serves another server or app"
-                    : "Tailscale Serve left off; its current routes could not be read",
-                  { localPort, servePort: config.tailscaleServePort },
-                );
-                return route;
-              }
-              return yield* ensureTailscaleServe({
+              return yield* ensureTailscaleServeAtStartup({
                 localPort,
                 servePort: config.tailscaleServePort,
-                localHost,
+                localHost: route.localHost,
+                serveHost: localHost,
               }).pipe(
-                Effect.as(route),
-                Effect.tap(() =>
-                  Effect.logInfo("Tailscale Serve configured", {
-                    localPort,
-                    servePort: config.tailscaleServePort,
-                  }),
+                Effect.flatMap((outcome) =>
+                  outcome === "occupied"
+                    ? Effect.logWarning(
+                        "Tailscale Serve left off; its port already serves another server or app",
+                        { localPort, servePort: config.tailscaleServePort },
+                      )
+                    : Effect.logInfo("Tailscale Serve configured", {
+                        localPort,
+                        servePort: config.tailscaleServePort,
+                      }),
                 ),
+                Effect.as(route),
                 Effect.catch((cause) =>
                   Effect.logWarning(
                     cause._tag === "TailscaleCommandExitError" &&

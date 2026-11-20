@@ -6,6 +6,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -27,6 +28,8 @@ const TAILSCALE_STATUS_TIMEOUT = Duration.millis(3_500);
 const TAILSCALE_KILL_GRACE = Duration.millis(500);
 const TAILSCALE_SERVE_TIMEOUT = Duration.seconds(10);
 const TAILSCALE_PROBE_TIMEOUT = Duration.millis(2_500);
+const TAILSCALE_STARTUP_READ_TIMEOUT = Duration.seconds(8);
+const TAILSCALE_STARTUP_READ_RETRY_WINDOW = Duration.seconds(30);
 
 const tailscaleCommandForPlatform = (platform: NodeJS.Platform): "tailscale" | "tailscale.exe" =>
   platform === "win32" ? "tailscale.exe" : "tailscale";
@@ -244,6 +247,7 @@ export const parseTailscaleStatus = (
 const readTailscaleOutput = Effect.fn("tailscale.readTailscaleOutput")(function* (
   subcommand: "status" | "serve" | "debug",
   args: readonly string[],
+  timeout: Duration.Input = TAILSCALE_STATUS_TIMEOUT,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const hostPlatform = yield* HostProcess.Platform;
@@ -290,13 +294,13 @@ const readTailscaleOutput = Effect.fn("tailscale.readTailscaleOutput")(function*
     return stdout;
   }).pipe(
     Effect.scoped,
-    Effect.timeout(TAILSCALE_STATUS_TIMEOUT),
+    Effect.timeout(timeout),
     Effect.catchTags({
       TimeoutError: (cause) =>
         Effect.fail(
           new TailscaleCommandTimeoutError({
             ...commandContext,
-            timeoutMs: Duration.toMillis(TAILSCALE_STATUS_TIMEOUT),
+            timeoutMs: Duration.toMillis(Duration.fromInputUnsafe(timeout)),
             cause,
           }),
         ),
@@ -730,8 +734,9 @@ export const parseTailscaleServeRootHolders = (
 const readTailscaleServeRootHolders = (
   servePort: number,
   target: { readonly host: string; readonly port: number },
+  timeout?: Duration.Input,
 ) =>
-  readTailscaleOutput("serve", ["serve", "status", "--json"]).pipe(
+  readTailscaleOutput("serve", ["serve", "status", "--json"], timeout).pipe(
     Effect.flatMap((status) => {
       const holders = parseTailscaleServeRootHolders(status, servePort, target);
       return holders === undefined
@@ -745,9 +750,13 @@ const readTailscaleServeRootHolders = (
  * unclean exit leaves one), or another live server or app, whose route must be left alone.
  */
 export const readTailscaleServeRootHolder = Effect.fn("tailscale.readTailscaleServeRootHolder")(
-  function* (servePort: number, target: { readonly host: string; readonly port: number }) {
+  function* (
+    servePort: number,
+    target: { readonly host: string; readonly port: number },
+    readTimeout?: Duration.Input,
+  ) {
     const net = yield* NetService.NetService;
-    const holders = yield* readTailscaleServeRootHolders(servePort, target);
+    const holders = yield* readTailscaleServeRootHolders(servePort, target, readTimeout);
     if (holders.length === 0) return "none" as const;
     if (holders.some((holder) => holder.ours)) return "ours" as const;
     const live = yield* Effect.forEach(holders, (holder) =>
@@ -756,6 +765,47 @@ export const readTailscaleServeRootHolder = Effect.fn("tailscale.readTailscaleSe
         : net.hasListenerOnHost(holder.loopback.port, holder.loopback.host),
     );
     return live.includes(true) ? ("other" as const) : ("dead" as const);
+  },
+);
+
+const isSlowTailscaledError = (error: { readonly _tag: string }) =>
+  error._tag === "TailscaleCommandTimeoutError" || error._tag === "TailscaleCommandExitError";
+
+export const ensureTailscaleServeAtStartup = Effect.fn("tailscale.ensureTailscaleServeAtStartup")(
+  function* (input: {
+    readonly localPort: number;
+    readonly servePort: number;
+    readonly localHost: string;
+    readonly serveHost: string;
+  }) {
+    const holder = yield* readTailscaleServeRootHolder(
+      input.servePort,
+      { host: input.localHost, port: input.localPort },
+      TAILSCALE_STARTUP_READ_TIMEOUT,
+    ).pipe(
+      Effect.retry({
+        while: isSlowTailscaledError,
+        schedule: Schedule.exponential(Duration.seconds(1)).pipe(
+          Schedule.upTo({ duration: TAILSCALE_STARTUP_READ_RETRY_WINDOW }),
+        ),
+      }),
+      Effect.catch((cause) =>
+        Effect.logWarning("Tailscale Serve routes could not be read; configuring Serve anyway", {
+          cause,
+          localPort: input.localPort,
+          servePort: input.servePort,
+        }).pipe(Effect.as("unreadable" as const)),
+      ),
+    );
+    if (holder === "other") {
+      return "occupied" as const;
+    }
+    yield* ensureTailscaleServe({
+      localPort: input.localPort,
+      servePort: input.servePort,
+      localHost: input.serveHost,
+    });
+    return "configured" as const;
   },
 );
 
