@@ -181,6 +181,36 @@ describe("renderWebhookPrompt", () => {
     assert.deepEqual(rendered.missing, []);
   });
 
+  it("appends the request when the prompt names nothing from it", () => {
+    const rendered = renderWebhookPrompt("Triage this event.", githubPullRequest, "id");
+    assert.include(rendered.prompt, "Triage this event.\n\n<webhook-data-id>POST /api/hooks/task-1?source=github\n");
+    assert.include(rendered.prompt, "x-github-event: pull_request");
+    assert.include(rendered.prompt, githubPullRequest.bodyText);
+    assert.include(rendered.prompt, NOTE);
+    assert.deepEqual(rendered.missing, []);
+  });
+
+  it("does not append the request when the prompt already names it", () => {
+    const rendered = renderWebhookPrompt("Review {{body.pull_request.url}}", githubPullRequest, "id");
+    assert.notInclude(rendered.prompt, "POST /api/hooks/task-1");
+  });
+
+  it("does not append the request when a placeholder resolved empty", () => {
+    const rendered = renderWebhookPrompt("Event: {{body.missing}}", githubPullRequest, "id");
+    assert.equal(rendered.prompt, "Event: ");
+    assert.deepEqual(rendered.missing, ["body.missing"]);
+  });
+
+  it("marks an appended request that exceeds the copy limit", () => {
+    const rendered = renderWebhookPrompt(
+      "Triage this event.",
+      { ...githubPullRequest, bodyText: "x".repeat(40_000) },
+      "id",
+    );
+    assert.include(rendered.prompt, "[truncated]</webhook-data-id>");
+    assert.isBelow(rendered.prompt.length, 40_000);
+  });
+
   it("does not resolve inherited object properties", () => {
     const rendered = renderWebhookPrompt(
       "{{body.constructor}}{{body.__proto__}}{{headers.constructor}}{{headers.__proto__}}",
