@@ -604,6 +604,33 @@ it.effect("maintains delegated candidate indexes across legacy rows and payload 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("counts threads with live or unheld queued runs as active lanes", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    for (const name of ["running", "waiting", "queued", "held", "completed", "deleted", "both"]) {
+      const thread = yield* createThread(`lanes-${name}`, {
+        deletedAt: name === "deleted" ? now : null,
+      });
+      if (name === "queued" || name === "held") {
+        yield* createRun(thread, "queued", {
+          startedAt: null,
+          ...(name === "held" ? { queueHeld: true } : {}),
+        });
+      } else if (name === "both") {
+        yield* createRun(thread, "running");
+        yield* createRun(thread, "queued", { ordinal: 2, startedAt: null });
+      } else {
+        yield* createRun(
+          thread,
+          name === "waiting" ? "waiting" : name === "completed" ? "completed" : "running",
+        );
+      }
+    }
+    assert.strictEqual(yield* projections.countActiveRunThreads(), 4);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("recovers terminal subagent results until their cross-thread transfer exists", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;

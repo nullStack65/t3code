@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { chooseThreadPlacement, type ThreadPlacementCandidate } from "./threadPlacement.ts";
+import {
+  chooseThreadPlacement,
+  placementHostLimits,
+  type ThreadPlacementCandidate,
+} from "./threadPlacement.ts";
 
 const now = 1_000_000;
 const GiB = 1024 ** 3;
@@ -151,7 +155,7 @@ describe("chooseThreadPlacement", () => {
     }
   });
 
-  it("keeps work on the person's own machine when nothing else has room", () => {
+  it("never keeps work on the person's own machine when nothing else has room", () => {
     const desk = host("here", 0.3, {
       resources: {
         ...host("here", 0.3).resources!,
@@ -160,17 +164,127 @@ describe("chooseThreadPlacement", () => {
       },
     });
     expect(chooseThreadPlacement(origin, [desk, host("r720", 0.97)], now)).toEqual({
-      accepted: true,
-      environmentId: "here",
-      reason: "capacity",
+      accepted: false,
+      reason: "no-eligible-environment",
     });
-    // A headless machine with room still wins, and a full origin is not kept.
     expect(chooseThreadPlacement(origin, [desk, host("r720", 0.5)], now)).toMatchObject({
       environmentId: "r720",
     });
     expect(chooseThreadPlacement(origin, [host("here", 0.97), host("r720", 0.97)], now)).toEqual({
       accepted: false,
       reason: "no-eligible-environment",
+    });
+  });
+
+  describe("with the fleet host order and caps", () => {
+    const fleet = [
+      { environmentId: "r720", maxLanes: 4, minAvailableMemoryGiB: 4 },
+      { environmentId: "asus", maxLanes: 1, minAvailableMemoryGiB: 4 },
+      { environmentId: "omarchy", maxLanes: 1, minAvailableMemoryGiB: 4 },
+      { environmentId: "laptop", maxLanes: 0, minAvailableMemoryGiB: 4 },
+    ];
+    const machine = (
+      environmentId: string,
+      cpuUtilization: number,
+      extra: Partial<NonNullable<ThreadPlacementCandidate["resources"]>> = {},
+    ) =>
+      host(environmentId, cpuUtilization, {
+        resources: { ...host(environmentId, cpuUtilization).resources!, ...extra },
+        ...placementHostLimits(fleet, environmentId),
+      });
+    const away = { placementRole: "interactive", humanActive: false } as const;
+    const laptopOrigin = { originEnvironmentId: "laptop" };
+
+    it("sends a lane started from the laptop to R720, then ASUS, then the Omarchy desktop", () => {
+      const laptop = machine("laptop", 0.01, away);
+      expect(
+        chooseThreadPlacement(
+          laptopOrigin,
+          [laptop, machine("omarchy", 0.01, away), machine("asus", 0.01), machine("r720", 0.6)],
+          now,
+        ),
+      ).toEqual({ accepted: true, environmentId: "r720", reason: "capacity" });
+      expect(
+        chooseThreadPlacement(
+          laptopOrigin,
+          [
+            laptop,
+            machine("omarchy", 0.01, away),
+            machine("asus", 0.6),
+            machine("r720", 0.1, { runningAgents: 4 }),
+          ],
+          now,
+        ),
+      ).toMatchObject({ environmentId: "asus" });
+      expect(
+        chooseThreadPlacement(
+          laptopOrigin,
+          [
+            laptop,
+            machine("omarchy", 0.01, away),
+            machine("asus", 0.1, { runningAgents: 1 }),
+            machine("r720", 0.1, { runningAgents: 4 }),
+          ],
+          now,
+        ),
+      ).toMatchObject({ environmentId: "omarchy" });
+    });
+
+    it("refuses with no-eligible-environment when every host is at its cap, never the laptop", () => {
+      expect(
+        chooseThreadPlacement(
+          laptopOrigin,
+          [
+            machine("laptop", 0.01, away),
+            machine("omarchy", 0.01, { ...away, runningAgents: 1 }),
+            machine("asus", 0.1, { runningAgents: 1 }),
+            machine("r720", 0.1, { runningAgents: 4 }),
+          ],
+          now,
+        ),
+      ).toEqual({ accepted: false, reason: "no-eligible-environment" });
+    });
+
+    it("caps R720 at four active lanes and a memory floor, counts idle scopes only without a run count, and refuses a host that cannot count its lanes", () => {
+      for (const [extra, expected] of [
+        [{ runningAgents: 3 }, "r720"],
+        [{ runningAgents: 4 }, null],
+        [{ runningAgents: 18 }, null],
+        [{ runningAgents: 0, availableMemoryBytes: 3.9 * GiB }, null],
+        [{ runningAgents: undefined }, null],
+        [{ runningAgents: 18, activeRuns: 3 }, "r720"],
+        [{ runningAgents: 0, activeRuns: 4 }, null],
+        [{ runningAgents: undefined, activeRuns: 0 }, "r720"],
+      ] as const) {
+        const decision = chooseThreadPlacement(origin, [machine("r720", 0.1, extra)], now);
+        expect(decision.accepted ? decision.environmentId : null).toBe(expected);
+      }
+    });
+
+    it("tries unlisted hosts after listed ones, without a cap", () => {
+      expect(
+        chooseThreadPlacement(origin, [machine("spare", 0.01), machine("asus", 0.5)], now),
+      ).toMatchObject({ environmentId: "asus" });
+      expect(
+        chooseThreadPlacement(
+          origin,
+          [
+            machine("spare", 0.5, { runningAgents: 30 }),
+            machine("asus", 0.1, { runningAgents: 1 }),
+          ],
+          now,
+        ),
+      ).toMatchObject({ environmentId: "spare" });
+    });
+
+    it("still runs laptop-bound work on the laptop", () => {
+      expect(
+        chooseThreadPlacement(
+          { ...laptopOrigin, requiresOrigin: true },
+          [machine("laptop", 0.9), machine("r720", 0.1)],
+          now,
+        ),
+      ).toEqual({ accepted: true, environmentId: "laptop", reason: "local-state" });
     });
   });
 

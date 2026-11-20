@@ -72,7 +72,7 @@ import {
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { latestExecutedRun, runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
@@ -3610,6 +3610,27 @@ const make = Effect.gen(function* () {
                 ),
           ),
         );
+      if (result.run.status === "queued" && result.run.queueHeld === true) {
+        yield* threadManagement.getThreadRecords(input.threadId, ["runs"]).pipe(
+          Effect.flatMap(({ thread, runs }) => {
+            const failed = latestExecutedRun(runs);
+            return thread.worktreePath === null &&
+              failed?.status === "failed" &&
+              failed.workspacePreparation?.type === "worktree"
+              ? threadLaunch.retryPreparation({
+                  commandId: CommandId.make(
+                    `${stableCommandId({ scope, requestKey: key, operation: "thread-send" })}:retry-preparation`,
+                  ),
+                  threadId: input.threadId,
+                  runId: failed.id,
+                })
+              : Effect.void;
+          }),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("thread-send could not retry the failed worktree setup", { cause }),
+          ),
+        );
+      }
       return {
         threadId: input.threadId,
         link: threadLinkFor(scope, input.threadId, target.thread.title),

@@ -11,7 +11,30 @@ const LIMITS = {
   interactive: { cpu: 0.5, loadPerCpu: 0.5, memoryShare: 0.4, memoryBytes: 3 * GiB, agents: 2 },
 } as const;
 
-function headroom(resources: HostResourcesSnapshot, tier: keyof typeof LIMITS): number | null {
+export interface PlacementHostCap {
+  readonly maxLanes: number;
+  readonly minAvailableMemoryBytes: number;
+}
+
+export function withinHostCap(
+  resources: HostResourcesSnapshot | null,
+  cap: PlacementHostCap | undefined,
+): boolean {
+  if (cap === undefined) return true;
+  if (resources === null) return false;
+  const lanes = resources.activeRuns ?? resources.runningAgents;
+  return (
+    lanes !== undefined &&
+    lanes < cap.maxLanes &&
+    resources.availableMemoryBytes >= cap.minAvailableMemoryBytes
+  );
+}
+
+function headroom(
+  resources: HostResourcesSnapshot,
+  tier: keyof typeof LIMITS,
+  cap: PlacementHostCap | undefined,
+): number | null {
   const limits = LIMITS[tier];
   const { cpuUtilization, cpuCount, totalMemoryBytes, availableMemoryBytes } = resources;
   if (cpuUtilization === null || totalMemoryBytes <= 0 || cpuCount <= 0) return null;
@@ -29,6 +52,7 @@ function headroom(resources: HostResourcesSnapshot, tier: keyof typeof LIMITS): 
     (limits.agents !== null && agents >= limits.agents)
   )
     return null;
+  if (!withinHostCap(resources, cap)) return null;
   // Run queues past the core count show saturation that a short CPU sample can miss.
   const busy = Math.max(cpuUtilization, Math.min(1, loadPerCpu));
   return (cpuCount * (1 - busy) * memoryAvailable) / (1 + agents);
@@ -40,9 +64,9 @@ function headroom(resources: HostResourcesSnapshot, tier: keyof typeof LIMITS): 
  * its person is not using it, and it stays well clear of its limits. A machine that does not
  * report its role, such as one on an older release, counts as someone's computer in use.
  *
- * `originEnvironmentId` is where the work starts. When nothing has room it keeps the work if it
- * has room by headless limits, as before placement could pick: work started on someone's
- * computer is theirs to run there.
+ * Within a tier the lowest `rank` with room wins, then the most room. A `cap` refuses a machine
+ * at its lane count or memory floor, and one that cannot report its lanes. When nothing has room
+ * the answer is null, never the machine the work started on.
  */
 export function chooseLoadBalancedEnvironment(
   candidates: ReadonlyArray<{
@@ -51,16 +75,16 @@ export function chooseLoadBalancedEnvironment(
     /** Client receipt time avoids comparing clocks on different machines. */
     receivedAt?: number;
     weight: number;
+    rank?: number | undefined;
+    cap?: PlacementHostCap | undefined;
   }>,
   now: number,
-  originEnvironmentId?: string,
 ): string | null {
   const best = {
-    headless: { id: null as string | null, score: 0 },
-    interactive: { id: null as string | null, score: 0 },
+    headless: { id: null as string | null, rank: Infinity, score: 0 },
+    interactive: { id: null as string | null, rank: Infinity, score: 0 },
   };
-  let origin: string | null = null;
-  for (const { environmentId, resources, receivedAt, weight } of candidates) {
+  for (const { environmentId, resources, receivedAt, weight, rank, cap } of candidates) {
     const sampledAt = receivedAt ?? resources?.sampledAt ?? 0;
     if (
       !resources ||
@@ -71,15 +95,16 @@ export function chooseLoadBalancedEnvironment(
     ) {
       continue;
     }
-    if (environmentId === originEnvironmentId && headroom(resources, "headless") !== null)
-      origin = environmentId;
     // A machine that does not say is someone's until it says otherwise, and in use if unsure.
     const tier = resources.placementRole === "headless" ? "headless" : "interactive";
     if (tier === "interactive" && resources.humanActive !== false) continue;
-    const room = headroom(resources, tier);
+    const room = headroom(resources, tier, cap);
     if (room === null) continue;
     const score = weight * room;
-    if (score > best[tier].score) best[tier] = { id: environmentId, score };
+    const order = rank ?? Infinity;
+    const current = best[tier];
+    if (order < current.rank || (order === current.rank && score > current.score))
+      best[tier] = { id: environmentId, rank: order, score };
   }
-  return best.headless.id ?? best.interactive.id ?? origin;
+  return best.headless.id ?? best.interactive.id;
 }

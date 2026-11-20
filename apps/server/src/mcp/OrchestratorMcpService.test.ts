@@ -4489,8 +4489,11 @@ describe("OrchestratorMcpService thread lookup", () => {
     shells: ReadonlyArray<OrchestrationV2ThreadShell>,
     sent: Ref.Ref<number>,
     overrides: Partial<ThreadManagementService.ThreadManagementService["Service"]> = {},
+    launch: Partial<ThreadLaunchService.ThreadLaunchService["Service"]> = {},
   ) =>
-    layerOrchestratorService.pipe(
+    OrchestratorMcpService.layer.pipe(
+      Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)(launch)),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
       Layer.provide(
         Layer.mergeAll(
           NodeServices.layer,
@@ -4635,6 +4638,63 @@ describe("OrchestratorMcpService thread lookup", () => {
       assert.deepStrictEqual(fromLink?.linkedSender, sender);
       assert.isUndefined(fromLink?.senderThreadId);
       assert.isUndefined((yield* sendAs(linked()))?.linkedSender);
+    }),
+  );
+
+  it.effect("retries a failed worktree setup when a send is held behind it", () =>
+    Effect.gen(function* () {
+      const target = liveThreadShell(ThreadId.make("thread:held"));
+      const failedRunId = RunId.make("run:setup-failed");
+      const retried: Array<ThreadLaunchService.ThreadLaunchPreparationInput> = [];
+      const sendWith = (worktreePath: string | null) =>
+        Effect.gen(function* () {
+          const sent = yield* Ref.make(0);
+          yield* Effect.gen(function* () {
+            const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+            yield* mcp.sendToThread(client, { threadId: target.id, message: "hello" });
+          }).pipe(
+            Effect.provide(
+              service(
+                [target],
+                sent,
+                {
+                  getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(target)),
+                  getThreadRecords: () =>
+                    Effect.succeed({
+                      thread: { ...target, worktreePath },
+                      runs: [
+                        {
+                          id: failedRunId,
+                          status: "failed",
+                          startedAt: null,
+                          workspacePreparation: { type: "worktree" },
+                        },
+                      ],
+                    } as never),
+                  sendToThread: () =>
+                    Effect.succeed({
+                      run: { id: RunId.make("run:held"), status: "queued", queueHeld: true },
+                      delivery: "queued",
+                    } as never),
+                },
+                {
+                  retryPreparation: (input) => {
+                    retried.push(input);
+                    return Effect.succeed({} as never);
+                  },
+                },
+              ),
+            ),
+          );
+        });
+
+      yield* sendWith(null);
+      assert.deepStrictEqual(
+        retried.map((input) => [input.threadId, input.runId]),
+        [[target.id, failedRunId]],
+      );
+      yield* sendWith("/repo/worktree");
+      assert.equal(retried.length, 1);
     }),
   );
 

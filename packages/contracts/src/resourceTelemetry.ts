@@ -17,6 +17,7 @@ export const HostResourcesSnapshot = Schema.Struct({
   loadPerCpu: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
   /** Agent processes running on this host, across every T3 server there. */
   runningAgents: Schema.optional(NonNegativeInt),
+  activeRuns: Schema.optional(NonNegativeInt),
   /** Interactive machines belong to a person; placement uses them last and only while idle. */
   placementRole: Schema.optional(Schema.Literals(["headless", "interactive"])),
   /** Someone is using this interactive machine now, or it cannot tell. */

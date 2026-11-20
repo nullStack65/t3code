@@ -154,6 +154,7 @@ export interface CreateWorktreeOptions {
   readonly worktreesDirectory?: string;
   /** Clone the checkout from the macOS worktree checkout cache. */
   readonly fastCheckout?: boolean;
+  readonly reuseEmptyBranch?: boolean;
 }
 
 export interface GitCommitProgress {

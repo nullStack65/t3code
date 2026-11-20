@@ -3,6 +3,7 @@ import {
   agentLaunchInboxRouting,
   withLegacyPeerInboxReason,
   CommandId,
+  DEFAULT_AUTOMATIC_PLACEMENT_HOSTS,
   type EnvironmentId,
   MessageId,
   type ModelSelection,
@@ -35,6 +36,8 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as DateTime from "effect/DateTime";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import { withinHostCap } from "@t3tools/shared/loadBalancing";
+import { placementHostLimits } from "@t3tools/shared/threadPlacement";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -238,8 +241,21 @@ const launchPlacedThere = Effect.fn("mcp.launchPlacedThere")(function* (
     runtimeMode: local.runtimeMode,
     here,
   });
-  // Placement nobody asked for falls back to here, as before, when no machine has room.
-  const environmentId = byDefault
+  // Placement nobody asked for falls back to here when no machine has room, within here's limit.
+  const hereMayKeep =
+    byDefault &&
+    withinHostCap(
+      here.resources,
+      placementHostLimits(
+        yield* ServerSettings.ServerSettingsService.pipe(
+          Effect.flatMap((settings) => settings.getSettings),
+          Effect.map((settings) => settings.automaticPlacementHosts),
+          Effect.orElseSucceed(() => DEFAULT_AUTOMATIC_PLACEMENT_HOSTS),
+        ),
+        scope.environmentId,
+      ).cap,
+    );
+  const environmentId = hereMayKeep
     ? yield* placing.pipe(
         Effect.catchIf(
           (error) => error.code === "target_required",

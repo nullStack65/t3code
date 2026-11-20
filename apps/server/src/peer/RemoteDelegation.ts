@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_AUTOMATIC_PLACEMENT_HOSTS,
   EnvironmentId,
   isRuntimeModeAbove,
   type ModelSelection,
@@ -29,6 +30,7 @@ import {
 } from "@t3tools/contracts";
 import {
   chooseThreadPlacement,
+  placementHostLimits,
   type ThreadPlacementCandidate,
 } from "@t3tools/shared/threadPlacement";
 import * as Cause from "effect/Cause";
@@ -501,6 +503,37 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const recentPlacements = new Map<
+    string,
+    ReadonlyArray<{ readonly at: number; readonly lanes: number }>
+  >();
+  const recentAt = (environmentId: string, now: number) =>
+    (recentPlacements.get(environmentId) ?? []).filter((entry) => now - entry.at < 60_000);
+  const reportedLanes = (resources: HostResourcesSnapshot | null) =>
+    resources === null ? undefined : (resources.activeRuns ?? resources.runningAgents);
+  const withRecentPlacements = <
+    C extends { readonly environmentId: string; readonly resources: HostResourcesSnapshot | null },
+  >(
+    candidate: C,
+    now: number,
+  ): C => {
+    const resources = candidate.resources;
+    const reported = reportedLanes(resources);
+    if (resources === null || reported === undefined) return candidate;
+    const recent = recentAt(candidate.environmentId, now);
+    let expected = reported;
+    for (let index = recent.length - 1; index >= 0; index--)
+      expected = Math.max(expected, recent[index]!.lanes + recent.length - index);
+    if (expected === reported) return candidate;
+    return {
+      ...candidate,
+      resources:
+        resources.activeRuns !== undefined
+          ? { ...resources, activeRuns: expected }
+          : { ...resources, runningAgents: expected },
+    };
+  };
+
   /** The shared choice: this environment and the askable links, from their own answers. */
   const choosePlacement = Effect.fn("RemoteDelegation.choosePlacement")(function* (
     ask: Ask,
@@ -510,6 +543,9 @@ const make = Effect.gen(function* () {
     },
   ) {
     const askable = yield* askableLinks(input);
+    const hosts = yield* links.placementHosts.pipe(
+      Effect.orElseSucceed(() => DEFAULT_AUTOMATIC_PLACEMENT_HOSTS),
+    );
     const peers = (yield* Effect.forEach(askable, (link) => peerCandidate(ask, link, input), {
       concurrency: "unbounded",
     })).flatMap((peer) => (Option.isSome(peer) ? [peer.value] : []));
@@ -517,26 +553,45 @@ const make = Effect.gen(function* () {
     const hereCandidate =
       !input.excluded.has(hereId) &&
       (input.restrictTo === undefined || input.restrictTo.includes(hereId));
-    const decision = chooseThreadPlacement(
-      { originEnvironmentId: hereId },
-      [
-        ...(hereCandidate
-          ? [
-              {
-                environmentId: hereId,
-                resources: input.here.resources,
-                receivedAt: now,
-                weight: 1,
-                operable: true,
-                projectAvailable: true,
-                modelAvailable: input.here.modelAvailable,
-              },
-            ]
-          : []),
-        ...peers.map((peer) => peer.candidate),
-      ],
-      now,
-    );
+    const candidates = [
+      ...(hereCandidate
+        ? [
+            {
+              environmentId: hereId,
+              resources: input.here.resources,
+              receivedAt: now,
+              weight: 1,
+              operable: true,
+              projectAvailable: true,
+              modelAvailable: input.here.modelAvailable,
+              ...placementHostLimits(hosts, hereId),
+            },
+          ]
+        : []),
+      ...peers.map((peer) => ({
+        ...peer.candidate,
+        ...placementHostLimits(hosts, peer.candidate.environmentId),
+      })),
+    ];
+    const decision = yield* Effect.sync(() => {
+      const chosen = chooseThreadPlacement(
+        { originEnvironmentId: hereId },
+        candidates.map((candidate) => withRecentPlacements(candidate, now)),
+        now,
+      );
+      const lanes = chosen.accepted
+        ? reportedLanes(
+            candidates.find((candidate) => candidate.environmentId === chosen.environmentId)
+              ?.resources ?? null,
+          )
+        : undefined;
+      if (chosen.accepted && lanes !== undefined)
+        recentPlacements.set(chosen.environmentId, [
+          ...recentAt(chosen.environmentId, now),
+          { at: now, lanes },
+        ]);
+      return chosen;
+    });
     yield* Effect.annotateCurrentSpan({
       "placement.reason": decision.reason,
       "placement.candidates": askable.length + (hereCandidate ? 1 : 0),
@@ -601,7 +656,7 @@ const make = Effect.gen(function* () {
       if (!decision.accepted) {
         return yield* new OrchestratorMcpFailure({
           code: "target_required",
-          message: `No environment can take this task now (${decision.reason}): none answered with spare capacity, this repository's project and ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Name an environment, or omit placement to run it here.`,
+          message: `No environment can take this task now (${decision.reason}): every machine automatic placement may use is at its lane or memory limit, or lacks this repository's project or ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Retry later; name an environment only for work bound to that machine.`,
         });
       }
       return yield* threads

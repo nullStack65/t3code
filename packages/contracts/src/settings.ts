@@ -16,6 +16,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   EnvironmentId,
   ForwardCompatibleNullable,
+  NonNegativeInt,
   ForwardCompatibleOptional,
   OmittedWhenNull,
   ProjectId,
@@ -1432,6 +1433,38 @@ export const CloudSpeechCredentials = Schema.Struct({
 export const MachinePlacementRole = Schema.Literals(["auto", "headless", "interactive"]);
 export type MachinePlacementRole = typeof MachinePlacementRole.Type;
 
+export const AutomaticPlacementHost = Schema.Struct({
+  environmentId: EnvironmentId,
+  maxLanes: NonNegativeInt,
+  minAvailableMemoryGiB: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(4)),
+  ),
+});
+export type AutomaticPlacementHost = typeof AutomaticPlacementHost.Type;
+
+export const DEFAULT_AUTOMATIC_PLACEMENT_HOSTS: ReadonlyArray<AutomaticPlacementHost> = [
+  {
+    environmentId: EnvironmentId.make("5cd73d78-08c9-47d4-8381-a53e008340d4"),
+    maxLanes: 4,
+    minAvailableMemoryGiB: 4,
+  },
+  {
+    environmentId: EnvironmentId.make("26cc7088-9c9e-4e60-87dc-51af42d30424"),
+    maxLanes: 1,
+    minAvailableMemoryGiB: 4,
+  },
+  {
+    environmentId: EnvironmentId.make("47f1a903-7121-4886-8b2f-7c8f50174b61"),
+    maxLanes: 1,
+    minAvailableMemoryGiB: 4,
+  },
+  {
+    environmentId: EnvironmentId.make("2f360b2e-0386-498a-b9cd-62999f3525ba"),
+    maxLanes: 0,
+    minAvailableMemoryGiB: 4,
+  },
+];
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1586,6 +1619,15 @@ export const ServerSettings = Schema.Struct({
    */
   automaticPlacementByDefault: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  /**
+   * Closura: the fleet order and limits for automatic placement. R720 first with at most four
+   * lanes, ASUS one heavy lane, Jeff's Omarchy desktop light work, Kameron's laptop none: work
+   * runs there only when it is bound to that laptop. A host past its limit refuses, so the
+   * dispatch router overflows to the cloud. Unlisted hosts follow the listed ones, uncapped.
+   */
+  automaticPlacementHosts: Schema.Array(AutomaticPlacementHost).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AUTOMATIC_PLACEMENT_HOSTS)),
   ),
   /**
    * The watcher thread. It hears a run that ran another model than selected, hit a provider
@@ -2057,6 +2099,7 @@ export const ServerSettingsPatch = Schema.Struct({
   automaticPlacementExcludedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   machinePlacementRole: Schema.optionalKey(MachinePlacementRole),
   automaticPlacementByDefault: Schema.optionalKey(Schema.Boolean),
+  automaticPlacementHosts: Schema.optionalKey(Schema.Array(AutomaticPlacementHost)),
   modelAlertWatcher: Schema.optionalKey(Schema.NullOr(ModelAlertWatcher)),
   modelAlertWebhookUrl: Schema.optionalKey(TrimmedString),
   watcherStuckMinutes: Schema.optionalKey(
