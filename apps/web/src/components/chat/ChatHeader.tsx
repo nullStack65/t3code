@@ -61,6 +61,11 @@ interface ChatHeaderProps {
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
   /** A standing bot shows who it is instead of the project/thread breadcrumb. */
   standing?: ThreadStanding | null | undefined;
+  /**
+   * Collapse agent, automation and system activity, or null when the thread has
+   * no toggle. A standing thread passes it.
+   */
+  activityCollapsed?: { readonly on: boolean; readonly onToggle: () => void } | null | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -87,6 +92,7 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenProjectSettings,
   onFindInThread,
   standing,
+  activityCollapsed = null,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -282,6 +288,7 @@ export const ChatHeader = memo(function ChatHeader({
           </span>
         ) : null}
         <span className="flex-1" />
+        <ActivityViewToggle collapsed={activityCollapsed} />
         {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
       </div>
     );
@@ -439,6 +446,46 @@ export const ChatHeader = memo(function ChatHeader({
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
+      <ActivityViewToggle collapsed={activityCollapsed} />
     </div>
   );
 });
+
+/**
+ * Switches the timeline between the founder's conversation and everything that
+ * happened in the thread. Absent when the thread has nothing to collapse.
+ */
+function ActivityViewToggle({
+  collapsed,
+}: {
+  collapsed: { readonly on: boolean; readonly onToggle: () => void } | null;
+}) {
+  if (collapsed === null) return null;
+  const label = collapsed.on ? "Human conversation" : "All activity";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-pressed={collapsed.on}
+            onClick={collapsed.onToggle}
+            className={cn(
+              "shrink-0 cursor-pointer rounded-full border px-2 py-0.5 text-xs transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+              collapsed.on
+                ? "border-border bg-muted/60 text-foreground hover:bg-muted"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          />
+        }
+      >
+        {label}
+      </TooltipTrigger>
+      <TooltipPopup side="bottom">
+        {collapsed.on
+          ? "Agent, automation and system updates are collapsed. Click to show everything."
+          : "Showing everything. Click to keep only your messages and the replies to them."}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
