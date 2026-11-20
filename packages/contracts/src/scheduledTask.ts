@@ -187,7 +187,7 @@ const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
   filters: Schema.optional(ScheduledTaskWebhookFilters),
 }).annotate({
   description:
-    "Run per webhook request. Prompt can use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}}, {{request}}.",
+    "Run per webhook request. Prompt can use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}}, {{request}}. A prompt that names nothing still gets the request appended.",
 });
 
 /** Accept legacy sub-minute schedules so users can still manage them. */
