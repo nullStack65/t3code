@@ -267,16 +267,9 @@ export function BotAvatar(props: {
           {avatar.head}
         </g>
         {state === "running" ? (
-          <rect
-            x="8"
-            y="11"
-            width="2.5"
-            height="4"
-            fill="currentColor"
-            stroke="none"
-            opacity="0.28"
-            className="motion-safe:animate-bot-scan"
-          />
+          <g className="motion-safe:animate-bot-scan">
+            <rect x="6.5" y="11" width="2.5" height="4" fill="currentColor" stroke="none" opacity="0.28" />
+          </g>
         ) : null}
         <g
           className={cn(

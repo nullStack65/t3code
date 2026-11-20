@@ -365,23 +365,24 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     }
   }
   @keyframes bot-scan {
-    /* Four equal holds, left eye to right eye. steps(4, end) never rests on the
-       final keyframe, so the last stop is written out rather than implied. */
+    /* Four equal holds from the left eye to the right. The distance is in
+       viewBox units: a px translate would shrink with the avatar. The first and
+       last keyframes match so steps(4, end) rests on every stop. */
     0%,
     24% {
-      transform: translateX(-4px);
+      transform: translateX(0);
     }
     25%,
     49% {
-      transform: translateX(0px);
+      transform: translateX(3);
     }
     50%,
     74% {
-      transform: translateX(4px);
+      transform: translateX(6);
     }
     75%,
     100% {
-      transform: translateX(8px);
+      transform: translateX(9);
     }
   }
   @keyframes bot-antenna {
