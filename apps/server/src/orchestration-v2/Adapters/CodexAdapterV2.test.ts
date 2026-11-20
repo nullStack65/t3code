@@ -11685,28 +11685,46 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     const startApprovalTurn = (
       scenario: string,
       entries: ReadonlyArray<CodexReplay.CodexAppServerReplayEntry>,
+      runtimeMode: "approval-required" | "full-access" = "approval-required",
     ) =>
       Effect.gen(function* () {
         const pending = yield* Queue.unbounded<OrchestrationV2RuntimeRequest>();
         const harness = yield* makeCodexReplayHarness(
           makeCodexReplayTranscript({
             scenario,
-            entries: [...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }), ...entries],
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId,
+                prompt,
+                ...(runtimeMode === "full-access"
+                  ? {}
+                  : {
+                      turnPolicy: {
+                        approvalPolicy: "untrusted" as const,
+                        sandboxPolicy: { type: "readOnly" as const },
+                      },
+                    }),
+              }),
+              ...entries,
+            ],
           }),
           (event) =>
             event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
               ? Queue.offer(pending, event.runtimeRequest)
               : Effect.void,
         );
-        yield* harness.runtime.startTurn(
-          makeCodexTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make(`${scenario}-attempt`),
-            text: prompt,
-          }),
-        );
+        const turnInput = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make(`${scenario}-attempt`),
+          text: prompt,
+        });
+        yield* harness.runtime.startTurn({
+          ...turnInput,
+          runtimePolicy: { ...turnInput.runtimePolicy, runtimeMode },
+        });
         return {
           harness,
           answerNext: Queue.take(pending).pipe(
@@ -11916,6 +11934,140 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ),
         ),
       ),
+    );
+
+    const approvalMethods = [
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+      "item/permissions/requestApproval",
+    ] as const;
+    const permissionEntries = [
+      { access: "write" as const, path: { type: "path" as const, path: "/w/a.ts" } },
+    ];
+
+    it.effect.each(approvalMethods)(
+      "accepts %s in full access and leaves no pending approval",
+      (method) =>
+        Effect.gen(function* () {
+          const result =
+            method === "item/permissions/requestApproval"
+              ? { permissions: { fileSystem: { entries: permissionEntries } }, scope: "turn" }
+              : { decision: "accept" };
+          const { harness } = yield* startApprovalTurn(
+            `full-access-${method.replaceAll("/", "-")}`,
+            [
+              {
+                type: "emit_inbound",
+                label: method,
+                frame: {
+                  id: 0,
+                  method,
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    itemId: "full-access-item",
+                    startedAtMs: 2,
+                    ...(method === "item/commandExecution/requestApproval"
+                      ? { command: "rm -rf /tmp/closura-scratch", reason: "dangerous" }
+                      : {}),
+                    ...(method === "item/fileChange/requestApproval"
+                      ? { reason: null, grantRoot: null }
+                      : {}),
+                    ...(method === "item/permissions/requestApproval"
+                      ? { cwd: "/w", permissions: { fileSystem: { entries: permissionEntries } } }
+                      : {}),
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                label: method,
+                frame: { id: 0, result },
+              },
+              turnCompleted(nativeTurnId),
+            ],
+            "full-access",
+          );
+          yield* harness.firstTerminal;
+          assert.isFalse(harness.events.some((event) => event.type === "runtime_request.updated"));
+          assert.deepEqual(
+            harness.terminalEvents().map((event) => event.status),
+            ["completed"],
+          );
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+    );
+
+    it.effect.each(approvalMethods)(
+      "still parks %s when the thread is approval-required",
+      (method) =>
+        Effect.gen(function* () {
+          const result =
+            method === "item/permissions/requestApproval"
+              ? { permissions: { fileSystem: { entries: permissionEntries } }, scope: "turn" }
+              : { decision: "accept" };
+          const { harness, answerNext } = yield* startApprovalTurn(
+            `approval-required-${method.replaceAll("/", "-")}`,
+            [
+              {
+                type: "emit_inbound",
+                label: method,
+                frame: {
+                  id: 0,
+                  method,
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    itemId: "narrow-item",
+                    startedAtMs: 2,
+                    ...(method === "item/commandExecution/requestApproval"
+                      ? { command: "rm -rf /tmp/closura-scratch", reason: "dangerous" }
+                      : {}),
+                    ...(method === "item/fileChange/requestApproval"
+                      ? { reason: null, grantRoot: null }
+                      : {}),
+                    ...(method === "item/permissions/requestApproval"
+                      ? { cwd: "/w", permissions: { fileSystem: { entries: permissionEntries } } }
+                      : {}),
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                label: method,
+                frame: { id: 0, result },
+              },
+              turnCompleted(nativeTurnId),
+            ],
+          );
+          const request = yield* answerNext;
+          assert.equal(request.status, "pending");
+          yield* harness.firstTerminal;
+          const requests = harness.events.flatMap((event) =>
+            event.type === "runtime_request.updated" ? [event.runtimeRequest] : [],
+          );
+          assert.isNotEmpty(requests);
+          assert.equal(requests[0]?.status, "pending");
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
     );
   });
 });
