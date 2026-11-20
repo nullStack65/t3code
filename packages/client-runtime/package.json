@@ -255,6 +255,10 @@
       "types": "./src/state/peerLinks.ts",
       "default": "./src/state/peerLinks.ts"
     },
+    "./state/linked-sidebar": {
+      "types": "./src/state/linkedSidebar.ts",
+      "default": "./src/state/linkedSidebar.ts"
+    },
     "./state/environmentHttpAuth": {
       "types": "./src/state/environmentHttpAuth.ts",
       "default": "./src/state/environmentHttpAuth.ts"

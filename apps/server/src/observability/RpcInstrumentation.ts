@@ -71,6 +71,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.peerLinksUnlink]: "peerLinks",
   [WS_METHODS.peerLinksAddToApp]: "peerLinks",
   [WS_METHODS.peerLinksEnvironments]: "peerLinks",
+  [WS_METHODS.peerLinksLinkedSidebar]: "peerLinks",
   [WS_METHODS.peerLinksReportAppConnections]: "peerLinks",
   [WS_METHODS.peerLinksAnswerRequest]: "peerLinks",
   [WS_METHODS.serverGetSettings]: "server",

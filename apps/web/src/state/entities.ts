@@ -32,6 +32,7 @@ import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thre
 import { Atom } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
+import { sidebarProjectsAtom, sidebarThreadShellsAtom } from "./linkedSidebar";
 import { environmentPresentations } from "./presentation";
 import { environmentServerConfigsAtom } from "./server";
 import {
@@ -96,7 +97,7 @@ export function useEnvironmentThreadRefs(
 }
 
 export function useProjects(): ReadonlyArray<EnvironmentProject> {
-  return useAtomValue(environmentProjects.projectsAtom);
+  return useAtomValue(sidebarProjectsAtom);
 }
 
 /** Providers are left out; read them with `useEnvironmentProviders()`. */
@@ -165,7 +166,7 @@ export function useQuietThreadShell(ref: ScopedThreadRef | null): EnvironmentThr
 
 /** Every thread shell, held through streaming ticks; see quietThreadShellAtom. */
 export function useQuietThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
-  return useAtomValue(environmentThreadShells.quietThreadShellsAtom);
+  return useAtomValue(sidebarThreadShellsAtom);
 }
 
 export function useChildThreadInputs(ref: ScopedThreadRef | null) {

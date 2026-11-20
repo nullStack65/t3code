@@ -30,6 +30,8 @@ import {
   PeerLinkRequestError,
   PeerLinkSummary,
 } from "./peerLink.ts";
+import { LinkedSidebarInput, LinkedSidebarResult } from "./linkedSidebar.ts";
+
 import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
@@ -529,6 +531,7 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAddToApp: "peerLinks.addToApp",
   peerLinksEnvironments: "peerLinks.environments",
+  peerLinksLinkedSidebar: "peerLinks.linkedSidebar",
   peerLinksReportAppConnections: "peerLinks.reportAppConnections",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverGetSettings: "server.getSettings",
@@ -877,6 +880,12 @@ const WsPeerLinksAddToAppRpc = Rpc.make(WS_METHODS.peerLinksAddToApp, {
 const WsPeerLinksEnvironmentsRpc = Rpc.make(WS_METHODS.peerLinksEnvironments, {
   payload: Schema.Struct({}),
   success: Schema.Struct({ environments: Schema.Array(KnownEnvironment) }),
+  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerLinksLinkedSidebarRpc = Rpc.make(WS_METHODS.peerLinksLinkedSidebar, {
+  payload: LinkedSidebarInput,
+  success: LinkedSidebarResult,
   error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
 });
 
@@ -2182,6 +2191,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksUnlinkRpc,
   WsPeerLinksAddToAppRpc,
   WsPeerLinksEnvironmentsRpc,
+  WsPeerLinksLinkedSidebarRpc,
   WsPeerLinksReportAppConnectionsRpc,
   WsPeerLinksAnswerRequestRpc,
   WsServerDiscoverSourceControlRpc,

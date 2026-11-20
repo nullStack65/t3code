@@ -22,6 +22,11 @@ export function createPeerLinkEnvironmentAtoms<R, E>(
     tag: WS_METHODS.peerLinksEnvironments,
     staleTimeMs: 10_000,
   });
+  const linkedSidebar = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:peer-links:linked-sidebar",
+    tag: WS_METHODS.peerLinksLinkedSidebar,
+    staleTimeMs: 10_000,
+  });
   const refreshLists = (environmentId: EnvironmentId, registry: AtomRegistry.AtomRegistry) =>
     Effect.sync(() => {
       registry.refresh(list({ environmentId, input: {} }));
@@ -30,6 +35,7 @@ export function createPeerLinkEnvironmentAtoms<R, E>(
   return {
     list,
     environments,
+    linkedSidebar,
     link: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-links:link",
       tag: WS_METHODS.peerLinksLink,

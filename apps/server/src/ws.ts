@@ -2774,6 +2774,10 @@ export const layerWsRpc = (
           peerForwarding.addToApp(environmentId),
         [WS_METHODS.peerLinksEnvironments]: (_input) =>
           peerLinks.environments.pipe(Effect.map((environments) => ({ environments }))),
+        [WS_METHODS.peerLinksLinkedSidebar]: (input) =>
+          peerForwarding.linkedSidebar({
+            catalogEnvironmentIds: input.catalogEnvironmentIds,
+          }),
         [WS_METHODS.peerLinksReportAppConnections]: ({ connections }) =>
           peerLinks.reportAppConnections(currentSessionId, connections),
         [WS_METHODS.peerLinksAnswerRequest]: (input) =>
