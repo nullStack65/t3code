@@ -44,7 +44,7 @@ const SEEN_AT = "2026-11-20T03:00:00.000Z";
 
 const sendWithHistory = (
   threadId: ThreadId,
-  history: ReadonlyArray<readonly [string, "user" | "assistant"]>,
+  history: ReadonlyArray<readonly [string, "user" | "assistant", "streaming"?]>,
   seenMarker?: ThreadSeenMarker,
 ) =>
   Effect.gen(function* () {
@@ -66,7 +66,7 @@ const sendWithHistory = (
     });
     const now = yield* DateTime.now;
     yield* sink.write({
-      events: history.map(([id, role], index) => ({
+      events: history.map(([id, role, streaming], index) => ({
         id: EventId.make(`event:${threadId}:${id}`),
         type: "message.updated" as const,
         threadId,
@@ -79,7 +79,7 @@ const sendWithHistory = (
           role,
           text: id,
           attachments: [],
-          streaming: false,
+          streaming: streaming === "streaming",
           createdBy: role === "user" ? "user" : "agent",
           creationSource: role === "user" ? "web" : "provider",
           createdAt: DateTime.subtract(now, { seconds: history.length - index }),
@@ -129,6 +129,7 @@ it.layer(layerTest)("seen marker dispatch", (it) => {
           ["message-assistant-1", "assistant"],
           ["message-user-2", "user"],
           ["message-assistant-2", "assistant"],
+          ["message-assistant-live", "assistant", "streaming"],
         ],
         { lastSeenMessageId: MessageId.make("message-user"), seenAt: SEEN_AT },
       );

@@ -11,6 +11,6 @@ export function formatSeenMarkerForProvider(
     `The user last saw message ${marker.lastSeenMessageId}; ${marker.unseenCount} ${noun} since are unseen. Open the reply with a short catch-up on only those.`,
     "</seen_marker>",
   ].join("\n");
-  if (text.trim().startsWith("/")) return `${text}\n\n${block}`;
+  if (text.trim().startsWith("/")) return text;
   return `${block}\n\n${text}`;
 }

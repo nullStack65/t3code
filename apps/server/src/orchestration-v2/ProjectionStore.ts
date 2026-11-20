@@ -6305,6 +6305,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         LEFT JOIN orchestration_v2_projection_messages AS later
           ON later.thread_id = seen.thread_id
           AND later.role = 'assistant'
+          AND later.streaming = 0
           AND (later.created_at, later.message_id) > (seen.created_at, seen.message_id)
         WHERE seen.message_id = ${messageId} AND seen.thread_id = ${threadId}
         GROUP BY seen.message_id
