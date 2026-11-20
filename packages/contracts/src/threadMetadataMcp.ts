@@ -10,6 +10,7 @@ import {
 import { ThreadDecisionAsk, ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
+import { DelegationNudgeUpdate, StoredThreadDelegationNudge } from "./delegationNudge.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 
 export function hasOnlyPairedSurrogates(value: string): boolean {
@@ -49,6 +50,7 @@ export const ThreadMetadataMcpAction = Schema.Literals([
   "request_decision",
   "resolve_decision",
   "set_standing",
+  "set_delegation_nudge",
 ]);
 export type ThreadMetadataMcpAction = typeof ThreadMetadataMcpAction.Type;
 
@@ -64,15 +66,22 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
         "Required only when action is set_standing: a bot persona ({name, role?, avatarId, accent}) makes this a standing bot thread; null makes it an ordinary thread. Independent of pinning.",
     }),
   ),
+  delegationNudge: Schema.optional(
+    DelegationNudgeUpdate.annotate({
+      description:
+        "Required only when action is set_delegation_nudge: {enabled, thresholds?}. When on, the thread is reminded to delegate after that many of its own tool calls in one request (default [5, 10]). A thread cannot change its own setting.",
+    }),
+  ),
   clientRequestId: Schema.optional(ThreadMetadataClientRequestId),
 }).check(
   Schema.makeFilter((input) =>
     (input.action === "rename") === (input.title !== undefined) &&
     (input.action === "route") === (input.inboxRouting !== undefined) &&
     (input.action === "request_decision") === (input.decision !== undefined) &&
-    (input.action === "set_standing") === (input.standing !== undefined)
+    (input.action === "set_standing") === (input.standing !== undefined) &&
+    (input.action === "set_delegation_nudge") === (input.delegationNudge !== undefined)
       ? true
-      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; other actions reject those fields.",
+      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; set_delegation_nudge requires delegationNudge; other actions reject those fields.",
   ),
 );
 export type ThreadMetadataMcpUpdateInput = typeof ThreadMetadataMcpUpdateInput.Type;
@@ -87,6 +96,7 @@ export const ThreadMetadataMcpUpdateResult = Schema.Struct({
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   inbox: Schema.optionalKey(ThreadInbox),
   standing: Schema.optionalKey(StoredThreadStanding),
+  delegationNudge: Schema.optionalKey(StoredThreadDelegationNudge),
   updatedAt: IsoDateTime,
 });
 export type ThreadMetadataMcpUpdateResult = typeof ThreadMetadataMcpUpdateResult.Type;
