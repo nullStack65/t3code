@@ -80,4 +80,18 @@ describe("userFacingDispatchErrorMessage", () => {
     assert.include(message, "server logs");
     assert.notInclude(message, "private-query-data");
   });
+
+  it("shows the thread type refusal when dispatch wraps it", () => {
+    const message = userFacingDispatchErrorMessage({
+      message: "Failed to dispatch orchestration command message.dispatch (command:clo-924).",
+      cause: {
+        message:
+          "gpt-6-astra is refused on standing threads by the Closura thread type policy. Pick another model, or tag the title with a type that allows it, such as [coding].",
+      },
+    });
+    assert.equal(
+      message,
+      "gpt-6-astra is refused on standing threads by the Closura thread type policy. Pick another model, or tag the title with a type that allows it, such as [coding].",
+    );
+  });
 });

@@ -90,6 +90,32 @@ const isProviderAdapterEventStreamError = Schema.is(
 );
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
+describe("CodexAdapterV2 thread type policy", () => {
+  it("sets the thread type compaction limit without raising the context window", () => {
+    const params = CodexAdapterV2.codexThreadRuntimeParams({
+      threadId: null,
+      mcpSession: undefined,
+      runtimePolicy: {
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: "/workspace",
+        threadType: { type: "review", contextWindow: 272_000, compactAt: 120_000, cacheTtl: "5m" },
+      },
+    });
+    assert.equal(params.config.model_auto_compact_token_limit, 120_000);
+    assert.isUndefined(params.config.model_context_window);
+  });
+
+  it("leaves Codex defaults alone without a thread type", () => {
+    const params = CodexAdapterV2.codexThreadRuntimeParams({
+      threadId: null,
+      mcpSession: undefined,
+    });
+    assert.isUndefined(params.config.model_auto_compact_token_limit);
+    assert.isUndefined(params.config.model_context_window);
+  });
+});
+
 describe("CodexAdapterV2 context usage", () => {
   it("uses the current context rather than cumulative processed tokens", () => {
     const usage = CodexAdapterV2.codexProviderTurnTokenUsage(

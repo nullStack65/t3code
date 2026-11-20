@@ -38,6 +38,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { RuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
+import { isThreadTypeModelRefusedError } from "./ThreadTypePolicy.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 
 export const ROLLBACK_FAILED_MESSAGE =
@@ -87,6 +88,7 @@ const isRuntimePolicyAboveCeilingError = Schema.is(RuntimePolicyAboveCeilingErro
  */
 export function rollbackFailureClientMessage(error: CheckpointRollbackExecutionError): string {
   if (isRuntimePolicyAboveCeilingError(error.cause)) return error.cause.message;
+  if (isThreadTypeModelRefusedError(error.cause)) return error.cause.message;
   const restoreCause = isCheckpointRestoreError(error.cause) ? error.cause.cause : undefined;
   return isVcsProcessExitError(restoreCause) && restoreCause.detail === GIT_INDEX_LOCKED_DETAIL
     ? GIT_INDEX_LOCKED_DETAIL
