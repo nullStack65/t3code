@@ -45,6 +45,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   judgeThread,
   threadEventAlert,
+  launchingThreadId,
   ThreadEventAlert,
   type ThreadEventKind,
   threadEventMessage,
@@ -238,6 +239,14 @@ export function modelAlertDestinations(input: {
   ];
 }
 
+export const threadEventDestinations = (
+  recipient: ModelAlertWatcher | null,
+  webhookUrl: string,
+): ReadonlyArray<Destination> => [
+  ...(recipient === null ? [] : (["watcher"] as const)),
+  ...(webhookUrl.trim() === "" ? [] : (["webhook"] as const)),
+];
+
 const signature = (alert: ModelAlert) =>
   `${alert.reasons.join(",")}|${alert.executedModel ?? ""}|${alert.fallbackModels.join(",")}`;
 
@@ -337,20 +346,27 @@ export function recordThreadEvents(
     // A kind can hold several findings at once (a question and an inbox flip), so it remembers
     // each signature it reported. One that stops being true is forgotten and can report again.
     const known = (reported[key] ?? "").split("\n").filter((signature) => signature !== "");
-    const current = kindFindings.map((finding) => finding.signature);
-    const stored = current.join("\n");
-    if (reported[key] !== stored) {
-      const { [key]: _previous, ...rest } = reported;
-      reported = {
-        ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
-        [key]: stored,
-      };
-    }
+    const delivered: Array<string> = [];
     for (const finding of kindFindings) {
-      if (known.includes(finding.signature)) continue;
+      if (known.includes(finding.signature)) {
+        delivered.push(finding.signature);
+        continue;
+      }
       const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
       outbox = queued.outbox;
+      if (queued.enqueued) delivered.push(finding.signature);
       enqueued ||= queued.enqueued;
+    }
+    // A finding with nowhere to go stays unreported, so a later launcher or webhook still hears it.
+    const stored = delivered.join("\n");
+    if (reported[key] !== stored) {
+      const { [key]: _previous, ...rest } = reported;
+      reported = stored
+        ? {
+            ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
+            [key]: stored,
+          }
+        : rest;
     }
   }
   if (reported === state.reported && outbox === state.outbox) return { state, enqueued };
@@ -1060,15 +1076,19 @@ export const make = Effect.gen(function* () {
       return { _tag: "sent" } satisfies DeliveryResult;
     }
     const watcher = current.modelAlertWatcher;
-    if (watcher === null) return { _tag: "sent" } satisfies DeliveryResult;
+    const target = alert.type === "thread-event" ? (alert.recipient ?? null) : watcher;
+    if (target === null) return { _tag: "sent" } satisfies DeliveryResult;
     const here = yield* environment.getEnvironmentId;
     const nowMs = yield* Clock.currentTimeMillis;
-    const view = yield* watcherView;
+    const view =
+      target.environmentId === watcher?.environmentId && target.threadId === watcher.threadId
+        ? yield* watcherView
+        : yield* readWatcher(target, here).pipe(Effect.catchCause(() => Effect.succeed(null)));
     const until =
       holdUntil(view, alert, nowMs) ??
       busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
-    yield* deliverToWatcher(alert, watcher, here);
+    yield* deliverToWatcher(alert, target, here);
     return { _tag: "sent" } satisfies DeliveryResult;
   });
 
@@ -1248,6 +1268,19 @@ export const make = Effect.gen(function* () {
     return { usageLimited: judged.alert?.reasons.includes("usage_limit") === true };
   });
 
+  const launchingThread = Effect.fnUntraced(function* (
+    shell: OrchestrationV2ThreadShell,
+    here: EnvironmentId,
+  ) {
+    const threadId = launchingThreadId(shell.inbox);
+    if (threadId === null || threadId === shell.id) return null;
+    const launcher = yield* projections.getThreadShell(ThreadId.make(threadId));
+    if (launcher === null || launcher.deletedAt !== null || launcher.archivedAt !== null) {
+      return null;
+    }
+    return { environmentId: here, threadId: launcher.id } satisfies ModelAlertWatcher;
+  });
+
   /** Judges one thread for the kinds a trigger can change, and queues what is newly true. */
   const handleThreadEvents = Effect.fnUntraced(function* (
     threadId: ThreadId,
@@ -1275,12 +1308,14 @@ export const make = Effect.gen(function* () {
     });
     const label = (yield* environment.getDescriptor).label;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
-    const destinations = modelAlertDestinations({
-      watcher,
-      webhookUrl: current.modelAlertWebhookUrl,
-      here,
-      lineage: shell.lineage,
-    });
+    const recipient = yield* launchingThread(shell, here);
+    const destinations = threadEventDestinations(recipient, current.modelAlertWebhookUrl);
+    if (recipient === null && destinations.length === 0 && judged.findings.length > 0) {
+      yield* Effect.logWarning("a thread event has no launching thread and no webhook", {
+        threadId,
+        kinds: judged.findings.map((finding) => finding.kind),
+      });
+    }
     const enqueued = yield* update((state) => {
       const result = recordThreadEvents(
         state,
@@ -1292,6 +1327,7 @@ export const make = Effect.gen(function* () {
             shell,
             finding,
             occurredAt,
+            recipient,
           }),
         destinations,
         nowMs,
