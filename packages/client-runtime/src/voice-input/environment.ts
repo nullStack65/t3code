@@ -159,7 +159,10 @@ export const transcribeCloudPcm = (
   );
 };
 
-export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
+export const getEnvironmentSpeechStreamUrl = (
+  prepared: PreparedConnection,
+  path: string = SPEECH_STREAM_PATH,
+) => {
   let endpoint = prepared.httpBaseUrl;
   return request({
     group: "auth",
@@ -172,7 +175,7 @@ export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
     run: ({ client, headers }) => client.webSocketTicketFor({ headers, params: { use: "media" } }),
   }).pipe(
     Effect.map(({ ticket }) => {
-      const url = new URL(SPEECH_STREAM_PATH, endpoint);
+      const url = new URL(path, endpoint);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("wsTicket", Redacted.value(ticket));
       return url.toString();

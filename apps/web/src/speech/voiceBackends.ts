@@ -3,15 +3,16 @@ import type { CloudSpeechProvider, EnvironmentId } from "@t3tools/contracts";
 /** What turns speech into text. The environment that runs it is a separate, defaulted choice. */
 export type VoiceBackend = CloudSpeechProvider | "local";
 
-/** Menu order. This fork recommends AssemblyAI; its key comes from the host's vault. */
+/** Menu order. This fork recommends Groq; its key comes from the host's vault. */
 export const VOICE_BACKENDS: ReadonlyArray<VoiceBackend> = [
+  "groq",
   "assemblyai",
   "openai",
   "xai",
   "openrouter",
   "local",
 ];
-export const RECOMMENDED_VOICE_BACKEND: VoiceBackend = "assemblyai";
+export const RECOMMENDED_VOICE_BACKEND: VoiceBackend = "groq";
 
 export interface VoiceEnvironmentCandidate {
   readonly environmentId: EnvironmentId;
@@ -26,7 +27,9 @@ export interface VoiceEnvironmentSource {
   readonly environmentId: EnvironmentId;
   readonly connection: { readonly phase: string };
   readonly serverConfig?:
-    | { readonly environment: { readonly capabilities?: VoiceEnvironmentCandidate["capabilities"] } }
+    | {
+        readonly environment: { readonly capabilities?: VoiceEnvironmentCandidate["capabilities"] };
+      }
     | null
     | undefined;
 }

@@ -39,9 +39,17 @@ It sends text, never audio, to the text generation model of the draft's
 own environment, because that is where its credentials live.
 
 A cloud destination binds both the forwarding environment and the named provider.
-It uses a separate, batch-only endpoint: changing a server key cannot upgrade
-an environment-local grant, and a cloud recording never uses the streaming
+It uses separate endpoints: changing a server key cannot upgrade an
+environment-local grant, and a cloud recording never uses the native streaming
 socket or falls back to another provider or the environment's native model.
+Groq is the one cloud provider that streams, over its own socket
+(`GROQ_SPEECH_STREAM_PATH`) with the same frame protocol. The server cuts the audio
+at pauses once a piece reaches four seconds (forced at twelve) and uploads each piece
+while the person is still talking, so release waits only for the tail. The four-second
+floor keeps one continuous dictation at or under fifteen requests a minute, inside the
+free tier's twenty. A failed piece is retried twice, then fails the stream on the next
+audio frame rather than at release. With live transcription off, Groq uses the batch
+endpoint like the other providers.
 
 OpenRouter routes to many upstreams, so its grant also names the exact model and
 the model travels with every upload as a query parameter. The server accepts only

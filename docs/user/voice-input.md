@@ -14,10 +14,10 @@ to a named environment on that phone, open **Settings → Voice → Transcribe o
 
 On web and desktop, you choose what transcribes your speech.
 Nothing is sent until you choose: open **Settings → Voice** and set
-**Transcribe with** to a backend: **AssemblyAI**, **OpenAI**, **Grok Voice Transcribe**,
+**Transcribe with** to a backend: **Groq**, **AssemblyAI**, **OpenAI**, **Grok Voice Transcribe**,
 **OpenRouter**, or **Local model** for a speech model you download.
 On a new device, the microphone or dictation shortcut opens that setting from the composer
-and offers **AssemblyAI** straight away.
+and offers **Groq** straight away.
 The backend runs on your own environment unless you pick another under
 **Advanced → Transcription environment**, which appears when more than one environment can run it.
 Microphone audio recorded on this device is sent to that environment over your
@@ -165,5 +165,7 @@ same environment, language, and dictionary as the composer, but skips transcript
 cleanup even when it is on, so you see what the model heard. Browser recording
 needs HTTPS or localhost and microphone permission; for a remote server over
 plain HTTP, use the desktop app.
+
+Groq uses Whisper large-v3-turbo with your Groq API key, or `GROQ_API_KEY` from the environment's launch environment. On web and desktop it transcribes in pieces while you speak, split at natural pauses, so stopping waits only for the last few seconds; with live transcription off it sends the recording when you stop. Groq's free tier limits requests per minute; a long dictation uses about one request every four seconds of speech.
 
 AssemblyAI uses the Sync API with Universal-3.5 Pro and your existing AssemblyAI API key. Each recording must be between 80 milliseconds and two minutes. Choose AssemblyAI under the cloud providers in Settings → Voice.

@@ -11,7 +11,11 @@ import {
   type VoiceTranscriptionOptions,
 } from "@t3tools/client-runtime/voice-input";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
-import type { SpeechTranscriptionOptions, SpeechStreamText } from "@t3tools/contracts";
+import {
+  GROQ_SPEECH_STREAM_PATH,
+  type SpeechTranscriptionOptions,
+  type SpeechStreamText,
+} from "@t3tools/contracts";
 import type { CloudSpeechModelId, CloudSpeechProvider } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -85,9 +89,24 @@ export function createBrowserVoiceInputPlatform(input: {
         options,
       );
       throwIfVoiceTranscriptionAborted(options.signal);
+      const locale = effectiveSpeechLanguage(cloudSpeechLanguages, recordingOptions.speechLanguage);
+      if (input.cloudProvider !== "groq" || !streamingEnabled)
+        return { locale, transcribe: transcribeRecording };
+      const url = await runEnvironmentSpeech(
+        getEnvironmentSpeechStreamUrl(input.prepared, GROQ_SPEECH_STREAM_PATH),
+        options,
+      );
       return {
-        locale: effectiveSpeechLanguage(cloudSpeechLanguages, recordingOptions.speechLanguage),
+        locale,
         transcribe: transcribeRecording,
+        streaming: openSpeechStream({
+          url,
+          canSend: input.hasAudioConsent,
+          options: recordingOptions,
+          signal: options.signal,
+          onText: input.onText,
+          onError: (error) => input.onError(error.message),
+        }),
       };
     }
     const status = await runEnvironmentSpeech(getEnvironmentSpeechStatus(input.prepared), options);

@@ -301,7 +301,7 @@ it("a backend on a disconnected environment points to a real control, never a mi
   );
 });
 
-it("AssemblyAI with a host-provided key enables in one step, with nothing to type or remove", async () => {
+it("Groq with a host-provided key enables in one step, with nothing to type or remove", async () => {
   // Never chosen, unlike an explicit Off.
   window.localStorage.removeItem(grantKey);
   const writes: unknown[] = [];
@@ -312,8 +312,9 @@ it("AssemblyAI with a host-provided key enables in one step, with nothing to typ
           Response.json({
             openai: false,
             xai: false,
-            assemblyai: true,
-            hostManaged: ["assemblyai"],
+            assemblyai: false,
+            groq: true,
+            hostManaged: ["groq"],
           }),
         );
       if (url.pathname.endsWith("/key")) writes.push(url.pathname);
@@ -322,7 +323,7 @@ it("AssemblyAI with a host-provided key enables in one step, with nothing to typ
     async (screen) => {
       // The composer's mic sends first-time users here; the recommended backend is offered at once.
       const dialog = page.getByRole("dialog");
-      await expect.element(dialog.getByText("Use AssemblyAI for dictation?")).toBeVisible();
+      await expect.element(dialog.getByText("Use Groq for dictation?")).toBeVisible();
       await expect
         .element(
           dialog.getByText("was started with, so there’s nothing to enter", { exact: false }),
@@ -330,10 +331,10 @@ it("AssemblyAI with a host-provided key enables in one step, with nothing to typ
         .toBeVisible();
       expect(dialog.element().querySelector("input")).toBeNull();
       expectNoDeadEnd(dialog);
-      await dialog.getByRole("button", { name: "Use AssemblyAI" }).click();
+      await dialog.getByRole("button", { name: "Use Groq" }).click();
       await expect.element(dialog).not.toBeInTheDocument();
       const destination = screen.getByRole("combobox", { name: "Transcribe with" });
-      await expect.element(destination).toHaveTextContent("AssemblyAI");
+      await expect.element(destination).toHaveTextContent("Groq");
       await screen.getByRole("button", { name: "Manage key" }).click();
       await expect.element(dialog).toBeVisible();
       expect(dialog.element().querySelector("input")).toBeNull();
