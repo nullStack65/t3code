@@ -63,26 +63,30 @@ it.effect("returns path, size, and type and does not put file bytes in the resul
 
     const shown = yield* call({ path: filePath, line: 4 });
     expect(shown).toEqual({
-      path: filePath,
-      byteSize: SENTINEL.length,
-      mediaType: "text/markdown",
-      line: 4,
+      showFile: {
+        path: filePath,
+        byteSize: SENTINEL.length,
+        mediaType: "text/markdown",
+        line: 4,
+      },
       message: "Shown in the file viewer. Do not read or quote the file.",
     });
     expect(JSON.stringify(shown)).not.toContain(SENTINEL);
-    expect(Object.keys(shown as object).sort()).toEqual([
+    expect(Object.keys(shown as object).sort()).toEqual(["message", "showFile"]);
+    expect(Object.keys((shown as { showFile: object }).showFile).sort()).toEqual([
       "byteSize",
       "line",
       "mediaType",
-      "message",
       "path",
     ]);
 
     const relative = yield* call({ path: "answers.md" });
     expect(relative).toMatchObject({
-      path: filePath,
-      byteSize: SENTINEL.length,
-      mediaType: "text/markdown",
+      showFile: {
+        path: filePath,
+        byteSize: SENTINEL.length,
+        mediaType: "text/markdown",
+      },
     });
     expect(JSON.stringify(relative)).not.toContain(SENTINEL);
 

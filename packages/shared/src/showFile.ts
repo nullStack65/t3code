@@ -51,8 +51,8 @@ export function mediaTypeForPath(path: string): string {
 }
 
 export function readShowFileReference(value: unknown): ShowFileReference | undefined {
-  if (!isRecord(value)) return undefined;
-  const source = isRecord(value.showFile) ? value.showFile : value;
+  if (!isRecord(value) || !isRecord(value.showFile)) return undefined;
+  const source = value.showFile;
   const { path, byteSize, mediaType, line } = source;
   if (
     typeof path !== "string" ||

@@ -220,7 +220,6 @@ export function htmlRenderFromToolItem(item: {
   return output?.isError ? undefined : output?.htmlRender;
 }
 
-/** The text `send_to_user` showed the user, which clients render as the agent's own words. */
 export function showFileFromToolItem(item: {
   readonly toolName: string | null | undefined;
   readonly output?: unknown;
@@ -235,6 +234,7 @@ export function showFileFromToolItem(item: {
   return output?.isError ? undefined : output?.showFile;
 }
 
+/** The text `send_to_user` showed the user, which clients render as the agent's own words. */
 export function sentMessageFromToolItem(item: {
   readonly toolName: string | null | undefined;
   readonly output?: unknown;

@@ -30,10 +30,12 @@ const ShowFileTool = Tool.make(SHOW_FILE_TOOL_NAME, {
     ),
   }),
   success: Schema.Struct({
-    path: Schema.String,
-    byteSize: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-    mediaType: Schema.String,
-    line: Schema.optional(Schema.Int),
+    showFile: Schema.Struct({
+      path: Schema.String,
+      byteSize: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+      mediaType: Schema.String,
+      line: Schema.optional(Schema.Int),
+    }),
     message: Schema.String,
   }),
   failure: OrchestratorMcpFailure,
