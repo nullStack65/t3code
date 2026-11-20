@@ -63,12 +63,18 @@ export const make = Effect.gen(function* () {
       if (run === undefined) return;
       const message = records.messages.find((candidate) => candidate.id === run.userMessageId);
       if (message?.text.trim().toLowerCase() === "/compact") return;
-      const result = recordCompaction(
-        historyByThread.get(item.threadId) ?? [],
-        DateTime.toEpochMillis(item.completedAt ?? item.updatedAt),
-      );
+      const previous = historyByThread.get(item.threadId) ?? [];
+      const atMs = DateTime.toEpochMillis(item.completedAt ?? item.updatedAt);
+      const result = recordCompaction(previous, atMs);
+      if (result.tripped && !isActiveRun(run)) {
+        historyByThread.set(item.threadId, [
+          ...previous.filter((at) => atMs - at < CODEX_COMPACTION_LOOP_LIMIT.windowMs),
+          atMs,
+        ]);
+        return;
+      }
       historyByThread.set(item.threadId, result.history);
-      if (!result.tripped || !isActiveRun(run)) return;
+      if (!result.tripped) return;
       yield* orchestrator.dispatch({
         type: "run.interrupt",
         commandId: CommandId.make(`server:compaction-loop:${item.threadId}:${item.id}`),

@@ -263,4 +263,39 @@ describe("CompactionLoopGuard", () => {
       expect(interrupts).toHaveLength(0);
     }),
   );
+
+  it.effect("does not count a manual compact", () =>
+    Effect.gen(function* () {
+      const manual = [10, 50, 90].map((seconds) => ({
+        seconds,
+        ...makeRun(`manual-${seconds}`, "completed", "/compact"),
+      }));
+      const active = makeRun("active", "running");
+      const interrupts = yield* replayCodexCompactions(
+        [...manual, active],
+        [
+          ...manual.map((entry) => compacted(entry.run, entry.seconds)),
+          compacted(active.run, 100),
+          compacted(active.run, 130),
+        ],
+      );
+      expect(interrupts).toHaveLength(0);
+    }),
+  );
+
+  it.effect("interrupts the next active turn after compactions that had no turn to stop", () =>
+    Effect.gen(function* () {
+      const finished = makeRun("finished", "completed");
+      const active = makeRun("active", "running");
+      const interrupts = yield* replayCodexCompactions(
+        [finished, active],
+        [
+          ...[10, 50, 90].map((seconds) => compacted(finished.run, seconds)),
+          compacted(active.run, 100),
+        ],
+      );
+      expect(interrupts).toHaveLength(1);
+      expect(interrupts[0]?.runId).toBe(active.run.id);
+    }),
+  );
 });
