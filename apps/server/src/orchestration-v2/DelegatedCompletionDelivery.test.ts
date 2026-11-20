@@ -5105,6 +5105,105 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     }),
   );
 
+  it.effect("a lane's thread events reach the thread that launched it and never Lead", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:lane-routing");
+      yield* ProjectService.ProjectService.pipe(
+        Effect.flatMap((projects) =>
+          projects.create({
+            commandId: CommandId.make("command:lane-routing-project"),
+            projectId,
+            title: "Lane routing",
+            workspaceRoot: "/workspace/lane-routing",
+          }),
+        ),
+      );
+      const createThread = (
+        name: string,
+        launch?: { readonly inboxOrigin: { readonly kind: "agent"; readonly id: string } },
+      ) =>
+        orchestrator
+          .dispatch({
+            type: "thread.create",
+            createdBy: launch === undefined ? "user" : "agent",
+            creationSource: launch === undefined ? "web" : "mcp",
+            ...(launch === undefined ? {} : { inboxOrigin: launch.inboxOrigin }),
+            commandId: CommandId.make(`command:lane-routing:${name}`),
+            threadId: ThreadId.make(`thread:lane-routing:${name}`),
+            projectId,
+            title: name,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          })
+          .pipe(Effect.as(ThreadId.make(`thread:lane-routing:${name}`)));
+      const lead = yield* createThread("Chief of Staff");
+      const cto = yield* createThread("CTO");
+      const archivedLauncher = yield* createThread("Archived launcher");
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("command:lane-routing:archive"),
+        threadId: archivedLauncher,
+      });
+      const launchedByCto = yield* createThread("Launched by CTO", {
+        inboxOrigin: { kind: "agent", id: cto },
+      });
+      const launchedByLead = yield* createThread("Launched by Lead", {
+        inboxOrigin: { kind: "agent", id: lead },
+      });
+      const orphans = [
+        yield* createThread("Launcher archived", {
+          inboxOrigin: { kind: "agent", id: archivedLauncher },
+        }),
+        yield* createThread("Launcher never existed", {
+          inboxOrigin: { kind: "agent", id: "thread:lane-routing:missing" },
+        }),
+        yield* createThread("Launcher unknown", { inboxOrigin: { kind: "agent", id: "agent" } }),
+      ];
+      const { reactor } = yield* makeModelAlertReactor({
+        watcher: { environmentId: hereEnvironmentId, threadId: lead },
+      });
+      for (const lane of [launchedByCto, launchedByLead, ...orphans]) {
+        const failed = runEvent({
+          threadId: lane,
+          runId: RunId.make(`run:${lane}`),
+          ordinal: 1,
+          status: "failed",
+          now,
+        });
+        yield* eventSink.write({
+          commandId: CommandId.make(`command:${lane}:failed`),
+          events: [failed],
+        });
+        yield* reactor.handle(failed);
+      }
+      yield* reactor.flush;
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.flush;
+      const threadEventsIn = (threadId: ThreadId) =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) =>
+              projection.messages.filter((message) => message.text.startsWith("Thread event from")),
+            ),
+          );
+      const toCto = yield* threadEventsIn(cto);
+      assert.equal(toCto.length, 1);
+      assert.include(toCto[0]?.text, `/${launchedByCto})`);
+      assert.include(toCto[0]?.text, "its last run failed");
+      const toLead = yield* threadEventsIn(lead);
+      assert.equal(toLead.length, 1);
+      assert.include(toLead[0]?.text, `/${launchedByLead})`);
+      assert.deepEqual(yield* threadEventsIn(archivedLauncher), []);
+    }),
+  );
+
   it.effect("sends a model alert over the link to the watcher's machine and retries it", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

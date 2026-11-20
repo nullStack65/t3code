@@ -158,12 +158,39 @@ function pullRequestSettles(
   return pullRequestAtMs >= userAnchorMs;
 }
 
+const FINISHED_AGENT_RUN_STATUSES = new Set(["completed", "interrupted", "cancelled"]);
+const SUBAGENT_SETTLE_STATUSES = new Set(["idle", "completed", "interrupted", "cancelled"]);
+
+function agentBackgroundWorkPending(
+  thread: Pick<ProjectionStore.ProjectionSettlementCandidate, "pendingBackgroundTasks">,
+): boolean {
+  const tasks = thread.pendingBackgroundTasks ?? [];
+  return tasks.some((task) => task.kind === "monitor" || backgroundWorkHoldsCompletion([task]));
+}
+
+export function settlesFinishedAgentWork(
+  thread: Pick<
+    ProjectionStore.ProjectionSettlementCandidate,
+    "inbox" | "status" | "pendingBackgroundTasks" | "standing"
+  >,
+): boolean {
+  if (thread.standing != null || thread.inbox?.audience !== "agent-only") return false;
+  if (!FINISHED_AGENT_RUN_STATUSES.has(thread.status)) return false;
+  return !agentBackgroundWorkPending(thread);
+}
+
+const HUMAN_INBOX_AUDIENCES = new Set(["kameron", "jeff", "shared"]);
+
 export function isAutoSettlementCandidate(
   thread: Omit<ProjectionStore.ProjectionSettlementCandidate, "latestUserAuthoredMessageAt">,
   nowMs: number,
 ): boolean {
   if (thread.archivedAt !== null || thread.settledOverride !== null) return false;
   if (thread.pinnedAt != null || thread.autoSettleDisabledAt != null) return false;
+  if (thread.inbox?.audience !== undefined && HUMAN_INBOX_AUDIENCES.has(thread.inbox.audience)) {
+    return false;
+  }
+  if (thread.inbox?.audience === "agent-only" && thread.status === "failed") return false;
   // A standing bot is a long-lived lane, never finished work.
   if (thread.standing != null) return false;
   if (thread.pendingRuntimeRequest !== null) return false;
@@ -366,16 +393,21 @@ export const make = Effect.gen(function* () {
     // Merge events resweep all candidates because unlinked threads settle through branch lookup.
     const candidates = threads.filter(
       (thread) =>
-        (automaticSettlementEnabled || thread.lineage.relationshipToParent === "subagent") &&
-        isAutoSettlementCandidate(thread, nowMs),
+        isAutoSettlementCandidate(thread, nowMs) &&
+        (automaticSettlementEnabled ||
+          thread.lineage.relationshipToParent === "subagent" ||
+          settlesFinishedAgentWork(thread)),
     );
 
     // Runs per candidate thread, thousands per sweep on busy servers; the sweep owns the span.
     const settleThread = Effect.fnUntraced(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
-        if (thread.lineage.relationshipToParent === "subagent") {
-          // The store returns a subagent only once its parent is done, so it
-          // settles with the parent and never runs its own lookup.
+        if (
+          (thread.lineage.relationshipToParent === "subagent" &&
+            SUBAGENT_SETTLE_STATUSES.has(thread.status) &&
+            !agentBackgroundWorkPending(thread)) ||
+          settlesFinishedAgentWork(thread)
+        ) {
           const uuid = yield* random.uuidV4();
           yield* orchestrator.dispatch({
             type: "thread.auto-settle",
@@ -385,6 +417,7 @@ export const make = Effect.gen(function* () {
           });
           return null;
         }
+        if (thread.lineage.relationshipToParent === "subagent") return null;
         // thread.auto-settle does not recheck settings, so read them per decision; reads are cached.
         const currentSettings = resolveProjectSettings(
           yield* settingsService.getSettings,
@@ -426,7 +459,12 @@ export const make = Effect.gen(function* () {
     const lookupCandidates = (yield* Effect.forEach(
       candidates,
       (thread) => {
-        if (thread.lineage.relationshipToParent === "subagent") return settleThread(thread, null);
+        if (
+          thread.lineage.relationshipToParent === "subagent" ||
+          settlesFinishedAgentWork(thread)
+        ) {
+          return settleThread(thread, null);
+        }
         const projectSettings = resolveProjectSettings(settings, thread.projectId).settings;
         // Skip no-op decisions; actual settlement still reads fresh settings before dispatch.
         const settledAt = resolveAutoSettlementAt({
@@ -764,10 +802,13 @@ export const make = Effect.gen(function* () {
       case "run.background-work-cancelled":
         return enqueueThread(event.threadId);
       // Sweep only when the work can have ended: progress updates cannot settle anything.
-      case "subagent.updated":
-        return isOrchestrationV2WorkActive(event.payload.status)
-          ? Effect.void
-          : enqueueThread(event.threadId);
+      case "subagent.updated": {
+        if (isOrchestrationV2WorkActive(event.payload.status)) return Effect.void;
+        const childThreadId = event.payload.childThreadId;
+        return enqueueThread(event.threadId).pipe(
+          Effect.andThen(childThreadId === null ? Effect.void : enqueueThread(childThreadId)),
+        );
+      }
       case "provider-thread.updated":
         return backgroundWorkHoldsCompletion(event.payload.pendingBackgroundTasks ?? [])
           ? Effect.void

@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   isListedThreadLineage,
+  ModelAlertWatcher,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -37,6 +38,7 @@ export const ThreadEventAlert = Schema.Struct({
   lastError: Schema.NullOr(Schema.String),
   openPullRequests: Schema.Array(Schema.String),
   occurredAt: Schema.String,
+  recipient: Schema.optionalKey(ModelAlertWatcher),
 });
 export type ThreadEventAlert = typeof ThreadEventAlert.Type;
 
@@ -282,6 +284,9 @@ export function judgeThread(input: {
   return { evaluated, findings };
 }
 
+export const launchingThreadId = (inbox: WatchedShell["inbox"]) =>
+  [inbox?.origin, inbox?.requestedBy].find((actor) => actor?.kind === "agent")?.id ?? null;
+
 export function threadEventAlert(input: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
@@ -297,6 +302,7 @@ export function threadEventAlert(input: {
   >;
   readonly finding: ThreadFinding;
   readonly occurredAt: string;
+  readonly recipient: ModelAlertWatcher | null;
 }): ThreadEventAlert {
   const { shell, finding } = input;
   const message = shell.latestVisibleMessage;
@@ -323,6 +329,7 @@ export function threadEventAlert(input: {
       .map((link) => link.url)
       .slice(0, 5),
     occurredAt: input.occurredAt,
+    ...(input.recipient === null ? {} : { recipient: input.recipient }),
   };
 }
 

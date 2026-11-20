@@ -300,6 +300,7 @@ it("a recurrence of the same state is a new message", () => {
       shell,
       finding,
       occurredAt,
+      recipient: null,
     });
   assert.notEqual(make("2026-11-19T05:00:00.000Z").id, make("2026-11-19T05:30:00.000Z").id);
 });
@@ -313,6 +314,7 @@ const fired = (overrides: Partial<WatchedShell>, trigger: ThreadEventTrigger) =>
     shell,
     finding,
     occurredAt: DateTime.formatIso(DateTime.makeUnsafe(NOW)),
+    recipient: null,
   });
 };
 const stillHolds = (
@@ -414,6 +416,7 @@ it("the wake carries environment, thread link, title, kind, run, last line and o
     shell,
     finding,
     occurredAt: "2026-11-19T05:00:00.000Z",
+    recipient: null,
   });
   assert.equal(alert.runId, "run:7");
   assert.equal(alert.threadTitle, "Fleet rollout");
