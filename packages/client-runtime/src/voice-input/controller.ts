@@ -581,9 +581,10 @@ export class VoiceInputController {
 
     try {
       if (!alreadyStopped) await this.dependencies.recorder.stop();
-      await this.releaseAudioSession();
+      // Read the uri before releaseAudioSession: its cancelRecording clears the recorder's uri.
       this.recordingUri = completedUri ?? this.dependencies.recorder.uri ?? this.recordingUri;
       this.rememberRecordingUri(this.recordingUri);
+      await this.releaseAudioSession();
       if (!this.isCurrent(operationToken)) return;
       let transcription = this.transcription;
       if (!transcription && this.preparation) {

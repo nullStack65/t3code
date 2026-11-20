@@ -113,7 +113,10 @@ describe("voice input press latency", () => {
 
   it("stops the recording when preparation fails after capture started, and retries the same audio", async () => {
     const preparation = deferred<PreparedVoiceTranscription>();
-    const releaseRecording = vi.fn(async () => undefined);
+    const held: { uri: { uri: string | null } | null } = { uri: null };
+    const releaseRecording = vi.fn(async () => {
+      if (held.uri) held.uri.uri = null;
+    });
     const prepare = vi
       .fn<VoiceTranscriber["prepare"]>()
       .mockReturnValueOnce(preparation.promise)
@@ -124,6 +127,7 @@ describe("voice input press latency", () => {
       releaseRecording,
       getTranscriber: () => ({ prepare }),
     });
+    held.uri = harness.recorder;
     await harness.controller.start();
     expect(harness.controller.currentState.phase).toBe("recording");
     preparation.reject(
