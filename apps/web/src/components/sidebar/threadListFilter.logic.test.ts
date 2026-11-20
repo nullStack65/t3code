@@ -57,16 +57,16 @@ describe("thread list filter", () => {
       (candidate) => candidate.from,
     );
     expect(Object.fromEntries(counts.inboxes)).toEqual({
-      kameron: { working: 0, done: 1, needsMe: 0 },
-      agents: { working: 0, done: 1, needsMe: 0 },
+      kameron: { working: 0, done: 1, needsMe: 0, settled: 0 },
+      agents: { working: 0, done: 1, needsMe: 0, settled: 0 },
     });
     expect(Object.fromEntries(counts.environments)).toEqual({
-      laptop: { working: 0, done: 1, needsMe: 0 },
-      crown: { working: 0, done: 1, needsMe: 0 },
+      laptop: { working: 0, done: 1, needsMe: 0, settled: 0 },
+      crown: { working: 0, done: 1, needsMe: 0, settled: 0 },
     });
     expect(Object.fromEntries(counts.from)).toEqual({
-      kameron: { working: 0, done: 1, needsMe: 0 },
-      unknown: { working: 0, done: 1, needsMe: 0 },
+      kameron: { working: 0, done: 1, needsMe: 0, settled: 0 },
+      unknown: { working: 0, done: 1, needsMe: 0, settled: 0 },
     });
     expect(
       matchesThreadListFilter(
@@ -233,7 +233,7 @@ describe("thread list filter", () => {
     expect(threadListFilterBucket(fixtures.attention, "kameron")).toBe("needsMe");
     expect(threadListFilterBucket(fixtures.parked, "kameron")).toBe("working");
     expect(threadListFilterBucket(fixtures.parkedAttention, "kameron")).toBe("working");
-    expect(threadListFilterBucket(fixtures.settled, "kameron")).toBeNull();
+    expect(threadListFilterBucket(fixtures.settled, "kameron")).toBe("settled");
     expect(threadListFilterBucket(fixtures.otherFounder, "kameron")).toBe("done");
     expect(threadListFilterBucket(fixtures.unstarted, "kameron")).toBeNull();
 
@@ -251,11 +251,49 @@ describe("thread list filter", () => {
       (candidate) => candidate.from,
       "kameron",
     );
-    const kameronRow = { working: 4, done: 2, needsMe: 4 };
-    const everyRow = { working: 4, done: 3, needsMe: 4 };
+    const kameronRow = { working: 4, done: 2, needsMe: 4, settled: 1 };
+    const everyRow = { working: 4, done: 3, needsMe: 4, settled: 1 };
     expect(counts.inboxes.get("kameron")).toEqual(kameronRow);
-    expect(counts.inboxes.get("jeff")).toEqual({ working: 0, done: 1, needsMe: 0 });
+    expect(counts.inboxes.get("jeff")).toEqual({ working: 0, done: 1, needsMe: 0, settled: 0 });
     expect(counts.environments.get(laptop)).toEqual(everyRow);
     expect(counts.from.get("kameron")).toEqual(everyRow);
+  });
+
+  it("counts older settled threads from the servers' groups instead of the loaded rows", () => {
+    const settledRow = (environmentId: EnvironmentId, older: boolean) => ({
+      ...thread(environmentId, kameron),
+      settledOverride: "settled" as const,
+      older,
+    });
+    const loaded = [settledRow(laptop, false), settledRow(laptop, true), settledRow(crown, true)];
+    const group = (inbox: "kameron" | "jeff" | null, count: number, agentCreated = false) => ({
+      inbox,
+      agentCreated,
+      founder: "kameron" as const,
+      byAgent: false,
+      count,
+    });
+    const counts = threadListFilterCounts(
+      loaded,
+      threadListFilterOf({ founderInboxOwner: "kameron" }),
+      () => "kameron" as const,
+      "kameron",
+      {
+        groups: [
+          { environmentId: laptop, group: group("kameron", 40) },
+          { environmentId: laptop, group: group("jeff", 7) },
+          { environmentId: laptop, group: group(null, 5) },
+          { environmentId: laptop, group: group(null, 3, true) },
+        ],
+        attributionOf: () => "kameron",
+        covers: (candidate) => candidate.environmentId === laptop && candidate.older,
+      },
+    );
+    expect(counts.inboxes.get("kameron")?.settled).toBe(1 + 40 + 1);
+    expect(counts.inboxes.get("jeff")?.settled).toBe(7);
+    expect(counts.inboxes.get("agents")?.settled).toBe(3);
+    expect(counts.environments.get(laptop)?.settled).toBe(1 + 40 + 3);
+    expect(counts.environments.get(crown)?.settled).toBe(1);
+    expect(counts.unclassified).toBe(5);
   });
 });

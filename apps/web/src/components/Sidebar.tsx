@@ -1,11 +1,17 @@
 import { SidebarThreadFilterMenu } from "./sidebar/SidebarThreadFilterMenu";
-import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
 import {
+  matchesThreadListFilter,
+  threadListFilterOf,
+  type OlderSettledCounts,
+} from "./sidebar/threadListFilter.logic";
+import {
+  attributionOfSender,
   launchingThreadIdOf,
   resolveMachineOwners,
   resolveThreadAttributions,
   threadAttributionKey,
   threadSenderLine,
+  type FounderByEnvironmentId,
 } from "@t3tools/client-runtime/state/thread-attribution";
 import {
   matchesOlderSettledGroup,
@@ -15,6 +21,7 @@ import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import {
   effectiveInboxFilter,
+  isOlderSettledThreadShell,
   staysActiveWhileWorking,
   type EnvironmentId,
   type InboxChoice,
@@ -82,6 +89,7 @@ import {
 } from "@t3tools/contracts";
 import {
   resolveListedAncestorThreadRef,
+  type OlderSettled,
   type OlderSettledFilter,
   type OlderSettledScope,
 } from "@t3tools/client-runtime/state/threads";
@@ -777,6 +785,34 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     settledThreads: sortSettledThreads(settled),
     visibleThreads: visible,
     snoozeNow: preciseNow,
+  };
+}
+
+function olderSettledFilterCounts(
+  scopes: ReadonlyArray<OlderSettledScope>,
+  olderOf: (environmentId: EnvironmentId) => OlderSettled | null,
+  owners: FounderByEnvironmentId,
+): OlderSettledCounts<EnvironmentThreadShell> {
+  const counted = scopes.flatMap((scope) => {
+    const older = olderOf(scope.environmentId);
+    return older?.groups == null ? [] : [{ scope, older, groups: older.groups }];
+  });
+  return {
+    groups: counted.flatMap(({ scope, groups }) =>
+      (scope.projectIds ?? [...groups.keys()]).flatMap((projectId) =>
+        (groups.get(projectId) ?? []).map((group) => ({
+          environmentId: scope.environmentId,
+          group,
+        })),
+      ),
+    ),
+    attributionOf: (environmentId, group) => attributionOfSender(group, owners[environmentId]),
+    covers: (thread) =>
+      counted.some(
+        ({ scope, older }) =>
+          scope.environmentId === thread.environmentId &&
+          isOlderSettledThreadShell(thread.source, older.beforeMs),
+      ),
   };
 }
 
@@ -3112,11 +3148,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 <SidebarThreadFilterMenu
                   attributionOf={attributionOf}
                   countedThreads={() =>
-                    filterSidebarV2VisibleThreads(
-                      threads,
-                      scopedProjectKeys,
-                      delegatedUnderParent,
-                    ).filter((thread) => thread.settledOverride !== "settled")
+                    filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent)
+                  }
+                  olderSettled={() =>
+                    olderSettledFilterCounts(
+                      olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
+                      (environmentId) =>
+                        olderSettledShelf.environments.get(environmentId)?.older ?? null,
+                      machineOwners,
+                    )
                   }
                 />
               }

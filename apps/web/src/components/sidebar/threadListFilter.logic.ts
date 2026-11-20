@@ -9,6 +9,7 @@ import {
   InboxChoice,
   primaryInbox,
   type EnvironmentId,
+  type OrchestrationV2OlderSettledGroup,
   type ThreadInbox,
 } from "@t3tools/contracts";
 import type { ThreadAttribution } from "@t3tools/contracts/settings";
@@ -49,19 +50,33 @@ const FINISHED_RUN_STATUSES: ReadonlySet<string> = new Set([
   "rolled_back",
 ]);
 
-export type ThreadListFilterBucket = "working" | "done" | "needsMe";
+export type ThreadListFilterBucket = "working" | "done" | "needsMe" | "settled";
 
 export interface ThreadListFilterBucketCounts {
   readonly working: number;
   readonly done: number;
   readonly needsMe: number;
+  readonly settled: number;
 }
 
 export const EMPTY_THREAD_LIST_FILTER_BUCKETS: ThreadListFilterBucketCounts = {
   working: 0,
   done: 0,
   needsMe: 0,
+  settled: 0,
 };
+
+export interface OlderSettledCounts<T> {
+  readonly groups: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly group: OrchestrationV2OlderSettledGroup;
+  }>;
+  readonly attributionOf: (
+    environmentId: EnvironmentId,
+    group: OrchestrationV2OlderSettledGroup,
+  ) => ThreadAttribution;
+  readonly covers: (thread: T) => boolean;
+}
 
 const activityStatus = (thread: FilterableThread) =>
   thread.runtime?.status ?? thread.latestRun?.status ?? null;
@@ -94,7 +109,7 @@ export function threadListFilterBucket(
   thread: FilterableThread,
   viewingFounder?: Founder,
 ): ThreadListFilterBucket | null {
-  if (thread.settledOverride === "settled") return null;
+  if (thread.settledOverride === "settled") return "settled";
   const status = activityStatus(thread);
   if (waitsOnHuman(thread, viewingFounder)) return "needsMe";
   if (thread.runtime?.status === "idle") return "working";
@@ -108,13 +123,6 @@ export function threadListFilterBucket(
   }
   return null;
 }
-
-const matchesInboxes = (thread: FilterableThread, inboxes: ReadonlyArray<InboxChoice>) =>
-  matchesListedInboxes(
-    primaryInbox(thread.source.inbox),
-    thread.source.createdBy === "agent",
-    inboxes,
-  );
 
 /** The chosen founder's inbox first, then Agents, so the common pair sits together. */
 export const inboxMenuOrder = (owner: Founder | undefined): ReadonlyArray<InboxChoice> => {
@@ -162,9 +170,10 @@ const addBucket = <K>(
   counts: Map<K, ThreadListFilterBucketCounts>,
   key: K,
   bucket: ThreadListFilterBucket | null,
+  amount: number,
 ) => {
   const current = counts.get(key) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
-  counts.set(key, bucket === null ? current : { ...current, [bucket]: current[bucket] + 1 });
+  counts.set(key, bucket === null ? current : { ...current, [bucket]: current[bucket] + amount });
 };
 
 /**
@@ -176,25 +185,62 @@ export function threadListFilterCounts<T extends FilterableThread>(
   filter: ThreadListFilter,
   attributionOf: (thread: T) => ThreadAttribution,
   viewingFounder?: Founder,
+  older?: OlderSettledCounts<T>,
 ) {
   const inboxes = new Map<InboxChoice, ThreadListFilterBucketCounts>();
   const environments = new Map<EnvironmentId, ThreadListFilterBucketCounts>();
   const from = new Map<ThreadAttribution, ThreadListFilterBucketCounts>();
-  for (const thread of threads) {
-    const bucket = threadListFilterBucket(thread, viewingFounder);
-    const attribution = attributionOf(thread);
-    const environmentShown = !filter.hiddenEnvironmentIds.includes(thread.environmentId);
-    const fromShown = !filter.hiddenAttributions.includes(attribution);
-    const inboxShown = matchesInboxes(thread, filter.inboxes);
+  let unclassified = 0;
+  const tally = (entry: {
+    readonly environmentId: EnvironmentId;
+    readonly inbox: InboxChoice | null;
+    readonly agentCreated: boolean;
+    readonly attribution: ThreadAttribution;
+    readonly bucket: ThreadListFilterBucket | null;
+    readonly amount: number;
+  }) => {
+    const environmentShown = !filter.hiddenEnvironmentIds.includes(entry.environmentId);
+    const fromShown = !filter.hiddenAttributions.includes(entry.attribution);
+    const inboxShown = matchesListedInboxes(entry.inbox, entry.agentCreated, filter.inboxes);
     if (environmentShown && fromShown) {
       for (const choice of InboxChoice.literals) {
-        if (matchesInboxes(thread, [choice])) addBucket(inboxes, choice, bucket);
+        if (matchesListedInboxes(entry.inbox, entry.agentCreated, [choice])) {
+          addBucket(inboxes, choice, entry.bucket, entry.amount);
+        }
+      }
+      if (entry.bucket !== null && entry.inbox === null && !entry.agentCreated) {
+        unclassified += entry.amount;
       }
     }
-    if (inboxShown && fromShown) addBucket(environments, thread.environmentId, bucket);
-    if (inboxShown && environmentShown) addBucket(from, attribution, bucket);
+    if (inboxShown && fromShown) {
+      addBucket(environments, entry.environmentId, entry.bucket, entry.amount);
+    }
+    if (inboxShown && environmentShown) {
+      addBucket(from, entry.attribution, entry.bucket, entry.amount);
+    }
+  };
+  for (const thread of threads) {
+    if (older?.covers(thread) === true) continue;
+    tally({
+      environmentId: thread.environmentId,
+      inbox: primaryInbox(thread.source.inbox),
+      agentCreated: thread.source.createdBy === "agent",
+      attribution: attributionOf(thread),
+      bucket: threadListFilterBucket(thread, viewingFounder),
+      amount: 1,
+    });
   }
-  return { inboxes, environments, from };
+  for (const { environmentId, group } of older?.groups ?? []) {
+    tally({
+      environmentId,
+      inbox: group.inbox,
+      agentCreated: group.agentCreated,
+      attribution: older?.attributionOf(environmentId, group) ?? "unknown",
+      bucket: "settled",
+      amount: group.count,
+    });
+  }
+  return { inboxes, environments, from, unclassified };
 }
 
 /** Toggles one option, keeping at least one checked so the list never empties by accident. */
