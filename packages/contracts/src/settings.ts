@@ -392,7 +392,7 @@ export const VoiceTranscriptionDestination = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("cloud"),
     environmentId: EnvironmentId,
-    provider: Schema.Literals(["openai", "xai", "assemblyai"]),
+    provider: Schema.Literals(["openai", "xai", "assemblyai", "groq"]),
   }),
   Schema.Struct({
     kind: Schema.Literal("cloud"),
@@ -1401,6 +1401,7 @@ export const CloudSpeechCredentials = Schema.Struct({
   xai: CloudSpeechCredential,
   openrouter: CloudSpeechCredential,
   assemblyai: CloudSpeechCredential,
+  groq: CloudSpeechCredential,
 });
 
 export const MachinePlacementRole = Schema.Literals(["auto", "headless", "interactive"]);
@@ -1449,7 +1450,7 @@ export const ServerSettings = Schema.Struct({
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   cloudSpeechCredentials: CloudSpeechCredentials.pipe(
     Schema.withDecodingDefault(
-      Effect.succeed({ openai: "", xai: "", openrouter: "", assemblyai: "" }),
+      Effect.succeed({ openai: "", xai: "", openrouter: "", assemblyai: "", groq: "" }),
     ),
   ),
   speechModelId: Schema.String.pipe(
@@ -1967,6 +1968,7 @@ export const ServerSettingsPatch = Schema.Struct({
       xai: Schema.optionalKey(SettingsSecretValue),
       openrouter: Schema.optionalKey(SettingsSecretValue),
       assemblyai: Schema.optionalKey(SettingsSecretValue),
+      groq: Schema.optionalKey(SettingsSecretValue),
     }),
   ),
   speechModelId: Schema.optionalKey(Schema.String),

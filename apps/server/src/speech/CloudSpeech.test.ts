@@ -60,6 +60,7 @@ it.effect.each(["openai", "xai"] as const)("sends only to %s using its own saved
       xai: true,
       openrouter: false,
       assemblyai: false,
+      groq: false,
     });
     yield* Effect.flip(transcribe(new Uint8Array(3)));
     expect(upstream).not.toHaveBeenCalled();
@@ -306,11 +307,12 @@ it.effect(
 );
 
 it.effect(
-  "a host-injected AssemblyAI key works without settings and never outranks a saved key",
+  "host-injected AssemblyAI and Groq keys work without settings and never outrank a saved key",
   () =>
     Effect.gen(function* () {
       const upstream = vi.fn<typeof fetch>(async () => Response.json({ text: "hello" }));
       process.env.ASSEMBLYAI_API_KEY = "host-fixture";
+      process.env.GROQ_API_KEY = "groq-host-fixture";
       const service = yield* CloudSpeech.CloudSpeech.pipe(
         Effect.provide(
           CloudSpeech.layer.pipe(
@@ -319,7 +321,12 @@ it.effect(
             Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
             Layer.provide(
               ConfigProvider.layer(
-                ConfigProvider.fromEnv({ env: { ASSEMBLYAI_API_KEY: " host-fixture\n" } }),
+                ConfigProvider.fromEnv({
+                  env: {
+                    ASSEMBLYAI_API_KEY: " host-fixture\n",
+                    GROQ_API_KEY: "groq-host-fixture",
+                  },
+                }),
               ),
             ),
           ),
@@ -327,6 +334,7 @@ it.effect(
       );
       // Agent subprocesses must not inherit the key.
       expect(process.env.ASSEMBLYAI_API_KEY).toBeUndefined();
+      expect(process.env.GROQ_API_KEY).toBeUndefined();
       const authorization = () =>
         new Headers(upstream.mock.calls.at(-1)![1]?.headers).get("authorization");
       const transcribe = () =>
@@ -340,17 +348,50 @@ it.effect(
         xai: false,
         openrouter: false,
         assemblyai: true,
-        hostManaged: ["assemblyai"],
+        groq: true,
+        hostManaged: ["assemblyai", "groq"],
       });
       expect(yield* transcribe()).toBe("hello");
       expect(authorization()).toBe("host-fixture");
       yield* service.setKey("assemblyai", Redacted.make("saved-fixture"));
-      expect((yield* service.configured).hostManaged).toBeUndefined();
+      expect((yield* service.configured).hostManaged).toEqual(["groq"]);
       yield* transcribe();
       expect(authorization()).toBe("saved-fixture");
       yield* service.setKey("assemblyai", null);
-      expect((yield* service.configured).hostManaged).toEqual(["assemblyai"]);
+      expect((yield* service.configured).hostManaged).toEqual(["assemblyai", "groq"]);
       yield* transcribe();
       expect(authorization()).toBe("host-fixture");
+      expect(
+        yield* service
+          .transcribe("groq", new Uint8Array(new Float32Array(1600).buffer), {
+            ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
+            speechLanguage: "en",
+            speechCustomWords: [
+              { term: "T3 Code", aliases: [] },
+              { term: "Closura", aliases: [] },
+            ],
+          })
+          .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream)),
+      ).toBe("hello");
+      const [url, init] = upstream.mock.calls.at(-1)!;
+      expect(String(url)).toBe("https://api.groq.com/openai/v1/audio/transcriptions");
+      expect(init?.redirect).toBe("error");
+      expect(authorization()).toBe("Bearer groq-host-fixture");
+      const form = init?.body as FormData;
+      expect(form.get("model")).toBe("whisper-large-v3-turbo");
+      expect(form.get("language")).toBe("en");
+      expect(form.get("prompt")).toBe("T3 Code, Closura");
+      upstream.mockResolvedValueOnce(new Response(null, { status: 429 }));
+      expect(
+        yield* Effect.flip(
+          service
+            .transcribe("groq", new Uint8Array(new Float32Array(1600).buffer), {
+              ...DEFAULT_SPEECH_TRANSCRIPTION_OPTIONS,
+            })
+            .pipe(Effect.provideService(FetchHttpClient.Fetch, upstream)),
+        ),
+      ).toMatchObject({ provider: "groq", reason: "rate-limit" });
+      yield* service.setKey("groq", Redacted.make("groq-saved-fixture"));
+      expect((yield* service.configured).hostManaged).toEqual(["assemblyai"]);
     }),
 );

@@ -159,6 +159,8 @@ jobs:
           set -euo pipefail
           vp test run \
             apps/server/src/speech/CloudSpeech.test.ts \
+            apps/server/src/speech/GroqSpeechStream.test.ts \
+            apps/server/src/speech/stream.test.ts \
             packages/contracts/src/threadInbox.test.ts \
             packages/contracts/src/threadInbox.invariants.test.ts \
             packages/contracts/src/threadInbox.upgrade.test.ts \

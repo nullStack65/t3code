@@ -154,7 +154,8 @@ function VoiceBackendIcon({ backend }: { backend: VoiceBackend | null }) {
   return <CloudSpeechLogo provider={backend} />;
 }
 function CloudSpeechLogo({ provider }: { provider: CloudSpeechProvider }) {
-  if (provider === "assemblyai") return <AudioLinesIcon aria-hidden className="size-4 shrink-0" />;
+  if (provider === "assemblyai" || provider === "groq")
+    return <AudioLinesIcon aria-hidden className="size-4 shrink-0" />;
   if (provider === "openrouter")
     return <ProviderPackageIcon icon={openRouterIcon} aria-hidden className="size-4 shrink-0" />;
   return (

@@ -181,6 +181,7 @@ it.effect("reads a collected reference again once it is invalidated", () =>
           xai: "",
           openrouter: "",
           assemblyai: "",
+          groq: "",
         },
         usageLimitSources,
         textGenerators: {},

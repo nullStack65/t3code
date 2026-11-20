@@ -8,6 +8,7 @@ import {
   type SecretReference,
   type ServerSettingsError,
   type CloudSpeechKeys,
+  CloudSpeechCredentials,
   type CloudSpeechProvider,
   EnvironmentSpeechTranscriptionResult,
   type SpeechTranscriptionOptions,
@@ -34,14 +35,21 @@ const endpoints = {
   openai: { url: "https://api.openai.com/v1/audio/transcriptions", model: "gpt-transcribe" },
   xai: { url: "https://api.x.ai/v1/stt", model: "grok-voice-transcribe-2.0" },
   openrouter: { url: "https://openrouter.ai/api/v1/audio/transcriptions" },
+  groq: {
+    url: "https://api.groq.com/openai/v1/audio/transcriptions",
+    model: "whisper-large-v3-turbo",
+  },
 };
+const GROQ_PROMPT_CHARACTERS = 800;
 const OPENROUTER_CATALOG_URL =
   "https://openrouter.ai/api/v1/models?output_modalities=transcription&zdr=true";
 /**
  * Keys a host injects at launch (for example `infisical run -- t3`), so nobody types or sees them.
  * A key saved in settings still wins.
  */
-const HOST_KEY_VARIABLES = { assemblyai: "ASSEMBLYAI_API_KEY" } as const;
+const HOST_KEY_VARIABLES = { assemblyai: "ASSEMBLYAI_API_KEY", groq: "GROQ_API_KEY" } as const;
+type HostKeyProvider = keyof typeof HOST_KEY_VARIABLES;
+const HOST_KEY_PROVIDERS = Object.keys(HOST_KEY_VARIABLES) as HostKeyProvider[];
 const isApiKey = Schema.is(CloudSpeechApiKey);
 const isModelId = Schema.is(CloudSpeechModelId);
 const sameCredential = Schema.toEquivalence(SettingsSecretValue);
@@ -113,6 +121,21 @@ function assemblyAiBody(audio: ArrayBuffer, language: string, options: SpeechTra
   return HttpClientRequest.bodyFormData(form);
 }
 
+function groqBody(audio: ArrayBuffer, language: string, options: SpeechTranscriptionOptions) {
+  const form = new FormData();
+  form.set("model", endpoints.groq.model);
+  form.set("response_format", "json");
+  form.set("temperature", "0");
+  if (language !== "auto") form.set("language", language);
+  const prompt = options.speechCustomWords
+    .map(({ term }) => term)
+    .join(", ")
+    .slice(0, GROQ_PROMPT_CHARACTERS);
+  if (prompt) form.set("prompt", prompt);
+  form.set("file", new Blob([audio], { type: "audio/wav" }), "dictation.wav");
+  return HttpClientRequest.bodyFormData(form);
+}
+
 function openRouterBody(model: string, audio: ArrayBuffer, language: string) {
   return HttpClientRequest.bodyJsonUnsafe({
     model,
@@ -147,35 +170,42 @@ export const layer = Layer.effect(
     const settings = yield* ServerSettings.ServerSettingsService;
     const resolver = yield* SecretResolver.SecretResolver;
     const http = yield* HttpClient.HttpClient;
-    const hostAssemblyAi = Option.filter(
-      Option.map(yield* Config.Redacted(HOST_KEY_VARIABLES.assemblyai).pipe(Config.option), (key) =>
-        Redacted.value(key).trim(),
-      ),
-      isApiKey,
-    );
-    // Agent subprocesses inherit this environment; only this service should hold the key.
-    // @effect-diagnostics-next-line processEnvInEffect:off
-    delete process.env[HOST_KEY_VARIABLES.assemblyai];
+    const hostKeys: Partial<Record<HostKeyProvider, string>> = {};
+    for (const provider of HOST_KEY_PROVIDERS) {
+      const key = Option.filter(
+        Option.map(yield* Config.Redacted(HOST_KEY_VARIABLES[provider]).pipe(Config.option), (k) =>
+          Redacted.value(k).trim(),
+        ),
+        isApiKey,
+      );
+      if (Option.isSome(key)) hostKeys[provider] = key.value;
+      // Agent subprocesses inherit this environment; only this service should hold the key.
+      // @effect-diagnostics-next-line processEnvInEffect:off
+      delete process.env[HOST_KEY_VARIABLES[provider]];
+    }
     const savedCredentials = settings.getSettings.pipe(
       Effect.map((value) => value.cloudSpeechCredentials),
     );
+    const hostManagedFor = (saved: Pick<typeof CloudSpeechCredentials.Type, HostKeyProvider>) =>
+      HOST_KEY_PROVIDERS.filter((provider) => !saved[provider] && hostKeys[provider]);
     const credentials = savedCredentials.pipe(
-      Effect.map((saved) =>
-        !saved.assemblyai && Option.isSome(hostAssemblyAi)
-          ? { ...saved, assemblyai: hostAssemblyAi.value }
-          : saved,
-      ),
+      Effect.map((saved) => ({
+        ...saved,
+        ...Object.fromEntries(hostManagedFor(saved).map((p) => [p, hostKeys[p]!])),
+      })),
     );
     const configured = savedCredentials.pipe(
-      Effect.map(({ openai, xai, openrouter, assemblyai }) => ({
-        openai: Boolean(openai),
-        xai: Boolean(xai),
-        openrouter: Boolean(openrouter),
-        assemblyai: Boolean(assemblyai) || Option.isSome(hostAssemblyAi),
-        ...(!assemblyai && Option.isSome(hostAssemblyAi)
-          ? { hostManaged: ["assemblyai" as const] }
-          : {}),
-      })),
+      Effect.map((saved) => {
+        const hostManaged = hostManagedFor(saved);
+        return {
+          openai: Boolean(saved.openai),
+          xai: Boolean(saved.xai),
+          openrouter: Boolean(saved.openrouter),
+          assemblyai: Boolean(saved.assemblyai) || hostManaged.includes("assemblyai"),
+          groq: Boolean(saved.groq) || hostManaged.includes("groq"),
+          ...(hostManaged.length ? { hostManaged } : {}),
+        };
+      }),
     );
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
       http
@@ -262,7 +292,9 @@ export const layer = Layer.effect(
             ? openRouterBody(model!, audio, language)
             : provider === "assemblyai"
               ? assemblyAiBody(audio, language, options)
-              : audioBody(provider, audio, language, options),
+              : provider === "groq"
+                ? groqBody(audio, language, options)
+                : audioBody(provider, audio, language, options),
         );
         const unavailable = () => new CloudSpeechError({ provider, reason: "unavailable" });
         // A catalog fetch or vault lookup may have outlived the credential it started with.
