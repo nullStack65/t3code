@@ -318,11 +318,20 @@ export function isUnlistedModel(table: RateTable, model: string): boolean {
   );
 }
 
+// Magpie names a model by the harness it served it through (`codex/gpt-6.1-sol`,
+// `claude/claude-fable-5`, `grok/grok-4.7`). Those prefixes are not rate-table providers.
+const HARNESS_RATE_PREFIXES = new Set(["claude", "codex", "grok"]);
+
 function resolveRate(table: RateTable, model: string): ModelRate | null {
   const key = stripVariantSuffix(normalizeRateKey(model));
   const bareName = bareModelName(key);
   if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
-  return table.get(key) ?? null;
+  const exact = table.get(key);
+  if (exact !== undefined) return exact;
+  const slash = key.indexOf("/");
+  if (slash === -1 || !HARNESS_RATE_PREFIXES.has(key.slice(0, slash))) return null;
+  // The bare alias is added only when every qualified entry agrees, so an ambiguous name stays unpriced.
+  return table.get(bareName) ?? null;
 }
 
 export type PricedRecord = Pick<
