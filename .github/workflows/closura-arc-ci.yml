@@ -176,6 +176,7 @@ jobs:
             apps/server/src/mcp/OrchestratorMcpService.test.ts \
             apps/server/src/cli/thread.test.ts \
             apps/web/src/composerDraftStore.test.ts \
+            packages/client-runtime/src/voice-input/controller.test.ts \
             apps/web/src/components/chat/composerSend.logic.test.ts \
             apps/web/src/components/chat/chatViewSend.test.ts \
             apps/web/src/components/chat/composerImagePersistence.test.ts \
@@ -207,6 +208,16 @@ jobs:
             src/features/threads/new-task-flow-provider.test.tsx \
             src/features/home/pendingTaskRoute.test.tsx \
             src/features/threads/NewTaskDraftRouteScreen.test.tsx
+
+      - name: Test voice press-to-recording and release-to-text stay under 400 ms
+        shell: bash
+        working-directory: apps/web
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: |
+          set -euo pipefail
+          vp exec playwright install --only-shell chromium
+          vp test run --project browser src/speech/voiceInputLatency.browser.test.ts
 
       - name: Build native T3 server
         shell: bash

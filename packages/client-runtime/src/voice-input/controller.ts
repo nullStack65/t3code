@@ -78,6 +78,7 @@ export type VoiceInputControllerDependencies = {
   readonly deleteRecording: (uri: string) => void;
   /** Keep a recording whose transcription failed so the next start retries it without recording again. */
   readonly retryFailedRecording?: boolean;
+  readonly captureDuringPreparation?: boolean;
   /**
    * Optional cleanup of the transcript before insertion. Returning null skips it for this
    * recording; a failure falls back to the raw transcript.
@@ -259,6 +260,7 @@ export class VoiceInputController {
   private operationToken = 0;
   private sessionToken: VoiceInputSession | null = null;
   private transcription: PreparedVoiceTranscription | null = null;
+  private preparation: Promise<PreparedVoiceTranscription> | null = null;
   private liveTranscription: Promise<{ text: string | null } | { error: unknown }> | null = null;
   private transcriptionAbortController: AbortController | null = null;
   private postProcessingAbortController: AbortController | null = null;
@@ -339,6 +341,16 @@ export class VoiceInputController {
         return;
       }
 
+      if (this.dependencies.captureDuringPreparation) {
+        await this.captureDuringPreparation(
+          transcriber,
+          abortController.signal,
+          initiatingDraft,
+          operationToken,
+        );
+        return;
+      }
+
       try {
         this.transcription = await runTranscriptionOperation(() =>
           transcriber.prepare({ signal: abortController.signal }),
@@ -397,6 +409,51 @@ export class VoiceInputController {
         }
       }
     }
+  }
+
+  private async captureDuringPreparation(
+    transcriber: VoiceTranscriber,
+    signal: AbortSignal,
+    initiatingDraft: VoiceDraftSnapshot,
+    operationToken: number,
+  ): Promise<void> {
+    let failure: { readonly error: unknown } | null = null;
+    const preparation = runTranscriptionOperation(() => transcriber.prepare({ signal }));
+    this.preparation = preparation;
+    preparation.catch((error: unknown) => {
+      failure = { error };
+    });
+    const failIfUnprepared = () => {
+      if (!failure) return false;
+      this.setError(preparationErrorMessage(failure.error), "retry");
+      return true;
+    };
+
+    await this.dependencies.configureRecording();
+    this.recordingConfigured = true;
+    if (!this.isCurrent(operationToken) || failIfUnprepared()) return;
+    await this.dependencies.recorder.prepareToRecordAsync(signal);
+    if (!this.isCurrent(operationToken) || failIfUnprepared()) return;
+    this.recordingUri = this.dependencies.recorder.uri;
+    this.rememberRecordingUri(this.recordingUri);
+
+    const capturedDraft = this.dependencies.readDraft();
+    if (!capturedDraft || capturedDraft.ownerKey !== initiatingDraft.ownerKey) {
+      this.setError("This draft is no longer available.", "retry");
+      return;
+    }
+    this.capturedDraft = capturedDraft;
+    this.dependencies.recorder.record({ forDuration: VOICE_RECORDING_LIMIT_SECONDS });
+    this.setState({ phase: "recording", error: null, errorAction: null });
+    void preparation.then(
+      (transcription) => {
+        if (this.preparation === preparation) this.transcription = transcription;
+      },
+      (error: unknown) => {
+        if (this.isCurrent(operationToken) && this.state.phase === "recording")
+          void this.discardRecording(preparationErrorMessage(error));
+      },
+    );
   }
 
   stop(): Promise<void> {
@@ -511,7 +568,17 @@ export class VoiceInputController {
       this.recordingUri = completedUri ?? this.dependencies.recorder.uri ?? this.recordingUri;
       this.rememberRecordingUri(this.recordingUri);
       if (!this.isCurrent(operationToken)) return;
-      const transcription = this.transcription;
+      let transcription = this.transcription;
+      if (!transcription && this.preparation) {
+        try {
+          transcription = await this.preparation;
+        } catch (error) {
+          if (this.isCurrent(operationToken))
+            this.setError(preparationErrorMessage(error), "retry");
+          return;
+        }
+        if (!this.isCurrent(operationToken)) return;
+      }
       const recordingUri = this.recordingUri;
       if (
         !transcription ||
@@ -651,6 +718,7 @@ export class VoiceInputController {
     this.sessionToken = null;
     this.capturedDraft = null;
     this.transcription = null;
+    this.preparation = null;
     this.transcriptionAbortController = null;
     this.postProcessingAbortController = null;
     this.skipPostProcessingRequested = false;

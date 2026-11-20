@@ -12,6 +12,7 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
   private length = 0;
   private recording = false;
   private flushed = false;
+  private released = false;
   private samples = 0;
   private levelSamples = 0;
   private levelEnergy = 0;
@@ -23,6 +24,7 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
     this.meterOnly = options?.processorOptions?.meterOnly === true;
     this.port.onmessage = ({ data }) => {
       if (data === "start") this.recording = true;
+      if (data === "release") this.released = true;
       if (data === "stop") {
         this.recording = false;
         if (!this.meterOnly && !this.flushed) this.append(this.resampler.flush());
@@ -55,6 +57,7 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
   }
 
   process(inputs: Float32Array[][]): boolean {
+    if (this.released || this.flushed) return false;
     if (!this.recording) return true;
     const channels = inputs[0];
     if (!channels?.[0]) return true;
