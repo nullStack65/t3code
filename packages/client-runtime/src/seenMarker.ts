@@ -53,6 +53,7 @@ export function createSeenDwellTracker(options: {
 export interface SeenMessage {
   id: MessageId;
   role: string;
+  streaming?: boolean;
 }
 
 interface SeenEntry {
@@ -69,7 +70,7 @@ export function recordSeenMessage(input: {
   seenAt: string;
 }): boolean {
   const nextIndex = input.messages.findIndex((message) => message.id === input.messageId);
-  if (nextIndex < 0) return false;
+  if (nextIndex < 0 || input.messages[nextIndex]?.streaming === true) return false;
   const previous = seenByThreadKey.get(input.threadKey);
   if (previous) {
     const previousIndex = input.messages.findIndex((message) => message.id === previous.messageId);
@@ -86,6 +87,7 @@ export function pickNewestMessageId(
   const visible = new Set(visibleIds);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
+    if (message.streaming === true) continue;
     if (visible.has(message.id)) return message.id;
   }
   return null;
@@ -129,7 +131,9 @@ export function createSeenMarkerSession(input: {
       if (next.visibleIds !== undefined) visibleIds = [...next.visibleIds];
       tracker.observe({
         active,
-        newestVisibleMessageId: active ? pickNewestMessageId(visibleIds, input.getMessages()) : null,
+        newestVisibleMessageId: active
+          ? pickNewestMessageId(visibleIds, input.getMessages())
+          : null,
       });
     },
     dispose: tracker.dispose,

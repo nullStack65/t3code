@@ -62,20 +62,28 @@ export function startSeenMarkerSampling(input: {
   let frame: number | null = null;
 
   const sample = () => {
-    frame = null;
     const node = input.getScrollNode();
     const active = doc.visibilityState === "visible" && doc.hasFocus();
     session.update({ active, visibleIds: active && node ? visibleMessageIds(node) : [] });
   };
   const requestSample = () => {
-    if (frame === null) frame = win.requestAnimationFrame(sample);
+    if (frame !== null) return;
+    frame = win.requestAnimationFrame(() => {
+      frame = null;
+      sample();
+    });
+  };
+  const sampleNow = () => {
+    if (frame !== null) win.cancelAnimationFrame(frame);
+    frame = null;
+    sample();
   };
   const scrollOptions = { capture: true, passive: true } as const;
 
   doc.addEventListener("scroll", requestSample, scrollOptions);
-  doc.addEventListener("visibilitychange", requestSample);
-  win.addEventListener("focus", requestSample);
-  win.addEventListener("blur", requestSample);
+  doc.addEventListener("visibilitychange", sampleNow);
+  win.addEventListener("focus", sampleNow);
+  win.addEventListener("blur", sampleNow);
   win.addEventListener("resize", requestSample);
   requestSample();
 
@@ -86,9 +94,9 @@ export function startSeenMarkerSampling(input: {
       frame = null;
       session.dispose();
       doc.removeEventListener("scroll", requestSample, scrollOptions);
-      doc.removeEventListener("visibilitychange", requestSample);
-      win.removeEventListener("focus", requestSample);
-      win.removeEventListener("blur", requestSample);
+      doc.removeEventListener("visibilitychange", sampleNow);
+      win.removeEventListener("focus", sampleNow);
+      win.removeEventListener("blur", sampleNow);
       win.removeEventListener("resize", requestSample);
     },
   };

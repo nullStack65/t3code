@@ -1,8 +1,4 @@
-import type {
-  MessageId,
-  ThreadSeenMarker,
-  ThreadSeenMarkerSummary,
-} from "@t3tools/contracts";
+import type { MessageId, ThreadSeenMarker, ThreadSeenMarkerSummary } from "@t3tools/contracts";
 
 export function summarizeSeenMarker(
   marker: ThreadSeenMarker | undefined,
@@ -29,11 +25,11 @@ export function formatSeenMarkerForProvider(
 ) {
   if (marker === undefined || marker.unseenCount === 0) return text;
   const noun = marker.unseenCount === 1 ? "message" : "messages";
-  return [
+  const block = [
     `<seen_marker last_seen_message_id="${marker.lastSeenMessageId}" seen_at="${marker.seenAt}" unseen_count="${marker.unseenCount}">`,
     `The user last saw message ${marker.lastSeenMessageId}; ${marker.unseenCount} ${noun} since are unseen. Open the reply with a short catch-up on only those.`,
     "</seen_marker>",
-    "",
-    text,
   ].join("\n");
+  if (text.trim().startsWith("/")) return `${text}\n\n${block}`;
+  return `${block}\n\n${text}`;
 }

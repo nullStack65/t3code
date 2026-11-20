@@ -40,10 +40,7 @@ describe("summarizeSeenMarker", () => {
 
   it("omits the marker when the id is missing or nothing is unseen", () => {
     expect(
-      summarizeSeenMarker(
-        { lastSeenMessageId: MessageId.make("missing"), seenAt },
-        messages,
-      ),
+      summarizeSeenMarker({ lastSeenMessageId: MessageId.make("missing"), seenAt }, messages),
     ).toBeUndefined();
     expect(
       summarizeSeenMarker(
@@ -75,5 +72,19 @@ describe("formatSeenMarkerForProvider", () => {
 
   it("leaves text unchanged when a send carries no marker", () => {
     expect(formatSeenMarkerForProvider("Ship the fix", undefined)).toBe("Ship the fix");
+  });
+
+  it("keeps a slash command at the first character", () => {
+    const marker = {
+      lastSeenMessageId: MessageId.make("message-user-1"),
+      seenAt,
+      unseenCount: 2,
+    };
+    const command = formatSeenMarkerForProvider("  /review the diff", marker);
+    expect(command.trim().startsWith("/review the diff")).toBe(true);
+    expect(command.indexOf("<seen_marker")).toBeGreaterThan(command.indexOf("/review"));
+    const prose = formatSeenMarkerForProvider("Review the diff", marker);
+    expect(prose.startsWith("<seen_marker")).toBe(true);
+    expect(prose.endsWith("Review the diff")).toBe(true);
   });
 });

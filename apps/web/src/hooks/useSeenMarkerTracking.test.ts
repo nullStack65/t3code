@@ -1,8 +1,16 @@
 import { MessageId } from "@t3tools/contracts";
-import { buildSeenMarker, resetSeenMarkersForTest, type SeenTimers } from "@t3tools/client-runtime/seen-marker";
+import {
+  buildSeenMarker,
+  resetSeenMarkersForTest,
+  type SeenTimers,
+} from "@t3tools/client-runtime/seen-marker";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { startSeenMarkerSampling, visibleMessageIds, type SeenScrollNode } from "./useSeenMarkerTracking";
+import {
+  startSeenMarkerSampling,
+  visibleMessageIds,
+  type SeenScrollNode,
+} from "./useSeenMarkerTracking";
 
 const seenAt = "2026-11-20T03:00:00.000Z";
 const userId = MessageId.make("message-user");
@@ -184,9 +192,17 @@ describe("timeline seen sampling", () => {
     expect(clock.pendingCount()).toBe(1);
     page.state.focused = false;
     page.emit("win:blur");
-    page.flush();
+    expect(page.frames).toEqual([]);
     expect(clock.pendingCount()).toBe(0);
     expect(buildSeenMarker("env:thread")).toBeUndefined();
+    page.state.focused = true;
+    page.emit("win:focus");
+    expect(page.frames).toEqual([]);
+    expect(clock.pendingCount()).toBe(1);
+    page.state.visibility = "hidden";
+    page.emit("doc:visibilitychange");
+    expect(page.frames).toEqual([]);
+    expect(clock.pendingCount()).toBe(0);
     sampling.dispose();
   });
 

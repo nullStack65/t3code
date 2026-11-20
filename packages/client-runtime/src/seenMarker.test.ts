@@ -103,4 +103,25 @@ describe("seen dwell", () => {
     expect(pickNewestMessageId([userId, assistantId], messages)).toBe(assistantId);
     expect(buildSeenMarker("env:thread")).toBeUndefined();
   });
+
+  it("does not mark a message that is still streaming", () => {
+    const streamingId = MessageId.make("message-streaming");
+    const withStreaming = [...messages, { id: streamingId, role: "assistant", streaming: true }];
+    expect(pickNewestMessageId([assistantId, streamingId], withStreaming)).toBe(assistantId);
+    expect(pickNewestMessageId([streamingId], withStreaming)).toBeNull();
+
+    const clock = manualTimers();
+    const tracker = createSeenMarkerSession({
+      threadKey: "env:thread",
+      getMessages: () => withStreaming,
+      seenAt: () => seenAt,
+      timers: clock.timers,
+    });
+    tracker.update({ active: true, visibleIds: [streamingId] });
+    expect(clock.pendingMs()).toEqual([]);
+    tracker.update({ active: true, visibleIds: [assistantId, streamingId] });
+    clock.fireNext();
+    expect(buildSeenMarker("env:thread")?.lastSeenMessageId).toBe(assistantId);
+    tracker.dispose();
+  });
 });

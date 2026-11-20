@@ -12,8 +12,9 @@ never counts as a view.
   and a shorter look is not.
 - `seen-marker.focus`: a hidden, blurred, or backgrounded window does not count.
 - `seen-marker.send`: the next send on that thread carries the marker, and the
-  provider prompt starts with who was last seen and how many assistant messages
-  since are unseen.
+  provider prompt says who was last seen and how many assistant messages since
+  are unseen. A slash command stays first so it still runs; other text keeps
+  the catch-up in front.
 - `seen-marker.quiet`: scrolling and dwelling dispatch no command and open no socket.
 - `seen-marker.bots`: a thread read, and a send that did not come from the app,
   carry no marker.
@@ -37,7 +38,9 @@ this drive does not do that.
   message.
 - Bot and MCP reads do not run this client code. MCP sends do not attach a marker.
 - Compact on the open thread is a send, so it carries the marker. A brand-new
-  thread does not.
+  thread does not. The catch-up follows `/compact` instead of leading it.
+- A reply that is still streaming does not count. The previous finished message
+  on screen can.
 
 ## Proves it works
 
