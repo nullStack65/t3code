@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./seen-marker": {
+      "types": "./src/seenMarker.ts",
+      "default": "./src/seenMarker.ts"
+    },
     "./device/stream": {
       "types": "./src/device/stream.ts",
       "default": "./src/device/stream.ts"

@@ -65,6 +65,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
+import { buildSeenMarker, type SeenMessage } from "@t3tools/client-runtime/seen-marker";
 import {
   applyClaudePromptEffortPrefix,
   createModelSelection,
@@ -338,6 +339,7 @@ import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnectDelay";
+import { useSeenMarkerTracking } from "../hooks/useSeenMarkerTracking";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { resolvePostStartObservationReceipt } from "@t3tools/client-runtime/state/post-start-observation-receipt";
@@ -539,6 +541,19 @@ import {
 } from "./chat/composerPromptHistory";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
+const EMPTY_SEEN_MESSAGES: ReadonlyArray<SeenMessage> = [];
+
+function seenMarkerForSend(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  messages: ReadonlyArray<SeenMessage>,
+) {
+  const seenMarker = buildSeenMarker({
+    threadKey: scopedThreadKey(scopeThreadRef(environmentId, threadId)),
+    messages,
+  });
+  return seenMarker ? { seenMarker } : {};
+}
 const EMPTY_QUEUED_MESSAGES: QueuedComposerMessage[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
@@ -3599,6 +3614,11 @@ export default function ChatView(props: ChatViewProps) {
     displayedTimeline.displayThreadKey,
     activeThreadKey,
   );
+  useSeenMarkerTracking({
+    threadKey: isServerThread && !paintOnlyDisplayedTimeline ? activeThreadKey : null,
+    getScrollNode: () => legendListRef.current?.getScrollableNode() ?? null,
+    messages: activeServerThread?.messages ?? EMPTY_SEEN_MESSAGES,
+  });
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   // Live stages of a bootstrap worktree setup. A worktree send creates the
   // server thread under the route's thread id before anything else, so the
@@ -8487,6 +8507,7 @@ export default function ChatView(props: ChatViewProps) {
           runtimeMode,
           interactionMode: sendInteractionMode,
           ...(bootstrap ? { bootstrap } : {}),
+          ...seenMarkerForSend(activeThread.environmentId, threadIdForSend, activeThread.messages),
           createdAt: messageCreatedAt,
         },
       });
@@ -9112,6 +9133,7 @@ export default function ChatView(props: ChatViewProps) {
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
+            ...seenMarkerForSend(activeThread.environmentId, threadIdForSend, activeThread.messages),
             ...(nextInteractionMode === "default" && activeProposedPlan
               ? {
                   sourceProposedPlan: {

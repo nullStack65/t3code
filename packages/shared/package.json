@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./seenMarker": {
+      "types": "./src/seenMarker.ts",
+      "import": "./src/seenMarker.ts"
+    },
     "./legacyCliLauncher": {
       "types": "./src/legacyCliLauncher.ts",
       "import": "./src/legacyCliLauncher.ts"
