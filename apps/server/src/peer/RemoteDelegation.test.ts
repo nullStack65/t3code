@@ -1759,6 +1759,21 @@ it.effect(
         expect(behind.isError).toBe(true);
         expect(JSON.stringify(behind.content)).toContain("no-eligible-environment");
         expect(yield* Ref.get(localLaunches)).toBe(0);
+
+        yield* Ref.set(thread.resources, { ...loadOf(0.1), runningAgents: 18, activeRuns: 2 });
+        const idleScopes = yield* launchUnplaced(a, {
+          clientRequestId: "idle-scopes",
+          workspaceStrategy: fresh,
+        });
+        expect(idleScopes.isError, JSON.stringify(idleScopes.content)).toBe(false);
+        expect(idleScopes.structuredContent).toMatchObject({ environmentId: box.environmentId });
+
+        const full = yield* launchUnplaced(a, {
+          clientRequestId: "active-full",
+          workspaceStrategy: fresh,
+        });
+        expect(full.isError).toBe(true);
+        expect(JSON.stringify(full.content)).toContain("no-eligible-environment");
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

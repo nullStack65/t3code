@@ -22,7 +22,7 @@ export function withinHostCap(
 ): boolean {
   if (cap === undefined) return true;
   if (resources === null) return false;
-  const lanes = resources.runningAgents;
+  const lanes = resources.activeRuns ?? resources.runningAgents;
   return (
     lanes !== undefined &&
     lanes < cap.maxLanes &&

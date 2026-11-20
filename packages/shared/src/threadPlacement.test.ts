@@ -245,13 +245,16 @@ describe("chooseThreadPlacement", () => {
       ).toEqual({ accepted: false, reason: "no-eligible-environment" });
     });
 
-    it("caps R720 at four lanes and a memory floor, and refuses a host that cannot count its lanes", () => {
+    it("caps R720 at four active lanes and a memory floor, counts idle scopes only without a run count, and refuses a host that cannot count its lanes", () => {
       for (const [extra, expected] of [
         [{ runningAgents: 3 }, "r720"],
         [{ runningAgents: 4 }, null],
         [{ runningAgents: 18 }, null],
         [{ runningAgents: 0, availableMemoryBytes: 3.9 * GiB }, null],
         [{ runningAgents: undefined }, null],
+        [{ runningAgents: 18, activeRuns: 3 }, "r720"],
+        [{ runningAgents: 0, activeRuns: 4 }, null],
+        [{ runningAgents: undefined, activeRuns: 0 }, "r720"],
       ] as const) {
         const decision = chooseThreadPlacement(origin, [machine("r720", 0.1, extra)], now);
         expect(decision.accepted ? decision.environmentId : null).toBe(expected);

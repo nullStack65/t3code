@@ -513,10 +513,19 @@ const make = Effect.gen(function* () {
     now: number,
   ): C => {
     const recent = recentAt(candidate.environmentId, now).length;
-    const lanes = candidate.resources?.runningAgents;
-    return recent === 0 || candidate.resources === null || lanes === undefined
+    const resources = candidate.resources;
+    if (recent === 0 || resources === null) return candidate;
+    if (resources.activeRuns !== undefined)
+      return {
+        ...candidate,
+        resources: { ...resources, activeRuns: resources.activeRuns + recent },
+      };
+    return resources.runningAgents === undefined
       ? candidate
-      : { ...candidate, resources: { ...candidate.resources, runningAgents: lanes + recent } };
+      : {
+          ...candidate,
+          resources: { ...resources, runningAgents: resources.runningAgents + recent },
+        };
   };
 
   /** The shared choice: this environment and the askable links, from their own answers. */

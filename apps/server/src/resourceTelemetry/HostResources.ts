@@ -26,6 +26,11 @@ export class MachinePresence extends Context.Service<
   }
 >()("t3/resourceTelemetry/HostResources/MachinePresence") {}
 
+export class ActiveRuns extends Context.Service<
+  ActiveRuns,
+  { readonly count: Effect.Effect<number | undefined> }
+>()("t3/resourceTelemetry/HostResources/ActiveRuns") {}
+
 // The user manager's slice holding every T3 server's agent scopes (agentScope.ts).
 const AGENTS_SLICE_PATH = "app.slice/app-t3code.slice/app-t3code-agents.slice";
 
@@ -91,6 +96,7 @@ const make = Effect.fn("makeHostResources")(function* () {
 
   const readFile = (path: string) => fs.readFileString(path).pipe(Effect.orElseSucceed(() => ""));
   const presence = yield* Effect.serviceOption(MachinePresence);
+  const activeRuns = yield* Effect.serviceOption(ActiveRuns);
 
   // Populated agent scopes under this user's manager, from every T3 server on the host.
   const countAgents = Effect.fn("HostResources.countAgents")(function* (
@@ -220,6 +226,7 @@ const make = Effect.fn("makeHostResources")(function* () {
         : loadAverage / cpu.count;
     const runningAgents = platform === "linux" ? yield* countAgents(cgroupPath) : undefined;
     const role = Option.isSome(presence) ? yield* presence.value.read : {};
+    const runs = Option.isSome(activeRuns) ? yield* activeRuns.value.count : undefined;
     return {
       sampledAt: DateTime.toEpochMillis(yield* DateTime.now),
       cpuUtilization,
@@ -228,6 +235,7 @@ const make = Effect.fn("makeHostResources")(function* () {
       totalMemoryBytes,
       ...(loadPerCpu === undefined ? {} : { loadPerCpu }),
       ...(runningAgents === undefined ? {} : { runningAgents }),
+      ...(runs === undefined ? {} : { activeRuns: runs }),
       ...role,
     };
   });

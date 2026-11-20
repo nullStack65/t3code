@@ -326,8 +326,18 @@ const layerMachinePresence = MachinePresence.layer.pipe(
   Layer.provide(layerServerSettings),
 );
 
+const layerActiveRuns = Layer.effect(
+  HostResources.ActiveRuns,
+  Effect.gen(function* () {
+    const store = yield* ProjectionStoreV2.ProjectionStoreV2;
+    return HostResources.ActiveRuns.of({
+      count: store.countActiveRunThreads().pipe(Effect.orElseSucceed(() => undefined)),
+    });
+  }),
+).pipe(Layer.provide(ProjectionStoreV2.layer), Layer.provide(SqlitePersistence.layerConfig));
+
 const layerResourceDiagnostics = Layer.mergeAll(
-  HostResources.layer.pipe(Layer.provide(layerMachinePresence)),
+  HostResources.layer.pipe(Layer.provide(Layer.merge(layerMachinePresence, layerActiveRuns))),
   layerResourceTelemetry,
   ProcessDiagnostics.layer.pipe(Layer.provide(layerResourceTelemetry)),
   ProcessResourceMonitor.layer.pipe(Layer.provide(layerResourceTelemetry)),
