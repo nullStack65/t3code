@@ -69,6 +69,13 @@ jobs:
             !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
           sparse-checkout-cone-mode: false
 
+      - name: Fork drift receipt
+        run: |
+          git fetch --no-tags https://github.com/pingdotgg/t3code.git main:refs/remotes/upstream/main
+          node --test scripts/fork-drift-receipt.test.mjs
+          node scripts/fork-drift-receipt.mjs --base "origin/${{ github.base_ref || github.ref_name }}" || true
+        shell: bash
+
       - name: Prove exact ARC repository and worker
         shell: bash
         run: |
