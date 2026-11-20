@@ -38,6 +38,7 @@ import {
 import { useEnvironment } from "../state/environments";
 import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { chooseRecordingMicrophone } from "./browserMicrophones";
+import { warmBrowserAudioCapture } from "./browserPcmCapture";
 import { createBrowserVoiceInputPlatform } from "./browserVoiceInput";
 import { preferredSpeechLanguages } from "./preferredSpeechLanguages";
 import { runEnvironmentSpeech } from "./runEnvironmentSpeech";
@@ -313,6 +314,7 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     };
     controller = new VoiceInputController({
       retryFailedRecording: true,
+      captureDuringPreparation: true,
       recorder: platform.recorder,
       getTranscriber: () => platform.transcriber,
       requestPermission: async () => ({ granted: true, canAskAgain: true }),
@@ -340,6 +342,7 @@ export function useEnvironmentSpeechInput(input: HookInput) {
       },
     });
     controllerRef.current = controller;
+    if (typeof AudioContext !== "undefined") void warmBrowserAudioCapture().catch(() => undefined);
     return () => {
       disposed = true;
       pendingSubmissionRef.current = null;
@@ -472,6 +475,27 @@ export function useEnvironmentSpeechInput(input: HookInput) {
       latestRef.current.input.ownerKey === owner &&
       !latestRef.current.input.disabled;
     setSetup(INITIAL_SETUP);
+    const knownStatus = status?.prepared === prepared ? status.value : null;
+    if (knownStatus?.supported && knownStatus.state !== "missing-model") {
+      setLevel(0);
+      void probeSpeechStatus(prepared, true).then(
+        (latest) => {
+          if (!stillCurrent()) return;
+          setStatus({ prepared, value: latest });
+          if (latest.supported && latest.state !== "missing-model") return;
+          controller.cancel();
+          if (latest.supported) return loadSetupCatalog(prepared, latest.modelId, request);
+          toastManager.add({
+            type: "error",
+            title: "Voice input is not available",
+            description: latest.reason,
+          });
+        },
+        () => undefined,
+      );
+      await controller.start();
+      return;
+    }
     setQueuedStart(prepared);
     let latestStatus: EnvironmentSpeechStatus;
     try {

@@ -8,8 +8,35 @@ import { requestMicrophone } from "./requestMicrophone";
 import workletUrl from "./pcmWorklet.ts?worker&url";
 
 type PreparedBrowserTranscription = PreparedVoiceTranscription & {
-  readonly streaming?: VoiceStreamingSession & { readonly feed: (pcm: Float32Array) => void };
+  readonly streaming?: VoiceStreamingSession & {
+    readonly feed: (pcm: Float32Array) => void;
+    readonly cancel: () => void;
+  };
 };
+
+let warmAudio: { context: AudioContext; ready: Promise<AudioContext> } | undefined;
+let capturing = false;
+
+export function warmBrowserAudioCapture(): Promise<AudioContext> {
+  if (
+    warmAudio &&
+    warmAudio.context instanceof AudioContext &&
+    warmAudio.context.state !== "closed"
+  )
+    return warmAudio.ready;
+  const context = new AudioContext();
+  const ready = context.audioWorklet.addModule(workletUrl).then(async () => {
+    if (context.state === "running" && !capturing) await context.suspend();
+    return context;
+  });
+  const entry = { context, ready };
+  warmAudio = entry;
+  ready.catch(() => {
+    if (warmAudio === entry) warmAudio = undefined;
+    void context.close().catch(() => undefined);
+  });
+  return ready;
+}
 
 export function createBrowserPcmCapture(
   input: {
@@ -24,7 +51,9 @@ export function createBrowserPcmCapture(
   let recordingUri: string | null = null;
   let chunks: Float32Array<ArrayBuffer>[] = [];
   let audioContext: AudioContext | undefined;
+  let source: MediaStreamAudioSourceNode | undefined;
   let worklet: AudioWorkletNode | undefined;
+  let captureFinished = false;
   let durationTimer: ReturnType<typeof setTimeout> | undefined;
   let signal: AbortSignal | undefined;
   let feed: ((pcm: Float32Array) => void) | undefined;
@@ -35,13 +64,18 @@ export function createBrowserPcmCapture(
   const cleanupCapture = () => {
     if (durationTimer) clearTimeout(durationTimer);
     durationTimer = undefined;
+    source?.disconnect();
+    source = undefined;
     worklet?.disconnect();
-    worklet?.port.close();
+    if (worklet) worklet.port.onmessage = null;
+    worklet?.port.postMessage("release", []);
     worklet = undefined;
     stream?.getTracks().forEach((track) => track.stop());
     stream = undefined;
-    void audioContext?.close();
+    if (audioContext && audioContext.state !== "closed")
+      void audioContext.suspend().catch(() => undefined);
     audioContext = undefined;
+    capturing = false;
     stopped?.resolve();
     stopped = undefined;
     chunks = [];
@@ -53,13 +87,18 @@ export function createBrowserPcmCapture(
     get uri() {
       return recordingUri;
     },
-    prepareToRecordAsync: async () => {
-      const captureSignal = signal;
+    prepareToRecordAsync: async (requestedSignal) => {
+      const captureSignal = requestedSignal ?? signal;
       if (!captureSignal) throw new Error("Voice transcription is not prepared.");
       captureSignal.throwIfAborted();
+      signal = captureSignal;
       if (recordingUri) URL.revokeObjectURL(recordingUri);
       recordingUri = null;
       chunks = [];
+      captureFinished = false;
+      capturing = true;
+      const warming = warmBrowserAudioCapture();
+      warming.catch(() => undefined);
       const microphoneId = await input.getMicrophoneId();
       captureSignal.throwIfAborted();
       const captured = await new Promise<MediaStream>((resolve, reject) => {
@@ -84,9 +123,8 @@ export function createBrowserPcmCapture(
       }
       stream = captured;
       try {
-        const context = new AudioContext();
+        const context = await warming;
         audioContext = context;
-        await context.audioWorklet.addModule(workletUrl);
         captureSignal.throwIfAborted();
         const node = new AudioWorkletNode(context, "t3-pcm-capture", { channelCount: 1 });
         worklet = node;
@@ -117,7 +155,8 @@ export function createBrowserPcmCapture(
           track.addEventListener("ended", () => input.onError("The microphone disconnected."), {
             once: true,
           });
-        context.createMediaStreamSource(captured).connect(node);
+        source = context.createMediaStreamSource(captured);
+        source.connect(node);
         // The processor emits silence, keeping the graph active without microphone playback.
         node.connect(context.destination);
         await context.resume();
@@ -153,6 +192,7 @@ export function createBrowserPcmCapture(
           const blob = new Blob(chunks, { type: "application/octet-stream" });
           recordingUri = URL.createObjectURL(blob);
         }
+        captureFinished = true;
       } finally {
         clearTimeout(timeout);
         cleanupCapture();
@@ -168,11 +208,22 @@ export function createBrowserPcmCapture(
       if (recordingUri === uri) recordingUri = null;
     },
     transcriber: {
-      prepare: async (options: VoiceTranscriptionOptions) => {
+      prepare: async (
+        options: VoiceTranscriptionOptions,
+      ): Promise<PreparedBrowserTranscription> => {
         const prepared = await prepare(options);
         options.signal.throwIfAborted();
         signal = options.signal;
+        if (prepared.streaming && captureFinished) {
+          prepared.streaming.cancel();
+          const { streaming: _streaming, ...buffered } = prepared;
+          return buffered;
+        }
         feed = prepared.streaming?.feed;
+        if (feed) {
+          for (const chunk of chunks) feed(chunk);
+          chunks = [];
+        }
         return prepared;
       },
     },

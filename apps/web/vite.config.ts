@@ -140,7 +140,16 @@ const browserTestProject = {
     browser: {
       enabled: true,
       headless: true,
-      provider: playwright(),
+      provider: playwright({
+        launchOptions: {
+          args: [
+            "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-audio-output",
+          ],
+        },
+      }),
       instances: [{ browser: "chromium" }],
       screenshotFailures: false,
       commands: {

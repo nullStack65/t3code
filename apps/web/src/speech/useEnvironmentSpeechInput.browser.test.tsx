@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   primaryEnvironmentId: "primary-env",
   statusRequests: [] as string[],
   statusUnavailable: false,
+  statusHold: null as Promise<void> | null,
   modelState: "ready" as "ready" | "missing-model",
   statusModelId: "test-model",
   models: [] as EnvironmentSpeechModel[],
@@ -116,8 +117,9 @@ vi.mock("../components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 vi.mock("@t3tools/client-runtime/voice-input", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/voice-input")>()),
   getEnvironmentSpeechStatus: (prepared: PreparedConnection) =>
-    Effect.sync(() => {
+    Effect.promise(async () => {
       mocks.statusRequests.push(prepared.environmentId);
+      if (mocks.statusHold) await mocks.statusHold;
       if (mocks.statusUnavailable) throw new Error("Temporarily offline");
       return {
         supported: true,
@@ -218,6 +220,7 @@ function setup(options: { readonly destination?: string | null } = {}) {
   mocks.prepared.clear();
   mocks.statusRequests = [];
   mocks.statusUnavailable = false;
+  mocks.statusHold = null;
   mocks.modelState = "ready";
   mocks.statusModelId = "test-model";
   mocks.models = [];
@@ -799,6 +802,25 @@ it("shares one status probe per destination across every mounted editor", async 
   );
   expect(mocks.voice.available).toBe(true);
   expect(mocks.statusRequests).toEqual(["env-a"]);
+});
+
+it("records within 400 ms of the press while the status refresh is still unanswered", async () => {
+  setup({ destination: "env-a" });
+  await using _screen = await render(<Probe />);
+  expect(mocks.voice.available).toBe(true);
+  let answer!: () => void;
+  mocks.statusHold = new Promise((resolve) => {
+    answer = resolve;
+  });
+  const started = mocks.voice.start();
+  await vi.waitFor(() => expect(mocks.voice.state.phase).toBe("recording"), {
+    timeout: 400,
+    interval: 1,
+  });
+  answer();
+  await act(() => started);
+  await act(() => mocks.voice.stop());
+  expect(mocks.committed).toHaveBeenCalledExactlyOnceWith("dictated", expect.anything());
 });
 
 it("lets the user retry after a status failure without reselecting the destination", async () => {

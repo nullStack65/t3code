@@ -84,6 +84,93 @@ function createHarness(
   };
 }
 
+describe("voice input press latency", () => {
+  beforeEach(() => resetVoiceInputGlobalsForTests());
+
+  const PRESS_TO_RECORDING_BUDGET_MS = 400;
+
+  it("reaches recording within 400 ms while transcription preparation is still pending", async () => {
+    const preparation = deferred<PreparedVoiceTranscription>();
+    const harness = createHarness({
+      captureDuringPreparation: true,
+      getTranscriber: () => ({ prepare: () => preparation.promise }),
+    });
+    const started = harness.controller.start();
+    await vi.waitFor(() => expect(harness.controller.currentState.phase).toBe("recording"), {
+      timeout: PRESS_TO_RECORDING_BUDGET_MS,
+      interval: 1,
+    });
+    await started;
+    expect(harness.recorder.record).toHaveBeenCalledOnce();
+
+    const stopped = harness.controller.stop();
+    expect(harness.controller.currentState.phase).toBe("transcribing");
+    preparation.resolve(preparedTranscription(async () => "late text"));
+    await stopped;
+    expect(harness.commits.map(({ text }) => text)).toEqual(["hello late text"]);
+    expect(harness.controller.currentState.phase).toBe("idle");
+  });
+
+  it("stops the recording when preparation fails after capture started, and retries the same audio", async () => {
+    const preparation = deferred<PreparedVoiceTranscription>();
+    const held: { uri: { uri: string | null } | null } = { uri: null };
+    const releaseRecording = vi.fn(async () => {
+      if (held.uri) held.uri.uri = null;
+    });
+    const prepare = vi
+      .fn<VoiceTranscriber["prepare"]>()
+      .mockReturnValueOnce(preparation.promise)
+      .mockResolvedValueOnce(preparedTranscription(async () => "kept text"));
+    const harness = createHarness({
+      captureDuringPreparation: true,
+      retryFailedRecording: true,
+      releaseRecording,
+      getTranscriber: () => ({ prepare }),
+    });
+    held.uri = harness.recorder;
+    await harness.controller.start();
+    expect(harness.controller.currentState.phase).toBe("recording");
+    preparation.reject(
+      new VoiceTranscriptionError({ code: "unavailable", message: "Server is offline." }),
+    );
+    await vi.waitFor(() =>
+      expect(harness.controller.currentState).toEqual({
+        phase: "error",
+        error: "Server is offline.",
+        errorAction: "retry",
+      }),
+    );
+    await vi.waitFor(() => expect(releaseRecording).toHaveBeenCalled());
+    expect(harness.recorder.stop).toHaveBeenCalled();
+    expect(harness.commits).toEqual([]);
+    expect(harness.deleted).toEqual([]);
+
+    await harness.controller.start();
+    expect(harness.recorder.record).toHaveBeenCalledOnce();
+    expect(harness.commits.map(({ text }) => text)).toEqual(["hello kept text"]);
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+  });
+
+  it("never records when preparation fails before capture is ready", async () => {
+    const capture = deferred<undefined>();
+    const harness = createHarness({
+      captureDuringPreparation: true,
+      getTranscriber: () => ({
+        prepare: async () => {
+          throw new VoiceTranscriptionError({ code: "unavailable", message: "No model." });
+        },
+      }),
+    });
+    harness.recorder.prepareToRecordAsync.mockReturnValueOnce(capture.promise);
+    const started = harness.controller.start();
+    await Promise.resolve();
+    capture.resolve(undefined);
+    await started;
+    expect(harness.recorder.record).not.toHaveBeenCalled();
+    expect(harness.controller.currentState.error).toBe("No model.");
+  });
+});
+
 describe("environment voice input", () => {
   beforeEach(() => resetVoiceInputGlobalsForTests());
 

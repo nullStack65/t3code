@@ -33,9 +33,11 @@ function capture() {
       class {
         audioWorklet = { addModule: async () => {} };
         createMediaStreamSource() {
-          return { connect() {} };
+          return { connect() {}, disconnect() {} };
         }
+        state = "running";
         resume = async () => {};
+        suspend = async () => {};
         close = async () => {};
       },
     ),
