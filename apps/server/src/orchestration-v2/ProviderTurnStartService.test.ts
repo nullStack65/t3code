@@ -487,7 +487,7 @@ effectIt.effect("lets a restart continuation of a founder's own turn through at 
       providerTurns: [{ startedAt: "2099-01-01T00:00:01.000Z", inputTokens: 1 }],
     });
     yield* Effect.exit(harness.start);
-    expect(harness.refusal()?.title).not.toBe("Turn refused by the session spend guard");
+    expect(harness.refusal()).toBeUndefined();
   }),
 );
 

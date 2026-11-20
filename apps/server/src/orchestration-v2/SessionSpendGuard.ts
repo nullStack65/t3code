@@ -251,9 +251,15 @@ export function refusesAutomatedTurn(
 const MAX_ORIGIN_CHAIN = 50;
 
 export function originCreationSource(input: {
-  readonly run: Pick<OrchestrationV2Run, "userMessageId" | "restartContinuationOfRunId">;
+  readonly run: Pick<
+    OrchestrationV2Run,
+    "userMessageId" | "restartContinuationOfRunId" | "usageLimitContinuationOfRunId"
+  >;
   readonly runs: ReadonlyArray<
-    Pick<OrchestrationV2Run, "id" | "userMessageId" | "restartContinuationOfRunId">
+    Pick<
+      OrchestrationV2Run,
+      "id" | "userMessageId" | "restartContinuationOfRunId" | "usageLimitContinuationOfRunId"
+    >
   >;
   readonly messages: ReadonlyArray<
     Pick<OrchestrationV2ConversationMessage, "id" | "creationSource">
@@ -261,7 +267,7 @@ export function originCreationSource(input: {
 }): OrchestrationV2ConversationMessage["creationSource"] | undefined {
   let current = input.run;
   for (let depth = 0; depth < MAX_ORIGIN_CHAIN; depth += 1) {
-    const sourceRunId = current.restartContinuationOfRunId;
+    const sourceRunId = current.restartContinuationOfRunId ?? current.usageLimitContinuationOfRunId;
     if (sourceRunId === undefined) break;
     const source = input.runs.find((candidate) => candidate.id === sourceRunId);
     if (source === undefined) break;

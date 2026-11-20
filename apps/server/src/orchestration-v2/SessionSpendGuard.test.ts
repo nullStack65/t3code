@@ -393,6 +393,8 @@ describe("originCreationSource", () => {
     { id: "r4", userMessageId: "m-mcp" },
     { id: "r5", userMessageId: "m-server", restartContinuationOfRunId: "r4" },
     { id: "r6", userMessageId: "m-server", restartContinuationOfRunId: "missing" },
+    { id: "r7", userMessageId: "m-server", usageLimitContinuationOfRunId: "r1" },
+    { id: "r8", userMessageId: "m-server", restartContinuationOfRunId: "r7" },
   ] as never;
   const origin = (id: string) =>
     originCreationSource({
@@ -405,6 +407,11 @@ describe("originCreationSource", () => {
     expect(origin("r1")).toBe("web");
     expect(origin("r2")).toBe("web");
     expect(origin("r3")).toBe("web");
+  });
+
+  it("follows usage limit continuations and mixed chains", () => {
+    expect(origin("r7")).toBe("web");
+    expect(origin("r8")).toBe("web");
   });
 
   it("keeps an automated origin automated", () => {
