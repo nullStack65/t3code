@@ -28,12 +28,14 @@ import {
 import { SidebarHeaderIconButton } from "./SidebarThreadHeader";
 import {
   changedThreadListFilters,
+  EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
   threadListFilterCounts,
   threadListFilterOf,
   toggleFilterOption,
   toggleHiddenEnvironment,
   type ThreadListFilter,
+  type ThreadListFilterBucketCounts,
 } from "./threadListFilter.logic";
 
 const INBOX_LABELS: Record<InboxChoice, string> = {
@@ -114,7 +116,7 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
   isChanged: boolean;
 }) {
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
-  const counts = threadListFilterCounts(countedThreads(), filter, attributionOf);
+  const counts = threadListFilterCounts(countedThreads(), filter, attributionOf, owner);
   const shownAttributions = THREAD_ATTRIBUTIONS.filter(
     (from) => !filter.hiddenAttributions.includes(from),
   );
@@ -130,13 +132,13 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
         {inboxOrder.map((inbox) => {
           const checked = filter.inboxes.includes(inbox);
           const isLast = checked && filter.inboxes.length === 1;
-          const count = counts.inboxes.get(inbox) ?? 0;
+          const count = counts.inboxes.get(inbox) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
           return (
             <MenuCheckboxItem
               key={inbox}
               checked={checked}
               disabled={isLast}
-              aria-label={`${INBOX_LABELS[inbox]}, ${count} active${isLast ? LAST_OPTION_NOTE : ""}`}
+              aria-label={`${INBOX_LABELS[inbox]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : ""}`}
               onCheckedChange={() =>
                 void updateClientSettings({
                   founderInboxFilter: toggleFilterOption(filter.inboxes, inbox, inboxOrder),
@@ -154,13 +156,13 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
         {THREAD_ATTRIBUTIONS.map((from) => {
           const checked = shownAttributions.includes(from);
           const isLast = checked && shownAttributions.length === 1;
-          const count = counts.from.get(from) ?? 0;
+          const count = counts.from.get(from) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
           return (
             <MenuCheckboxItem
               key={from}
               checked={checked}
               disabled={isLast}
-              aria-label={`From ${THREAD_ATTRIBUTION_LABELS[from]}, ${count} active${isLast ? LAST_OPTION_NOTE : ""}`}
+              aria-label={`From ${THREAD_ATTRIBUTION_LABELS[from]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : ""}`}
               onCheckedChange={() => {
                 const shown = toggleFilterOption(shownAttributions, from, THREAD_ATTRIBUTIONS);
                 void updateClientSettings({
@@ -184,13 +186,15 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
               const checked = shownEnvironmentIds.includes(environment.environmentId);
               const isLast = checked && shownEnvironmentIds.length === 1;
               const connected = connectedEnvironmentIds.includes(environment.environmentId);
-              const count = counts.environments.get(environment.environmentId) ?? 0;
+              const count =
+                counts.environments.get(environment.environmentId) ??
+                EMPTY_THREAD_LIST_FILTER_BUCKETS;
               return (
                 <MenuCheckboxItem
                   key={environment.environmentId}
                   checked={checked}
                   disabled={isLast}
-                  aria-label={`${environment.label}, ${connected ? "connected" : "not connected"}, ${count} active${isLast ? LAST_OPTION_NOTE : ""}`}
+                  aria-label={`${environment.label}, ${connected ? "connected" : "not connected"}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : ""}`}
                   onCheckedChange={() =>
                     void updateClientSettings({
                       sidebarHiddenEnvironmentIds: toggleHiddenEnvironment(
@@ -240,20 +244,52 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
   );
 }
 
+const STATE_COUNT_COLUMNS = [
+  ["working", "working"],
+  ["done", "done"],
+  ["needsMe", "needs me"],
+] as const satisfies ReadonlyArray<readonly [keyof ThreadListFilterBucketCounts, string]>;
+
+function stateCountPhrase(counts: ThreadListFilterBucketCounts) {
+  return STATE_COUNT_COLUMNS.map(([key, label]) => `${counts[key]} ${label}`).join(", ");
+}
+
 function FilterOptionRow({
   label,
   count,
   indicator,
 }: {
   label: string;
-  count: number;
+  count: ThreadListFilterBucketCounts;
   indicator?: ReactNode;
 }) {
   return (
     <span className="flex min-w-0 items-center gap-2">
       {indicator}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className="shrink-0 text-muted-foreground text-xs tabular-nums">{count}</span>
+      <span className="grid shrink-0 grid-cols-3 gap-x-1.5 text-center">
+        {STATE_COUNT_COLUMNS.map(([key, name]) => {
+          const value = count[key];
+          return (
+            <span
+              key={key}
+              className={cn(
+                "text-3xs leading-tight tabular-nums",
+                value === 0
+                  ? "text-muted-foreground/40"
+                  : key === "working"
+                    ? "text-info-foreground"
+                    : key === "done"
+                      ? "text-success-foreground"
+                      : "text-warning-foreground",
+              )}
+            >
+              <span className="block">{value}</span>
+              <span className="block">{name}</span>
+            </span>
+          );
+        })}
+      </span>
     </span>
   );
 }

@@ -5,6 +5,7 @@ import {
   changedThreadListFilters,
   inboxMenuOrder,
   matchesThreadListFilter,
+  threadListFilterBucket,
   threadListFilterCounts,
   threadListFilterOf,
   toggleFilterOption,
@@ -42,21 +43,31 @@ describe("thread list filter", () => {
   });
 
   it("counts each section within the other sections' selection", () => {
+    const finished = { runtime: { status: "completed" }, latestRun: { status: "completed" } };
     const threads = [
-      { ...thread(laptop, kameron), from: "kameron" as const },
-      { ...thread(laptop, bot), from: "kameron-agents" as const },
-      { ...thread(crown, jeff), from: "jeff" as const },
-      { ...thread(crown, kameron), from: "kameron" as const },
-      { ...thread(laptop, kameron), from: "unknown" as const },
+      { ...thread(laptop, kameron), ...finished, from: "kameron" as const },
+      { ...thread(laptop, bot), ...finished, from: "kameron-agents" as const },
+      { ...thread(crown, jeff), ...finished, from: "jeff" as const },
+      { ...thread(crown, kameron), ...finished, from: "kameron" as const },
+      { ...thread(laptop, kameron), ...finished, from: "unknown" as const },
     ];
     const counts = threadListFilterCounts(
       threads,
       { inboxes: ["kameron"], hiddenEnvironmentIds: [crown], hiddenAttributions: ["unknown"] },
       (candidate) => candidate.from,
     );
-    expect(Object.fromEntries(counts.inboxes)).toEqual({ kameron: 1, agents: 1 });
-    expect(Object.fromEntries(counts.environments)).toEqual({ laptop: 1, crown: 1 });
-    expect(Object.fromEntries(counts.from)).toEqual({ kameron: 1, unknown: 1 });
+    expect(Object.fromEntries(counts.inboxes)).toEqual({
+      kameron: { working: 0, done: 1, needsMe: 0 },
+      agents: { working: 0, done: 1, needsMe: 0 },
+    });
+    expect(Object.fromEntries(counts.environments)).toEqual({
+      laptop: { working: 0, done: 1, needsMe: 0 },
+      crown: { working: 0, done: 1, needsMe: 0 },
+    });
+    expect(Object.fromEntries(counts.from)).toEqual({
+      kameron: { working: 0, done: 1, needsMe: 0 },
+      unknown: { working: 0, done: 1, needsMe: 0 },
+    });
     expect(
       matchesThreadListFilter(
         threads[4]!,
@@ -106,5 +117,145 @@ describe("thread list filter", () => {
     expect(toggleHiddenEnvironment([offline], crown, [laptop, crown])).toEqual([offline, crown]);
     expect(toggleHiddenEnvironment([offline, crown], crown, [laptop, crown])).toEqual([offline]);
     expect(toggleHiddenEnvironment([crown], laptop, [laptop, crown])).toEqual([crown]);
+  });
+
+  it("buckets working, done and needs-me the same way on every row", () => {
+    const finished = { runtime: { status: "completed" }, latestRun: { status: "completed" } };
+    const quiet = {
+      ...thread(laptop, kameron),
+      source: {
+        inbox: makeThreadInbox({
+          actor: kameron,
+          routing: { attentionKind: "FYI", reason: "fyi" },
+        }),
+      },
+    };
+    const asked = {
+      ...quiet,
+      source: {
+        inbox: {
+          ...quiet.source.inbox,
+          decisionRequest: {
+            founder: "kameron" as const,
+            kind: "decision" as const,
+            question: "Ship it?",
+            requestedAt: "2026-11-20T00:00:00.000Z",
+          },
+        },
+      },
+    };
+    const attention = {
+      ...thread(laptop, bot),
+      ...finished,
+      source: {
+        inbox: makeThreadInbox({
+          actor: bot,
+          routing: {
+            owner: "kameron",
+            assignee: { kind: "human", id: "kameron" },
+            audience: "kameron",
+            attentionKind: "action",
+            reason: "review",
+          },
+        }),
+      },
+    };
+    const otherAsk = {
+      ...thread(laptop, jeff),
+      ...finished,
+      source: {
+        inbox: {
+          ...makeThreadInbox({
+            actor: jeff,
+            routing: { attentionKind: "FYI", reason: "fyi" },
+          }),
+          decisionRequest: {
+            founder: "jeff" as const,
+            kind: "decision" as const,
+            question: "Your call?",
+            requestedAt: "2026-11-20T00:00:00.000Z",
+          },
+        },
+      },
+    };
+    const fixtures = {
+      queued: {
+        ...quiet,
+        runtime: { status: "queued" },
+        latestRun: { status: "queued" },
+      },
+      running: {
+        ...quiet,
+        runtime: { status: "running" },
+        latestRun: { status: "running" },
+      },
+      done: { ...quiet, ...finished },
+      failed: {
+        ...quiet,
+        runtime: { status: "failed" },
+        latestRun: { status: "failed" },
+      },
+      approval: {
+        ...quiet,
+        runtime: { status: "running" },
+        latestRun: { status: "running" },
+        hasPendingApprovals: true,
+      },
+      question: {
+        ...quiet,
+        runtime: { status: "waiting" },
+        latestRun: { status: "waiting" },
+        hasPendingUserInput: true,
+      },
+      decision: { ...asked, ...finished },
+      attention,
+      parked: {
+        ...quiet,
+        runtime: { status: "idle" },
+        latestRun: { status: "completed" },
+      },
+      parkedAttention: {
+        ...attention,
+        runtime: { status: "idle" },
+        latestRun: { status: "completed" },
+      },
+      settled: { ...quiet, ...finished, settledOverride: "settled" as const },
+      otherFounder: otherAsk,
+      unstarted: quiet,
+    };
+    expect(threadListFilterBucket(fixtures.queued, "kameron")).toBe("working");
+    expect(threadListFilterBucket(fixtures.running, "kameron")).toBe("working");
+    expect(threadListFilterBucket(fixtures.done, "kameron")).toBe("done");
+    expect(threadListFilterBucket(fixtures.failed, "kameron")).toBe("done");
+    expect(threadListFilterBucket(fixtures.approval, "kameron")).toBe("needsMe");
+    expect(threadListFilterBucket(fixtures.question, "kameron")).toBe("needsMe");
+    expect(threadListFilterBucket(fixtures.decision, "kameron")).toBe("needsMe");
+    expect(threadListFilterBucket(fixtures.attention, "kameron")).toBe("needsMe");
+    expect(threadListFilterBucket(fixtures.parked, "kameron")).toBe("working");
+    expect(threadListFilterBucket(fixtures.parkedAttention, "kameron")).toBe("working");
+    expect(threadListFilterBucket(fixtures.settled, "kameron")).toBeNull();
+    expect(threadListFilterBucket(fixtures.otherFounder, "kameron")).toBe("done");
+    expect(threadListFilterBucket(fixtures.unstarted, "kameron")).toBeNull();
+
+    const threads = Object.values(fixtures).map((candidate) => ({
+      ...candidate,
+      from: "kameron" as const,
+    }));
+    const counts = threadListFilterCounts(
+      threads,
+      {
+        inboxes: ["kameron", "jeff", "agents", "shared"],
+        hiddenEnvironmentIds: [],
+        hiddenAttributions: [],
+      },
+      (candidate) => candidate.from,
+      "kameron",
+    );
+    const kameronRow = { working: 4, done: 2, needsMe: 4 };
+    const everyRow = { working: 4, done: 3, needsMe: 4 };
+    expect(counts.inboxes.get("kameron")).toEqual(kameronRow);
+    expect(counts.inboxes.get("jeff")).toEqual({ working: 0, done: 1, needsMe: 0 });
+    expect(counts.environments.get(laptop)).toEqual(everyRow);
+    expect(counts.from.get("kameron")).toEqual(everyRow);
   });
 });
