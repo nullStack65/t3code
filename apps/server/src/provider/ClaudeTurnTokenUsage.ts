@@ -119,17 +119,22 @@ export function claudeResumedLedgerDelta(
 ): ClaudeLedgerUsage | undefined {
   const fromZero = claudeLedgerDelta(new Map(), current);
   if (previousProcess === undefined || fromZero === undefined) return undefined;
-  const sincePreviousProcess = claudeLedgerDelta(previousProcess, current);
-  if (sincePreviousProcess === undefined) return fromZero;
   const usage = (resultUsage ?? {}) as Record<string, unknown>;
-  const resultInput = BILLED_USAGE_FIELDS.filter((field) => field !== "output_tokens").map(
-    (field) => finiteNonNegativeInteger(usage[field]) ?? 0,
+  const resultInput = BILLED_USAGE_FIELDS.filter((field) => field !== "output_tokens").reduce(
+    (sum, field) => sum + (finiteNonNegativeInteger(usage[field]) ?? 0),
+    0,
   );
   const resultOutput = finiteNonNegativeInteger(usage.output_tokens) ?? 0;
-  const restoredCounterCannotHoldResult =
-    sincePreviousProcess.inputTokens < resultInput.reduce((sum, count) => sum + count, 0) ||
-    sincePreviousProcess.outputTokens < resultOutput;
-  return restoredCounterCannotHoldResult ? fromZero : undefined;
+  if (fromZero.inputTokens > resultInput || fromZero.outputTokens > resultOutput) return undefined;
+  const sincePreviousProcess = claudeLedgerDelta(previousProcess, current);
+  if (
+    sincePreviousProcess !== undefined &&
+    sincePreviousProcess.inputTokens >= resultInput &&
+    sincePreviousProcess.outputTokens >= resultOutput
+  ) {
+    return undefined;
+  }
+  return fromZero;
 }
 
 export function addClaudeLedgerUsage(

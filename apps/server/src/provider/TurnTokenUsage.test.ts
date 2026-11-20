@@ -227,24 +227,45 @@ describe("billable native turn usage", () => {
     const ledger = (input: number, output: number) =>
       claudeModelLedger({ "claude-sonnet-4-6": { inputTokens: input, outputTokens: output } });
     const result = { input_tokens: 40, output_tokens: 5 };
+    const otherUsage = (
+      previous: ReturnType<typeof ledger>,
+      current: ReturnType<typeof ledger>,
+      usage: object,
+    ) =>
+      normalizeClaudeTurnTokenUsage({ subtype: "success", usage }, false, "completed", [], {
+        ledger: claudeResumedLedgerDelta(previous, current, usage),
+      }).otherUsage;
     expect(
       claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_040, 105), result),
     ).toBeUndefined();
+    expect(otherUsage(ledger(1_000, 100), ledger(1_040, 105), result)).toBeUndefined();
     expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_000, 100), {})).toBeUndefined();
     expect(claudeResumedLedgerDelta(undefined, ledger(1_040, 105), result)).toBeUndefined();
-    expect(claudeResumedLedgerDelta(ledger(30, 4), ledger(40, 5), result)).toEqual({
-      inputTokens: 40,
-      outputTokens: 5,
+    expect(otherUsage(ledger(30, 4), ledger(40, 5), result)).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
     });
-    expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(60, 9), result)).toEqual({
-      inputTokens: 60,
-      outputTokens: 9,
-    });
+    expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(60, 9), result)).toBeUndefined();
+    expect(otherUsage(ledger(1_000, 100), ledger(60, 9), result)).toBeUndefined();
+    const shortOfResult = { input_tokens: 80, output_tokens: 5 };
     expect(
-      normalizeClaudeTurnTokenUsage({ subtype: "success", usage: result }, false, "completed", [], {
-        ledger: claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_040, 105), result),
-      }),
-    ).not.toHaveProperty("otherUsage");
+      claudeResumedLedgerDelta(ledger(10_000, 100), ledger(10_040, 104), shortOfResult),
+    ).toBeUndefined();
+    expect(otherUsage(ledger(10_000, 100), ledger(10_040, 104), shortOfResult)).toBeUndefined();
+    const droppedModel = claudeModelLedger({
+      "claude-sonnet-4-6": { inputTokens: 100_000, outputTokens: 10 },
+      "claude-haiku-4-5": { inputTokens: 20_000, outputTokens: 5 },
+    });
+    const continuedSonnet = claudeModelLedger({
+      "claude-sonnet-4-6": { inputTokens: 100_100, outputTokens: 12 },
+    });
+    const droppedResult = { input_tokens: 100, output_tokens: 2 };
+    expect(claudeResumedLedgerDelta(droppedModel, continuedSonnet, droppedResult)).toBeUndefined();
+    expect(otherUsage(droppedModel, continuedSonnet, droppedResult)).toBeUndefined();
+    expect(otherUsage(ledger(1_000, 100), ledger(40, 5), result)).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+    });
   });
 
   it("adds Claude steering segments to the final measured result once", () => {
