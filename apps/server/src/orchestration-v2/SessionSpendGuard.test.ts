@@ -8,6 +8,7 @@ import {
   describeSpendStop,
   evaluateSpendGuard,
   evaluateThreadSpend,
+  originCreationSource,
   priceProviderTurns,
   rateForModel,
   spendGuardMarkers,
@@ -30,6 +31,7 @@ const rate = {
 
 const settings = {
   ...decodeSettings({}).sessionSpendGuard,
+  mode: "enforce" as const,
   idleFlagUsd: 3,
   idleStopUsd: 5,
   sessionCeilingUsd: 10,
@@ -56,26 +58,69 @@ const evaluate = (overrides: Partial<SpendGuardInput> = {}) =>
 
 describe("priceProviderTurns", () => {
   it("prices uncached input, cache read, output, and other usage", () => {
-    expect(
-      priceProviderTurns(
-        [
-          {
-            startedAt: at("2026-01-01T00:00:00.000Z"),
-            completedAt: at("2026-01-01T00:05:00.000Z"),
-            turnTokenUsage: {
-              usageScope: "main_agent",
-              usageStatus: "complete",
-              hasSubagents: true,
-              inputTokens: 10,
-              cachedInputTokens: 4,
-              outputTokens: 2,
-              otherUsage: { inputTokens: 1, outputTokens: 1 },
-            },
+    const [entry] = priceProviderTurns(
+      [
+        {
+          startedAt: at("2026-01-01T00:00:00.000Z"),
+          completedAt: at("2026-01-01T00:05:00.000Z"),
+          turnTokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            hasSubagents: true,
+            inputTokens: 10,
+            cachedInputTokens: 4,
+            outputTokens: 2,
+            otherUsage: { inputTokens: 1, outputTokens: 1 },
           },
-        ],
-        rate,
-      ),
-    ).toEqual([{ createdAt: "2026-01-01T00:00:00.000Z", usd: 13.4 }]);
+        },
+      ],
+      rate,
+    );
+    expect(entry?.createdAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(entry?.usd).toBeCloseTo(13.04, 6);
+  });
+
+  it("prices other-agent input at the main agent's cache mix", () => {
+    const [entry] = priceProviderTurns(
+      [
+        {
+          startedAt: at("2026-01-01T00:00:00.000Z"),
+          completedAt: at("2026-01-01T00:05:00.000Z"),
+          turnTokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            hasSubagents: true,
+            inputTokens: 1000,
+            cachedInputTokens: 980,
+            outputTokens: 0,
+            otherUsage: { inputTokens: 1_000_000, outputTokens: 0 },
+          },
+        },
+      ],
+      rate,
+    );
+    expect(entry?.usd).toBeCloseTo(20 + 98 + 1_000_000 * (0.02 + 0.98 * 0.1), 3);
+  });
+
+  it("prices other-agent input as uncached when the main agent reports no cache reads", () => {
+    const [entry] = priceProviderTurns(
+      [
+        {
+          startedAt: at("2026-01-01T00:00:00.000Z"),
+          completedAt: null,
+          turnTokenUsage: {
+            usageScope: "main_agent",
+            usageStatus: "complete",
+            hasSubagents: true,
+            inputTokens: 0,
+            outputTokens: 0,
+            otherUsage: { inputTokens: 10, outputTokens: 0 },
+          },
+        },
+      ],
+      rate,
+    );
+    expect(entry?.usd).toBe(10);
   });
 
   it("falls back to the context snapshot and skips a turn with no counts", () => {
@@ -283,14 +328,25 @@ describe("launch and stop copy", () => {
     const evaluation = evaluate({ spend: [priced("2026-01-01T00:01:00.000Z", 6)] });
     expect(describeSpendStop(evaluation, settings)).toContain("$6.00");
     expect(describeSpendStop(evaluation, settings)).toContain("$5.00");
+    expect(describeSpendStop(evaluation, settings)).toContain("with no linked pull request");
     expect(UNTITLED_LAUNCH_REFUSAL).toContain("default title");
+  });
+
+  it("does not say no pull request is linked when one is", () => {
+    const evaluation = evaluate({
+      spend: [priced("2026-01-01T00:02:00.000Z", 6)],
+      workSignalAts: ["2026-01-01T00:01:00.000Z"],
+    });
+    const detail = describeSpendStop(evaluation, settings);
+    expect(detail).toContain("since its last linked pull request or file-changing turn");
+    expect(detail).not.toContain("with no linked pull request");
   });
 });
 
 describe("evaluateThreadSpend", () => {
   it("uses the model override and otherwise the fallback rate", () => {
     const decoded = decodeSettings({
-      sessionSpendGuard: { idleStopUsd: 1, sessionCeilingUsd: 100 },
+      sessionSpendGuard: { mode: "enforce", idleStopUsd: 1, sessionCeilingUsd: 100 },
       usagePriceOverrides: {
         "custom-model": {
           inputCostPerMillionTokens: 1_000_000,
@@ -321,5 +377,41 @@ describe("evaluateThreadSpend", () => {
       rateForModel("missing", decoded.usagePriceOverrides, decoded.sessionSpendGuard.fallbackRate)
         .inputCostPerToken,
     ).toBe(10 / 1_000_000);
+  });
+});
+
+describe("originCreationSource", () => {
+  const messages = [
+    { id: "m-web", creationSource: "web" as const },
+    { id: "m-mcp", creationSource: "mcp" as const },
+    { id: "m-server", creationSource: "server" as const },
+  ] as never;
+  const runs = [
+    { id: "r1", userMessageId: "m-web" },
+    { id: "r2", userMessageId: "m-server", restartContinuationOfRunId: "r1" },
+    { id: "r3", userMessageId: "m-server", restartContinuationOfRunId: "r2" },
+    { id: "r4", userMessageId: "m-mcp" },
+    { id: "r5", userMessageId: "m-server", restartContinuationOfRunId: "r4" },
+    { id: "r6", userMessageId: "m-server", restartContinuationOfRunId: "missing" },
+  ] as never;
+  const origin = (id: string) =>
+    originCreationSource({
+      run: (runs as ReadonlyArray<{ id: string }>).find((run) => run.id === id) as never,
+      runs,
+      messages,
+    });
+
+  it("follows restart continuations back to the founder's message", () => {
+    expect(origin("r1")).toBe("web");
+    expect(origin("r2")).toBe("web");
+    expect(origin("r3")).toBe("web");
+  });
+
+  it("keeps an automated origin automated", () => {
+    expect(origin("r5")).toBe("mcp");
+  });
+
+  it("falls back to the run's own message when the source run is gone", () => {
+    expect(origin("r6")).toBe("server");
   });
 });

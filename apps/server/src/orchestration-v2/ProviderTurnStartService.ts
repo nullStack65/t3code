@@ -69,6 +69,7 @@ import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
   checkLaunch,
+  originCreationSource,
   refusesAutomatedTurn,
   describeSpendStop,
   evaluateThreadSpend,
@@ -563,11 +564,17 @@ export const layer: Layer.Layer<
         },
       );
       const guardSettings = yield* serverSettings.getSettings;
+      const guardCreationSource =
+        originCreationSource({
+          run,
+          runs: projection.runs,
+          messages: projection.messages,
+        }) ?? message.creationSource;
       const launchRefusal = checkLaunch({
         title: projection.thread.title,
         titlePending: projection.thread.titleRegeneration != null,
         hasOtherUserMessages: projection.runs.some((candidate) => candidate.ordinal < run.ordinal),
-        creationSource: message.creationSource,
+        creationSource: guardCreationSource,
         mode: guardSettings.sessionSpendGuard.mode,
       });
       if (launchRefusal !== null) {
@@ -579,7 +586,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      if (refusesAutomatedTurn(guardSettings.sessionSpendGuard.mode, message.creationSource)) {
+      if (refusesAutomatedTurn(guardSettings.sessionSpendGuard.mode, guardCreationSource)) {
         const { checkpoints } = yield* projectionStore.getThreadRecords(input.threadId, [
           "checkpoints",
         ]);

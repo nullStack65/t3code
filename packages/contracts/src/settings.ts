@@ -732,7 +732,7 @@ export type SessionSpendGuardMode = typeof SessionSpendGuardMode.Type;
 const SpendGuardUsd = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0));
 
 export const SessionSpendGuardSettings = Schema.Struct({
-  mode: SessionSpendGuardMode.pipe(Schema.withDecodingDefault(Effect.succeed("enforce" as const))),
+  mode: SessionSpendGuardMode.pipe(Schema.withDecodingDefault(Effect.succeed("flag" as const))),
   idleFlagUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(25))),
   idleStopUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(50))),
   sessionCeilingUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(200))),

@@ -295,7 +295,8 @@ it.each([
 
 function startWithSpendGuard(input: {
   readonly title: string;
-  readonly creationSource: "web" | "mcp";
+  readonly creationSource: "web" | "mcp" | "server";
+  readonly restartContinuationOf?: "web" | "mcp";
   readonly pullRequestLinkedAt?: string;
   readonly providerTurns: ReadonlyArray<{
     readonly startedAt: string;
@@ -308,6 +309,8 @@ function startWithSpendGuard(input: {
   const rootNodeId = NodeId.make("node_provider_turn_start_spend_guard");
   const providerThreadId = ProviderThreadId.make("provider_thread_provider_turn_start_spend_guard");
   const messageId = MessageId.make("message_provider_turn_start_spend_guard");
+  const sourceRunId = RunId.make("run_provider_turn_start_spend_guard_source");
+  const sourceMessageId = MessageId.make("message_provider_turn_start_spend_guard_source");
   const projection = {
     thread: {
       id: threadId,
@@ -323,8 +326,14 @@ function startWithSpendGuard(input: {
     },
     runs: [
       { id: RunId.make("run_provider_turn_start_spend_guard_first"), ordinal: 1 },
+      ...(input.restartContinuationOf === undefined
+        ? []
+        : [{ id: sourceRunId, userMessageId: sourceMessageId, ordinal: 1 }]),
       {
         id: runId,
+        ...(input.restartContinuationOf === undefined
+          ? {}
+          : { restartContinuationOfRunId: sourceRunId }),
         status: "starting",
         rootNodeId,
         activeAttemptId: attemptId,
@@ -349,6 +358,17 @@ function startWithSpendGuard(input: {
         attachments: [],
         creationSource: input.creationSource,
       },
+      ...(input.restartContinuationOf === undefined
+        ? []
+        : [
+            {
+              id: sourceMessageId,
+              role: "user",
+              text: "continue anyway",
+              attachments: [],
+              creationSource: input.restartContinuationOf,
+            },
+          ]),
     ],
     checkpointScopes: [{ id: CheckpointScopeId.make("scope_spend_guard") }],
     checkpoints: [],
@@ -455,6 +475,33 @@ effectIt.effect("lets a founder's own turn through at the session ceiling", () =
     });
     yield* Effect.exit(harness.start);
     expect(harness.refusal()?.title).not.toBe("Turn refused by the session spend guard");
+  }),
+);
+
+effectIt.effect("lets a restart continuation of a founder's own turn through at the ceiling", () =>
+  Effect.gen(function* () {
+    const harness = startWithSpendGuard({
+      title: "Manager work",
+      creationSource: "server",
+      restartContinuationOf: "web",
+      providerTurns: [{ startedAt: "2099-01-01T00:00:01.000Z", inputTokens: 1 }],
+    });
+    yield* Effect.exit(harness.start);
+    expect(harness.refusal()?.title).not.toBe("Turn refused by the session spend guard");
+  }),
+);
+
+effectIt.effect("still refuses a restart continuation of an automated turn at the ceiling", () =>
+  Effect.gen(function* () {
+    const harness = startWithSpendGuard({
+      title: "Manager work",
+      creationSource: "server",
+      restartContinuationOf: "mcp",
+      providerTurns: [{ startedAt: "2099-01-01T00:00:01.000Z", inputTokens: 1 }],
+    });
+    yield* harness.start;
+    expect(harness.refusal()?.failure.message).toContain("session ceiling");
+    expect(harness.startRootRun).not.toHaveBeenCalled();
   }),
 );
 
