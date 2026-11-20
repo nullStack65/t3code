@@ -8944,17 +8944,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         { now, autoResume: true, snooze: false },
         { now, autoResume: false, snooze: true },
       ]) {
+        // The query still returns a snooze-only candidate. A usage limit no longer snoozes,
+        // so the worker is what drops it.
         const armed = (yield* store.getLimitRecoveryCandidates(options))
           .filter((row) => children.includes(row.id))
-          .filter(
-            (row) =>
-              limitRecoveryCommand(
-                row,
-                options.autoResume,
-                DateTime.toEpochMillis(now),
-                options.snooze,
-              )?.type === "thread.metadata.update",
-          )
           .map((row) => row.id);
         assert.deepEqual(
           armed,
