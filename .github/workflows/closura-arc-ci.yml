@@ -209,6 +209,28 @@ jobs:
             src/features/home/pendingTaskRoute.test.tsx \
             src/features/threads/NewTaskDraftRouteScreen.test.tsx
 
+      - name: Provide Chromium libraries for the voice latency browser test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -e /usr/lib/x86_64-linux-gnu/libnspr4.so; then
+            printf 'Chromium libraries present\n'
+            exit 0
+          fi
+          dir="$RUNNER_TEMP/chromium-libs"
+          mkdir -p "$dir/lists/partial" "$dir/cache/archives/partial" "$dir/root"
+          apt_opts=(-o Debug::NoLocking=1 -o Dir::State::Lists="$dir/lists" -o Dir::Cache="$dir/cache")
+          apt-get "${apt_opts[@]}" -qq update
+          apt-get "${apt_opts[@]}" -qq install --download-only --no-install-recommends -y \
+            libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 \
+            libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 \
+            libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+            libxkbcommon0 libxrandr2
+          for deb in "$dir"/cache/archives/*.deb; do dpkg-deb -x "$deb" "$dir/root"; done
+          lib_dir="$dir/root/usr/lib/x86_64-linux-gnu"
+          test -f "$lib_dir/libnspr4.so"
+          printf 'LD_LIBRARY_PATH=%s\n' "$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
       - name: Test voice press-to-recording and release-to-text stay under 400 ms
         shell: bash
         working-directory: apps/web
