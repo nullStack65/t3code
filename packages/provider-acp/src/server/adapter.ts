@@ -487,7 +487,7 @@ export interface AcpAdapterV2Flavor {
   ) => ReadonlyArray<{ readonly id: string; readonly value: string }>;
   /**
    * The runtime mode a native session mode grants, for flavors whose modes are permission levels.
-   * Under a policy ceiling, a mode the user picks that this does not place under it is not applied.
+   * A picked mode this does not place within the thread's runtime mode is not applied.
    */
   readonly runtimeModeForSessionMode?: (modeId: string) => RuntimeMode | undefined;
   readonly clientFileSystem?: {
@@ -8038,9 +8038,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             });
           }
           const configOptions = yield* runtime.getConfigOptions;
-          // Under a policy ceiling, a mode the user picks applies only when the flavor can place
-          // it under the ceiling; an unknown mode could be the agent's own skip-approval mode.
-          const ceiling = runtimePolicy.maxRuntimeMode;
+          // A picked mode applies only when the flavor places it within the bound; an unknown mode
+          // could be the agent's own skip-approval mode. Modes known to be permission levels are
+          // also bounded by the thread's runtime mode, so model options cannot widen it.
+          const ceiling =
+            flavor.runtimeModeForSessionMode === undefined ||
+            (runtimePolicy.maxRuntimeMode !== undefined &&
+              isRuntimeModeAbove(runtimePolicy.runtimeMode, runtimePolicy.maxRuntimeMode))
+              ? runtimePolicy.maxRuntimeMode
+              : runtimePolicy.runtimeMode;
           const isModeChoice = (id: string) =>
             id === ACP_SESSION_MODE_OPTION_ID ||
             configOptions.some(
@@ -8191,6 +8197,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const nativeBuild = nativeBuildConfigurationBySessionId.get(startResult.sessionId);
             if (nativeBuild !== undefined) {
               if (
+                policyMode === undefined &&
                 nativeBuild.modeId !== undefined &&
                 effectiveModeState?.currentModeId !== nativeBuild.modeId &&
                 effectiveModeState?.availableModes.some(
@@ -8203,7 +8210,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 const option = effectiveConfigOptions.find(
                   (candidate) => candidate.type === "select" && candidate.id === saved.id,
                 );
-                if (option === undefined || option.type !== "select") continue;
+                if (
+                  option === undefined ||
+                  option.type !== "select" ||
+                  (policyMode !== undefined && option.category === "mode")
+                )
+                  continue;
                 const choices = option.options.flatMap((entry) =>
                   "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
                 );
