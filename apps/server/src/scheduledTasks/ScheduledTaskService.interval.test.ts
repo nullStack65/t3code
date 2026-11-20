@@ -17,10 +17,12 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 afterEach(() => vi.unstubAllEnvs());
 
 const dependencies = Layer.mergeAll(
+  ProviderRegistryMock.layer(),
   NodeCrypto.layer,
   Scheduler.layer,
   ManagedPolicy.layerTest(),

@@ -665,6 +665,7 @@ const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 const INTENT_RECEIPT_TYPE = "intent.bind:";
 
 const make = Effect.gen(function* () {
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -941,23 +942,17 @@ const make = Effect.gen(function* () {
       Effect.flatMap((receipt) =>
         Option.isSome(receipt)
           ? Effect.void
-          : Effect.serviceOption(ProviderRegistry.ProviderRegistry).pipe(
-              Effect.flatMap((registry) =>
-                Option.isNone(registry)
+          : providerRegistry.getProviders.pipe(
+              Effect.flatMap((providers) => {
+                const detail = refuseUnservedModel(providers, selection);
+                return detail === undefined
                   ? Effect.void
-                  : registry.value.getProviders.pipe(
-                      Effect.flatMap((providers) => {
-                        const detail = refuseUnservedModel(providers, selection);
-                        return detail === undefined
-                          ? Effect.void
-                          : new Orchestrator.OrchestratorCommandRejectedError({
-                              commandId: command.commandId,
-                              commandType: command.type,
-                              cause: detail,
-                            });
-                      }),
-                    ),
-              ),
+                  : new Orchestrator.OrchestratorCommandRejectedError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause: detail,
+                    });
+              }),
             ),
       ),
     );
@@ -1970,6 +1965,7 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProviderRegistry.ProviderRegistry
 > = Layer.effect(ThreadManagementService, make).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(layerThreadWorktreeRestoreNoop),
@@ -1985,4 +1981,5 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProviderRegistry.ProviderRegistry
 > = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));

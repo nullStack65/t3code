@@ -46,6 +46,7 @@ const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
 }).pipe(
   Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
   Layer.provideMerge(ServerSettings.layerTest()),
+  Layer.provideMerge(ProviderRegistryMock.layer()),
 );
 
 const layerFailingDispatchHandler =

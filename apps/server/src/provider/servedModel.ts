@@ -7,7 +7,7 @@ import type {
 
 const LISTED_MODEL_LIMIT = 8;
 
-type ListedModel = Pick<ServerProviderModel, "slug" | "aliases" | "isLegacy">;
+type ListedModel = Pick<ServerProviderModel, "slug" | "aliases" | "isLegacy" | "isCustom">;
 
 export function findServedModel<Model extends Pick<ServerProviderModel, "slug" | "aliases">>(
   models: ReadonlyArray<Model>,
@@ -45,7 +45,12 @@ export function unservedModelMessage(
   model: string,
   models: ReadonlyArray<ListedModel>,
 ): string | undefined {
-  if (models.length === 0 || findServedModel(models, model) !== undefined) return undefined;
+  if (
+    models.length === 0 ||
+    models.every((candidate) => candidate.isCustom) ||
+    findServedModel(models, model) !== undefined
+  )
+    return undefined;
   return `Model ${model} is not advertised by provider ${instanceId}. ${servedModelsHint(models, model)}`;
 }
 

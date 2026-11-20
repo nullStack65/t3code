@@ -78,6 +78,7 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
@@ -2955,6 +2956,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           },
         });
         const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provideMerge(layerOrchestrator),
           Layer.provide(
             LegacyV1ThreadImporter.layer.pipe(
@@ -3137,6 +3139,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           providerInstances: { [codexInstanceId]: { driver: "codex", enabled: true } },
         });
         const layerThreads = ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provideMerge(layerOrchestrator),
           Layer.provide(
             LegacyV1ThreadImporter.layer.pipe(

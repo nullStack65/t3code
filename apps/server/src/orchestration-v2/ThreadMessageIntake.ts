@@ -13,7 +13,6 @@ import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { modelSelectionFromCommand, refuseUnservedModel } from "../provider/servedModel.ts";
-import * as Option from "effect/Option";
 import { OrchestratorCommandRejectedError } from "./Orchestrator.ts";
 
 // These failures precede commitCommand; generic dispatch errors can follow commits and remain ambiguous.
@@ -100,16 +99,16 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     selection !== undefined &&
     !(yield* threads.hasReceipt(command.commandId).pipe(Effect.orElseSucceed(() => false)))
   ) {
-    const registry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
-    if (Option.isSome(registry)) {
-      const detail = refuseUnservedModel(yield* registry.value.getProviders, selection);
-      if (detail !== undefined) {
-        return yield* new OrchestratorCommandRejectedError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: detail,
-        });
-      }
+    const detail = refuseUnservedModel(
+      yield* (yield* ProviderRegistry.ProviderRegistry).getProviders,
+      selection,
+    );
+    if (detail !== undefined) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: detail,
+      });
     }
   }
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {

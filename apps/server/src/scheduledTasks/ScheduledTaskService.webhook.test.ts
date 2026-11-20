@@ -32,6 +32,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import { renderWebhookPrompt } from "./webhookTemplate.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
 
@@ -182,6 +183,7 @@ const withService = <A, E>(
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
     const layerDependencies = Layer.mergeAll(
+      ProviderRegistryMock.layer(),
       NodePlatformCrypto.layerDigest,
       NodePlatformCrypto.layerMac,
       options.frameGate === undefined && options.onFrame === undefined

@@ -28,6 +28,7 @@ import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
 const adapter = {
@@ -182,6 +183,7 @@ it.layer(layerOrchestrator)("writesThreads against a mode raise", (it) => {
     }).pipe(
       Effect.provide(
         ThreadManagement.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provide(ServerSettings.layerTest()),
           Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
         ),

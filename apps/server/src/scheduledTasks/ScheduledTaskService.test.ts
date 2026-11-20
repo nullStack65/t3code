@@ -204,6 +204,7 @@ it.effect(
             Layer.provideMerge(
               ScheduledTaskService.layer,
               Layer.mergeAll(
+                ProviderRegistryMock.layer(),
                 ManagedPolicy.layerTest(),
                 Layer.mock(ThreadLaunchService.ThreadLaunchService)({
                   launch: () =>
@@ -298,6 +299,7 @@ it.effect(
             Layer.provideMerge(
               ScheduledTaskService.layer,
               Layer.mergeAll(
+                ProviderRegistryMock.layer(),
                 ManagedPolicy.layerTest(),
                 Layer.mock(ThreadLaunchService.ThreadLaunchService)({
                   launch: () =>
@@ -363,6 +365,7 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -437,6 +440,7 @@ it.effect.each([
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -523,6 +527,7 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -593,6 +598,7 @@ it.effect("a fresh-session task launches one thread, then starts each later run 
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             launch: () =>
@@ -687,6 +693,7 @@ it.effect("a refused dispatch records its refusal, and opaque causes stay generi
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -734,6 +741,7 @@ it.effect("a first run whose thread was deleted before it bound removes the task
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             launch: () =>
@@ -787,6 +795,7 @@ it.effect.each(["recreated under the same id", "moved to another project"] as co
       const layer = ScheduledTaskService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            ProviderRegistryMock.layer(),
             ManagedPolicy.layerTest(),
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({
               launch: () =>
@@ -848,6 +857,7 @@ it.effect("refuses saving an enabled task above the policy ceiling", () =>
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest({
             schemaVersion: 1,
             organization: "Example Corp",
@@ -931,6 +941,7 @@ it.effect("checks a task's destination thread only when the destination changes"
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -1009,6 +1020,7 @@ it.effect("a run interrupted right after it reserves the task does not block the
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          ProviderRegistryMock.layer(),
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
             launch: () =>
@@ -1098,6 +1110,7 @@ it.effect(
       const layer = ScheduledTaskService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            ProviderRegistryMock.layer([provider]),
             ManagedPolicy.layerTest(),
             Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
             Layer.mock(ThreadManagementService.ThreadManagementService)({}),
@@ -1146,6 +1159,6 @@ it.effect(
         });
         assert.equal(task.modelSelection.model, "claude-opus");
         assert.equal(task.modelSelection.instanceId, "claudeAgent");
-      }).pipe(Effect.provide(Layer.mergeAll(layer, ProviderRegistryMock.layer([provider]))));
+      }).pipe(Effect.provide(layer));
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

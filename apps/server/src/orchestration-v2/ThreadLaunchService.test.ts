@@ -162,6 +162,7 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.provide(layerOrchestrator),
     Layer.provide(layerServerSettings),
     Layer.provide(layerReceipts),
+    Layer.provide(ProviderRegistryMock.layer(options.providers ?? [])),
   );
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const createWorktree = vi.fn(
@@ -424,6 +425,40 @@ it.effect(
     }).pipe(Effect.provide(harness.layer));
   },
 );
+
+it.effect("accepts a built-in Codex model when the catalog lists only custom models", () => {
+  const harness = makeHarness({
+    providers: [
+      {
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        enabled: true,
+        installed: true,
+        status: "ready",
+        version: "test",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        models: [
+          {
+            slug: "my-custom",
+            name: "My custom",
+            isCustom: true,
+            capabilities: null,
+          },
+        ],
+        slashCommands: [],
+        skills: [],
+      } as ServerProvider,
+    ],
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const accepted = yield* launches.launch(
+      launchInput({ command: "accept-builtin", thread: "thread:accept-builtin" }),
+    );
+    assert.equal(accepted.projection.thread.modelSelection.model, "gpt-5.1-codex");
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>

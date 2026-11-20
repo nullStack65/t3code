@@ -23,12 +23,14 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
 
 it.effect("rejects a stale form save after deletion while preserving explicit-id creates", () =>
   Effect.gen(function* () {
     const layerDependencies = Layer.mergeAll(
+      ProviderRegistryMock.layer(),
       NodeCrypto.layer,
       Scheduler.layer,
       ManagedPolicy.layerTest(),
@@ -77,6 +79,7 @@ it.effect("preserves a due run when a save only pads the scheduled hour", () =>
     yield* TestClock.setTime(DateTime.toEpochMillis(dueAt) - 1_000);
 
     const layerDependencies = Layer.mergeAll(
+      ProviderRegistryMock.layer(),
       NodeCrypto.layer,
       Scheduler.layer,
       ManagedPolicy.layerTest(),
@@ -132,6 +135,7 @@ it.effect("keeps the task list order when a toggle or edit rewrites updated_at",
   Effect.gen(function* () {
     yield* TestClock.setTime(Date.parse("2026-07-01T09:00:00.000Z"));
     const layerDependencies = Layer.mergeAll(
+      ProviderRegistryMock.layer(),
       NodeCrypto.layer,
       Scheduler.layer,
       ManagedPolicy.layerTest(),
@@ -196,6 +200,7 @@ it.effect("keeps one queued occurrence of a recurring task while its bound threa
     }>({ runs: [activeRun], messages: [] });
     const runDueWork = yield* Ref.make<Effect.Effect<void>>(Effect.void);
     const layerDependencies = Layer.mergeAll(
+      ProviderRegistryMock.layer(),
       NodeCrypto.layer,
       ManagedPolicy.layerTest(),
       // Capture the poll pass so the test drives each due interval directly.
@@ -338,6 +343,7 @@ it.effect(
       yield* TestClock.setTime(Date.parse("2026-07-01T09:00:00.000Z"));
       const launched = yield* Deferred.make<string>();
       const layerDependencies = Layer.mergeAll(
+        ProviderRegistryMock.layer(),
         NodeCrypto.layer,
         Scheduler.layer,
         ManagedPolicy.layerTest(),
@@ -403,6 +409,7 @@ it.effect("a fixed-time slot missed while the server was off shows on the task",
     yield* TestClock.setTime(DateTime.toEpochMillis(at(8)));
     const launches = yield* Ref.make(0);
     const layerDependencies = Layer.mergeAll(
+      ProviderRegistryMock.layer(),
       NodeCrypto.layer,
       Scheduler.layer,
       ManagedPolicy.layerTest(),
@@ -480,6 +487,7 @@ it.effect(
       const releaseSlow = yield* Deferred.make<void>();
       const lastProcessed = yield* Deferred.make<void>();
       const layerDependencies = Layer.mergeAll(
+        ProviderRegistryMock.layer(),
         NodeCrypto.layer,
         Scheduler.layer,
         ManagedPolicy.layerTest(),

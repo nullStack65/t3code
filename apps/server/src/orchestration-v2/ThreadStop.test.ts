@@ -45,6 +45,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.1-codex" };
@@ -57,6 +58,7 @@ const adapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
 const layerTest = ThreadManagementService.layer.pipe(
+  Layer.provide(ProviderRegistryMock.layer()),
   Layer.provideMerge(
     Layer.mergeAll(
       layerDatabase,
@@ -2116,6 +2118,7 @@ it.effect.each([
         }),
       );
       const layerLive = ThreadManagementService.layer.pipe(
+        Layer.provide(ProviderRegistryMock.layer()),
         Layer.provide(layerSessionsStartingFollowUpFirst),
         Layer.provideMerge(
           Layer.mergeAll(

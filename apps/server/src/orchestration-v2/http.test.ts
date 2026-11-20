@@ -43,6 +43,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 
 class TranscriptTestApi extends HttpApi.make("environment").add(
   EnvironmentHttpApi.groups.orchestration,
@@ -129,6 +130,7 @@ const serveOrchestrationHttp = (allowed: () => boolean) =>
       Layer.mergeAll(
         runtime,
         ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
           Layer.provide(
             Layer.mergeAll(runtime, CommandReceiptStore.layer, ServerSettings.layerTest({})),
           ),
