@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -24,6 +25,7 @@ describe("shownFileTargets", () => {
           structuredPayload: {
             type: "dynamic_tool",
             status: "completed",
+            completedAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
             toolName: "show_file",
             output: {
               showFile: {
@@ -130,6 +132,38 @@ describe("shownFilesToOpen", () => {
         latestCreatedAt: "2026-01-02T00:00:00.000Z",
       }).open,
     ).toEqual([]);
+  });
+
+  it("opens a file that completes in the same millisecond it started", () => {
+    const sameTick = "2026-01-02T00:00:00.000Z";
+    const running: ShownFileTarget = {
+      id: "reasoning-1",
+      path: "/tmp/unused.md",
+      createdAt: sameTick,
+    };
+    const previous = shownFilesToOpen({
+      threadKey: "env/thread",
+      previous: null,
+      nextKey: shownFileKey([running]),
+      files: [],
+      entryCount: 1,
+      latestCreatedAt: sameTick,
+    }).baseline;
+    const completed: ShownFileTarget = {
+      id: "show-1",
+      path: "/tmp/answers.md",
+      createdAt: "2026-01-02T00:00:00.001Z",
+    };
+    expect(
+      shownFilesToOpen({
+        threadKey: "env/thread",
+        previous,
+        nextKey: shownFileKey([completed]),
+        files: [completed],
+        entryCount: 1,
+        latestCreatedAt: sameTick,
+      }).open,
+    ).toEqual([completed]);
   });
 
   it("opens only a file that completed after the newest item already on screen", () => {

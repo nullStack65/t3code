@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { showFileFromToolItem } from "@t3tools/shared/toolOutput";
 
 import type { TimelineEntry } from "../../session-logic";
@@ -22,7 +23,10 @@ export function shownFileTargets(
     targets.push({
       id: entry.id,
       path: shown.path,
-      createdAt: entry.createdAt,
+      createdAt:
+        item.completedAt === null || item.completedAt === undefined
+          ? entry.createdAt
+          : DateTime.formatIso(item.completedAt),
       ...(shown.line === undefined ? {} : { line: shown.line }),
     });
   }
