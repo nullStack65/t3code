@@ -4702,6 +4702,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         { toolName: "view_image", viewedImagePath: "/repo/screenshot.png" },
         { toolName: "mcp__docs__chart", output: { [MCP_APP_OUTPUT_KEY]: { uri: "ui://chart" } } },
         { toolName: "mcp__t3-code__send_to_user" },
+        { toolName: "mcp__t3-code__show_file" },
         // OpenCode Code Mode reports a nested send_to_user call as one `execute` item.
         { toolName: "execute", output: JSON.stringify({ sentMessage: "Draft" }) },
       ]) {

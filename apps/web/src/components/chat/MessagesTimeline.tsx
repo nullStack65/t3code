@@ -20,6 +20,13 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { useRightPanelStore } from "../../rightPanelStore";
+import {
+  latestShownFileCreatedAt,
+  shownFileKey,
+  shownFileTargets,
+  shownFilesToOpen,
+} from "./shownFileOpen";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
 import { observeResize } from "~/lib/observeResize";
@@ -40,6 +47,7 @@ import {
   useLayoutEffect,
   useEffect,
   useEffectEvent,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -492,6 +500,40 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
   const citationThreadRef = parseScopedThreadKey(routeThreadKey);
+  const shownFilePlan = useMemo(() => {
+    const files = shownFileTargets(timelineEntries);
+    return {
+      files,
+      signature: shownFileKey(files),
+      latestCreatedAt: latestShownFileCreatedAt(files),
+      entryCount: timelineEntries.length,
+    };
+  }, [timelineEntries]);
+  const shownFilesRef = useRef(shownFilePlan.files);
+  shownFilesRef.current = shownFilePlan.files;
+  const shownFileBaseline = useRef<string | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a show_file completion opens the existing file viewer with a panel state update; the viewer reads the file after paint, and files already on screen stay put
+  useEffect(() => {
+    const plan = shownFilesToOpen({
+      threadKey: routeThreadKey,
+      previous: shownFileBaseline.current,
+      nextKey: shownFilePlan.signature,
+      files: shownFilesRef.current,
+      entryCount: shownFilePlan.entryCount,
+      latestCreatedAt: shownFilePlan.latestCreatedAt,
+    });
+    shownFileBaseline.current = plan.baseline;
+    const threadRef = parseScopedThreadKey(routeThreadKey);
+    if (threadRef === null) return;
+    for (const file of plan.open) {
+      useRightPanelStore.getState().openFile(threadRef, file.path, file.line);
+    }
+  }, [
+    routeThreadKey,
+    shownFilePlan.entryCount,
+    shownFilePlan.latestCreatedAt,
+    shownFilePlan.signature,
+  ]);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const normalizedFindQuery = findQuery.trim();
