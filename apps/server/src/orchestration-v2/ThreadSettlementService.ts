@@ -159,6 +159,14 @@ function pullRequestSettles(
 }
 
 const FINISHED_AGENT_RUN_STATUSES = new Set(["completed", "interrupted", "cancelled"]);
+const SUBAGENT_SETTLE_STATUSES = new Set(["idle", "completed", "interrupted", "cancelled"]);
+
+function agentBackgroundWorkPending(
+  thread: Pick<ProjectionStore.ProjectionSettlementCandidate, "pendingBackgroundTasks">,
+): boolean {
+  const tasks = thread.pendingBackgroundTasks ?? [];
+  return tasks.some((task) => task.kind === "monitor" || backgroundWorkHoldsCompletion([task]));
+}
 
 export function settlesFinishedAgentWork(
   thread: Pick<
@@ -168,8 +176,7 @@ export function settlesFinishedAgentWork(
 ): boolean {
   if (thread.standing != null || thread.inbox?.audience !== "agent-only") return false;
   if (!FINISHED_AGENT_RUN_STATUSES.has(thread.status)) return false;
-  const tasks = thread.pendingBackgroundTasks ?? [];
-  return !tasks.some((task) => task.kind === "monitor" || backgroundWorkHoldsCompletion([task]));
+  return !agentBackgroundWorkPending(thread);
 }
 
 const HUMAN_INBOX_AUDIENCES = new Set(["kameron", "jeff", "shared"]);
@@ -396,7 +403,9 @@ export const make = Effect.gen(function* () {
     const settleThread = Effect.fnUntraced(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
         if (
-          (thread.lineage.relationshipToParent === "subagent" && thread.status !== "failed") ||
+          (thread.lineage.relationshipToParent === "subagent" &&
+            SUBAGENT_SETTLE_STATUSES.has(thread.status) &&
+            !agentBackgroundWorkPending(thread)) ||
           settlesFinishedAgentWork(thread)
         ) {
           const uuid = yield* random.uuidV4();

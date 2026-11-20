@@ -584,3 +584,145 @@ it.effect("sql: a subagent is a candidate once its parent has its result", () =>
     assert.deepEqual(new Set(yield* ids()), new Set([parent, child]));
   }).pipe(Effect.provide(layerSql)),
 );
+
+it.effect("sql: a running provider subagent result does not make the child a candidate", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const parent = yield* createThread("running-parent");
+    const child = yield* createThread("running-child", {
+      lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+    });
+    const ids = () =>
+      store.getSettlementCandidates().pipe(Effect.map((rows) => rows.map((row) => row.id)));
+    const taskId = NodeId.make("node:running-child");
+    const record = (status: "running" | "completed") =>
+      store.apply({
+        id: EventId.make(`event:running-child:${status}`),
+        type: "subagent.updated",
+        threadId: parent,
+        nodeId: taskId,
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: taskId,
+          threadId: parent,
+          runId: null,
+          parentNodeId: taskId,
+          origin: "provider_native",
+          createdBy: "agent",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          providerThreadId: null,
+          childThreadId: child,
+          nativeTaskRef: null,
+          prompt: "Do the work",
+          title: "child",
+          model: null,
+          status,
+          result: "still going",
+          startedAt: old,
+          completedAt: status === "completed" ? now : null,
+          updatedAt: now,
+        },
+      });
+    yield* record("running");
+    assert.deepEqual(yield* ids(), [parent]);
+    yield* record("completed");
+    assert.deepEqual(new Set(yield* ids()), new Set([parent, child]));
+  }).pipe(Effect.provide(layerSql)),
+);
+
+it.effect("sql: an open follow-up keeps a delivered subagent out of the candidates", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const parent = yield* createThread("follow-up-parent");
+    const child = yield* createThread("follow-up-child", {
+      lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+    });
+    const ids = () =>
+      store.getSettlementCandidates().pipe(Effect.map((rows) => rows.map((row) => row.id)));
+    const task = (
+      name: string,
+      status: "completed" | "pending",
+      delivery: "delivered" | "pending",
+      result: string | null,
+    ) =>
+      store.apply({
+        id: EventId.make(`event:follow-up:${name}`),
+        type: "subagent.updated",
+        threadId: parent,
+        nodeId: NodeId.make(`node:${name}`),
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: NodeId.make(`node:${name}`),
+          threadId: parent,
+          runId: null,
+          parentNodeId: NodeId.make(`node:${name}`),
+          origin: "app_owned",
+          createdBy: "agent",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          providerThreadId: null,
+          childThreadId: child,
+          nativeTaskRef: null,
+          prompt: "Do the work",
+          title: name,
+          model: null,
+          completionDelivery: { state: delivery, observedByRunId: null },
+          status,
+          result,
+          startedAt: old,
+          completedAt: status === "completed" ? old : null,
+          updatedAt: now,
+        },
+      });
+    yield* task("follow-up-done", "completed", "delivered", "done");
+    yield* task("follow-up-open", "pending", "pending", null);
+    assert.deepEqual(yield* ids(), [parent]);
+    yield* task("follow-up-open", "completed", "delivered", "also done");
+    assert.deepEqual(new Set(yield* ids()), new Set([parent, child]));
+  }).pipe(Effect.provide(layerSql)),
+);
+
+it.effect("sql: a runless subagent still reports a provider monitor", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const parent = yield* createThread("monitor-parent", { settledOverride: "settled" });
+    const child = yield* createThread("monitor-child", {
+      lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+    });
+    yield* store.apply({
+      id: EventId.make("event:monitor-child:provider"),
+      type: "provider-thread.updated",
+      threadId: child,
+      occurredAt: now,
+      payload: {
+        id: ProviderThreadId.make("provider-thread:monitor-child"),
+        appThreadId: child,
+        ownerNodeId: null,
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        providerSessionId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: old,
+        updatedAt: now,
+        pendingBackgroundTasks: [{ taskId: "tail", kind: "monitor", description: "logs" }],
+      },
+    });
+    const candidates = yield* store.getSettlementCandidates();
+    const row = candidates.find((candidate) => candidate.id === child);
+    assert.equal(row === undefined, false);
+    assert.deepEqual(row?.pendingBackgroundTasks, [
+      { taskId: "tail", kind: "monitor", description: "logs" },
+    ]);
+  }).pipe(Effect.provide(layerSql)),
+);

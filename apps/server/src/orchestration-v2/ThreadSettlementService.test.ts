@@ -1171,6 +1171,48 @@ describe("ThreadSettlementServiceV2 worker", () => {
       }),
   );
 
+  it.effect("leaves a queued subagent and a monitored subagent unsettled", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const child = (
+        id: string,
+        status: SettlementShell["status"],
+        pendingBackgroundTasks: SettlementShell["pendingBackgroundTasks"] = [],
+      ) =>
+        makeThread(id, {
+          status,
+          lineage: {
+            rootThreadId: ThreadId.make("subagent-parent"),
+            parentThreadId: ThreadId.make("subagent-parent"),
+            relationshipToParent: "subagent",
+          },
+          pendingBackgroundTasks,
+          latestRunId: RunId.make(`run:${id}`),
+          latestRunCompletedAt: DateTime.makeUnsafe(NOW),
+        });
+      const ready = child("subagent-ready", "completed");
+      const queued = child("subagent-queued", "queued");
+      const monitored = child("subagent-monitored", "completed", [
+        { taskId: "tail", kind: "monitor", description: "logs" },
+      ]);
+      const fixture = yield* makeHarness({
+        snapshot: makeSnapshot([ready, queued, monitored]),
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          sidebarAutoSettleAfterDays: null,
+          sidebarAutoSettleOnMerge: false,
+        },
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+        yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+        expect((yield* Ref.get(fixture.commands)).map((command) => command.threadId)).toEqual([
+          ready.id,
+        ]);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
   it.effect(
     "settles a finished subagent when its parent has the result and keeps a failed one",
     () =>
