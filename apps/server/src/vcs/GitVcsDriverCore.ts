@@ -5157,6 +5157,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         ? `t3-create-${yield* random.uuidV4()}`
         : undefined;
 
+    let reusedTip: string | null = null;
     if (newRefName) {
       const branch = { cwd: input.cwd, branch: newRefName, startPoint: input.refName };
       // Kept apart from the checkout so the shared-config lock only covers the tracking write.
@@ -5166,7 +5167,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         "git branch failed",
       ).pipe(
         Effect.catchIf(
-          (error) => error.reason === "branch_already_exists",
+          (error) => options?.reuseEmptyBranch === true && error.reason === "branch_already_exists",
           (error) =>
             Effect.gen(function* () {
               const checkedOut = (yield* executeWorktreeList(
@@ -5190,12 +5191,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                   { allowNonZeroExit: true },
                 )).exitCode !== 0;
               if (keep) return yield* error;
+              const tip = (yield* executeGit(
+                "GitVcsDriver.createWorktree.reusedBranchTip",
+                input.cwd,
+                ["rev-parse", "--verify", `refs/heads/${newRefName}`],
+              )).stdout.trim();
               yield* createBranchAt(
                 "GitVcsDriver.createWorktree.reuseBranch",
                 branch,
                 "git branch failed",
                 true,
               );
+              reusedTip = tip;
             }),
         ),
       );
@@ -5295,7 +5302,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               : Effect.void
             ).pipe(
               Effect.andThen(
-                deleteLocalBranch({ cwd: input.cwd, refName: newRefName, force: true }),
+                reusedTip === null
+                  ? deleteLocalBranch({ cwd: input.cwd, refName: newRefName, force: true })
+                  : executeGit("GitVcsDriver.createWorktree.restoreReusedBranch", input.cwd, [
+                      "branch",
+                      "--force",
+                      "--no-track",
+                      "--",
+                      newRefName,
+                      reusedTip,
+                    ]),
               ),
               Effect.catch((cause) =>
                 Effect.logWarning("could not clean up a failed worktree or its branch", { cause }),

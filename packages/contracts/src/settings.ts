@@ -1433,7 +1433,9 @@ export type MachinePlacementRole = typeof MachinePlacementRole.Type;
 export const AutomaticPlacementHost = Schema.Struct({
   environmentId: EnvironmentId,
   maxLanes: NonNegativeInt,
-  minAvailableMemoryGiB: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  minAvailableMemoryGiB: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(4)),
+  ),
 });
 export type AutomaticPlacementHost = typeof AutomaticPlacementHost.Type;
 

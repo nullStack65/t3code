@@ -6533,7 +6533,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
     );
 
     it.effect(
-      "reuses an existing branch with no commits of its own, and refuses one with work",
+      "reuses an existing branch with no commits of its own only when asked, and refuses one with work",
       () =>
         Effect.gen(function* () {
           const cwd = yield* makeTmpDir();
@@ -6546,12 +6546,35 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           const tip = (yield* git(cwd, ["rev-parse", "HEAD"])).trim();
           const path = yield* Path.Path;
           const driver = yield* GitVcsDriver.GitVcsDriver;
-          const reused = yield* driver.createWorktree({
-            cwd,
-            path: path.join(yield* makeTmpDir("git-worktrees-"), "stale"),
-            refName: initialBranch,
-            newRefName: "stale",
-          });
+          const reuse = { reuseEmptyBranch: true };
+          const unasked = yield* driver
+            .createWorktree({
+              cwd,
+              path: path.join(yield* makeTmpDir("git-worktrees-"), "unasked"),
+              refName: initialBranch,
+              newRefName: "stale",
+            })
+            .pipe(Effect.flip);
+          assert.equal(unasked.reason, "branch_already_exists");
+          const stale = (yield* git(cwd, ["rev-parse", "refs/heads/stale"])).trim();
+          const occupied = yield* makeTmpDir("git-worktrees-");
+          yield* writeTextFile(occupied, "taken.txt", "taken\n");
+          yield* driver
+            .createWorktree(
+              { cwd, path: occupied, refName: initialBranch, newRefName: "stale" },
+              reuse,
+            )
+            .pipe(Effect.flip);
+          assert.equal((yield* git(cwd, ["rev-parse", "refs/heads/stale"])).trim(), stale);
+          const reused = yield* driver.createWorktree(
+            {
+              cwd,
+              path: path.join(yield* makeTmpDir("git-worktrees-"), "stale"),
+              refName: initialBranch,
+              newRefName: "stale",
+            },
+            reuse,
+          );
           assert.equal((yield* git(reused.worktree.path, ["rev-parse", "HEAD"])).trim(), tip);
           assert.equal(
             (yield* git(reused.worktree.path, ["branch", "--show-current"])).trim(),
@@ -6559,12 +6582,15 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           );
 
           const again = yield* driver
-            .createWorktree({
-              cwd,
-              path: path.join(yield* makeTmpDir("git-worktrees-"), "stale-again"),
-              refName: initialBranch,
-              newRefName: "stale",
-            })
+            .createWorktree(
+              {
+                cwd,
+                path: path.join(yield* makeTmpDir("git-worktrees-"), "stale-again"),
+                refName: initialBranch,
+                newRefName: "stale",
+              },
+              reuse,
+            )
             .pipe(Effect.flip);
           assert.equal(again.reason, "branch_already_exists");
 
@@ -6576,12 +6602,15 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           const worked = (yield* git(cwd, ["rev-parse", "refs/heads/worked"])).trim();
           yield* git(cwd, ["worktree", "remove", "--", worktreePath]);
           const refused = yield* driver
-            .createWorktree({
-              cwd,
-              path: path.join(yield* makeTmpDir("git-worktrees-"), "worked-again"),
-              refName: initialBranch,
-              newRefName: "worked",
-            })
+            .createWorktree(
+              {
+                cwd,
+                path: path.join(yield* makeTmpDir("git-worktrees-"), "worked-again"),
+                refName: initialBranch,
+                newRefName: "worked",
+              },
+              reuse,
+            )
             .pipe(Effect.flip);
           assert.equal(refused.reason, "branch_already_exists");
           assert.equal((yield* git(cwd, ["rev-parse", "refs/heads/worked"])).trim(), worked);

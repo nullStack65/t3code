@@ -725,6 +725,7 @@ const make = Effect.gen(function* () {
               path: null,
             },
             {
+              reuseEmptyBranch: true,
               progress: {
                 onWorktreeClaimed: (path) =>
                   Effect.sync(() => {

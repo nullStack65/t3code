@@ -503,6 +503,22 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const recentPlacements = new Map<string, ReadonlyArray<number>>();
+  const recentAt = (environmentId: string, now: number) =>
+    (recentPlacements.get(environmentId) ?? []).filter((at) => now - at < 60_000);
+  const withRecentPlacements = <
+    C extends { readonly environmentId: string; readonly resources: HostResourcesSnapshot | null },
+  >(
+    candidate: C,
+    now: number,
+  ): C => {
+    const recent = recentAt(candidate.environmentId, now).length;
+    const lanes = candidate.resources?.runningAgents;
+    return recent === 0 || candidate.resources === null || lanes === undefined
+      ? candidate
+      : { ...candidate, resources: { ...candidate.resources, runningAgents: lanes + recent } };
+  };
+
   /** The shared choice: this environment and the askable links, from their own answers. */
   const choosePlacement = Effect.fn("RemoteDelegation.choosePlacement")(function* (
     ask: Ask,
@@ -522,30 +538,36 @@ const make = Effect.gen(function* () {
     const hereCandidate =
       !input.excluded.has(hereId) &&
       (input.restrictTo === undefined || input.restrictTo.includes(hereId));
-    const decision = chooseThreadPlacement(
-      { originEnvironmentId: hereId },
-      [
-        ...(hereCandidate
-          ? [
-              {
-                environmentId: hereId,
-                resources: input.here.resources,
-                receivedAt: now,
-                weight: 1,
-                operable: true,
-                projectAvailable: true,
-                modelAvailable: input.here.modelAvailable,
-                ...placementHostLimits(hosts, hereId),
-              },
-            ]
-          : []),
-        ...peers.map((peer) => ({
-          ...peer.candidate,
-          ...placementHostLimits(hosts, peer.candidate.environmentId),
-        })),
-      ],
-      now,
-    );
+    const candidates = [
+      ...(hereCandidate
+        ? [
+            {
+              environmentId: hereId,
+              resources: input.here.resources,
+              receivedAt: now,
+              weight: 1,
+              operable: true,
+              projectAvailable: true,
+              modelAvailable: input.here.modelAvailable,
+              ...placementHostLimits(hosts, hereId),
+            },
+          ]
+        : []),
+      ...peers.map((peer) => ({
+        ...peer.candidate,
+        ...placementHostLimits(hosts, peer.candidate.environmentId),
+      })),
+    ];
+    const decision = yield* Effect.sync(() => {
+      const chosen = chooseThreadPlacement(
+        { originEnvironmentId: hereId },
+        candidates.map((candidate) => withRecentPlacements(candidate, now)),
+        now,
+      );
+      if (chosen.accepted)
+        recentPlacements.set(chosen.environmentId, [...recentAt(chosen.environmentId, now), now]);
+      return chosen;
+    });
     yield* Effect.annotateCurrentSpan({
       "placement.reason": decision.reason,
       "placement.candidates": askable.length + (hereCandidate ? 1 : 0),
@@ -610,7 +632,7 @@ const make = Effect.gen(function* () {
       if (!decision.accepted) {
         return yield* new OrchestratorMcpFailure({
           code: "target_required",
-          message: `No environment can take this task now (${decision.reason}): every machine automatic placement may use is at its lane or memory limit, or lacks this repository's project or ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Retry later or send it to cloud overflow; name an environment only for work bound to that machine.`,
+          message: `No environment can take this task now (${decision.reason}): every machine automatic placement may use is at its lane or memory limit, or lacks this repository's project or ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Retry later; name an environment only for work bound to that machine.`,
         });
       }
       return yield* threads
