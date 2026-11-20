@@ -3,6 +3,7 @@ import {
   claudeLedgerDelta,
   claudeModelLedger,
   claudeResumedLedgerDelta,
+  mergeOmittedLedgerModels,
   normalizeClaudeTurnTokenUsage,
 } from "./ClaudeTurnTokenUsage.ts";
 import {
@@ -262,6 +263,25 @@ describe("billable native turn usage", () => {
     const droppedResult = { input_tokens: 100, output_tokens: 2 };
     expect(claudeResumedLedgerDelta(droppedModel, continuedSonnet, droppedResult)).toBeUndefined();
     expect(otherUsage(droppedModel, continuedSonnet, droppedResult)).toBeUndefined();
+    const haikuReturns = claudeModelLedger({
+      "claude-sonnet-4-6": { inputTokens: 100_150, outputTokens: 14 },
+      "claude-haiku-4-5": { inputTokens: 20_050, outputTokens: 7 },
+    });
+    const haikuResult = { input_tokens: 50, output_tokens: 2 };
+    const haikuGrowth = claudeLedgerDelta(
+      mergeOmittedLedgerModels(droppedModel, continuedSonnet),
+      haikuReturns,
+    );
+    expect(haikuGrowth).toEqual({ inputTokens: 100, outputTokens: 4 });
+    expect(
+      normalizeClaudeTurnTokenUsage(
+        { subtype: "success", usage: haikuResult },
+        false,
+        "completed",
+        [],
+        { ledger: haikuGrowth },
+      ).otherUsage,
+    ).toEqual({ inputTokens: 50, outputTokens: 2 });
     expect(otherUsage(ledger(1_000, 100), ledger(40, 5), result)).toEqual({
       inputTokens: 0,
       outputTokens: 0,

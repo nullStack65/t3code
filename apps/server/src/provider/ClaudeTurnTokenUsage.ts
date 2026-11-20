@@ -112,6 +112,23 @@ export function claudeLedgerDelta(
   return { inputTokens, outputTokens };
 }
 
+/**
+ * A resumed process's first result can omit a model the saved ledger still has.
+ * Keep that model's last total, so its return later is growth rather than a recount from zero.
+ */
+export function mergeOmittedLedgerModels(
+  previous: ClaudeModelLedger | undefined,
+  current: ClaudeModelLedger | undefined,
+): ClaudeModelLedger | undefined {
+  if (current === undefined) return previous;
+  if (previous === undefined) return current;
+  const merged = new Map(current);
+  for (const [model, before] of previous) {
+    if (!merged.has(model)) merged.set(model, before);
+  }
+  return merged;
+}
+
 export function claudeResumedLedgerDelta(
   previousProcess: ClaudeModelLedger | undefined,
   current: ClaudeModelLedger | undefined,

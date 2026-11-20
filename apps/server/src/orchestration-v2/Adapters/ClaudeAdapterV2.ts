@@ -31,6 +31,7 @@ import {
   claudeLedgerDelta,
   claudeModelLedger,
   claudeResumedLedgerDelta,
+  mergeOmittedLedgerModels,
   claudeReportedContextWindows,
   normalizeClaudeTurnTokenUsage,
   type ClaudeLedgerUsage,
@@ -12961,7 +12962,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       context.modelLedger !== undefined
                         ? undefined
                         : ledger;
-                    lastModelLedgers.set(context.nativeThreadId, ledger ?? null);
+                    lastModelLedgers.set(
+                      context.nativeThreadId,
+                      resumedFirstResult
+                        ? (mergeOmittedLedgerModels(
+                            lastModelLedgers.get(context.nativeThreadId) ?? undefined,
+                            ledger,
+                          ) ?? null)
+                        : (ledger ?? null),
+                    );
                     for (const [model, window] of claudeReportedContextWindows(
                       message.modelUsage,
                     )) {
