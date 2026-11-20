@@ -200,6 +200,7 @@ it.effect("applies the installed thread type policy when a turn starts", () =>
     for (const model of ["gpt-6-astra", "openai.gpt-6-astra", "openai/gpt-6-astra-fast", "openai/codex/gpt-6-astra"]) {
       const spelled = yield* resolve("Lead", model).pipe(Effect.flip);
       assert.equal(spelled._tag, "ThreadTypeModelRefusedError");
+      if (spelled._tag !== "ThreadTypeModelRefusedError") continue;
       assert.equal(spelled.model, "gpt-6-astra");
     }
     const refused = yield* resolve("Lead", "gpt-6-astra").pipe(Effect.flip);
