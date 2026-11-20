@@ -3551,10 +3551,14 @@ const make = Effect.gen(function* () {
       yield* assertTargetWithinLimits(limits, target.thread);
 
       const mode = input.mode ?? "auto";
-      // An agent that names no class rides in the next digest instead of steering the thread.
+      // A message to another thread rides in that thread's next digest unless the sender
+      // names a class. A message to the sender's own thread keeps the mode it asked for.
       const deliveryClass =
         input.deliveryClass ??
-        (input.digestCategory !== undefined || parent !== undefined ? "digest" : undefined);
+        (input.digestCategory !== undefined ||
+        (parent !== undefined && parent.thread.id !== input.threadId)
+          ? "digest"
+          : undefined);
       if (
         deliveryClass === undefined &&
         (input.coalesceKey !== undefined || input.expiresAt !== undefined)
