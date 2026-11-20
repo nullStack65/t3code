@@ -49,10 +49,12 @@ const showFile = Effect.fn("ShowFile.stat")(function* (input: {
     return yield* invalid("That file cannot be shown.");
   }
   return {
-    path: resolved,
-    byteSize,
-    mediaType: mediaTypeForPath(resolved),
-    ...(input.line === undefined ? {} : { line: input.line }),
+    showFile: {
+      path: resolved,
+      byteSize,
+      mediaType: mediaTypeForPath(resolved),
+      ...(input.line === undefined ? {} : { line: input.line }),
+    },
     message: "Shown in the file viewer. Do not read or quote the file.",
   };
 });
