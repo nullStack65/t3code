@@ -28,6 +28,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -5218,6 +5219,78 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activity?.summary).toBe("Compacted context 899K → 0 tokens");
     expect(activity?.tone).toBe("info");
     expect(activity?.payload).toMatchObject({ requestId: "message-compact" });
+  });
+
+  const replayCodexCompactions = async (offsetsSeconds: ReadonlyArray<number>) => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-compaction-loop");
+    const startedAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+    const at = (seconds: number) => DateTime.formatIso(DateTime.add(startedAt, { seconds }));
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-compaction-loop-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: at(0),
+      turnId,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+    await harness.emitAndDrain(
+      offsetsSeconds.flatMap((seconds, index) => [
+        {
+          type: "thread.state.changed" as const,
+          eventId: asEventId(`evt-compaction-loop-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          createdAt: at(seconds),
+          threadId,
+          turnId,
+          payload: { state: "compacted" as const },
+        },
+        {
+          type: "thread.state.changed" as const,
+          eventId: asEventId(`evt-compaction-loop-${index}:thread-compacted`),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          createdAt: at(seconds),
+          threadId,
+          turnId,
+          payload: { state: "compacted" as const },
+        },
+      ]),
+    );
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    return {
+      turnId,
+      interrupts: events.filter((event) => event.type === "thread.turn-interrupt-requested"),
+      stops: (thread?.activities ?? []).filter(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.kind === "provider.compaction-loop.stopped",
+      ),
+    };
+  };
+
+  it("interrupts a Codex turn that compacts three times within five minutes", async () => {
+    const result = await replayCodexCompactions([10, 50, 90]);
+    expect(result.interrupts).toHaveLength(1);
+    expect(result.interrupts[0]?.payload).toMatchObject({ turnId: result.turnId });
+    expect(result.stops).toHaveLength(1);
+    expect(result.stops[0]?.tone).toBe("error");
+    expect(result.stops[0]?.payload).toMatchObject({
+      detail: expect.stringContaining("will not resume on its own"),
+    });
+  });
+
+  it("lets a Codex turn with normally spaced compactions keep running", async () => {
+    const result = await replayCodexCompactions([10, 400, 800, 1_200]);
+    expect(result.interrupts).toHaveLength(0);
+    expect(result.stops).toHaveLength(0);
   });
 
   it("projects Codex task lifecycle chunks into thread activities", async () => {

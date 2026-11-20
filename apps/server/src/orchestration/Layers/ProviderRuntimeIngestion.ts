@@ -53,6 +53,7 @@ import {
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
+import { describeCompactionLoop, recordCompaction } from "../CompactionLoopGuard.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -1035,6 +1036,42 @@ const make = Effect.gen(function* () {
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
+
+  const compactionHistoryByThread = new Map<ThreadId, ReadonlyArray<number>>();
+  const guardCompactionLoop = Effect.fn("guardCompactionLoop")(function* (
+    threadId: ThreadId,
+    event: ProviderRuntimeEvent,
+    activeTurnId: TurnId | null,
+  ) {
+    const result = recordCompaction(
+      compactionHistoryByThread.get(threadId) ?? [],
+      Date.parse(event.createdAt),
+    );
+    compactionHistoryByThread.set(threadId, result.history);
+    if (!result.tripped || activeTurnId === null) return;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: yield* providerCommandId(event, "compaction-loop-stopped"),
+      threadId,
+      activity: {
+        id: EventId.make(`${event.eventId}:compaction-loop-stopped`),
+        tone: "error",
+        kind: "provider.compaction-loop.stopped",
+        summary: "Stopped a context compaction loop",
+        payload: { detail: describeCompactionLoop() },
+        turnId: activeTurnId,
+        createdAt: event.createdAt,
+      },
+      createdAt: event.createdAt,
+    });
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: yield* providerCommandId(event, "compaction-loop-interrupt"),
+      threadId,
+      turnId: activeTurnId,
+      createdAt: event.createdAt,
+    });
+  });
 
   // Post-start delivery: buffered `turn`-mode content and parent tool
   // heartbeats advance the in-memory observation without dispatching an
@@ -2723,11 +2760,19 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+      if (
+        isCompactedThreadState &&
+        event.provider === "codex" &&
+        activityEvent.requestId === undefined
+      ) {
+        yield* guardCompactionLoop(thread.id, event, activeTurnId);
+      }
       // The turn is over: drop the live observation so the settled shell does
       // not keep advertising provider progress. Only the accepted lifecycle
       // owner may clear: a delayed completion rejected for a superseded turn
       // must not erase the current turn's evidence.
       if (event.type === "session.exited") {
+        compactionHistoryByThread.delete(thread.id);
         threadPostStartActivity.clearThread(thread.id);
       } else if (isTerminalTurn && shouldApplyThreadLifecycle) {
         threadPostStartActivity.clearThread(thread.id, observationTurnId);
