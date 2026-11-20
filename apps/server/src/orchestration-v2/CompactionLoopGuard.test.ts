@@ -9,6 +9,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -163,8 +164,12 @@ const makeRun = (
   };
 };
 
-const compacted = (run: OrchestrationV2Run, seconds: number): OrchestrationV2DomainEvent => {
-  const id = TurnItemId.make(`compaction-${run.id}-${seconds}`);
+const compacted = (
+  run: OrchestrationV2Run,
+  seconds: number,
+  providerThread: string | null = null,
+): OrchestrationV2DomainEvent => {
+  const id = TurnItemId.make(`compaction-${run.id}-${seconds}-${providerThread ?? "root"}`);
   return {
     id: EventId.make(`event-${id}`),
     type: "turn-item.updated",
@@ -176,7 +181,7 @@ const compacted = (run: OrchestrationV2Run, seconds: number): OrchestrationV2Dom
       threadId,
       runId: run.id,
       nodeId: NodeId.make("root-node"),
-      providerThreadId: null,
+      providerThreadId: providerThread === null ? null : ProviderThreadId.make(providerThread),
       providerTurnId: null,
       nativeItemRef: null,
       parentItemId: null,
@@ -259,6 +264,19 @@ describe("CompactionLoopGuard", () => {
       const interrupts = yield* replayCodexCompactions(
         [active],
         [10, 400, 800, 1_200].map((seconds) => compacted(active.run, seconds)),
+      );
+      expect(interrupts).toHaveLength(0);
+    }),
+  );
+
+  it.effect("counts each subagent's compactions apart from its parent turn", () =>
+    Effect.gen(function* () {
+      const active = makeRun("active", "running");
+      const interrupts = yield* replayCodexCompactions(
+        [active],
+        ["subagent-a", "subagent-b", "subagent-c"].map((subagent, index) =>
+          compacted(active.run, 10 + index * 20, subagent),
+        ),
       );
       expect(interrupts).toHaveLength(0);
     }),

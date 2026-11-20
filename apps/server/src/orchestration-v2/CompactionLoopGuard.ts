@@ -1,4 +1,9 @@
-import { CommandId, type OrchestrationV2DomainEvent, type ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  isCompactionCommandMessage,
+  type OrchestrationV2DomainEvent,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
@@ -42,7 +47,7 @@ function describeCompactionLoop(limit: CompactionLoopLimit = CODEX_COMPACTION_LO
 export const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
-  const historyByThread = new Map<ThreadId, ReadonlyArray<number>>();
+  const historyByConversation = new Map<string, ReadonlyArray<number>>();
 
   const handle = Effect.fn("CompactionLoopGuard.handle")(
     function* (event: OrchestrationV2DomainEvent) {
@@ -62,18 +67,19 @@ export const make = Effect.gen(function* () {
       const run = records.runs.find((candidate) => candidate.id === item.runId);
       if (run === undefined) return;
       const message = records.messages.find((candidate) => candidate.id === run.userMessageId);
-      if (message?.text.trim().toLowerCase() === "/compact") return;
-      const previous = historyByThread.get(item.threadId) ?? [];
+      if (message !== undefined && isCompactionCommandMessage(message)) return;
+      const conversation = `${item.threadId}\u0000${item.providerThreadId ?? ""}`;
+      const previous = historyByConversation.get(conversation) ?? [];
       const atMs = DateTime.toEpochMillis(item.completedAt ?? item.updatedAt);
       const result = recordCompaction(previous, atMs);
       if (result.tripped && !isActiveRun(run)) {
-        historyByThread.set(item.threadId, [
+        historyByConversation.set(conversation, [
           ...previous.filter((at) => atMs - at < CODEX_COMPACTION_LOOP_LIMIT.windowMs),
           atMs,
         ]);
         return;
       }
-      historyByThread.set(item.threadId, result.history);
+      historyByConversation.set(conversation, result.history);
       if (!result.tripped) return;
       yield* orchestrator.dispatch({
         type: "run.interrupt",
@@ -85,7 +91,10 @@ export const make = Effect.gen(function* () {
     },
     (effect) =>
       effect.pipe(
-        Effect.catchCause((cause) => Effect.logWarning("compaction loop guard failed", { cause })),
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) => Effect.logWarning("compaction loop guard failed", { cause }),
+        ),
       ),
   );
 
