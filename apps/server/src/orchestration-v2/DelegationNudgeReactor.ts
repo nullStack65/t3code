@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -137,13 +138,16 @@ export const make = Effect.gen(function* () {
             summary: "Delegation reminder",
           },
           attachments: [],
-          dispatchMode: { type: "steer_active", targetRunId: run.id },
+          // Queued, like every other server notice: the planner refuses a
+          // notification that arrives already steering, then steers this one
+          // into the running turn when the provider can take it.
+          dispatchMode: { type: "queue_after_active" },
           createdBy: "agent",
           creationSource: "server",
         });
         // The note reached this turn, so the next run must not carry it again.
         const { deferredNote: _delivered, ...delivered } = stats;
-        return delivered;
+        return { ...delivered, deferredNote: undefined };
       }
       return { ...stats, deferredNote: note };
   });
@@ -192,13 +196,12 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const deliverReminder = (input: {
+  const deliverReminder = Effect.fn("DelegationNudgeReactor.deliverReminder")(function* (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly note: string;
     readonly nudgesFired: number;
-  }) =>
-    Effect.gen(function* () {
+  }) {
     const records = yield* projections.getThreadRecords(input.threadId, ["runs"]);
     const run = records.runs.find((candidate) => candidate.id === input.runId);
     const watch = run === undefined ? undefined : watches.get(run.id);
