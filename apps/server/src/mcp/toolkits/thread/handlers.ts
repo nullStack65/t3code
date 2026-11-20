@@ -8,6 +8,7 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
 
@@ -25,6 +26,8 @@ import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import { refuseUnservedModel } from "../../../provider/servedModel.ts";
 
 function queueEntry(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
@@ -236,6 +239,16 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           threads,
           projection: { thread },
         } = yield* readThread(input.threadId);
+        const registry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+        const detail = Option.isNone(registry)
+          ? undefined
+          : refuseUnservedModel(yield* registry.value.getProviders, modelSelection);
+        if (detail !== undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "model_unavailable",
+            message: detail,
+          });
+        }
         const type = modelSelectionCommandType(thread.providerInstanceId, modelSelection);
         const result = yield* threads
           .dispatch({ type, threadId: thread.id, commandId: yield* newCommandId(), modelSelection })

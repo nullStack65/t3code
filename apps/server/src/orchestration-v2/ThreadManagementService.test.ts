@@ -36,7 +36,9 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import type { ServerProvider } from "@t3tools/contracts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import {
@@ -206,6 +208,68 @@ it.effect(
         creationSource: "server",
       });
 
+      expect(dispatched).toEqual(["message.dispatch"]);
+    }).pipe(Effect.provide(layerTest));
+  },
+);
+
+it.effect(
+  "the dispatch chokepoint refuses a Grok model on claudeAgent and accepts a model that instance serves",
+  () => {
+    const threadId = ThreadId.make("thread:thread-management:chokepoint");
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    const dispatched: Array<string> = [];
+    const provider = {
+      instanceId,
+      driver: ProviderDriverKind.make("claudeAgent"),
+      enabled: true,
+      installed: true,
+      status: "ready",
+      version: "test",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      models: [
+        {
+          slug: "claude-opus",
+          name: "Opus",
+          aliases: ["Opus"],
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+      slashCommands: [],
+      skills: [],
+    } as ServerProvider;
+    const layerTest = layerDispatchChokepointTest(ServerSettings.layerTest())(dispatched).pipe(
+      Layer.provideMerge(ProviderRegistryMock.layer([provider])),
+    );
+    const send = (commandId: string, model: string) =>
+      ThreadManagementService.ThreadManagementService.pipe(
+        Effect.flatMap((threads) =>
+          threads.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(commandId),
+            threadId,
+            messageId: MessageId.make(`message:${commandId}`),
+            text: "Continue.",
+            attachments: [],
+            modelSelection: { instanceId, model },
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          }),
+        ),
+      );
+
+    return Effect.gen(function* () {
+      const refused = yield* send("command:grok-on-claude", "grok/grok-4.7").pipe(Effect.flip);
+      expect(refused).toBeInstanceOf(Orchestrator.OrchestratorCommandRejectedError);
+      expect(String(refused.cause)).toContain("grok/grok-4.7");
+      expect(String(refused.cause)).toContain("claudeAgent");
+      expect(String(refused.cause)).toContain("claude-opus");
+      expect(dispatched).toEqual([]);
+
+      yield* send("command:opus-on-claude", "claude-opus");
       expect(dispatched).toEqual(["message.dispatch"]);
     }).pipe(Effect.provide(layerTest));
   },

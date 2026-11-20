@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { findServedModel } from "../provider/servedModel.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -34,7 +35,7 @@ export const hereEvidence = Effect.fn("placement.hereEvidence")(function* (input
       provider.enabled &&
       isProviderAvailable(provider) &&
       resolveProjectProviderInstanceEnabled(settings, input.projectId, provider.instanceId) &&
-      provider.models.some((model) => model.slug === input.modelSelection.model) &&
+      findServedModel(provider.models, input.modelSelection.model) !== undefined &&
       (provider.supportedRuntimeModes === undefined ||
         provider.supportedRuntimeModes.length === 0 ||
         provider.supportedRuntimeModes.includes(input.runtimeMode)),

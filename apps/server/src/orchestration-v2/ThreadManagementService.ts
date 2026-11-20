@@ -72,6 +72,8 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { modelSelectionFromCommand, refuseUnservedModel } from "../provider/servedModel.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -931,9 +933,40 @@ const make = Effect.gen(function* () {
     }
   };
 
+  const assertModelServed = (command: OrchestrationV2ServerCommand) => {
+    const selection = modelSelectionFromCommand(command);
+    if (selection === undefined) return Effect.void;
+    return receipts.getByCommandId(command.commandId).pipe(
+      Effect.orElseSucceed(() => Option.none()),
+      Effect.flatMap((receipt) =>
+        Option.isSome(receipt)
+          ? Effect.void
+          : Effect.serviceOption(ProviderRegistry.ProviderRegistry).pipe(
+              Effect.flatMap((registry) =>
+                Option.isNone(registry)
+                  ? Effect.void
+                  : registry.value.getProviders.pipe(
+                      Effect.flatMap((providers) => {
+                        const detail = refuseUnservedModel(providers, selection);
+                        return detail === undefined
+                          ? Effect.void
+                          : new Orchestrator.OrchestratorCommandRejectedError({
+                              commandId: command.commandId,
+                              commandType: command.type,
+                              cause: detail,
+                            });
+                      }),
+                    ),
+              ),
+            ),
+      ),
+    );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
+      Effect.andThen(assertModelServed(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );
 

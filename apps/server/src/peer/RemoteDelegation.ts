@@ -27,6 +27,7 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
+import { findServedModel } from "../provider/servedModel.ts";
 import {
   chooseThreadPlacement,
   type ThreadPlacementCandidate,
@@ -271,7 +272,10 @@ export const runsModel = (
     (provider) =>
       provider.providerInstanceId === requested.modelSelection.instanceId &&
       provider.canRunChildTask &&
-      provider.models.some((model) => model.id === requested.modelSelection.model) &&
+      findServedModel(
+        provider.models.map((model) => ({ slug: model.id })),
+        requested.modelSelection.model,
+      ) !== undefined &&
       (provider.runtimeModes === undefined ||
         provider.runtimeModes.includes(requested.runtimeMode)),
   );

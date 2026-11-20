@@ -52,6 +52,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { refuseUnservedModel } from "../provider/servedModel.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -156,6 +157,7 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
       "dispatch-message",
       "release-run",
       "fail-run",
+      "reject-model",
     ]),
     commandId: CommandId,
     projectId: ProjectId,
@@ -164,6 +166,10 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
   },
 ) {
   override get message(): string {
+    if (this.operation === "reject-model") {
+      const cause = this.cause;
+      return cause instanceof Error ? cause.message : String(cause);
+    }
     return `Thread launch ${this.commandId} failed during ${this.operation}.`;
   }
 }
@@ -1223,6 +1229,21 @@ const make = Effect.gen(function* () {
         instanceId: input.modelSelection.instanceId,
         launch: true,
       });
+      if (Option.isNone(launchReceipt)) {
+        const detail = refuseUnservedModel(
+          yield* providerRegistry.getProviders,
+          input.modelSelection,
+        );
+        if (detail !== undefined) {
+          return yield* new ThreadLaunchError({
+            operation: "reject-model",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+            cause: new Error(detail),
+          });
+        }
+      }
       return yield* Effect.gen(function* () {
         // Recover ids from accepted launch receipts before allocating; retries have no client id and new ids collide with receipts.
         const reusableLaunchReceipt =

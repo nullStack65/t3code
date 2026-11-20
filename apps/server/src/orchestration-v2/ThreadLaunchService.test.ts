@@ -365,6 +365,66 @@ function launchInput(input: {
   };
 }
 
+const claudeCatalog = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  driver: ProviderDriverKind.make("claudeAgent"),
+  enabled: true,
+  installed: true,
+  status: "ready" as const,
+  version: "test",
+  auth: { status: "authenticated" as const },
+  checkedAt: "2026-01-01T00:00:00.000Z",
+  models: [
+    {
+      slug: "claude-opus",
+      name: "Opus",
+      aliases: ["Opus"],
+      isCustom: false,
+      capabilities: null,
+    },
+  ],
+  slashCommands: [],
+  skills: [],
+} as ServerProvider;
+
+it.effect(
+  "refuses a Grok model on claudeAgent before launch and accepts an advertised alias",
+  () => {
+    const harness = makeHarness({
+      adapters: [adapter, claudeAdapter],
+      providers: [claudeCatalog],
+    });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const refused = yield* launches
+        .launch({
+          ...launchInput({ command: "reject-grok", thread: "thread:reject-grok" }),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "grok/grok-4.7",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "ThreadLaunchError");
+      if (refused._tag !== "ThreadLaunchError") return;
+      assert.equal(refused.operation, "reject-model");
+      assert.include(refused.message, "grok/grok-4.7");
+      assert.include(refused.message, "claudeAgent");
+      assert.include(refused.message, "claude-opus");
+
+      const accepted = yield* launches.launch({
+        ...launchInput({ command: "accept-opus", thread: "thread:accept-opus" }),
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "Opus",
+        },
+      });
+      assert.equal(accepted.projection.thread.modelSelection.instanceId, "claudeAgent");
+      assert.equal(accepted.projection.thread.modelSelection.model, "Opus");
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>
     (["user", "agent"] as const).map((createdBy) => ({ target, createdBy })),
