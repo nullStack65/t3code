@@ -941,6 +941,10 @@ function listItemFromShell(
     creationSource: shell.creationSource,
     status: listedThreadStatus(shell),
     latestRunId: shell.latestRunId,
+    latestRunCompletedAt:
+      shell.latestRunCompletedAt === undefined || shell.latestRunCompletedAt === null
+        ? null
+        : DateTime.formatIso(shell.latestRunCompletedAt),
     providerInstanceId: shell.modelSelection.instanceId,
     model: shell.modelSelection.model,
     runtimeMode: shell.runtimeMode,

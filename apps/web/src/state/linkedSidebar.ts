@@ -37,6 +37,8 @@ const sameThread = (left: EnvironmentThreadShell, right: EnvironmentThreadShell)
   left.settledOverride === right.settledOverride &&
   left.snoozedUntil === right.snoozedUntil &&
   left.runtime?.status === right.runtime?.status &&
+  left.lastVisitedAt === right.lastVisitedAt &&
+  left.latestRun?.completedAt === right.latestRun?.completedAt &&
   left.source.inbox?.owner === right.source.inbox?.owner &&
   left.source.inbox?.audience === right.source.inbox?.audience &&
   left.source.inbox?.attentionKind === right.source.inbox?.attentionKind;

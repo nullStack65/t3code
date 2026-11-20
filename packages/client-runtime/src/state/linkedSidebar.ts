@@ -57,6 +57,9 @@ function threadShellFromLinkedThread(
       forkedFrom: null,
       activeProviderThreadId: null,
       latestRunId: thread.latestRunId,
+      ...(thread.latestRunCompletedAt === undefined
+        ? {}
+        : { latestRunCompletedAt: utcOrNull(thread.latestRunCompletedAt) }),
       activeRunId: active ? thread.latestRunId : null,
       ...(active ? { activityRunStatus: thread.status } : {}),
       status: thread.status,

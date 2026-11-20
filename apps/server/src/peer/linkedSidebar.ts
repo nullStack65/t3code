@@ -80,6 +80,9 @@ const slimThread = (
   creationSource: thread.creationSource,
   status: thread.status,
   latestRunId: thread.latestRunId,
+  ...(thread.latestRunCompletedAt === undefined
+    ? {}
+    : { latestRunCompletedAt: thread.latestRunCompletedAt }),
   providerInstanceId: thread.providerInstanceId,
   model: thread.model,
   runtimeMode: thread.runtimeMode,

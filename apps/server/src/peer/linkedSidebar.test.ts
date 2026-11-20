@@ -93,6 +93,7 @@ it.effect("reads a reachable server-only link and skips catalog and unreachable 
               createdAt: "2026-11-19T12:00:00.000Z",
               updatedAt: "2026-11-20T04:00:00.000Z",
               lastVisitedAt: "2026-11-20T03:59:00.000Z",
+              latestRunCompletedAt: "2026-11-20T03:58:00.000Z",
             },
           ],
         });
@@ -105,5 +106,8 @@ it.effect("reads a reachable server-only link and skips catalog and unreachable 
     ]);
     expect(result.environments[0]?.threads[0]?.inbox?.owner).toBe("jeff");
     expect(result.environments[0]?.threads[0]?.lastVisitedAt).toBe("2026-11-20T03:59:00.000Z");
+    expect(result.environments[0]?.threads[0]?.latestRunCompletedAt).toBe(
+      "2026-11-20T03:58:00.000Z",
+    );
   }),
 );

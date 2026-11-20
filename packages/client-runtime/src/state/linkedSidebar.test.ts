@@ -109,6 +109,7 @@ describe("sidebarFromServerLinks", () => {
       ...jeffThread,
       status: "failed" as const,
       latestRunId: RunId.make("run-eval"),
+      latestRunCompletedAt: "2026-11-20T05:00:00.000Z",
       updatedAt: "2026-11-20T05:00:00.000Z",
     } satisfies LinkedSidebarThread;
     const listed = (thread: LinkedSidebarThread) =>
@@ -125,6 +126,12 @@ describe("sidebarFromServerLinks", () => {
     expect(hasUnseenRunFailure(seen)).toBe(false);
     const failedAgain = listed({ ...failed, lastVisitedAt: "2026-11-20T04:59:00.000Z" });
     expect(hasUnseenRunFailure(failedAgain)).toBe(true);
+    const renamedAfter = listed({
+      ...failed,
+      lastVisitedAt: "2026-11-20T05:01:00.000Z",
+      updatedAt: "2026-11-20T05:02:00.000Z",
+    });
+    expect(hasUnseenRunFailure(renamedAfter)).toBe(false);
   });
 
   it("drops the failed pill once the host completes the thread", () => {

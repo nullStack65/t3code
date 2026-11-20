@@ -72,6 +72,45 @@ describe("readLinkedSidebarThreadShell", () => {
   });
 });
 
+const visited = "2026-11-20T05:01:00.000Z";
+
+describe("linked sidebar refresh", () => {
+  it("picks up a visit that changes nothing else", () => {
+    const result = {
+      environments: [
+        {
+          environmentId: omarcy,
+          label: "omarcy-desktop",
+          projects: [],
+          threads: [{ ...linkedThread, status: "failed" as const }],
+        },
+      ],
+    } satisfies LinkedSidebarResult;
+    appAtomRegistry.set(linkedSidebarByHostAtom, new Map([[laptop, result]]));
+    const before = readLinkedSidebarThreadShell({ environmentId: omarcy, threadId });
+    appAtomRegistry.set(
+      linkedSidebarByHostAtom,
+      new Map([
+        [
+          laptop,
+          {
+            environments: [
+              {
+                ...result.environments[0]!,
+                threads: [{ ...linkedThread, status: "failed" as const, lastVisitedAt: visited }],
+              },
+            ],
+          },
+        ],
+      ]),
+    );
+    const after = readLinkedSidebarThreadShell({ environmentId: omarcy, threadId });
+    expect(before?.lastVisitedAt ?? null).toBeNull();
+    expect(after?.lastVisitedAt).toBe(visited);
+    expect(after).not.toBe(before);
+  });
+});
+
 describe("linkedSidebarEnvironmentIds", () => {
   it("reports a server-only link, which the filter paints connected", () => {
     appAtomRegistry.set(linkedSidebarByHostAtom, new Map([[laptop, hostResult]]));
