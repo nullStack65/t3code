@@ -22,7 +22,7 @@ import {
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useRightPanelStore } from "../../rightPanelStore";
 import {
-  latestTimelineCreatedAt,
+  latestShownFileCreatedAt,
   shownFileKey,
   shownFileTargets,
   shownFilesToOpen,
@@ -496,7 +496,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return {
       files,
       signature: shownFileKey(files),
-      latestCreatedAt: latestTimelineCreatedAt(timelineEntries),
+      latestCreatedAt: latestShownFileCreatedAt(files),
       entryCount: timelineEntries.length,
     };
   }, [timelineEntries]);

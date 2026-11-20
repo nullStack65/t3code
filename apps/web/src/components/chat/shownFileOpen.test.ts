@@ -166,6 +166,34 @@ describe("shownFilesToOpen", () => {
     ).toEqual([completed]);
   });
 
+  it("opens a file that finishes after one which completed earlier, even though a row started later", () => {
+    const first = files[0]!;
+    const previous = shownFilesToOpen({
+      threadKey: "env/thread",
+      previous: null,
+      nextKey: shownFileKey([first]),
+      files: [first],
+      entryCount: 2,
+      latestCreatedAt: first.createdAt,
+    }).baseline;
+    const slow: ShownFileTarget = {
+      id: "show-slow",
+      path: "/tmp/slow.md",
+      createdAt: "2026-01-02T00:00:00.500Z",
+    };
+    expect(slow.createdAt > first.createdAt).toBe(true);
+    expect(
+      shownFilesToOpen({
+        threadKey: "env/thread",
+        previous,
+        nextKey: shownFileKey([first, slow]),
+        files: [first, slow],
+        entryCount: 3,
+        latestCreatedAt: slow.createdAt,
+      }).open,
+    ).toEqual([slow]);
+  });
+
   it("opens only a file that completed after the newest item already on screen", () => {
     const first = files.slice(0, 1);
     const previous = shownFilesToOpen({

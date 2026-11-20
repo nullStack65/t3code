@@ -33,10 +33,11 @@ export function shownFileTargets(
   return targets;
 }
 
-export function latestTimelineCreatedAt(entries: ReadonlyArray<{ createdAt: string }>): string {
+/** Newest completion, so a slow tool is not hidden behind a row that started later. */
+export function latestShownFileCreatedAt(files: ReadonlyArray<{ createdAt: string }>): string {
   let latest = "";
-  for (const entry of entries) {
-    if (entry.createdAt > latest) latest = entry.createdAt;
+  for (const file of files) {
+    if (file.createdAt > latest) latest = file.createdAt;
   }
   return latest;
 }
