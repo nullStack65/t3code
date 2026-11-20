@@ -134,7 +134,7 @@ export const speechStreamRouteLayer = Layer.unwrap(
       startStream: (options) =>
         startGroqSpeechStream((pcm) => cloud.transcribe("groq", pcm, options)),
     };
-    const route = (path: string, starter: SpeechStreamStarter) =>
+    const route = (path: HttpRouter.PathInput, starter: SpeechStreamStarter) =>
       HttpRouter.add(
         "GET",
         path,

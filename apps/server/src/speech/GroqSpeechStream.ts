@@ -1,20 +1,26 @@
-import type { SpeechStreamText } from "@t3tools/contracts";
+import { CloudSpeechError, type SpeechStreamText } from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import { decodeSpeechPcm, MAX_SPEECH_BYTES, SpeechInvalidAudioError } from "./SpeechService.ts";
 
 const SAMPLE_RATE = 16_000;
 const FRAME = SAMPLE_RATE / 50;
+const isCloudSpeechError = Schema.is(CloudSpeechError);
 
 const GROQ_SEGMENTER = {
   silenceRms: 0.01,
+  quietRms: 0.002,
   pauseFrames: 15,
   keepFrames: 5,
-  minSamples: SAMPLE_RATE * 8,
-  maxSamples: SAMPLE_RATE * 20,
+  minVoicedFrames: 10,
+  minSamples: SAMPLE_RATE * 4,
+  maxSamples: SAMPLE_RATE * 12,
 };
-
-type SegmenterConfig = typeof GROQ_SEGMENTER;
 
 function frameRms(data: Float32Array, start: number, end: number) {
   let sum = 0;
@@ -22,58 +28,62 @@ function frameRms(data: Float32Array, start: number, end: number) {
   return Math.sqrt(sum / Math.max(1, end - start));
 }
 
-export function createPauseSegmenter(config: SegmenterConfig = GROQ_SEGMENTER) {
+export function createPauseSegmenter(config = GROQ_SEGMENTER) {
   let data = new Float32Array(config.maxSamples + SAMPLE_RATE);
   let length = 0;
   let scanned = 0;
-  let voiced = false;
+  let voicedFrames = 0;
   let silentRun = 0;
   let quietest = { at: 0, rms: Infinity };
+  let everVoiced = false;
+  let peakRms = 0;
   const keep = config.keepFrames * FRAME;
 
-  const take = (count: number) => {
-    const out = data.slice(0, count);
+  const discard = (count: number) => {
     data.copyWithin(0, count, length);
     length -= count;
-    return out;
+    scanned -= count;
   };
-  const rescan = () => {
-    const pending = length;
-    length = 0;
+  const take = (count: number) => {
+    const piece = data.slice(0, count);
+    discard(count);
+    return piece;
+  };
+  const restart = () => {
     scanned = 0;
-    voiced = false;
+    voicedFrames = 0;
     silentRun = 0;
     quietest = { at: 0, rms: Infinity };
-    return scan(pending);
   };
-  const scan = (available: number): Float32Array[] => {
+  const scan = () => {
     const closed: Float32Array[] = [];
-    length = available;
     while (scanned + FRAME <= length) {
       const rms = frameRms(data, scanned, scanned + FRAME);
       scanned += FRAME;
+      peakRms = Math.max(peakRms, rms);
       if (rms >= config.silenceRms) {
-        voiced = true;
+        if (voicedFrames === 0 && scanned - FRAME > keep) discard(scanned - FRAME - keep);
+        voicedFrames++;
+        everVoiced = true;
         silentRun = 0;
       } else silentRun++;
-      if (!voiced) {
-        if (scanned > keep) {
-          take(scanned - keep);
-          scanned = keep;
-        }
+      if (voicedFrames === 0) continue;
+      if (silentRun >= config.pauseFrames && voicedFrames < config.minVoicedFrames) {
+        discard(scanned - keep);
+        restart();
+        scanned = keep;
         continue;
       }
       if (scanned >= config.minSamples && rms < quietest.rms) quietest = { at: scanned, rms };
       const cut =
         silentRun >= config.pauseFrames && scanned >= config.minSamples
-          ? scanned - Math.floor(silentRun / 2) * FRAME
+          ? scanned - (silentRun - config.keepFrames) * FRAME
           : scanned >= config.maxSamples
             ? quietest.at
             : 0;
       if (cut > 0) {
         closed.push(take(cut));
-        closed.push(...rescan());
-        return closed;
+        restart();
       }
     }
     return closed;
@@ -87,55 +97,66 @@ export function createPauseSegmenter(config: SegmenterConfig = GROQ_SEGMENTER) {
         data = grown;
       }
       data.set(samples, length);
-      return scan(length + samples.length);
+      length += samples.length;
+      return scan();
     },
     flush() {
       const partialVoiced =
         length > scanned && frameRms(data, scanned, length) >= config.silenceRms;
       const end = partialVoiced
         ? length
-        : voiced
+        : voicedFrames > 0
           ? scanned - Math.max(0, silentRun - config.keepFrames) * FRAME
-          : 0;
+          : !everVoiced && peakRms >= config.quietRms
+            ? length
+            : 0;
       const tail = data.slice(0, end);
       length = 0;
-      rescan();
+      restart();
       return tail.length ? tail : null;
     },
   };
 }
 
+const retryable = (error: unknown) =>
+  isCloudSpeechError(error) && (error.reason === "rate-limit" || error.reason === "unavailable");
+
 export const startGroqSpeechStream = Effect.fn("GroqSpeechStream.start")(function* <E>(
   transcribe: (pcm: Uint8Array) => Effect.Effect<string, E>,
 ) {
+  const scope = yield* Scope.Scope;
   const segmenter = createPauseSegmenter();
-  const results: Array<string | undefined> = [];
-  const pending: Array<Fiber.Fiber<string, E>> = [];
+  const pieces: Array<Fiber.Fiber<string, E>> = [];
   let receivedBytes = 0;
   let revision = 0;
-  const submit = Effect.fnUntraced(function* (segment: Float32Array) {
-    const index = results.length;
-    results.push(undefined);
-    const fiber = yield* transcribe(new Uint8Array(segment.buffer)).pipe(
-      Effect.tap((text) =>
-        Effect.sync(() => {
-          results[index] = text;
+  const submit = Effect.fnUntraced(function* (piece: Float32Array) {
+    pieces.push(
+      yield* transcribe(new Uint8Array(piece.buffer)).pipe(
+        Effect.retry({
+          times: 2,
+          while: retryable,
+          schedule: Schedule.exponential(Duration.millis(250)),
         }),
+        Effect.forkIn(scope),
       ),
-      Effect.forkScoped,
     );
-    pending.push(fiber);
   });
   const committed = (): SpeechStreamText | null => {
     const done: string[] = [];
-    for (const text of results) {
-      if (text === undefined) break;
-      if (text) done.push(text);
+    for (const piece of pieces) {
+      const exit = piece.pollUnsafe();
+      if (!exit || Exit.isFailure(exit)) break;
+      if (exit.value) done.push(exit.value);
     }
     return done.length ? { committed: done.join(" "), tentative: "" } : null;
   };
   return {
     feed: Effect.fnUntraced(function* (bytes: Uint8Array) {
+      const failed = pieces.find((piece) => {
+        const exit = piece.pollUnsafe();
+        return exit !== undefined && Exit.isFailure(exit);
+      });
+      if (failed) yield* Fiber.join(failed);
       receivedBytes += bytes.byteLength;
       if (receivedBytes > MAX_SPEECH_BYTES)
         return yield* new SpeechInvalidAudioError({
@@ -150,13 +171,13 @@ export const startGroqSpeechStream = Effect.fn("GroqSpeechStream.start")(functio
             message: "Invalid PCM audio.",
           }),
       });
-      for (const segment of segmenter.push(samples)) yield* submit(segment);
+      for (const piece of segmenter.push(samples)) yield* submit(piece);
       return { revision: ++revision, text: committed() };
     }),
     finish: Effect.gen(function* () {
       const tail = segmenter.flush();
       if (tail) yield* submit(tail);
-      const texts = yield* Effect.forEach(pending, Fiber.join);
+      const texts = yield* Effect.forEach(pieces, Fiber.join);
       return texts.filter(Boolean).join(" ").trim();
     }),
   };

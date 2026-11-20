@@ -166,6 +166,6 @@ cleanup even when it is on, so you see what the model heard. Browser recording
 needs HTTPS or localhost and microphone permission; for a remote server over
 plain HTTP, use the desktop app.
 
-Groq uses Whisper large-v3-turbo with your Groq API key, or `GROQ_API_KEY` from the environment's launch environment. On web and desktop it transcribes in pieces while you speak, split at natural pauses, so stopping waits only for the last few seconds. Groq's free tier limits requests per minute; a long dictation uses about one request every eight seconds of speech.
+Groq uses Whisper large-v3-turbo with your Groq API key, or `GROQ_API_KEY` from the environment's launch environment. On web and desktop it transcribes in pieces while you speak, split at natural pauses, so stopping waits only for the last few seconds; with live transcription off it sends the recording when you stop. Groq's free tier limits requests per minute; a long dictation uses about one request every four seconds of speech.
 
 AssemblyAI uses the Sync API with Universal-3.5 Pro and your existing AssemblyAI API key. Each recording must be between 80 milliseconds and two minutes. Choose AssemblyAI under the cloud providers in Settings → Voice.

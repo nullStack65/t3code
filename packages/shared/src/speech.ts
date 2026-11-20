@@ -12,7 +12,7 @@ const encodeOptions = Schema.encodeSync(Schema.fromJsonString(SpeechTranscriptio
 
 export function cloudSpeechDisclosure(provider: CloudSpeechProvider, environment: string) {
   if (provider === "groq")
-    return `While you speak, ${environment} sends your recording in pieces, with vocabulary hints such as project names, to Groq.`;
+    return `${environment} sends your recording and vocabulary hints, including project names, to Groq. With live transcription on web and desktop, it sends the recording in pieces while you speak.`;
   return provider === "openrouter"
     ? `After you stop, ${environment} sends the recording to OpenRouter. OpenRouter chooses who runs your model. T3 requests zero data retention; your OpenRouter account may allow safety retention.`
     : `After you stop, ${environment} sends your recording and vocabulary hints, including project names, to ${CLOUD_SPEECH_PROVIDER_NAMES[provider]}.`;

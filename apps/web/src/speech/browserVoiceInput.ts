@@ -90,7 +90,8 @@ export function createBrowserVoiceInputPlatform(input: {
       );
       throwIfVoiceTranscriptionAborted(options.signal);
       const locale = effectiveSpeechLanguage(cloudSpeechLanguages, recordingOptions.speechLanguage);
-      if (input.cloudProvider !== "groq") return { locale, transcribe: transcribeRecording };
+      if (input.cloudProvider !== "groq" || !streamingEnabled)
+        return { locale, transcribe: transcribeRecording };
       const url = await runEnvironmentSpeech(
         getEnvironmentSpeechStreamUrl(input.prepared, GROQ_SPEECH_STREAM_PATH),
         options,
