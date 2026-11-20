@@ -268,9 +268,9 @@ export function BotAvatar(props: {
         </g>
         {state === "running" ? (
           <rect
-            x="9"
+            x="8"
             y="11"
-            width="3"
+            width="2.5"
             height="4"
             fill="currentColor"
             stroke="none"

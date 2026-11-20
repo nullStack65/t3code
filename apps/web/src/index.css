@@ -229,7 +229,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --animate-bot-blink: bot-blink 4s step-end infinite;
   /* Idle bots breathe once every 6s, a slow stepped opacity dip. */
   --animate-bot-breathe: bot-breathe 6s infinite;
-  /* A working bot's visor sweeps once a second, four discrete stops. */
+  /* A working bot's visor sweeps from the left eye to the right, four discrete stops. */
   --animate-bot-scan: bot-scan 1.4s steps(4, end) infinite;
   /* A working bot's antenna tip pulses on the same cadence as the scan. */
   --animate-bot-antenna: bot-antenna 1.4s steps(4, end) infinite;
@@ -365,11 +365,23 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     }
   }
   @keyframes bot-scan {
-    from {
-      transform: translateX(-3px);
+    /* Four equal holds, left eye to right eye. steps(4, end) never rests on the
+       final keyframe, so the last stop is written out rather than implied. */
+    0%,
+    24% {
+      transform: translateX(-4px);
     }
-    to {
-      transform: translateX(3px);
+    25%,
+    49% {
+      transform: translateX(0px);
+    }
+    50%,
+    74% {
+      transform: translateX(4px);
+    }
+    75%,
+    100% {
+      transform: translateX(8px);
     }
   }
   @keyframes bot-antenna {

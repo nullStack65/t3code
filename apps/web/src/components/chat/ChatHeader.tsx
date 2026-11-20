@@ -20,7 +20,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { isTrailingDoubleClick, resolveThreadStatusPill } from "../Sidebar.logic";
+import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { Badge } from "../ui/badge";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -45,7 +45,6 @@ import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
 import { BotAvatar, type BotAvatarState } from "../bots/BotAvatar";
-import { resolveBotPresence } from "../bots/botPresence";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
