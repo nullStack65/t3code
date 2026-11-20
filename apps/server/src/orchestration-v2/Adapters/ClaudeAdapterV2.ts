@@ -3490,8 +3490,7 @@ function claudeBypassAvailability(
 }
 
 function requiresClaudeApproval(context: ActiveClaudeTurnContext): boolean {
-  // CLI-forwarded requests need a person's decision even under bypass (ask rules,
-  // safety checks, or settings fallback). Do not wait for queued init/status updates.
+  // Bypass still reaches the callback so a removal check or deny rule can fail closed.
   const policy = context.queryPolicy;
   return policy.installPermissionCallback || policy.permissionMode === "bypassPermissions";
 }
@@ -4281,8 +4280,7 @@ const CLAUDE_NO_STANDING_GRANT_OPTIONS = [
 ] satisfies ReadonlyArray<ProviderApprovalOption>;
 
 export function claudeCommandApprovalDisposition(input: {
-  readonly runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
-  readonly interactionMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["interactionMode"];
+  readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly permissionMode: PermissionMode;
   readonly toolName: string;
   readonly safetyReason: string;
@@ -4292,7 +4290,8 @@ export function claudeCommandApprovalDisposition(input: {
     (/^Dangerous rm(?:dir)?\b/i.test(input.safetyReason) ||
       input.safetyReason === "This shell -c script runs rm and could not be checked" ||
       input.safetyReason === "A permission rule denies a command in this shell -c script");
-  const fullAccess = input.runtimeMode === "full-access" && input.interactionMode !== "plan";
+  const fullAccess =
+    permissionModeForClaudeRuntimePolicy(input.runtimePolicy) === "bypassPermissions";
   if (safetyDenial && (fullAccess || input.permissionMode === "bypassPermissions")) {
     return "deny";
   }
@@ -12255,8 +12254,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ).trim();
           // The SDK omits the CLI's dangerousRemoval discriminator, so match its removal warnings.
           const disposition = claudeCommandApprovalDisposition({
-            runtimeMode: context.input.runtimePolicy.runtimeMode,
-            interactionMode: context.input.runtimePolicy.interactionMode,
+            runtimePolicy: context.input.runtimePolicy,
             permissionMode: activePermissionMode,
             toolName,
             safetyReason,

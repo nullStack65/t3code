@@ -949,11 +949,28 @@ describe("ClaudeAdapterV2 context usage", () => {
 });
 
 describe("ClaudeAdapterV2 full-access command approval", () => {
+  const policy = (input: {
+    readonly runtimeMode?: "full-access" | "approval-required";
+    readonly interactionMode?: "default" | "plan";
+    readonly approvalPolicy?: "on-request" | "never";
+    readonly sandboxPolicy?: {
+      readonly type: "readOnly" | "dangerFullAccess";
+      readonly access?: { readonly type: "fullAccess" };
+      readonly networkAccess?: false;
+    };
+  }) =>
+    ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+      runtimeMode: input.runtimeMode ?? "full-access",
+      interactionMode: input.interactionMode ?? "default",
+      cwd: "/workspace",
+      ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: input.approvalPolicy }),
+      ...(input.sandboxPolicy === undefined ? {} : { sandboxPolicy: input.sandboxPolicy }),
+    });
+
   it("runs a full-access command instead of waiting, and still denies removal and permission-rule checks", () => {
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
-        runtimeMode: "full-access",
-        interactionMode: "default",
+        runtimePolicy: policy({}),
         permissionMode: "auto",
         toolName: "Bash",
         safetyReason: "",
@@ -962,8 +979,7 @@ describe("ClaudeAdapterV2 full-access command approval", () => {
     );
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
-        runtimeMode: "full-access",
-        interactionMode: "default",
+        runtimePolicy: policy({}),
         permissionMode: "auto",
         toolName: "Bash",
         safetyReason: "Dangerous rm on a path built from a variable",
@@ -972,8 +988,7 @@ describe("ClaudeAdapterV2 full-access command approval", () => {
     );
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
-        runtimeMode: "full-access",
-        interactionMode: "default",
+        runtimePolicy: policy({}),
         permissionMode: "bypassPermissions",
         toolName: "Bash",
         safetyReason: "A permission rule denies a command in this shell -c script",
@@ -982,9 +997,45 @@ describe("ClaudeAdapterV2 full-access command approval", () => {
     );
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
-        runtimeMode: "approval-required",
-        interactionMode: "default",
+        runtimePolicy: policy({ runtimeMode: "approval-required" }),
         permissionMode: "default",
+        toolName: "Bash",
+        safetyReason: "",
+      }),
+      "ask",
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimePolicy: policy({ interactionMode: "plan" }),
+        permissionMode: "plan",
+        toolName: "Bash",
+        safetyReason: "",
+      }),
+      "ask",
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimePolicy: policy({
+          approvalPolicy: "on-request",
+          sandboxPolicy: {
+            type: "readOnly",
+            access: { type: "fullAccess" },
+            networkAccess: false,
+          },
+        }),
+        permissionMode: "default",
+        toolName: "Bash",
+        safetyReason: "",
+      }),
+      "ask",
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimePolicy: policy({
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        }),
+        permissionMode: "dontAsk",
         toolName: "Bash",
         safetyReason: "",
       }),
@@ -2091,7 +2142,7 @@ describe("ClaudeAdapterV2 resume compaction", () => {
           },
         ),
       );
-      assert.equal(mergeDecision.behavior, "allow");
+      assert.equal(mergeDecision?.behavior, "allow");
 
       const longQuestion = `Choose a deployment target: ${"region ".repeat(80)}`;
       const questionRequestEvent = yield* runtime.events.pipe(
