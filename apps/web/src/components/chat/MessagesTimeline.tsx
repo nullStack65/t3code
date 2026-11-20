@@ -20,6 +20,8 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { useRightPanelStore } from "../../rightPanelStore";
+import { shownFileKey, shownFileTargets, shownFilesToOpen } from "./shownFileOpen";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
 import { observeResize } from "~/lib/observeResize";
@@ -483,6 +485,23 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
   const citationThreadRef = parseScopedThreadKey(routeThreadKey);
+  const shownFiles = shownFileTargets(timelineEntries);
+  const shownFileSignature = shownFileKey(shownFiles);
+  const shownFileBaseline = useRef<string | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a show_file completion opens the existing file viewer with a panel state update; the viewer reads the file after paint, and files already on screen stay put
+  useEffect(() => {
+    const plan = shownFilesToOpen({
+      threadKey: routeThreadKey,
+      previous: shownFileBaseline.current,
+      nextKey: shownFileSignature,
+      files: shownFiles,
+    });
+    shownFileBaseline.current = plan.baseline;
+    if (citationThreadRef === null) return;
+    for (const file of plan.open) {
+      useRightPanelStore.getState().openFile(citationThreadRef, file.path, file.line);
+    }
+  }, [citationThreadRef, routeThreadKey, shownFileSignature, shownFiles]);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const normalizedFindQuery = findQuery.trim();
