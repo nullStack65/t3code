@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./seen-marker": {
+      "types": "./src/seenMarker.ts",
+      "default": "./src/seenMarker.ts"
+    },
     "./pull-request-diff-fold": {
       "types": "./src/pullRequestDiffFold.ts",
       "default": "./src/pullRequestDiffFold.ts"

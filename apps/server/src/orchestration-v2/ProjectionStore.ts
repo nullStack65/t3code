@@ -545,6 +545,10 @@ export interface ProjectionStoreV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
+  readonly countAssistantMessagesAfter: (
+    threadId: ThreadId,
+    messageId: MessageId,
+  ) => Effect.Effect<number | null, ProjectionStoreV2Error>;
   /** Bytes of tool output a transcript export is sure to hold, or 0 when it can fit in `limit`. */
   readonly getTranscriptByteFloor: (
     threadId: ThreadId,
@@ -6291,6 +6295,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+    const countAssistantMessagesAfter: ProjectionStoreV2Shape["countAssistantMessagesAfter"] = (
+      threadId,
+      messageId,
+    ) =>
+      sql<{ count: number }>`
+        SELECT COUNT(later.message_id) AS count
+        FROM orchestration_v2_projection_messages AS seen
+        LEFT JOIN orchestration_v2_projection_messages AS later
+          ON later.thread_id = seen.thread_id
+          AND later.role = 'assistant'
+          AND later.streaming = 0
+          AND (later.created_at, later.message_id) > (seen.created_at, seen.message_id)
+        WHERE seen.message_id = ${messageId} AND seen.thread_id = ${threadId}
+        GROUP BY seen.message_id
+      `.pipe(
+        Effect.map((rows) => rows[0]?.count ?? null),
+        Effect.mapError(controlReadError(threadId)),
+      );
     // Tool output reaches the export unchanged, so the bytes of its text, also inside a structured
     // result, are a floor for the export. Other stored bytes are not: decoding drops fields. A
     // rolled back run is the only way the export hides a tool row, and rows a fork inherits only
@@ -9529,6 +9551,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRunProviderRecords: readOnReader(getRunProviderRecords),
       isNodeStored: readOnReader(isNodeStored),
       getMessageCount: readOnReader(getMessageCount),
+      countAssistantMessagesAfter: readOnReader(countAssistantMessagesAfter),
       getTranscriptByteFloor: readOnReader(getTranscriptByteFloor),
       getSubagentCount: readOnReader(getSubagentCount),
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),

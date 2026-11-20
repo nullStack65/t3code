@@ -6084,6 +6084,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly linkedSender?: OrchestrationV2ConversationMessage["linkedSender"];
     readonly sentBy?: OrchestrationV2ConversationMessage["sentBy"];
     readonly idleCompaction?: OrchestrationV2ConversationMessage["idleCompaction"];
+    readonly seenMarker?: OrchestrationV2ConversationMessage["seenMarker"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly forceRestart: boolean;
@@ -6230,6 +6231,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
           ...(input.sentBy === undefined ? {} : { sentBy: input.sentBy }),
           ...(input.idleCompaction === undefined ? {} : { idleCompaction: input.idleCompaction }),
+          ...(input.seenMarker === undefined ? {} : { seenMarker: input.seenMarker }),
           id: input.messageId,
           threadId: input.command.threadId,
           runId: messageInput.runId,
@@ -6893,6 +6895,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     }
+    const unseenCount =
+      command.seenMarker === undefined
+        ? null
+        : yield* projectionStore
+            .countAssistantMessagesAfter(command.threadId, command.seenMarker.lastSeenMessageId)
+            .pipe(mapDispatchError(command));
+    const seenMarker =
+      command.seenMarker !== undefined && unseenCount !== null && unseenCount > 0
+        ? { ...command.seenMarker, unseenCount }
+        : undefined;
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -7498,6 +7510,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(seenMarker === undefined ? {} : { seenMarker }),
         forceRestart: dispatchMode.type === "restart_active",
       });
       return;
@@ -7794,6 +7807,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(seenMarker === undefined ? {} : { seenMarker }),
         ...(command.scheduledTaskId !== undefined && command.modelSelection === undefined
           ? { followsThreadSelection: true as const }
           : {}),
@@ -8213,6 +8227,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+        ...(seenMarker === undefined ? {} : { seenMarker }),
         ...(command.scheduledTaskId !== undefined && command.modelSelection === undefined
           ? { followsThreadSelection: true as const }
           : {}),
@@ -9011,6 +9026,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
       ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
       ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
+      ...(seenMarker === undefined ? {} : { seenMarker }),
       id: command.messageId,
       threadId: command.threadId,
       runId,
