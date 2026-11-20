@@ -97,6 +97,7 @@ export function threadListFilterBucket(
   if (thread.settledOverride === "settled") return null;
   const status = activityStatus(thread);
   if (waitsOnHuman(thread, viewingFounder)) return "needsMe";
+  if (thread.runtime?.status === "idle") return "working";
   if (status !== null && ACTIVE_RUN_STATUSES.has(status)) return "working";
   if (attentionForFounder(thread, viewingFounder)) return "needsMe";
   if (
@@ -157,10 +158,6 @@ export function changedThreadListFilters(
   };
 }
 
-/**
- * Faceted counts: each section counts threads that pass the other two sections, so a count
- * is what checking that option would add.
- */
 const addBucket = <K>(
   counts: Map<K, ThreadListFilterBucketCounts>,
   key: K,
@@ -170,6 +167,10 @@ const addBucket = <K>(
   counts.set(key, bucket === null ? current : { ...current, [bucket]: current[bucket] + 1 });
 };
 
+/**
+ * Faceted counts: each section counts threads that pass the other two sections, so a count
+ * is what checking that option would add.
+ */
 export function threadListFilterCounts<T extends FilterableThread>(
   threads: ReadonlyArray<T>,
   filter: ThreadListFilter,

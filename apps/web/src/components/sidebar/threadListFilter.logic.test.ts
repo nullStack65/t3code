@@ -209,6 +209,16 @@ describe("thread list filter", () => {
       },
       decision: { ...asked, ...finished },
       attention,
+      parked: {
+        ...quiet,
+        runtime: { status: "idle" },
+        latestRun: { status: "completed" },
+      },
+      parkedAttention: {
+        ...attention,
+        runtime: { status: "idle" },
+        latestRun: { status: "completed" },
+      },
       settled: { ...quiet, ...finished, settledOverride: "settled" as const },
       otherFounder: otherAsk,
       unstarted: quiet,
@@ -221,6 +231,8 @@ describe("thread list filter", () => {
     expect(threadListFilterBucket(fixtures.question, "kameron")).toBe("needsMe");
     expect(threadListFilterBucket(fixtures.decision, "kameron")).toBe("needsMe");
     expect(threadListFilterBucket(fixtures.attention, "kameron")).toBe("needsMe");
+    expect(threadListFilterBucket(fixtures.parked, "kameron")).toBe("working");
+    expect(threadListFilterBucket(fixtures.parkedAttention, "kameron")).toBe("working");
     expect(threadListFilterBucket(fixtures.settled, "kameron")).toBeNull();
     expect(threadListFilterBucket(fixtures.otherFounder, "kameron")).toBe("done");
     expect(threadListFilterBucket(fixtures.unstarted, "kameron")).toBeNull();
@@ -239,8 +251,8 @@ describe("thread list filter", () => {
       (candidate) => candidate.from,
       "kameron",
     );
-    const kameronRow = { working: 2, done: 2, needsMe: 4 };
-    const everyRow = { working: 2, done: 3, needsMe: 4 };
+    const kameronRow = { working: 4, done: 2, needsMe: 4 };
+    const everyRow = { working: 4, done: 3, needsMe: 4 };
     expect(counts.inboxes.get("kameron")).toEqual(kameronRow);
     expect(counts.inboxes.get("jeff")).toEqual({ working: 0, done: 1, needsMe: 0 });
     expect(counts.environments.get(laptop)).toEqual(everyRow);
