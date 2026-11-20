@@ -203,16 +203,12 @@ jobs:
             libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2
             libfontconfig1 fonts-dejavu-core)
           apt_dir="$RUNNER_TEMP/chromium-apt"
-          mkdir -p "$apt_dir/lists/partial" "$apt_dir/cache/archives/partial" "$apt_dir/debs" "$apt_dir/root"
-          apt_options=(-o "Dir::State::Lists=$apt_dir/lists" -o "Dir::Cache=$apt_dir/cache" -o Debug::NoLocking=1 -o "APT::Sandbox::User=$(id -un)")
+          mkdir -p "$apt_dir/lists/partial" "$apt_dir/cache/archives/partial" "$apt_dir/root"
+          apt_options=(-o "Dir::State::Lists=$apt_dir/lists" -o "Dir::Cache=$apt_dir/cache" -o Debug::NoLocking=1)
           apt-get "${apt_options[@]}" update -qq
-          closure=$(apt-get "${apt_options[@]}" install -s --no-install-recommends "${packages[@]}" | awk '/^Inst /{print $2}')
-          printf 'Chromium libraries to extract: %s\n' "${closure:-none}"
-          if test -n "$closure"; then
-            (cd "$apt_dir/debs" && apt-get "${apt_options[@]}" download $closure)
-            for deb in "$apt_dir"/debs/*.deb; do dpkg-deb -x "$deb" "$apt_dir/root"; done
-            export LD_LIBRARY_PATH="$apt_dir/root/usr/lib/x86_64-linux-gnu:$apt_dir/root/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          fi
+          apt-get "${apt_options[@]}" -qq install --download-only --no-install-recommends -y "${packages[@]}"
+          for deb in "$apt_dir"/cache/archives/*.deb; do dpkg-deb -x "$deb" "$apt_dir/root"; done
+          export LD_LIBRARY_PATH="$apt_dir/root/usr/lib/x86_64-linux-gnu:$apt_dir/root/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           mkdir -p "$RUNNER_TEMP/fontconfig-cache"
           printf '<?xml version="1.0"?>\n<fontconfig><dir>/usr/share/fonts</dir><dir>%s</dir><cachedir>%s</cachedir></fontconfig>\n' \
             "$apt_dir/root/usr/share/fonts" "$RUNNER_TEMP/fontconfig-cache" > "$RUNNER_TEMP/fonts.conf"
