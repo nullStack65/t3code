@@ -10,6 +10,7 @@ import {
   CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
   remarkAssistantInsights,
   remarkEnableOrderedListNumbers,
+  shouldPreserveAssistantLineBreaks,
 } from "./markdownPipeline.ts";
 
 it.each([
@@ -711,4 +712,34 @@ it("links complete absolute paths in prose and skips shortened ones", () => {
   ]);
   expect(links(`[notes](${path}) and \`${path}\``)).toEqual([path]);
   expect(links(`\`\`\`\n${path}\n\`\`\``)).toEqual([]);
+});
+
+it.each([
+  [
+    "lettered lines",
+    "Three calls:\nA. Merge the gateway PR.\nB. Hold the window.\nC. Retire Go.",
+    true,
+  ],
+  ["parenthesized letters", "a) one\nb) two", true],
+  ["bullet characters", "• one\n• two", true],
+  ["insight block", "★ Insight ─────\nfirst\nsecond", true],
+  ["one lettered line", "A. Only one item here.\nThen prose.", false],
+  ["lettered paragraphs", "A. one\n\nB. two", false],
+  ["real markdown list", "- one\n- two\n1. three", false],
+  ["plain paragraph", "A normal\nmarkdown paragraph", false],
+  ["inside a code fence", "```\nA. one\nB. two\n```", false],
+] as const)("preserves assistant line breaks for %s: %s", (_, text, expected) => {
+  expect(shouldPreserveAssistantLineBreaks(text)).toBe(expected);
+});
+
+it("keeps lettered lines apart once breaks are on", () => {
+  const text = "A. Merge the gateway PR.\nB. Hold the window.";
+  const tree = unified()
+    .use(remarkParse)
+    .use(CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS)
+    .runSync(unified().use(remarkParse).parse(text)) as Root;
+  const paragraph = tree.children[0];
+  expect(paragraph?.type).toBe("paragraph");
+  const kinds = paragraph && "children" in paragraph ? paragraph.children.map((c) => c.type) : [];
+  expect(kinds).toContain("break");
 });
