@@ -2400,14 +2400,34 @@ export function deriveMessagesTimelineRows(input: {
  * other rows say nothing about who sent them, so they drop out too.
  */
 /**
- * A message a person wrote, or the model's reply to one. Everything else in a
- * coordinator thread (agent relays, automations, T3 Code notices, and the work
- * between them) is activity that buries where the founder left off.
+ * Rows that stay on screen in a standing thread: a person's message, a guest's,
+ * the model's reply, and the cards a turn hands the reader (a plan to accept,
+ * a render, a message the agent sent on). Work logs, agent relays, automations
+ * and T3 Code notices collapse instead.
  */
+const KEPT_ACTIVITY_ROW_KINDS = new Set<MessagesTimelineRow["kind"]>([
+  "proposed-plan",
+  "html-render",
+  "mcp-app",
+  "sent-message",
+  "viewed-images",
+]);
+
 export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
+  if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return true;
   if (row.kind !== "message" && row.kind !== "assistant-meta") return false;
   const sender = resolveMessageSender(row.message);
   return sender.kind === "person" || sender.kind === "guest" || sender.kind === "model";
+}
+
+/**
+ * The pill's key. Anchored to the human message the run sits after, or to the
+ * first row when the thread opens on activity, so the key survives rows
+ * streaming in and earlier history loading above it. A live turn's own rows use
+ * constant ids that vanish when the turn settles, so they never anchor a pill.
+ */
+function activityPillId(anchor: MessagesTimelineRow | undefined, run: MessagesTimelineRow[]): string {
+  return `activity:${anchor?.id ?? run[0]!.id}`;
 }
 
 /**
@@ -2462,41 +2482,55 @@ export function collapseTimelineActivity(
 ): MessagesTimelineRow[] {
   const collapsed: MessagesTimelineRow[] = [];
   let run: MessagesTimelineRow[] = [];
+  let anchor: MessagesTimelineRow | undefined;
   const flush = () => {
     if (run.length === 0) return;
-    const id = `activity:${run[0]!.id}`;
-    if (expandedIds.has(id)) {
-      collapsed.push({
-        kind: "activity",
-        id,
-        createdAt: run[0]!.createdAt,
-        count: run.length,
-        summary: activityUpdateSummary(run),
-        expanded: true,
-      });
-      for (const row of run) collapsed.push(row);
-    } else {
-      collapsed.push({
-        kind: "activity",
-        id,
-        createdAt: run[run.length - 1]!.createdAt,
-        count: run.length,
-        summary: activityUpdateSummary(run),
-        expanded: false,
-      });
-    }
+    const id = activityPillId(anchor, run);
+    const pill: MessagesTimelineRow = {
+      kind: "activity",
+      id,
+      createdAt: run[0]!.createdAt,
+      count: run.length,
+      summary: activityUpdateSummary(run),
+      expanded: expandedIds.has(id),
+    };
+    collapsed.push(pill);
+    if (pill.expanded) for (const row of run) collapsed.push(row);
     run = [];
   };
   for (const row of rows) {
     if (timelineRowIsHumanConversation(row)) {
       flush();
       collapsed.push(row);
+      anchor = row;
     } else {
       run.push(row);
     }
   }
   flush();
   return collapsed;
+}
+
+/** The pill hiding `entryId`, if one does, so a search hit or a restored scroll position can open it. */
+export function activityPillIdForEntry(
+  rows: MessagesTimelineRow[],
+  entryId: string,
+): string | undefined {
+  let anchor: MessagesTimelineRow | undefined;
+  let run: MessagesTimelineRow[] = [];
+  const match = (): string | undefined =>
+    run.some((row) => row.id === entryId) ? activityPillId(anchor, run) : undefined;
+  for (const row of rows) {
+    if (timelineRowIsHumanConversation(row)) {
+      const found = match();
+      if (found !== undefined) return found;
+      run = [];
+      anchor = row;
+    } else {
+      run.push(row);
+    }
+  }
+  return match();
 }
 
 export function filterTimelineRowsBySender(

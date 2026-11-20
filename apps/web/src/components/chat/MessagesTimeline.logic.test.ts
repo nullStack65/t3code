@@ -32,6 +32,7 @@ import {
   filterTimelineRowsBySender,
   collapseTimelineActivity,
   activityUpdateSummary,
+  activityPillIdForEntry,
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   deriveMessagesTimelineRowsWithState,
@@ -5281,9 +5282,9 @@ describe("collapsing non-human activity", () => {
     expect(collapsed.map((row) => row.id)).toEqual([
       "kameron",
       "reply",
-      "activity:agent-1",
+      "activity:reply",
       "jeff",
-      "activity:system-1",
+      "activity:jeff",
     ]);
     expect(collapsed[2]).toMatchObject({
       kind: "activity",
@@ -5295,16 +5296,16 @@ describe("collapsing non-human activity", () => {
   });
 
   it("puts the collapsed rows back exactly when the pill expands", () => {
-    const expanded = collapseTimelineActivity(rows, new Set(["activity:agent-1"]));
+    const expanded = collapseTimelineActivity(rows, new Set(["activity:reply"]));
     expect(expanded.map((row) => row.id)).toEqual([
       "kameron",
       "reply",
-      "activity:agent-1",
+      "activity:reply",
       "agent-1",
       "work-1",
       "agent-2",
       "jeff",
-      "activity:system-1",
+      "activity:jeff",
     ]);
     expect(expanded[2]).toMatchObject({ expanded: true });
   });
@@ -5325,6 +5326,50 @@ describe("collapsing non-human activity", () => {
         messageRow("c", 2, { scheduledTaskId: ScheduledTaskId.make("task-1") }),
       ]),
     ).toBe("1 agent update and 1 system notice and 1 automation");
+  });
+
+  it("keeps a plan, a render and viewed images on screen", () => {
+    const plan: MessagesTimelineRow = {
+      kind: "proposed-plan",
+      id: "plan-1",
+      createdAt: time(7),
+      proposedPlan: {
+        id: "plan-1" as never,
+        runId,
+        planMarkdown: "Do the thing",
+        status: "active",
+        createdAt: time(7),
+        updatedAt: time(7),
+      },
+    };
+    const images: MessagesTimelineRow = {
+      kind: "viewed-images",
+      id: "images-1",
+      createdAt: time(8),
+      paths: ["shot.png"],
+    };
+    const withCards = [rows[0]!, plan, rows[2]!, images, rows[5]!];
+    expect(collapseTimelineActivity(withCards, new Set()).map((row) => row.id)).toEqual([
+      "kameron",
+      "plan-1",
+      "activity:plan-1",
+      "images-1",
+      "jeff",
+    ]);
+  });
+
+  it("names the pill after the message it follows, so streaming rows do not rename it", () => {
+    const grown = [...rows.slice(0, 5), workRow("work-2", 9), ...rows.slice(5)];
+    expect(collapseTimelineActivity(grown, new Set()).map((row) => row.id)).toEqual(
+      collapseTimelineActivity(rows, new Set()).map((row) => row.id),
+    );
+  });
+
+  it("finds the pill hiding a row", () => {
+    expect(activityPillIdForEntry(rows, "work-1")).toBe("activity:reply");
+    expect(activityPillIdForEntry(rows, "system-1")).toBe("activity:jeff");
+    expect(activityPillIdForEntry(rows, "kameron")).toBeUndefined();
+    expect(activityPillIdForEntry(rows.slice(2, 5), "agent-2")).toBe("activity:agent-1");
   });
 
   it("leaves a human conversation untouched", () => {

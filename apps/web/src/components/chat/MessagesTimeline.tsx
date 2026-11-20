@@ -88,6 +88,7 @@ import {
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   collapseTimelineActivity,
+  activityPillIdForEntry,
   type MessagesTimelineRow,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
@@ -572,14 +573,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // Turn and attempt folds reveal later rows rather than growing their own row.
   const onToggleActivity = (id: string) => {
     preserveDisclosurePosition(id);
-    setExpandedActivityIds((existing) => {
-      const next = new Set(existing);
-      if (next.has(id)) {
-        next.delete(id);
+    setExpandedActivity((existing) => {
+      const ids = new Set(existing.threadKey === listIdentityKey ? existing.ids : []);
+      if (ids.has(id)) {
+        ids.delete(id);
       } else {
-        next.add(id);
+        ids.add(id);
       }
-      return next;
+      return { threadKey: listIdentityKey, ids };
     });
   };
   const onToggleTurnFold = (runId: RunId) => {
@@ -783,12 +784,41 @@ const ConversationTimeline = memo(function ConversationTimeline({
   });
   const stableRows = useStableRows(rawRows, listIdentityKey);
   const senderRows = useSenderFilteredRows(stableRows, findSender);
-  const [expandedActivityIds, setExpandedActivityIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const rows = collapseActivity
-    ? collapseTimelineActivity(senderRows, expandedActivityIds)
-    : senderRows;
+  // A sender filter already removed every other message, so collapsing what it
+  // kept would hide the very rows it was asked to show.
+  const collapseRows = collapseActivity && findSender === null;
+  const [expandedActivity, setExpandedActivity] = useState<{
+    readonly threadKey: string;
+    readonly ids: ReadonlySet<string>;
+  }>(() => ({ threadKey: listIdentityKey, ids: new Set() }));
+  // Pill ids repeat across threads (`activity:` plus a message id can coincide,
+  // and a live turn's rows share constant ids), so expansion belongs to one thread.
+  const expandedActivityIds =
+    expandedActivity.threadKey === listIdentityKey ? expandedActivity.ids : new Set<string>();
+  if (collapseRows && expandedActivity.threadKey !== listIdentityKey) {
+    setExpandedActivity({ threadKey: listIdentityKey, ids: expandedActivityIds });
+  }
+  // A search hit or a restored scroll position inside a collapsed run opens that
+  // run, the way a find match opens the turn fold that hides it.
+  const revealedEntryId =
+    (findActive ? activeFindMatch?.entryId : undefined) ??
+    (restoringThreadPosition && rememberedPosition?.atEnd === false
+      ? rememberedPosition.rowId
+      : undefined);
+  const revealedPillId =
+    collapseRows && revealedEntryId !== undefined
+      ? activityPillIdForEntry(senderRows, revealedEntryId)
+      : undefined;
+  if (
+    revealedPillId !== undefined &&
+    expandedActivity.threadKey === listIdentityKey &&
+    !expandedActivity.ids.has(revealedPillId)
+  ) {
+    const ids = new Set(expandedActivity.ids);
+    ids.add(revealedPillId);
+    setExpandedActivity({ threadKey: listIdentityKey, ids });
+  }
+  const rows = collapseRows ? collapseTimelineActivity(senderRows, expandedActivityIds) : senderRows;
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =
