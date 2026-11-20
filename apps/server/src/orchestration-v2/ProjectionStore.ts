@@ -8447,6 +8447,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND json_extract(parent.payload_json, '$.archivedAt') IS NULL
                     AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
                 )
+                OR EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_subagents child_task
+                  WHERE child_task.child_thread_id = t.thread_id
+                    AND json_type(child_task.payload_json, '$.result') = 'text'
+                    AND COALESCE(child_task.completion_delivery_state, '') NOT IN ('pending', 'claimed')
+                )
               )
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active

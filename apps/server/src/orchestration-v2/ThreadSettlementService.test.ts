@@ -8,6 +8,8 @@ import {
   ProviderInstanceId,
   MessageId,
   RuntimeRequestId,
+  NodeId,
+  ProviderDriverKind,
   RunId,
   type OrchestrationV2Run,
   ThreadId,
@@ -230,6 +232,109 @@ describe("isAutoSettlementCandidate", () => {
         NOW_MS,
       ),
     ).toBe(true);
+  });
+
+  it("never settles a founder inbox or a failed agent-only thread", () => {
+    for (const audience of ["kameron", "jeff", "shared"] as const) {
+      expect(
+        ThreadSettlementService.isAutoSettlementCandidate(
+          shell({
+            status: "completed",
+            inbox: makeThreadInbox({
+              actor:
+                audience === "shared"
+                  ? { kind: "agent", id: "lane" }
+                  : { kind: "human", id: audience },
+              routing: { audience, attentionKind: audience === "shared" ? "FYI" : "action" },
+            }),
+          }),
+          NOW_MS,
+        ),
+      ).toBe(false);
+    }
+    expect(
+      ThreadSettlementService.isAutoSettlementCandidate(
+        shell({
+          status: "failed",
+          inbox: makeThreadInbox({
+            actor: { kind: "agent", id: "lane" },
+            routing: {
+              audience: "agent-only",
+              assignee: { kind: "agent", id: "lane" },
+              attentionKind: "background",
+            },
+          }),
+        }),
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("settlesFinishedAgentWork", () => {
+  const agent = makeThreadInbox({
+    actor: { kind: "agent", id: "lane" },
+    routing: {
+      audience: "agent-only",
+      assignee: { kind: "agent", id: "lane" },
+      attentionKind: "background",
+    },
+  });
+  const finished = (status: SettlementShell["status"], overrides: Partial<SettlementShell> = {}) =>
+    shell({ inbox: agent, status, ...overrides });
+
+  it("settles completed, interrupted and cancelled agent-only work only", () => {
+    for (const status of ["completed", "interrupted", "cancelled"] as const) {
+      expect(ThreadSettlementService.settlesFinishedAgentWork(finished(status))).toBe(true);
+    }
+    for (const status of ["failed", "idle", "queued", "running", "rolled_back"] as const) {
+      expect(ThreadSettlementService.settlesFinishedAgentWork(finished(status))).toBe(false);
+    }
+    for (const audience of ["kameron", "jeff", "shared"] as const) {
+      expect(
+        ThreadSettlementService.settlesFinishedAgentWork(
+          finished("completed", {
+            inbox: makeThreadInbox({
+              actor: { kind: "agent", id: "lane" },
+              routing: { audience, attentionKind: "background" },
+            }),
+          }),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      ThreadSettlementService.settlesFinishedAgentWork(
+        finished("completed", {
+          pendingBackgroundTasks: [
+            { taskId: "pull-request-watch:github.com/acme/app#1", kind: "monitor" },
+          ],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      ThreadSettlementService.settlesFinishedAgentWork(
+        finished("completed", {
+          pendingBackgroundTasks: [{ taskId: "tail", kind: "monitor", description: "logs" }],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      ThreadSettlementService.settlesFinishedAgentWork(
+        finished("completed", {
+          pendingBackgroundTasks: [{ taskId: "child", kind: "subagent", description: "Review" }],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      ThreadSettlementService.settlesFinishedAgentWork(
+        finished("completed", {
+          standing: { name: "Ops", role: null, avatarId: "bolt", accent: "sky" },
+        }),
+      ),
+    ).toBe(false);
+    expect(ThreadSettlementService.settlesFinishedAgentWork(shell({ status: "completed" }))).toBe(
+      false,
+    );
   });
 });
 
@@ -893,6 +998,309 @@ describe("ThreadSettlementServiceV2 worker", () => {
       }).pipe(Effect.provide(fixture.layer));
     }),
   );
+
+  it.effect("startup sweep settles finished agent-only threads and leaves holds unsettled", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const agent = makeThreadInbox({
+        actor: { kind: "agent", id: "lane" },
+        routing: {
+          audience: "agent-only",
+          assignee: { kind: "agent", id: "lane" },
+          attentionKind: "background",
+        },
+      });
+      const done = (
+        id: string,
+        status: SettlementShell["status"],
+        overrides: Partial<SettlementShell> = {},
+      ) =>
+        makeThread(id, {
+          inbox: agent,
+          status,
+          latestRunId: RunId.make(`run:${id}`),
+          latestRunCompletedAt: DateTime.makeUnsafe(NOW),
+          ...overrides,
+        });
+      const completed = done("completed", "completed");
+      const interrupted = done("interrupted", "interrupted");
+      const cancelled = done("cancelled", "cancelled");
+      const failed = done("failed", "failed");
+      const watched = done("watched", "completed", {
+        pendingBackgroundTasks: [
+          { taskId: "pull-request-watch:github.com/acme/app#1", kind: "monitor" },
+        ],
+      });
+      const monitored = done("monitored", "completed", {
+        pendingBackgroundTasks: [{ taskId: "tail", kind: "monitor", description: "logs" }],
+      });
+      const snoozed = done("snoozed", "completed", {
+        snoozedUntil: DateTime.makeUnsafe(Date.parse(NOW) + 60_000),
+        snoozedAt: DateTime.makeUnsafe(Date.parse(NOW) - 60_000),
+      });
+      const queued = done("queued", "queued");
+      const queuedMessage = done("queued-message", "completed", {
+        latestUserMessageAt: DateTime.makeUnsafe(NOW),
+        latestRunRequestedAt: DateTime.makeUnsafe(Date.parse(NOW) - 60_000),
+        latestRunStartedAt: DateTime.makeUnsafe(Date.parse(NOW) - 60_000),
+        latestRunCompletedAt: DateTime.makeUnsafe(Date.parse(NOW) - 60_000),
+      });
+      const asked = done("asked", "completed", {
+        pendingRuntimeRequest: {
+          id: RuntimeRequestId.make("request:asked"),
+          kind: "user_input",
+          createdAt: DateTime.makeUnsafe(NOW),
+        },
+      });
+      const idle = makeThread("idle-agent", { inbox: agent, status: "idle" });
+      const already = done("already", "completed", { settledOverride: "settled" });
+      const standing = done("standing", "completed", {
+        standing: { name: "Ops", role: null, avatarId: "bolt", accent: "sky" },
+      });
+      const human = (id: "kameron" | "jeff" | "shared") =>
+        done(id, "completed", {
+          inbox: makeThreadInbox({
+            actor: id === "shared" ? { kind: "agent", id: "lane" } : { kind: "human", id },
+            routing: { audience: id, attentionKind: id === "shared" ? "FYI" : "action" },
+          }),
+        });
+      const threads = [
+        completed,
+        interrupted,
+        cancelled,
+        failed,
+        watched,
+        monitored,
+        snoozed,
+        queued,
+        queuedMessage,
+        asked,
+        idle,
+        already,
+        standing,
+        human("kameron"),
+        human("jeff"),
+        human("shared"),
+      ];
+      const fixture = yield* makeHarness({
+        snapshot: makeSnapshot(threads),
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          sidebarAutoSettleAfterDays: null,
+          sidebarAutoSettleOnMerge: false,
+        },
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+        yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+        expect(
+          (yield* Ref.get(fixture.commands)).map((command) => command.threadId).toSorted(),
+        ).toEqual([cancelled.id, completed.id, interrupted.id].toSorted());
+        for (const command of yield* Ref.get(fixture.commands)) {
+          expect(command.settledAt).toBeUndefined();
+        }
+        const settledIds = new Set([completed.id, interrupted.id, cancelled.id]);
+        yield* Ref.update(fixture.snapshots, (snapshot) => ({
+          ...snapshot,
+          threads: snapshot.threads.map((thread) =>
+            thread.id === watched.id
+              ? { ...thread, pendingBackgroundTasks: [] }
+              : settledIds.has(thread.id)
+                ? { ...thread, settledOverride: "settled" as const }
+                : thread,
+          ),
+        }));
+        yield* fixture.updateSettings({ sidebarAutoSettleAfterDays: 99 });
+        yield* Queue.take(fixture.snapshotReads);
+        yield* service.drain;
+        expect(
+          (yield* Ref.get(fixture.commands)).map((command) => command.threadId).toSorted(),
+        ).toEqual([cancelled.id, completed.id, interrupted.id, watched.id].toSorted());
+        expect(yield* Ref.get(fixture.branchCalls)).toEqual([]);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
+  it.effect(
+    "day and merge settings still leave founder inboxes and failed agent work unsettled",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const agent = makeThreadInbox({
+          actor: { kind: "agent", id: "lane" },
+          routing: {
+            audience: "agent-only",
+            assignee: { kind: "agent", id: "lane" },
+            attentionKind: "background",
+          },
+        });
+        const done = (id: string, status: SettlementShell["status"], inbox = agent) =>
+          makeThread(id, {
+            inbox,
+            status,
+            latestRunId: RunId.make(`run:${id}`),
+            latestRunCompletedAt: DateTime.makeUnsafe("2026-08-20T00:00:00.000Z"),
+          });
+        const founder = (id: "kameron" | "jeff" | "shared") =>
+          done(
+            id,
+            "completed",
+            makeThreadInbox({
+              actor: id === "shared" ? { kind: "agent", id: "lane" } : { kind: "human", id },
+              routing: { audience: id, attentionKind: id === "shared" ? "FYI" : "action" },
+            }),
+          );
+        const finished = done("finished-agent", "completed");
+        const failed = done("failed-agent", "failed");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            finished,
+            failed,
+            founder("kameron"),
+            founder("jeff"),
+            founder("shared"),
+          ]),
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          expect((yield* Ref.get(fixture.commands)).map((command) => command.threadId)).toEqual([
+            finished.id,
+          ]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+  );
+
+  it.effect(
+    "settles a finished subagent when its parent has the result and keeps a failed one",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const parent = appThread("result-parent", null);
+        const childOf = (id: string) => ({
+          ...appThread(id, null),
+          lineage: {
+            rootThreadId: parent.id,
+            parentThreadId: parent.id,
+            relationshipToParent: "subagent" as const,
+          },
+        });
+        const finished = childOf("result-finished");
+        const failed = childOf("result-failed");
+        const marker = appThread("result-marker", "settled");
+        for (const thread of [parent, finished, failed, marker]) {
+          yield* store.apply({
+            type: "thread.created",
+            id: EventId.make(`created:${thread.id}`),
+            threadId: thread.id,
+            occurredAt: thread.createdAt,
+            payload: thread,
+          });
+        }
+        const run = (threadId: ThreadId, status: "completed" | "failed"): OrchestrationV2Run => ({
+          id: RunId.make(`run:${threadId}`),
+          threadId,
+          ordinal: 1,
+          providerInstanceId: parent.providerInstanceId,
+          modelSelection: parent.modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make(`message:${threadId}`),
+          rootNodeId: null,
+          activeAttemptId: null,
+          status,
+          requestedAt: DateTime.makeUnsafe(NOW),
+          startedAt: DateTime.makeUnsafe(NOW),
+          completedAt: DateTime.makeUnsafe(NOW),
+          checkpointId: null,
+          contextHandoffId: null,
+        });
+        for (const payload of [run(finished.id, "completed"), run(failed.id, "failed")]) {
+          yield* store.apply({
+            type: "run.created",
+            id: EventId.make(`created:${payload.id}`),
+            threadId: payload.threadId,
+            occurredAt: DateTime.makeUnsafe(NOW),
+            payload,
+          });
+        }
+        const task = (thread: OrchestrationV2AppThread) => {
+          const id = NodeId.make(`node:${thread.id}`);
+          return {
+            id: EventId.make(`event:${thread.id}`),
+            type: "subagent.updated" as const,
+            threadId: parent.id,
+            nodeId: id,
+            driver: ProviderDriverKind.make("codex"),
+            providerInstanceId: parent.providerInstanceId,
+            occurredAt: DateTime.makeUnsafe(NOW),
+            payload: {
+              id,
+              threadId: parent.id,
+              runId: null,
+              parentNodeId: id,
+              origin: "app_owned" as const,
+              createdBy: "agent" as const,
+              driver: ProviderDriverKind.make("codex"),
+              providerInstanceId: parent.providerInstanceId,
+              providerThreadId: null,
+              childThreadId: thread.id,
+              nativeTaskRef: null,
+              prompt: "Do the work",
+              title: thread.title,
+              model: null,
+              completionDelivery: { state: "delivered" as const, observedByRunId: null },
+              status: "completed" as const,
+              result: "done",
+              startedAt: DateTime.makeUnsafe(NOW),
+              completedAt: DateTime.makeUnsafe(NOW),
+              updatedAt: DateTime.makeUnsafe(NOW),
+            },
+          };
+        };
+        const finishedTask = task(finished);
+        const failedTask = task(failed);
+        const done = yield* Deferred.make<void>();
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([]),
+          projections: store,
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleOnMerge: false,
+          },
+          onDispatch: (command) =>
+            store.getThread(command.threadId).pipe(
+              Effect.flatMap((thread) =>
+                store.apply(
+                  settledEvent({
+                    ...thread,
+                    settledOverride: "settled",
+                    settledAt: DateTime.makeUnsafe(NOW),
+                  }),
+                ),
+              ),
+              Effect.andThen(Deferred.succeed(done, undefined).pipe(Effect.ignore)),
+              Effect.orDie,
+            ),
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          expect(yield* Ref.get(fixture.commands)).toEqual([]);
+          yield* store.apply(finishedTask);
+          yield* store.apply(failedTask);
+          yield* fixture.publishEvent(finishedTask);
+          yield* fixture.publishEvent(failedTask);
+          yield* Deferred.await(done);
+          yield* service.drain;
+          expect((yield* Ref.get(fixture.commands)).map((command) => command.threadId)).toEqual([
+            finished.id,
+          ]);
+        }).pipe(Effect.provide(fixture.layer));
+      }).pipe(Effect.provide(projectionStoreSql)),
+  );
+
   it.effect("settles a merged pull request stored only in the thread links", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.parse(NOW));
