@@ -324,6 +324,7 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.visited":
     case "thread.tags-updated":
     case "thread.standing-updated":
+    case "thread.delegation-nudge-updated":
     case "thread.marked-unread":
       return { ...projection, thread: event.payload };
     case "thread.visit-recorded":
@@ -352,6 +353,13 @@ export function applyOrchestrationV2ProjectionEvent(
                 restartCancelledBackgroundWork: event.payload.restartCancelledBackgroundWork,
               }
             : run,
+        ),
+      };
+    case "run.delegation-nudge-recorded":
+      return {
+        ...base,
+        runs: base.runs.map((run) =>
+          run.id === event.payload.runId ? { ...run, delegationNudge: event.payload.stats } : run,
         ),
       };
     case "run-attempt.created":

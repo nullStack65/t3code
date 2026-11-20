@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { AuthMcpClientAccess } from "./auth.ts";
+import { RunDelegationNudgeStats } from "./delegationNudge.ts";
 import { PeerLinkAppAccess } from "./peerLink.ts";
 import {
   ContextTransferId,
@@ -536,6 +537,8 @@ export const OrchestratorMcpThreadRun = Schema.Struct({
   requestedAt: IsoDateTime,
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),
+  /** Present once the thread's delegation nudge counted this run. */
+  delegationNudge: Schema.optional(RunDelegationNudgeStats),
 });
 export type OrchestratorMcpThreadRun = typeof OrchestratorMcpThreadRun.Type;
 

@@ -601,6 +601,22 @@ export const setThreadStanding = Effect.fn("EnvironmentCommands.setThreadStandin
   });
 });
 
+export interface SetThreadDelegationNudgeInput extends ThreadCommandInput {
+  readonly enabled: boolean;
+  readonly thresholds?: ReadonlyArray<number>;
+}
+export const setThreadDelegationNudge = Effect.fn("EnvironmentCommands.setThreadDelegationNudge")(
+  function* (input: SetThreadDelegationNudgeInput) {
+    return yield* dispatch({
+      type: "thread.delegation-nudge.set",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      enabled: input.enabled,
+      ...(input.thresholds === undefined ? {} : { thresholds: [...input.thresholds] }),
+    });
+  },
+);
+
 export interface SetThreadAutoSettleInput extends ThreadCommandInput {
   readonly enabled: boolean;
 }
