@@ -1,6 +1,7 @@
 import {
   getPromptControlledTraits,
   getTraitSelectChange,
+  optionsForModelSwitch,
 } from "@t3tools/client-runtime/model-traits";
 import * as Dialog from "../../components/ui/Dialog";
 import { createV5StackNavigator as createNativeStackNavigator } from "../../native/createV5StackNavigator";
@@ -1410,14 +1411,21 @@ export function ExistingThreadSettingsRouteScreen({
       prompt={prompt}
       onPromptChange={(text) => setComposerDraftText(draftKey, text)}
       reportedModelSelection={reportedModelSelection}
-      onSelectModel={(option) =>
+      onSelectModel={(option) => {
+        const remembered = withRememberedModelOptions(option.selection);
+        const options = optionsForModelSwitch({
+          fromOptions: modelSelection.options,
+          fromCapabilities: currentModelOption?.capabilities,
+          toCapabilities: option.capabilities,
+          baseOptions: remembered.options,
+        });
+        const selection = options
+          ? { ...option.selection, options: [...options] }
+          : { instanceId: option.selection.instanceId, model: option.selection.model };
         updateModelSelection(
-          withStoredThreadModelOptions(
-            withRememberedModelOptions(option.selection),
-            selectedThread.modelSelection,
-          ),
-        )
-      }
+          withStoredThreadModelOptions(selection, selectedThread.modelSelection),
+        );
+      }}
       restoreSelection={withRememberedModelOptions}
       optionDescriptors={resolveProviderOptionDescriptors({
         capabilities: currentModelOption?.capabilities,
@@ -1453,7 +1461,7 @@ export function NewTaskThreadSettingsRouteScreen() {
       selectedModel={flow.selectedModel}
       prompt={flow.prompt}
       onPromptChange={flow.setPrompt}
-      onSelectModel={(option) => flow.setSelectedModelKey(option.key, option.selection.options)}
+      onSelectModel={(option) => flow.setSelectedModelKey(option.key)}
       restoreSelection={withRememberedModelOptions}
       optionDescriptors={optionDescriptors}
       onUpdateOptionSelections={flow.setSelectedModelOptions}

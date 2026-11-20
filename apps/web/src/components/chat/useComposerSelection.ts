@@ -17,7 +17,9 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { type SetStateAction } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toastManager } from "../ui/toast";
+import { optionsForModelSwitch } from "@t3tools/client-runtime/model-traits";
 import { resolveAppModelSelectionForInstance } from "../../modelSelection";
+import { getProviderModelCapabilities } from "../../providerModels";
 import {
   draftModelSelectionApplies,
   resolveNewDraftStartFromOrigin,
@@ -206,9 +208,26 @@ export function useComposerSelection(input: ComposerSelectionInput) {
             )
           ? threadSelection.options
           : undefined;
+    const fromProvider = providerStatuses.find(
+      (snapshot) => snapshot.instanceId === shownSelection.instanceId,
+    );
+    const nextOptions = optionsForModelSwitch({
+      fromOptions: shownSelection.options,
+      fromCapabilities: fromProvider
+        ? getProviderModelCapabilities(
+            fromProvider.models,
+            shownSelection.model,
+            fromProvider.driver,
+          )
+        : null,
+      toCapabilities: entry
+        ? getProviderModelCapabilities(entry.models, resolvedModel, entry.driver)
+        : null,
+      baseOptions: pickOptions,
+    });
     const nextModelSelection: ModelSelection =
-      pickOptions !== undefined && pickOptions.length > 0
-        ? { instanceId, model: resolvedModel, options: [...pickOptions] }
+      nextOptions !== undefined && nextOptions.length > 0
+        ? { instanceId, model: resolvedModel, options: [...nextOptions] }
         : { instanceId, model: resolvedModel };
     const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
       hasStartedSession: activeRuntime !== null,

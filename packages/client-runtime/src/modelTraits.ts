@@ -1,8 +1,14 @@
-import type { ModelSelection, ProviderOptionDescriptor } from "@t3tools/contracts";
+import type {
+  ModelCapabilities,
+  ModelSelection,
+  ProviderOptionDescriptor,
+  ProviderOptionSelection,
+} from "@t3tools/contracts";
 import {
   buildProviderOptionSelectionsFromDescriptors,
   getProviderOptionCurrentLabel,
   getProviderOptionCurrentValue,
+  getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
 } from "@t3tools/shared/model";
 import { REASONING_EFFORT_OPTION_IDS } from "./state/threadExecution.ts";
@@ -185,4 +191,100 @@ export function buildTraitsTriggerDisplay(input: {
     }
   }
   return { label: labels.join(" · "), speedLabel, ultracode };
+}
+
+function reasoningDescriptor(
+  capabilities: ModelCapabilities | null | undefined,
+): Extract<ProviderOptionDescriptor, { type: "select" }> | null {
+  return capabilities?.optionDescriptors?.find(isReasoningSelect) ?? null;
+}
+
+function explicitReasoningValue(
+  options: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): string | null {
+  if (!options) return null;
+  for (const id of REASONING_DESCRIPTOR_IDS) {
+    const value = options.find(
+      (option) => option.id === id && typeof option.value === "string",
+    )?.value;
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+export function statedReasoningEffort(
+  options: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+  capabilities: ModelCapabilities | null | undefined,
+): string | null {
+  const descriptor = reasoningDescriptor(capabilities);
+  if (!descriptor || !capabilities?.optionDescriptors?.length) {
+    return explicitReasoningValue(options);
+  }
+  const resolved = getProviderOptionDescriptors({
+    caps: capabilities,
+    selections: options,
+  }).find((candidate) => candidate.id === descriptor.id);
+  if (!resolved || resolved.type !== "select") return explicitReasoningValue(options);
+  const value = getProviderOptionCurrentValue(resolved);
+  return typeof value === "string" ? value : null;
+}
+
+export function resolveReasoningEffortForModel(
+  effort: string | null,
+  capabilities: ModelCapabilities | null | undefined,
+): { readonly id: string; readonly value: string; readonly kept: boolean } | null {
+  const descriptor = reasoningDescriptor(capabilities);
+  if (!descriptor) return null;
+  const choices = selectableProviderOptionChoices(descriptor);
+  if (effort && choices.some((choice) => choice.id === effort)) {
+    return { id: descriptor.id, value: effort, kept: true };
+  }
+  const fallback =
+    choices.find((choice) => choice.isDefault)?.id ??
+    (descriptor.currentValue && choices.some((choice) => choice.id === descriptor.currentValue)
+      ? descriptor.currentValue
+      : undefined);
+  if (!fallback) return null;
+  return { id: descriptor.id, value: fallback, kept: false };
+}
+
+function isCarriedReasoningOption(
+  id: string,
+  capabilities: ModelCapabilities | null | undefined,
+): boolean {
+  const descriptor = capabilities?.optionDescriptors?.find((candidate) => candidate.id === id);
+  if (!descriptor) return REASONING_DESCRIPTOR_IDS.has(id);
+  return isReasoningSelect(descriptor);
+}
+
+export function optionsForModelSwitch(input: {
+  readonly fromOptions: ReadonlyArray<ProviderOptionSelection> | null | undefined;
+  readonly fromCapabilities: ModelCapabilities | null | undefined;
+  readonly toCapabilities: ModelCapabilities | null | undefined;
+  readonly baseOptions?: ReadonlyArray<ProviderOptionSelection> | null | undefined;
+}): ReadonlyArray<ProviderOptionSelection> | undefined {
+  const descriptors = input.toCapabilities?.optionDescriptors;
+  if (!descriptors || descriptors.length === 0) {
+    return input.baseOptions && input.baseOptions.length > 0 ? [...input.baseOptions] : undefined;
+  }
+  const next: Array<ProviderOptionSelection> = [];
+  for (const option of input.baseOptions ?? []) {
+    if (isCarriedReasoningOption(option.id, input.toCapabilities)) continue;
+    const descriptor = descriptors.find((candidate) => candidate.id === option.id);
+    if (!descriptor) continue;
+    if (descriptor.type === "boolean") {
+      if (typeof option.value === "boolean") next.push({ id: option.id, value: option.value });
+      continue;
+    }
+    if (typeof option.value !== "string") continue;
+    if (descriptor.promptInjectedValues?.includes(option.value)) continue;
+    if (!descriptor.options.some((choice) => choice.id === option.value)) continue;
+    next.push({ id: option.id, value: option.value });
+  }
+  const resolved = resolveReasoningEffortForModel(
+    statedReasoningEffort(input.fromOptions, input.fromCapabilities),
+    input.toCapabilities,
+  );
+  if (resolved?.kept) next.push({ id: resolved.id, value: resolved.value });
+  return next.length > 0 ? next : undefined;
 }
