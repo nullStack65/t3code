@@ -159,7 +159,6 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import {
-  useEnvironmentIdentities,
   useConnectedEnvironmentIds,
   useEnvironmentMachines,
   usePrimaryEnvironmentId,
@@ -168,10 +167,13 @@ import {
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useDelegatedUnderParent,
-  useProjects,
   useServerConfigs,
-  useQuietThreadShells,
 } from "../state/entities";
+import {
+  useSidebarEnvironmentIdentities,
+  useSidebarProjects,
+  useSidebarThreadShells,
+} from "../state/linkedSidebar";
 import { environmentPresentations } from "../state/presentation";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
@@ -868,8 +870,8 @@ function isOptimisticDropReleased(input: {
 
 // Build maps in a hook so the compiler can prove they are frozen and cache them.
 function useSidebarLookups() {
-  const projects = useProjects();
-  const environments = useEnvironmentIdentities();
+  const projects = useSidebarProjects();
+  const environments = useSidebarEnvironmentIdentities();
   const serverConfigs = useServerConfigs();
   const providerEntriesByEnvironment = useAtomValue(sidebarProviderEntriesAtom);
   const projectGroups = useSidebarProjectGroups();
@@ -1159,7 +1161,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ),
           ),
         );
-  const threads = useQuietThreadShells();
+  const threads = useSidebarThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const threadListFilter = useClientSettings(threadListFilterOf);
   const founderByEnvironmentId = useClientSettings((settings) => settings.founderByEnvironmentId);

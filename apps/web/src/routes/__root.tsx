@@ -63,6 +63,7 @@ import { isChunkLoadError } from "../lib/chunkReloadGuard";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 import { AppConnectionReporter, LinkOnConnectCoordinator } from "../state/peerLinks";
 import { AutoAddLinkedEnvironments } from "../state/knownEnvironments";
+import { LinkedSidebarFromHosts } from "../state/linkedSidebarHost";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -201,6 +202,7 @@ function RootRouteBranch() {
       <AppConnectionReporter />
       <LinkOnConnectCoordinator />
       <AutoAddLinkedEnvironments />
+      <LinkedSidebarFromHosts />
       <AddProjectToMachineDialogHost />
       <UseInAnotherAppDialogHost />
       {import.meta.env.DEV && primaryEnvironmentAuthenticated ? <DevReplayHost /> : null}

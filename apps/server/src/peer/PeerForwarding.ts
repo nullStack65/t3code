@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type LinkedSidebarResult,
   OrchestratorMcpFailure,
   type OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpLinkAppPairingResult,
@@ -29,6 +30,7 @@ import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { type CallerLimits, readCaller, unavailable } from "../mcp/threadAccess.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import { readLinkedSidebar } from "./linkedSidebar.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 
@@ -122,6 +124,9 @@ export class PeerForwarding extends Context.Service<
     readonly links: (
       scope: Scope,
     ) => Effect.Effect<OrchestratorMcpEnvironmentLinksResult, OrchestratorMcpFailure>;
+    readonly linkedSidebar: (input: {
+      readonly catalogEnvironmentIds?: ReadonlyArray<EnvironmentId> | undefined;
+    }) => Effect.Effect<LinkedSidebarResult, PeerLinkError>;
   }
 >()("t3/peer/PeerForwarding") {}
 
@@ -442,6 +447,9 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const linkedSidebar: PeerForwarding["Service"]["linkedSidebar"] = (input) =>
+    readLinkedSidebar({ links, peers, catalogEnvironmentIds: input.catalogEnvironmentIds });
+
   return PeerForwarding.of({
     addToApp,
     call,
@@ -450,6 +458,7 @@ const make = Effect.gen(function* () {
     interruptThread,
     waitForThread,
     links: listLinks,
+    linkedSidebar,
   });
 });
 

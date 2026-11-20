@@ -14,7 +14,8 @@ import type { ReactNode } from "react";
 
 import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { useConnectedEnvironmentIds, useEnvironmentIdentities } from "../../state/environments";
+import { useConnectedEnvironmentIds } from "../../state/environments";
+import { useSidebarEnvironmentIdentities } from "../../state/linkedSidebar";
 import {
   Menu,
   MenuCheckboxItem,
@@ -59,7 +60,7 @@ export function SidebarThreadFilterMenu<T extends CountedThread>({
 }) {
   const filter = useClientSettings(threadListFilterOf);
   const owner = useClientSettings((settings) => settings.founderInboxOwner);
-  const environments = useEnvironmentIdentities();
+  const environments = useSidebarEnvironmentIdentities();
   const environmentIds = environments.map((environment) => environment.environmentId);
   const changed = changedThreadListFilters(filter, owner, environmentIds);
   const hiddenCount = environmentIds.filter((id) =>
