@@ -7,6 +7,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -42,6 +43,17 @@ function queueEntry(
     queuedRunId: run.id,
     text: characters.slice(0, limit).join(""),
     truncated: characters.length > limit,
+    ...(run.delivery === undefined
+      ? {}
+      : {
+          deliveryClass: run.delivery.class,
+          ...(run.delivery.coalesceKey === undefined
+            ? {}
+            : { coalesceKey: run.delivery.coalesceKey }),
+          ...(run.delivery.expiresAt === undefined
+            ? {}
+            : { expiresAt: DateTime.formatIso(run.delivery.expiresAt) }),
+        }),
   };
 }
 const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (

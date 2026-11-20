@@ -41,6 +41,8 @@ import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2DelegatedFrom,
+  OrchestrationV2DeliveryClass,
+  OrchestrationV2DigestCategory,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2WorkerAlert,
@@ -590,6 +592,12 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
     }),
   ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+  deliveryClass: Schema.optional(OrchestrationV2DeliveryClass),
+  coalesceKey: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  expiresAt: Schema.optional(
+    IsoDateTime.annotate({ description: "ISO time; an undelivered message is dropped then." }),
+  ),
+  digestCategory: Schema.optional(OrchestrationV2DigestCategory),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
 
@@ -601,6 +609,7 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   taskId: Schema.optional(NodeId),
   status: OrchestrationV2RunStatus,
   delivery: Schema.Literals(["started", "queued", "steered", "restarted"]),
+  deliveryClass: Schema.optional(OrchestrationV2DeliveryClass),
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 

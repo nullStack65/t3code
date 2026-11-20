@@ -1,5 +1,6 @@
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
+import { formatDigestForProvider } from "@t3tools/shared/messageDigest";
 import { formatSeenMarkerForProvider } from "@t3tools/shared/seenMarker";
 import {
   CommandId,
@@ -911,12 +912,15 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
-      const userText = formatSeenMarkerForProvider(
-        projectComposerContextForProvider({
-          text: providerMessage.text,
-          records: providerMessage.context?.records ?? [],
-        }),
-        providerMessage.seenMarker,
+      const userText = formatDigestForProvider(
+        formatSeenMarkerForProvider(
+          projectComposerContextForProvider({
+            text: providerMessage.text,
+            records: providerMessage.context?.records ?? [],
+          }),
+          providerMessage.seenMarker,
+        ),
+        run.digest,
       );
       // Native goal commands go verbatim; handoff history waits a turn.
       const goalDriver =

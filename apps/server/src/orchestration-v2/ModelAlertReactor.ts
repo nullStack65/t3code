@@ -4,6 +4,7 @@ import {
   isListedThreadLineage,
   MessageId,
   type ModelAlertWatcher,
+  type OrchestrationV2DigestCategory,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
@@ -736,6 +737,33 @@ export const watcherAlertMessage = (alert: WatcherAlert) => {
   }
 };
 
+const ALERT_DIGEST_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Alerts ride in the watcher's next digest; a newer alert on the same subject replaces an older one. */
+function alertDelivery(alert: WatcherAlert): {
+  readonly coalesceKey: string;
+  readonly category: OrchestrationV2DigestCategory;
+} {
+  switch (alert.type) {
+    case "peer-link-renewal":
+      return { coalesceKey: `${alert.type}:${alert.linkedEnvironmentId}`, category: "alert" };
+    case "usage-limit-incident":
+      return { coalesceKey: `${alert.type}:${alert.groupKey}`, category: "alert" };
+    case "model-degraded":
+      return { coalesceKey: `${alert.type}:${alert.threadId}`, category: "alert" };
+    case "thread-event":
+      return {
+        coalesceKey: `${alert.type}:${alert.kind}:${alert.threadId}`,
+        category:
+          alert.kind === "lane-ended"
+            ? "lane_result"
+            : alert.kind === "needs-person"
+              ? "decision_needed"
+              : "alert",
+      };
+  }
+}
+
 /**
  * Puts an alert in the watcher thread, here or on the linked machine that owns it. The retry key is
  * one per alert and watcher, so a retry after a lost answer sends once.
@@ -754,6 +782,8 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   // Run ids can be long; a retry key must stay under the 256 characters the peer accepts.
   const identity = `${alert.id}\n${watcher.environmentId}\n${watcher.threadId}`;
   const key = `${alert.type === "model-degraded" ? "model-alert" : alert.type}:${yield* deps.sha256Hex(identity)}`;
+  const { coalesceKey, category } = alertDelivery(alert);
+  const expiresAt = DateTime.add(yield* DateTime.now, { milliseconds: ALERT_DIGEST_TTL_MS });
   if (watcher.environmentId === here) {
     yield* deps.dispatch({
       type: "message.dispatch",
@@ -763,6 +793,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
       text: message,
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
+      delivery: { class: "digest", coalesceKey, expiresAt, category },
       createdBy: "agent",
       creationSource: "server",
     });
@@ -771,7 +802,16 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   yield* deps.call({
     environmentId: watcher.environmentId,
     tool: "t3_thread_send",
-    arguments: { threadId: watcher.threadId, message, mode: "queue", clientRequestId: key },
+    arguments: {
+      threadId: watcher.threadId,
+      message,
+      mode: "queue",
+      clientRequestId: key,
+      deliveryClass: "digest",
+      coalesceKey,
+      expiresAt: DateTime.formatIso(expiresAt),
+      digestCategory: category,
+    },
     limits: { runtimeMode: "full-access", interactionMode: "default" },
     success: OrchestratorMcpThreadSendResult,
   });
