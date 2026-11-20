@@ -10,6 +10,9 @@ below before declaring it unavailable. Do not install or switch to another
 automation system. For native mobile testing, use
 [test-t3-mobile](../test-t3-mobile/SKILL.md).
 
+Name what you test with [the feature map](references/feature-map.md), the
+user's names for every page, panel and control.
+
 ## Start the app
 
 Reuse this task's healthy dev server. Otherwise run `vp run dev` from the
