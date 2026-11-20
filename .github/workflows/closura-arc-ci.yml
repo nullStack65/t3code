@@ -200,7 +200,8 @@ jobs:
           fi
           packages=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2
             libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0
-            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2)
+            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2
+            libfontconfig1 fonts-dejavu-core)
           apt_dir="$RUNNER_TEMP/chromium-apt"
           mkdir -p "$apt_dir/lists/partial" "$apt_dir/cache/archives/partial" "$apt_dir/debs" "$apt_dir/root"
           apt_options=(-o "Dir::State::Lists=$apt_dir/lists" -o "Dir::Cache=$apt_dir/cache" -o Debug::NoLocking=1 -o "APT::Sandbox::User=$(id -un)")
@@ -212,6 +213,16 @@ jobs:
             for deb in "$apt_dir"/debs/*.deb; do dpkg-deb -x "$deb" "$apt_dir/root"; done
             export LD_LIBRARY_PATH="$apt_dir/root/usr/lib/x86_64-linux-gnu:$apt_dir/root/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           fi
+          mkdir -p "$RUNNER_TEMP/fontconfig-cache"
+          printf '<?xml version="1.0"?>\n<fontconfig><dir>/usr/share/fonts</dir><dir>%s</dir><cachedir>%s</cachedir></fontconfig>\n' \
+            "$apt_dir/root/usr/share/fonts" "$RUNNER_TEMP/fontconfig-cache" > "$RUNNER_TEMP/fonts.conf"
+          export FONTCONFIG_FILE="$RUNNER_TEMP/fonts.conf"
+          fonts=$(find /usr/share/fonts "$apt_dir/root/usr/share/fonts" -name '*.ttf' 2>/dev/null | wc -l)
+          if test "$fonts" -eq 0; then
+            echo "::error::No fonts for headless Chromium, so text has no size and is never visible."
+            exit 1
+          fi
+          printf 'Fonts available to Chromium: %s\n' "$fonts"
           if ldd "$shell" | grep 'not found'; then
             echo "::error::Headless Chromium still misses the libraries above."
             exit 1
