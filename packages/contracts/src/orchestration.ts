@@ -1370,9 +1370,15 @@ export const ThreadTurnStartRouteBinding = Schema.Struct({
 export const ThreadSeenMarker = Schema.Struct({
   lastSeenMessageId: MessageId,
   seenAt: IsoDateTime,
-  unseenCount: NonNegativeInt,
 });
 export type ThreadSeenMarker = typeof ThreadSeenMarker.Type;
+
+export const ThreadSeenMarkerSummary = Schema.Struct({
+  lastSeenMessageId: MessageId,
+  seenAt: IsoDateTime,
+  unseenCount: NonNegativeInt,
+});
+export type ThreadSeenMarkerSummary = typeof ThreadSeenMarkerSummary.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
@@ -1989,7 +1995,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
-  seenMarker: Schema.optional(ThreadSeenMarker),
+  seenMarker: Schema.optional(ThreadSeenMarkerSummary),
   createdAt: IsoDateTime,
 });
 

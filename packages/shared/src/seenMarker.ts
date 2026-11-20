@@ -1,6 +1,32 @@
-import type { ThreadSeenMarker } from "@t3tools/contracts";
+import type {
+  MessageId,
+  ThreadSeenMarker,
+  ThreadSeenMarkerSummary,
+} from "@t3tools/contracts";
 
-export function formatSeenMarkerForProvider(text: string, marker: ThreadSeenMarker | undefined) {
+export function summarizeSeenMarker(
+  marker: ThreadSeenMarker | undefined,
+  messages: ReadonlyArray<{ id: MessageId; role: string }>,
+): ThreadSeenMarkerSummary | undefined {
+  if (marker === undefined) return undefined;
+  const seenIndex = messages.findIndex((message) => message.id === marker.lastSeenMessageId);
+  if (seenIndex < 0) return undefined;
+  let unseenCount = 0;
+  for (let index = seenIndex + 1; index < messages.length; index += 1) {
+    if (messages[index]!.role === "assistant") unseenCount += 1;
+  }
+  if (unseenCount === 0) return undefined;
+  return {
+    lastSeenMessageId: marker.lastSeenMessageId,
+    seenAt: marker.seenAt,
+    unseenCount,
+  };
+}
+
+export function formatSeenMarkerForProvider(
+  text: string,
+  marker: ThreadSeenMarkerSummary | undefined,
+) {
   if (marker === undefined || marker.unseenCount === 0) return text;
   const noun = marker.unseenCount === 1 ? "message" : "messages";
   return [

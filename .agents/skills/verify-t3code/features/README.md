@@ -59,3 +59,8 @@ Desktop (Electron) shell, mobile app, linked remote machines (Connections > Add
 environment), Pull Request linking to a thread, previews and the in-app Browser panel,
 SnapShots, Integrations browser import, Agents panel, composer attachments and queued
 follow-ups, diff panel, git actions. Each needs a feature file when someone drives it.
+
+The last-seen marker ([seen-marker.md](seen-marker.md)) is also not on this drive.
+Nothing in the window shows it: a focused 2 second dwell only updates device memory,
+and the catch-up line is added to the provider prompt on the next send. The unit
+tests are the proof.

@@ -543,15 +543,8 @@ import {
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_SEEN_MESSAGES: ReadonlyArray<SeenMessage> = [];
 
-function seenMarkerForSend(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-  messages: ReadonlyArray<SeenMessage>,
-) {
-  const seenMarker = buildSeenMarker({
-    threadKey: scopedThreadKey(scopeThreadRef(environmentId, threadId)),
-    messages,
-  });
+function seenMarkerForSend(environmentId: EnvironmentId, threadId: ThreadId) {
+  const seenMarker = buildSeenMarker(scopedThreadKey(scopeThreadRef(environmentId, threadId)));
   return seenMarker ? { seenMarker } : {};
 }
 const EMPTY_QUEUED_MESSAGES: QueuedComposerMessage[] = [];
@@ -7253,6 +7246,7 @@ export default function ChatView(props: ChatViewProps) {
                 modelSelection: context.selectedModelSelection,
                 runtimeMode,
                 interactionMode: context.interactionMode,
+                ...seenMarkerForSend(activeThread.environmentId, threadId),
                 createdAt,
               },
             });
@@ -8507,7 +8501,7 @@ export default function ChatView(props: ChatViewProps) {
           runtimeMode,
           interactionMode: sendInteractionMode,
           ...(bootstrap ? { bootstrap } : {}),
-          ...seenMarkerForSend(activeThread.environmentId, threadIdForSend, activeThread.messages),
+          ...seenMarkerForSend(activeThread.environmentId, threadIdForSend),
           createdAt: messageCreatedAt,
         },
       });
@@ -9133,7 +9127,7 @@ export default function ChatView(props: ChatViewProps) {
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
-            ...seenMarkerForSend(activeThread.environmentId, threadIdForSend, activeThread.messages),
+            ...seenMarkerForSend(activeThread.environmentId, threadIdForSend),
             ...(nextInteractionMode === "default" && activeProposedPlan
               ? {
                   sourceProposedPlan: {

@@ -1,8 +1,6 @@
 import type { MessageId } from "@t3tools/contracts";
 import {
-  createSeenDwellTracker,
-  pickNewestMessageId,
-  recordSeenMessage,
+  createSeenMarkerSession,
   type SeenMessage,
   type SeenTimers,
 } from "@t3tools/client-runtime/seen-marker";
@@ -52,16 +50,14 @@ export function startSeenMarkerSampling(input: {
   timers?: SeenTimers;
 }) {
   const { window: win, document: doc } = input.host;
-  const now = input.now ?? (() => new Date());
-  const tracker = createSeenDwellTracker({
-    onSeen: (messageId) =>
-      recordSeenMessage({
-        threadKey: input.threadKey,
-        messageId,
-        messages: input.getMessages(),
-        seenAt: now().toISOString(),
-      }),
-    ...(input.timers ? { timers: input.timers } : {}),
+  const session = createSeenMarkerSession({
+    threadKey: input.threadKey,
+    getMessages: input.getMessages,
+    seenAt: () => (input.now ?? (() => new Date()))().toISOString(),
+    timers: input.timers ?? {
+      set: (callback, ms) => setTimeout(callback, ms),
+      clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    },
   });
   let frame: number | null = null;
 
@@ -69,11 +65,7 @@ export function startSeenMarkerSampling(input: {
     frame = null;
     const node = input.getScrollNode();
     const active = doc.visibilityState === "visible" && doc.hasFocus();
-    tracker.observe({
-      active,
-      newestVisibleMessageId:
-        active && node ? pickNewestMessageId(visibleMessageIds(node), input.getMessages()) : null,
-    });
+    session.update({ active, visibleIds: active && node ? visibleMessageIds(node) : [] });
   };
   const requestSample = () => {
     if (frame === null) frame = win.requestAnimationFrame(sample);
@@ -92,7 +84,7 @@ export function startSeenMarkerSampling(input: {
     dispose() {
       if (frame !== null) win.cancelAnimationFrame(frame);
       frame = null;
-      tracker.dispose();
+      session.dispose();
       doc.removeEventListener("scroll", requestSample, scrollOptions);
       doc.removeEventListener("visibilitychange", requestSample);
       win.removeEventListener("focus", requestSample);

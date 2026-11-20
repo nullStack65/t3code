@@ -17,17 +17,12 @@ export interface SeenTimers {
   clear(handle: unknown): void;
 }
 
-const defaultTimers: SeenTimers = {
-  set: (callback, ms) => setTimeout(callback, ms),
-  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
-
 export function createSeenDwellTracker(options: {
   onSeen: (messageId: MessageId) => void;
   dwellMs?: number;
-  timers?: SeenTimers;
+  timers: SeenTimers;
 }): SeenDwellTracker {
-  const timers = options.timers ?? defaultTimers;
+  const timers = options.timers;
   const dwellMs = options.dwellMs ?? SEEN_DWELL_MS;
   let pendingId: MessageId | null = null;
   let handle: unknown = null;
@@ -96,22 +91,48 @@ export function pickNewestMessageId(
   return null;
 }
 
-export function buildSeenMarker(input: {
-  threadKey: string;
-  messages: ReadonlyArray<SeenMessage>;
-}): ThreadSeenMarker | undefined {
-  const seen = seenByThreadKey.get(input.threadKey);
+export function buildSeenMarker(threadKey: string): ThreadSeenMarker | undefined {
+  const seen = seenByThreadKey.get(threadKey);
   if (!seen) return undefined;
-  const seenIndex = input.messages.findIndex((message) => message.id === seen.messageId);
-  if (seenIndex < 0) return undefined;
-  const unseenCount = input.messages
-    .slice(seenIndex + 1)
-    .filter((message) => message.role === "assistant").length;
-  if (unseenCount === 0) return undefined;
+  return { lastSeenMessageId: seen.messageId, seenAt: seen.seenAt };
+}
+
+export interface SeenMarkerSession {
+  update(input: { active?: boolean; visibleIds?: Iterable<MessageId> }): void;
+  dispose(): void;
+}
+
+export function createSeenMarkerSession(input: {
+  threadKey: string;
+  getMessages: () => ReadonlyArray<SeenMessage>;
+  seenAt: () => string;
+  timers: SeenTimers;
+  dwellMs?: number;
+}): SeenMarkerSession {
+  const tracker = createSeenDwellTracker({
+    onSeen: (messageId) =>
+      recordSeenMessage({
+        threadKey: input.threadKey,
+        messageId,
+        messages: input.getMessages(),
+        seenAt: input.seenAt(),
+      }),
+    timers: input.timers,
+    ...(input.dwellMs !== undefined ? { dwellMs: input.dwellMs } : {}),
+  });
+  let active = false;
+  let visibleIds: ReadonlyArray<MessageId> = [];
+
   return {
-    lastSeenMessageId: seen.messageId,
-    seenAt: seen.seenAt,
-    unseenCount,
+    update(next) {
+      if (next.active !== undefined) active = next.active;
+      if (next.visibleIds !== undefined) visibleIds = [...next.visibleIds];
+      tracker.observe({
+        active,
+        newestVisibleMessageId: active ? pickNewestMessageId(visibleIds, input.getMessages()) : null,
+      });
+    },
+    dispose: tracker.dispose,
   };
 }
 

@@ -17,6 +17,7 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert } from "react-native";
 
+import { buildSeenMarker } from "@t3tools/client-runtime/seen-marker";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn";
 import { serializeComposerMessageForServer, uploadedComposerContext } from "../lib/composerContext";
@@ -800,6 +801,9 @@ export function useThreadOutboxDrain(): void {
         settings,
         currentConfig.providers,
       );
+      const seenMarker = buildSeenMarker(
+        scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId),
+      );
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: {
@@ -822,6 +826,7 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          ...(seenMarker ? { seenMarker } : {}),
           createdAt: queuedMessage.createdAt,
         },
       });

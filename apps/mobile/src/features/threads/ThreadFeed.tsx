@@ -172,6 +172,7 @@ import {
   WORK_GROUP_TOGGLE_HEIGHT,
 } from "./thread-work-log";
 import { appendPendingThreadMessages, type PendingThreadFeedEntry } from "./pending-thread-feed";
+import { seenMessagesFromFeed, useThreadSeenMarker } from "./useThreadSeenMarker";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import {
@@ -2418,6 +2419,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     () => new Map<string, ThreadWorkGroupScrollPosition>(),
     [feedThreadKey],
   );
+  const seenMessages = useMemo(() => seenMessagesFromFeed(props.feed), [props.feed]);
+  const handleViewableItemsChanged = useThreadSeenMarker({
+    threadKey: feedThreadKey,
+    messages: seenMessages,
+  });
 
   useEffect(() => {
     reportHeaderMaterialVisibility(false);
@@ -2927,6 +2933,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             extraData={listAppearanceData}
             renderItem={renderItem}
             viewabilityConfig={THREAD_MEDIA_VIEWABILITY_CONFIG}
+            onViewableItemsChanged={handleViewableItemsChanged}
             keyExtractor={(entry) => entry.id}
             getItemType={(entry) =>
               entry.type === "message" ? `message:${entry.message.role}` : entry.type

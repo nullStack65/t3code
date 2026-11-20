@@ -21,6 +21,7 @@ import {
   threadPullRequestKeysEqual,
 } from "@t3tools/shared/threadPullRequests";
 import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
+import { summarizeSeenMarker } from "@t3tools/shared/seenMarker";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -1436,6 +1437,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               updatedAt: command.createdAt,
             },
           };
+      const seenMarker = summarizeSeenMarker(command.seenMarker, targetThread.messages);
       const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1456,7 +1458,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
-          ...(command.seenMarker !== undefined ? { seenMarker: command.seenMarker } : {}),
+          ...(seenMarker !== undefined ? { seenMarker } : {}),
           createdAt: command.createdAt,
         },
       };
