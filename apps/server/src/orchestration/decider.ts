@@ -46,6 +46,7 @@ import {
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
+import { SPEND_GUARD_FLAGGED_KIND, SPEND_GUARD_STOPPED_KIND } from "./SessionSpendGuard.ts";
 
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -2175,7 +2176,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // never stay hidden inside a settled slim row.
       const wakesSettledThread =
         command.activity.kind === "approval.requested" ||
-        command.activity.kind === "user-input.requested";
+        command.activity.kind === "user-input.requested" ||
+        command.activity.kind === SPEND_GUARD_FLAGGED_KIND ||
+        command.activity.kind === SPEND_GUARD_STOPPED_KIND;
       // Real activity resets ANY override (settled wakes, active unpins).
       if (thread.settledOverride === null || !wakesSettledThread) {
         return activityAppendedEvent;

@@ -600,6 +600,29 @@ export const CodexSessionGuardSettings = Schema.Struct({
 });
 export type CodexSessionGuardSettings = typeof CodexSessionGuardSettings.Type;
 
+export const SessionSpendGuardMode = Schema.Literals(["off", "flag", "enforce"]);
+export type SessionSpendGuardMode = typeof SessionSpendGuardMode.Type;
+
+const SpendGuardUsd = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0));
+
+export const SessionSpendGuardSettings = Schema.Struct({
+  mode: SessionSpendGuardMode.pipe(Schema.withDecodingDefault(Effect.succeed("enforce" as const))),
+  idleFlagUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(25))),
+  idleStopUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(50))),
+  sessionCeilingUsd: SpendGuardUsd.pipe(Schema.withDecodingDefault(Effect.succeed(200))),
+  fallbackRate: UsageModelPriceOverride.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({
+        inputCostPerMillionTokens: 10,
+        outputCostPerMillionTokens: 50,
+        cacheReadCostPerMillionTokens: 1,
+        cacheWriteCostPerMillionTokens: 12.5,
+      }),
+    ),
+  ),
+});
+export type SessionSpendGuardSettings = typeof SessionSpendGuardSettings.Type;
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -1333,6 +1356,12 @@ export const ServerSettings = Schema.Struct({
    * cannot be partly enrolled by leaving another instance unguarded.
    */
   codexSessionGuard: CodexSessionGuardSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  /**
+   * Closura: idle sessions stop spending by default. `enforce` refuses the
+   * next automated turn past the idle or session ceiling. `flag` records the
+   * warning without stopping, and `off` disables the guard.
+   */
+  sessionSpendGuard: SessionSpendGuardSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 
   // Legacy single-instance-per-driver settings. Continues to be the source
   // of truth until `providerInstances` (below) lands per-driver migration
@@ -1626,6 +1655,15 @@ export const ServerSettingsPatch = Schema.Struct({
       sourceRoot: Schema.optionalKey(TrimmedString),
       deviceFile: Schema.optionalKey(TrimmedString),
       stateRoot: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  sessionSpendGuard: Schema.optionalKey(
+    Schema.Struct({
+      mode: Schema.optionalKey(SessionSpendGuardMode),
+      idleFlagUsd: Schema.optionalKey(SpendGuardUsd),
+      idleStopUsd: Schema.optionalKey(SpendGuardUsd),
+      sessionCeilingUsd: Schema.optionalKey(SpendGuardUsd),
+      fallbackRate: Schema.optionalKey(UsageModelPriceOverride),
     }),
   ),
   observability: Schema.optionalKey(
