@@ -44,7 +44,7 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
-import { BotAvatar } from "../bots/BotAvatar";
+import { BotAvatar, type BotAvatarState } from "../bots/BotAvatar";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -61,6 +61,8 @@ interface ChatHeaderProps {
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
   /** A standing bot shows who it is instead of the project/thread breadcrumb. */
   standing?: ThreadStanding | null | undefined;
+  /** Drives the bot avatar's motion in the header; idle when absent. */
+  botAvatarState?: BotAvatarState | undefined;
   /**
    * Collapse agent, automation and system activity, or null when the thread has
    * no toggle. A standing thread passes it.
@@ -92,6 +94,7 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenProjectSettings,
   onFindInThread,
   standing,
+  botAvatarState,
   activityCollapsed = null,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
@@ -266,7 +269,12 @@ export const ChatHeader = memo(function ChatHeader({
         data-testid="bot-thread-header"
         onContextMenu={handleHeaderContextMenu}
       >
-        <BotAvatar avatarId={standing.avatarId} accent={standing.accent} size="md" />
+        <BotAvatar
+          avatarId={standing.avatarId}
+          accent={standing.accent}
+          size="md"
+          state={botAvatarState ?? "idle"}
+        />
         <button
           type="button"
           aria-label={`Bot actions for ${standing.name}`}

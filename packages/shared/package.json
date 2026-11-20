@@ -159,6 +159,10 @@
       "types": "./src/htmlRender.ts",
       "import": "./src/htmlRender.ts"
     },
+    "./showFile": {
+      "types": "./src/showFile.ts",
+      "import": "./src/showFile.ts"
+    },
     "./favicon": {
       "types": "./src/favicon.ts",
       "import": "./src/favicon.ts"

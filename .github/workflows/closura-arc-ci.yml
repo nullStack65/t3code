@@ -95,6 +95,29 @@ jobs:
       - name: Install locked dependencies from cache
         uses: ./.github/actions/setup-ci-deps
 
+      # After Node. The ARC image has no `node` until setup-ci-deps, so running
+      # this earlier exits 127 before the receipt can measure anything.
+      - name: Fork drift receipt
+        run: |
+          # The checkout is shallow (`fetch-depth: 2`) and only has the
+          # triggering ref. A plain `git fetch` of another ref keeps the
+          # shallow boundary, and the merge-base between the release line and
+          # upstream/main sits hundreds of commits behind it, so `git
+          # merge-base` fails and the receipt exits 2. Drop the boundary first.
+          # `--unshallow` errors on a complete clone, so only pass it while
+          # `.git/shallow` exists. `--filter=blob:none` fetches the commit graph
+          # without file contents.
+          unshallow=()
+          if [ -f .git/shallow ]; then unshallow=(--unshallow); fi
+          git fetch --no-tags --filter=blob:none "${unshallow[@]}" origin "${{ github.base_ref || github.ref_name }}:refs/remotes/origin/${{ github.base_ref || github.ref_name }}"
+          git fetch --no-tags --filter=blob:none https://github.com/pingdotgg/t3code.git main:refs/remotes/upstream/main
+          node --test scripts/fork-drift-receipt.test.mjs
+          # Exit 1 means the release line is past its drift budget, which is
+          # reported rather than failed. Exit 2 means the receipt itself broke.
+          node scripts/fork-drift-receipt.mjs --base "origin/${{ github.base_ref || github.ref_name }}" || rc=$?
+          if [ "${rc:-0}" -eq 2 ]; then exit 2; fi
+        shell: bash
+
       - name: Guard indispensable AssemblyAI voice implementation
         shell: bash
         run: |
