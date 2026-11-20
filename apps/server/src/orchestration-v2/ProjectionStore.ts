@@ -8447,6 +8447,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND json_extract(parent.payload_json, '$.archivedAt') IS NULL
                     AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
                 )
+                OR (
+                  EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_subagents child_task
+                    WHERE child_task.child_thread_id = t.thread_id
+                      AND child_task.status IN ('completed', 'interrupted', 'cancelled')
+                      AND json_type(child_task.payload_json, '$.result') = 'text'
+                      AND COALESCE(child_task.completion_delivery_state, '') NOT IN ('pending', 'claimed')
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_subagents open_task
+                    WHERE open_task.child_thread_id = t.thread_id
+                      AND (
+                        open_task.status IN ('idle', 'pending', 'running', 'waiting')
+                        OR COALESCE(open_task.completion_delivery_state, '') IN ('pending', 'claimed')
+                      )
+                  )
+                )
               )
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
@@ -8531,9 +8548,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   pendingGuestMessageCount: pendingGuestMessageCount(thread.guestShare),
                   pendingBackgroundTasks: derivePendingBackgroundWork({
                     latestRun:
-                      latestRunId === null || status === "idle"
-                        ? null
-                        : { id: latestRunId, ordinal: 0, status },
+                      thread.lineage.relationshipToParent === "subagent" &&
+                      (latestRunId === null || status === "idle")
+                        ? {
+                            id: RunId.make(`run:subagent:${thread.id}`),
+                            ordinal: 0,
+                            status: "completed",
+                          }
+                        : latestRunId === null || status === "idle"
+                          ? null
+                          : { id: latestRunId, ordinal: 0, status },
                     providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
                     turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
                     activeProviderThreadId: thread.activeProviderThreadId,
