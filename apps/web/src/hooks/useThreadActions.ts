@@ -48,6 +48,7 @@ import {
   readThreadShell,
   readThreadShells,
 } from "../state/entities";
+import { readLinkedSidebarThreadShell } from "../state/linkedSidebar";
 import { useUiStateStore } from "../uiStateStore";
 import { useDiffPanelStore } from "../diffPanelStore";
 import { usePreviewMiniPlayerStore } from "../previewMiniPlayerStore";
@@ -228,7 +229,7 @@ function useMarkThreadUnread() {
       });
       return;
     }
-    const thread = readThreadShell(target);
+    const thread = readThreadShell(target) ?? readLinkedSidebarThreadShell(target);
     markThreadUnreadLocal(scopedThreadKey(target), thread?.latestRun?.completedAt);
   };
 }

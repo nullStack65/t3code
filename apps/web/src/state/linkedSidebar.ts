@@ -3,11 +3,12 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId, LinkedSidebarResult } from "@t3tools/contracts";
+import type { EnvironmentId, LinkedSidebarResult, ScopedThreadRef } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentSummaries } from "./presentation";
 import { environmentProjects } from "./projects";
 import { environmentThreadShells } from "./threads";
@@ -104,6 +105,23 @@ export const sidebarThreadShellsAtom = Atom.make((get) => {
     ? previous
     : next;
 }).pipe(Atom.withLabel("linked-sidebar:threads"));
+
+export function readLinkedSidebarThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell | null {
+  return (
+    appAtomRegistry
+      .get(linkedSidebarSupplementAtom)
+      .threads.find(
+        (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,
+      ) ?? null
+  );
+}
+
+export function useLinkedOnlyEnvironment(environmentId: EnvironmentId | null) {
+  const identities = useAtomValue(linkedSidebarSupplementAtom).identities;
+  return environmentId === null
+    ? null
+    : (identities.find((identity) => identity.environmentId === environmentId) ?? null);
+}
 
 export function useSidebarEnvironmentIdentities() {
   return useAtomValue(sidebarEnvironmentIdentitiesAtom);
