@@ -656,11 +656,21 @@ describe("Antigravity subscription limits", () => {
 
   it.effect("does not make network requests for API keys or missing sign-ins", () =>
     Effect.gen(function* () {
-      for (const options of [{ authMethod: "gemini-api-key" as const }, { missingToken: true }]) {
-        const { probe, requests } = yield* fixture(options);
-        expect((yield* probe).unavailable?.reason).toBe("unsupported");
-        expect(requests).toEqual([]);
-      }
+      const apiKey = yield* fixture({ authMethod: "gemini-api-key" });
+      const apiLimits = yield* apiKey.probe;
+      expect(apiLimits.unavailable).toEqual({
+        reason: "unsupported",
+        message:
+          "Not applicable: Antigravity API keys and Agent Platform are billed by Google. T3 has no quota window for them.",
+      });
+      expect(apiKey.requests).toEqual([]);
+      const signedOut = yield* fixture({ missingToken: true });
+      const signedOutLimits = yield* signedOut.probe;
+      expect(signedOutLimits.unavailable).toEqual({
+        reason: "unsupported",
+        message: "Sign in with Google to see Antigravity limits.",
+      });
+      expect(signedOut.requests).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 });

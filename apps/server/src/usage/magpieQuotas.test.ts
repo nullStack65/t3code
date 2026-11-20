@@ -101,20 +101,21 @@ describe("magpieQuotasToAccounts", () => {
     ]);
   });
 
-  it("marks standing refusals not applicable and passing failures as failed reads", () => {
-    const [, , team, go, timedOut] = accounts;
-    expect(team!.email).toBe("first@example.com · Team");
-    expect(team!.usageLimits.unavailable).toEqual({
+  it("drops a Go key with no subscription and keeps payment and failed reads", () => {
+    expect(accounts.map((account) => account.id)).toEqual([
+      "claude:first@example.com",
+      "codex:first@example.com",
+      "codex:first@example.com · Team",
+      "claude:second@example.com",
+    ]);
+    const team = accounts[2]!;
+    const timedOut = accounts[3]!;
+    expect(team.email).toBe("first@example.com · Team");
+    expect(team.usageLimits.unavailable).toEqual({
       reason: "unsupported",
       message: "Payment Required.",
     });
-    expect(go!.driver).toBe("opencode");
-    expect(go!.email).toBeUndefined();
-    expect(go!.usageLimits.unavailable).toEqual({
-      reason: "unsupported",
-      message: "This key has no OpenCode Go subscription.",
-    });
-    expect(timedOut!.usageLimits.unavailable?.reason).toBe("probeFailed");
+    expect(timedOut.usageLimits.unavailable?.reason).toBe("probeFailed");
   });
 });
 

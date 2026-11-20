@@ -1948,12 +1948,45 @@ describe("owners and not-applicable usage", () => {
     expect(groups.map((group) => group.owner)).toEqual(["Unassigned"]);
   });
 
+  it("says when Antigravity has no quota window", () => {
+    const billed = provider({
+      instanceId: ProviderInstanceId.make("antigravity-api"),
+      driver: ProviderDriverKind.make("antigravity"),
+      displayName: "Antigravity",
+      usageLimits: {
+        checkedAt,
+        windows: [],
+        unavailable: {
+          reason: "unsupported",
+          message:
+            "Not applicable: Antigravity API keys and Agent Platform are billed by Google. T3 has no quota window for them.",
+        },
+      },
+    });
+    const view = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Crown" } }, serverConfig: { providers: [billed] } },
+      ],
+    ]);
+    expect(collectNotApplicable(view)).toEqual([
+      {
+        environment: "Crown",
+        subject: "Antigravity",
+        reason:
+          "Antigravity API keys and Agent Platform are billed by Google. T3 has no quota window for them.",
+      },
+    ]);
+    expect(collectLimitNotices(view)).toEqual([]);
+  });
+
   it("lists not-applicable usage apart from failures, and a billing refusal as a notice", () => {
     const view = presentations();
     expect(collectNotApplicable(view)).toEqual([
       { environment: "Crown", subject: "Magpie Codex", reason: "gateway reports it." },
     ]);
     expect(collectLimitNotices(view)).toEqual([
+      "Antigravity: Sign in with Google to see limits.",
       "Magpie · owner.a@example.com · Team: the vendor says payment is required, so this subscription's billing needs attention.",
       "Magpie · k: Upstream timed out.",
     ]);

@@ -167,6 +167,14 @@ export function magpieQuotasToAccounts(
   for (const entry of entries) {
     const driver = driverFor(entry.provider);
     if (!driver) continue;
+    if (
+      driver === "opencode" &&
+      entry.error &&
+      isStandingRefusal(entry.error) &&
+      !/payment required/i.test(entry.error)
+    ) {
+      continue;
+    }
     const user = entry.user?.trim() || entry.name?.trim() || entry.provider;
     const id = `${entry.provider}:${user}`;
     if (seen.has(id)) continue;
