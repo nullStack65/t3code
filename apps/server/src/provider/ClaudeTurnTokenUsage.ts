@@ -112,6 +112,26 @@ export function claudeLedgerDelta(
   return { inputTokens, outputTokens };
 }
 
+export function claudeResumedLedgerDelta(
+  previousProcess: ClaudeModelLedger | undefined,
+  current: ClaudeModelLedger | undefined,
+  resultUsage: unknown,
+): ClaudeLedgerUsage | undefined {
+  const fromZero = claudeLedgerDelta(new Map(), current);
+  if (previousProcess === undefined || fromZero === undefined) return undefined;
+  const sincePreviousProcess = claudeLedgerDelta(previousProcess, current);
+  if (sincePreviousProcess === undefined) return fromZero;
+  const usage = (resultUsage ?? {}) as Record<string, unknown>;
+  const resultInput = BILLED_USAGE_FIELDS.filter((field) => field !== "output_tokens").map(
+    (field) => finiteNonNegativeInteger(usage[field]) ?? 0,
+  );
+  const resultOutput = finiteNonNegativeInteger(usage.output_tokens) ?? 0;
+  const restoredCounterCannotHoldResult =
+    sincePreviousProcess.inputTokens < resultInput.reduce((sum, count) => sum + count, 0) ||
+    sincePreviousProcess.outputTokens < resultOutput;
+  return restoredCounterCannotHoldResult ? fromZero : undefined;
+}
+
 export function addClaudeLedgerUsage(
   left: ClaudeLedgerUsage | undefined,
   right: ClaudeLedgerUsage | undefined,

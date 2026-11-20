@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   claudeLedgerDelta,
   claudeModelLedger,
+  claudeResumedLedgerDelta,
   normalizeClaudeTurnTokenUsage,
 } from "./ClaudeTurnTokenUsage.ts";
 import {
@@ -220,6 +221,28 @@ describe("billable native turn usage", () => {
     expect(claudeLedgerDelta(ledger(25), ledger(10))).toBeUndefined();
     expect(claudeLedgerDelta(undefined, ledger(10))).toBeUndefined();
     expect(claudeModelLedger({})).toBeUndefined();
+  });
+
+  it("does not recount a resumed session's earlier usage as other usage", () => {
+    const ledger = (input: number, output: number) =>
+      claudeModelLedger({ "claude-sonnet-4-6": { inputTokens: input, outputTokens: output } });
+    const result = { input_tokens: 40, output_tokens: 5 };
+    expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_040, 105), result)).toBeUndefined();
+    expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_000, 100), {})).toBeUndefined();
+    expect(claudeResumedLedgerDelta(undefined, ledger(1_040, 105), result)).toBeUndefined();
+    expect(claudeResumedLedgerDelta(ledger(30, 4), ledger(40, 5), result)).toEqual({
+      inputTokens: 40,
+      outputTokens: 5,
+    });
+    expect(claudeResumedLedgerDelta(ledger(1_000, 100), ledger(60, 9), result)).toEqual({
+      inputTokens: 60,
+      outputTokens: 9,
+    });
+    expect(
+      normalizeClaudeTurnTokenUsage({ subtype: "success", usage: result }, false, "completed", [], {
+        ledger: claudeResumedLedgerDelta(ledger(1_000, 100), ledger(1_040, 105), result),
+      }),
+    ).not.toHaveProperty("otherUsage");
   });
 
   it("adds Claude steering segments to the final measured result once", () => {
