@@ -612,6 +612,33 @@ it("ignores a context-window suffix when comparing models", () => {
   );
 });
 
+it("treats a Magpie harness prefix and the vendor build id as the same model", () => {
+  assert.isUndefined(
+    workerAlert({
+      requestedModel: "grok/grok-4.7",
+      executedModel: "grok-4.7-build",
+      finalText: "Done.",
+    }),
+  );
+  assert.deepEqual(
+    workerAlert({
+      requestedModel: "grok/grok-4.7",
+      executedModel: "grok-4.5-build",
+      finalText: "Done.",
+    })?.reasons,
+    ["model_substituted"],
+  );
+  // A rate-table provider prefix is a different route, not a harness alias.
+  assert.deepEqual(
+    workerAlert({
+      requestedModel: "openai/gpt-6.1-sol",
+      executedModel: "gpt-6.1-sol",
+      finalText: "Done.",
+    })?.reasons,
+    ["model_substituted"],
+  );
+});
+
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>
   Effect.gen(function* () {
     const id = NodeId.make("node:orphaned-native-subagent");

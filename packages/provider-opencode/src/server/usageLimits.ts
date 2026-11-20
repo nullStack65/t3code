@@ -20,6 +20,11 @@ import {
 } from "@t3tools/provider-core/server/usageLimits";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+// Magpie's `model_provider` names the harness whose accounts the gateway pools.
+function routedProvider(environment: NodeJS.ProcessEnv): string | undefined {
+  return /(?:^|\s)--model-provider(?:=|\s+)([\w-]+)/.exec(environment.OPENCODE_FLAGS ?? "")?.[1];
+}
+
 const AuthFile = Schema.Struct({ "opencode-go": Schema.optionalKey(Schema.Unknown) });
 const ApiAuth = Schema.Struct({ type: Schema.Literal("api"), key: Schema.String });
 const decodeAuthFile = Schema.decodeEffect(Schema.fromJsonString(AuthFile));
@@ -94,6 +99,13 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
   const notApplicable = (message: string) =>
     makeUnavailableUsageLimits({ checkedAt, reason: "unsupported", message });
   if (!input.enabled || input.serverUrl.trim()) return unsupported;
+  // A Magpie route spends the gateway's pooled accounts, which the gateway reports itself.
+  const routed = routedProvider(input.environment);
+  if (routed !== undefined && routed !== "opencode") {
+    return notApplicable(
+      "Not applicable: this instance routes through a custom model provider, not OpenCode Go quota.",
+    );
+  }
 
   return yield* Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

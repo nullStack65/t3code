@@ -63,6 +63,20 @@ const entries = [
       "this key has no OpenCode Go subscription: Go belongs to the member who subscribed, in that workspace",
   },
   { provider: "claude", user: "second@example.com", error: "upstream timed out" },
+  {
+    provider: "grok",
+    name: "Grok",
+    kind: "subscription",
+    user: "jeffrey.smith@closura.ai",
+    windows: [{ name: "7 days", used: 40, resetsAt: "2026-11-22T02:00:00Z" }],
+  },
+  {
+    provider: "grok",
+    name: "Grok",
+    kind: "subscription",
+    user: "kameron.smith@closura.ai",
+    windows: [{ name: "month", used: 15, resetsAt: "2026-12-01T00:00:00Z" }],
+  },
 ];
 
 describe("magpieQuotasToAccounts", () => {
@@ -115,6 +129,22 @@ describe("magpieQuotasToAccounts", () => {
       message: "This key has no OpenCode Go subscription.",
     });
     expect(timedOut!.usageLimits.unavailable?.reason).toBe("probeFailed");
+  });
+
+  it("surfaces every Magpie Grok account under the Grok driver", () => {
+    const grok = accounts.filter((account) => account.driver === "grok");
+    expect(grok.map((account) => account.email)).toEqual([
+      "jeffrey.smith@closura.ai",
+      "kameron.smith@closura.ai",
+    ]);
+    expect(grok.map((account) => account.usageLimits.windows[0]?.id)).toEqual([
+      "subscription",
+      "subscription",
+    ]);
+    expect(grok.map((account) => account.usageLimits.windows[0]?.kind)).toEqual([
+      "weekly",
+      "monthly",
+    ]);
   });
 });
 

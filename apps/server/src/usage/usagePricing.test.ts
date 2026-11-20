@@ -319,6 +319,25 @@ describe("usage pricing", () => {
     }
   });
 
+  it("prices a Magpie harness prefix at the bare model's rate", () => {
+    const table = parseRateTable({
+      "openai/gpt-6.1-sol": rate(1e-5, 1e-6),
+      "anthropic/claude-fable-5": rate(2e-5, 2e-6),
+      "xai/grok-4.7": rate(3e-6, 3e-7),
+    });
+
+    expect(lookupRate(table, "codex/gpt-6.1-sol")).toEqual(lookupRate(table, "gpt-6.1-sol"));
+    expect(lookupRate(table, "Claude/claude-fable-5[1m]")?.inputCostPerToken).toBe(2e-5);
+    expect(lookupRate(table, "grok/grok-4.7")?.cacheReadCostPerToken).toBe(3e-7);
+    // A real rate-table provider keeps its own entry, and an ambiguous bare name stays unpriced.
+    expect(lookupRate(table, "openai/gpt-6.1-sol")?.cacheReadCostPerToken).toBe(1e-6);
+    const ambiguous = parseRateTable({
+      "openai/example-model": rate(1),
+      "xai/example-model": rate(3),
+    });
+    expect(lookupRate(ambiguous, "codex/example-model")).toBeNull();
+  });
+
   it("prices a bracketed context-tier variant at the base model's rate", () => {
     const table = parseRateTable({ "claude-fable-5-1": rate(1e-5, 2.5e-7) });
 

@@ -68,6 +68,8 @@ function driverFor(provider: string): ProviderDriverKind | null {
     case "opencode-go":
     case "opencode":
       return ProviderDriverKind.make("opencode");
+    case "grok":
+      return ProviderDriverKind.make("grok");
     default:
       return isProviderDriverKind(provider) ? provider : null;
   }
@@ -92,8 +94,10 @@ function magpieWindow(
 ): ServerProviderUsageWindow {
   const [span = window.name, ...scopeParts] = window.name.split("·").map((part) => part.trim());
   const scope = scopeParts.join(" · ");
-  const match = /^(\d+(?:\.\d+)?)\s*(minute|hour|day|week|month)s?$/i.exec(span);
-  const mins = match ? Number(match[1]) * MINUTES[match[2]!.toLowerCase()]! : undefined;
+  const match = /^(?:(\d+(?:\.\d+)?)\s+)?(minute|hour|day|week|month)s?$/i.exec(span);
+  const mins = match
+    ? Number(match[1] ?? 1) * MINUTES[match[2]!.toLowerCase()]!
+    : undefined;
   const kind: ServerProviderUsageWindow["kind"] =
     mins === undefined
       ? "other"
@@ -119,7 +123,9 @@ function magpieWindow(
           ? "secondary"
           : driver === "codex" && kind !== "other"
             ? "primary"
-            : slug(span) || "window";
+            : driver === "grok"
+              ? "subscription"
+              : slug(span) || "window";
   const parsedReset = window.resetsAt ? DateTime.make(window.resetsAt) : Option.none();
   const resetsAt = Option.isSome(parsedReset) ? DateTime.formatIso(parsedReset.value) : undefined;
   return {

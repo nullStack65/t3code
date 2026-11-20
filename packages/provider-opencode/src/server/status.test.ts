@@ -300,6 +300,30 @@ it.effect("prefers the selected stored Go key over the auth.json key OpenCode 2 
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
+it.effect("does not probe OpenCode Go for an instance Magpie routes elsewhere", () =>
+  Effect.gen(function* () {
+    const limits = yield* readOpenCodeGoUsageLimits({
+      enabled: true,
+      serverUrl: "",
+      environment: { OPENCODE_FLAGS: "--model-provider grok" },
+    }).pipe(
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.makeNoop({
+          readFileString: () => Effect.die("unexpected credential read"),
+        }),
+      ),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("unexpected usage request")),
+      ),
+      Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    );
+    NodeAssert.equal(limits.unavailable?.reason, "unsupported");
+    NodeAssert.match(limits.unavailable?.message ?? "", /custom model provider/);
+  }),
+);
+
 it.effect("does not read local credentials for external or disabled OpenCode instances", () =>
   Effect.gen(function* () {
     for (const settings of [

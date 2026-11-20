@@ -214,8 +214,16 @@ export function withholdsTask(text: string): boolean {
   );
 }
 
-// Context-window and similar suffixes, such as `[1m]`, name the same model.
-const baseModel = (model: string) => model.replace(/\[[^\]]*\]$/, "");
+// Context-window suffixes (`[1m]`), a Magpie harness prefix (`grok/`) and a product suffix
+// (`-build`) name the same model. Magpie selects `grok/grok-4.7` and xAI runs `grok-4.7-build`.
+const HARNESS_PREFIXES = /^(?:claude|codex|grok)\//;
+const baseModel = (model: string) =>
+  model
+    .trim()
+    .toLowerCase()
+    .replace(/\[[^\]]*\]$/, "")
+    .replace(HARNESS_PREFIXES, "")
+    .replace(/-build$/, "");
 
 /** What made a worker's run unfit for its task, or undefined when nothing did. */
 export function workerAlert(input: {
