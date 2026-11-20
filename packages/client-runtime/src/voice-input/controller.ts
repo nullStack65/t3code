@@ -273,7 +273,7 @@ export class VoiceInputController {
   private retryRecording: {
     uri: string;
     ownerKey: string;
-    transcription: PreparedVoiceTranscription;
+    transcription: PreparedVoiceTranscription | null;
   } | null = null;
 
   constructor(dependencies: VoiceInputControllerDependencies) {
@@ -318,10 +318,27 @@ export class VoiceInputController {
         this.deleteOwnedRecordings();
       }
       if (this.retryRecording) {
-        this.recordingUri = this.retryRecording.uri;
+        const retry = this.retryRecording;
+        this.recordingUri = retry.uri;
         this.capturedDraft = initiatingDraft;
-        this.transcription = this.retryRecording.transcription;
         this.retryRecording = null;
+        if (retry.transcription) {
+          this.transcription = retry.transcription;
+        } else {
+          const retryTranscriber = this.dependencies.getTranscriber();
+          try {
+            if (!retryTranscriber) throw new Error("Voice transcription is not available.");
+            this.transcription = await runTranscriptionOperation(() =>
+              retryTranscriber.prepare({ signal: abortController.signal }),
+            );
+          } catch (error) {
+            if (!this.isCurrent(operationToken)) return;
+            this.retryRecording = retry;
+            this.setError(preparationErrorMessage(error), "retry");
+            return;
+          }
+          if (!this.isCurrent(operationToken)) return;
+        }
         await this.finishRecording(true, this.recordingUri);
         return;
       }
@@ -449,9 +466,9 @@ export class VoiceInputController {
       (transcription) => {
         if (this.preparation === preparation) this.transcription = transcription;
       },
-      (error: unknown) => {
+      () => {
         if (this.isCurrent(operationToken) && this.state.phase === "recording")
-          void this.discardRecording(preparationErrorMessage(error));
+          void this.finishRecording(false, null);
       },
     );
   }
@@ -573,8 +590,15 @@ export class VoiceInputController {
         try {
           transcription = await this.preparation;
         } catch (error) {
-          if (this.isCurrent(operationToken))
+          if (this.isCurrent(operationToken)) {
+            if (this.dependencies.retryFailedRecording && this.recordingUri && this.capturedDraft)
+              this.retryRecording = {
+                uri: this.recordingUri,
+                ownerKey: this.capturedDraft.ownerKey,
+                transcription: null,
+              };
             this.setError(preparationErrorMessage(error), "retry");
+          }
           return;
         }
         if (!this.isCurrent(operationToken)) return;

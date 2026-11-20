@@ -15,6 +15,7 @@ type PreparedBrowserTranscription = PreparedVoiceTranscription & {
 };
 
 let warmAudio: { context: AudioContext; ready: Promise<AudioContext> } | undefined;
+let capturing = false;
 
 export function warmBrowserAudioCapture(): Promise<AudioContext> {
   if (
@@ -24,11 +25,15 @@ export function warmBrowserAudioCapture(): Promise<AudioContext> {
   )
     return warmAudio.ready;
   const context = new AudioContext();
-  const ready = context.audioWorklet.addModule(workletUrl).then(() => context);
+  const ready = context.audioWorklet.addModule(workletUrl).then(async () => {
+    if (context.state === "running" && !capturing) await context.suspend();
+    return context;
+  });
   const entry = { context, ready };
   warmAudio = entry;
   ready.catch(() => {
     if (warmAudio === entry) warmAudio = undefined;
+    void context.close().catch(() => undefined);
   });
   return ready;
 }
@@ -62,13 +67,15 @@ export function createBrowserPcmCapture(
     source?.disconnect();
     source = undefined;
     worklet?.disconnect();
+    if (worklet) worklet.port.onmessage = null;
     worklet?.port.postMessage("release", []);
-    worklet?.port.close();
     worklet = undefined;
     stream?.getTracks().forEach((track) => track.stop());
     stream = undefined;
-    if (audioContext?.state === "running") void audioContext.suspend().catch(() => undefined);
+    if (audioContext && audioContext.state !== "closed")
+      void audioContext.suspend().catch(() => undefined);
     audioContext = undefined;
+    capturing = false;
     stopped?.resolve();
     stopped = undefined;
     chunks = [];
@@ -89,6 +96,7 @@ export function createBrowserPcmCapture(
       recordingUri = null;
       chunks = [];
       captureFinished = false;
+      capturing = true;
       const warming = warmBrowserAudioCapture();
       warming.catch(() => undefined);
       const microphoneId = await input.getMicrophoneId();

@@ -217,7 +217,9 @@ jobs:
         run: |
           set -euo pipefail
           vp exec playwright install --only-shell chromium
-          vp test run --project browser src/speech/voiceInputLatency.browser.test.ts
+          vp test run --project browser \
+            src/speech/voiceInputLatency.browser.test.ts \
+            src/speech/useEnvironmentSpeechInput.browser.test.tsx
 
       - name: Build native T3 server
         shell: bash

@@ -35,7 +35,9 @@ function capture() {
         createMediaStreamSource() {
           return { connect() {}, disconnect() {} };
         }
+        state = "running";
         resume = async () => {};
+        suspend = async () => {};
         close = async () => {};
       },
     ),

@@ -111,13 +111,18 @@ describe("voice input press latency", () => {
     expect(harness.controller.currentState.phase).toBe("idle");
   });
 
-  it("stops the recording when preparation fails after capture started", async () => {
+  it("stops the recording when preparation fails after capture started, and retries the same audio", async () => {
     const preparation = deferred<PreparedVoiceTranscription>();
     const releaseRecording = vi.fn(async () => undefined);
+    const prepare = vi
+      .fn<VoiceTranscriber["prepare"]>()
+      .mockReturnValueOnce(preparation.promise)
+      .mockResolvedValueOnce(preparedTranscription(async () => "kept text"));
     const harness = createHarness({
       captureDuringPreparation: true,
+      retryFailedRecording: true,
       releaseRecording,
-      getTranscriber: () => ({ prepare: () => preparation.promise }),
+      getTranscriber: () => ({ prepare }),
     });
     await harness.controller.start();
     expect(harness.controller.currentState.phase).toBe("recording");
@@ -134,6 +139,12 @@ describe("voice input press latency", () => {
     await vi.waitFor(() => expect(releaseRecording).toHaveBeenCalled());
     expect(harness.recorder.stop).toHaveBeenCalled();
     expect(harness.commits).toEqual([]);
+    expect(harness.deleted).toEqual([]);
+
+    await harness.controller.start();
+    expect(harness.recorder.record).toHaveBeenCalledOnce();
+    expect(harness.commits.map(({ text }) => text)).toEqual(["hello kept text"]);
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
   });
 
   it("never records when preparation fails before capture is ready", async () => {

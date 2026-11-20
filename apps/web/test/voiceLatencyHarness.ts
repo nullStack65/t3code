@@ -11,8 +11,8 @@ import { warmBrowserAudioCapture } from "../src/speech/browserPcmCapture";
 import { createBrowserVoiceInputPlatform } from "../src/speech/browserVoiceInput";
 import { stubGlobal } from "./render";
 
-export const PRESS_TO_RECORDING_BUDGET_MS = 400;
-export const RELEASE_TO_TEXT_BUDGET_MS = 400;
+const PRESS_TO_RECORDING_BUDGET_MS = 400;
+const RELEASE_TO_TEXT_BUDGET_MS = 400;
 
 const prepared = (() => {
   const target = new BearerConnectionTarget({

@@ -476,7 +476,7 @@ export function useEnvironmentSpeechInput(input: HookInput) {
       !latestRef.current.input.disabled;
     setSetup(INITIAL_SETUP);
     const knownStatus = status?.prepared === prepared ? status.value : null;
-    if (knownStatus?.supported && knownStatus.state !== "missing-model") {
+    if (!knownStatus || (knownStatus.supported && knownStatus.state !== "missing-model")) {
       setLevel(0);
       void probeSpeechStatus(prepared, true).then(
         (latest) => {
