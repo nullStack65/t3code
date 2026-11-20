@@ -296,6 +296,33 @@ it("queues one delivery per destination for a thread event, beside model alerts"
   assert.include(watcherAlertMessage(eventAlert(finding("stuck", "run:1"))), "Thread event from");
 });
 
+it("a thread event with nowhere to go stays unreported until a destination exists", () => {
+  const judged = {
+    threadId: "thread:fleet",
+    evaluated: ["lane-ended"] as const,
+    findings: [finding("lane-ended", "run:1")],
+  };
+  const dropped = recordThreadEvents(EMPTY_MODEL_ALERT_STATE, judged, eventAlert, [], 0);
+  assert.equal(dropped.enqueued, false);
+  assert.deepEqual(dropped.state.outbox, []);
+  assert.deepEqual(dropped.state.reported, {});
+  // The same event again, still with nowhere to go, changes nothing.
+  const again = recordThreadEvents(dropped.state, judged, eventAlert, [], 0);
+  assert.equal(again.enqueued, false);
+  assert.deepEqual(again.state.outbox, []);
+  assert.deepEqual(again.state.reported, {});
+  // A webhook configured later receives the event that was dropped.
+  const delivered = recordThreadEvents(dropped.state, judged, eventAlert, ["webhook"], 0);
+  assert.equal(delivered.enqueued, true);
+  assert.deepEqual(
+    delivered.state.outbox.map((entry) => entry.destination),
+    ["webhook"],
+  );
+  // And once delivered it stays quiet.
+  const quiet = recordThreadEvents(delivered.state, judged, eventAlert, ["webhook"], 0);
+  assert.equal(quiet.enqueued, false);
+});
+
 it("a thread event with no launching thread to hear it goes only to a configured webhook", () => {
   const cto = { environmentId: EnvironmentId.make("laptop"), threadId: ThreadId.make("cto") };
   assert.deepEqual(threadEventDestinations(cto, ""), ["watcher"]);

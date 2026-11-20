@@ -346,20 +346,27 @@ export function recordThreadEvents(
     // A kind can hold several findings at once (a question and an inbox flip), so it remembers
     // each signature it reported. One that stops being true is forgotten and can report again.
     const known = (reported[key] ?? "").split("\n").filter((signature) => signature !== "");
-    const current = kindFindings.map((finding) => finding.signature);
-    const stored = current.join("\n");
-    if (reported[key] !== stored) {
-      const { [key]: _previous, ...rest } = reported;
-      reported = {
-        ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
-        [key]: stored,
-      };
-    }
+    const delivered: Array<string> = [];
     for (const finding of kindFindings) {
-      if (known.includes(finding.signature)) continue;
+      if (known.includes(finding.signature)) {
+        delivered.push(finding.signature);
+        continue;
+      }
       const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
       outbox = queued.outbox;
+      if (queued.enqueued) delivered.push(finding.signature);
       enqueued ||= queued.enqueued;
+    }
+    // A finding with nowhere to go stays unreported, so a later launcher or webhook still hears it.
+    const stored = delivered.join("\n");
+    if (reported[key] !== stored) {
+      const { [key]: _previous, ...rest } = reported;
+      reported = stored
+        ? {
+            ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
+            [key]: stored,
+          }
+        : rest;
     }
   }
   if (reported === state.reported && outbox === state.outbox) return { state, enqueued };
@@ -1303,6 +1310,12 @@ export const make = Effect.gen(function* () {
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
     const recipient = yield* launchingThread(shell, here);
     const destinations = threadEventDestinations(recipient, current.modelAlertWebhookUrl);
+    if (recipient === null && destinations.length === 0 && judged.findings.length > 0) {
+      yield* Effect.logWarning("a thread event has no launching thread and no webhook", {
+        threadId,
+        kinds: judged.findings.map((finding) => finding.kind),
+      });
+    }
     const enqueued = yield* update((state) => {
       const result = recordThreadEvents(
         state,
