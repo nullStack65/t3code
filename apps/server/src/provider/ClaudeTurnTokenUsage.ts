@@ -112,6 +112,48 @@ export function claudeLedgerDelta(
   return { inputTokens, outputTokens };
 }
 
+/**
+ * A resumed process's first result can omit a model the saved ledger still has.
+ * Keep that model's last total, so its return later is growth rather than a recount from zero.
+ */
+export function mergeOmittedLedgerModels(
+  previous: ClaudeModelLedger | undefined,
+  current: ClaudeModelLedger | undefined,
+): ClaudeModelLedger | undefined {
+  if (current === undefined) return previous;
+  if (previous === undefined) return current;
+  const merged = new Map(current);
+  for (const [model, before] of previous) {
+    if (!merged.has(model)) merged.set(model, before);
+  }
+  return merged;
+}
+
+export function claudeResumedLedgerDelta(
+  previousProcess: ClaudeModelLedger | undefined,
+  current: ClaudeModelLedger | undefined,
+  resultUsage: unknown,
+): ClaudeLedgerUsage | undefined {
+  const fromZero = claudeLedgerDelta(new Map(), current);
+  if (previousProcess === undefined || fromZero === undefined) return undefined;
+  const usage = (resultUsage ?? {}) as Record<string, unknown>;
+  const resultInput = BILLED_USAGE_FIELDS.filter((field) => field !== "output_tokens").reduce(
+    (sum, field) => sum + (finiteNonNegativeInteger(usage[field]) ?? 0),
+    0,
+  );
+  const resultOutput = finiteNonNegativeInteger(usage.output_tokens) ?? 0;
+  if (fromZero.inputTokens > resultInput || fromZero.outputTokens > resultOutput) return undefined;
+  const sincePreviousProcess = claudeLedgerDelta(previousProcess, current);
+  if (
+    sincePreviousProcess !== undefined &&
+    sincePreviousProcess.inputTokens >= resultInput &&
+    sincePreviousProcess.outputTokens >= resultOutput
+  ) {
+    return undefined;
+  }
+  return fromZero;
+}
+
 export function addClaudeLedgerUsage(
   left: ClaudeLedgerUsage | undefined,
   right: ClaudeLedgerUsage | undefined,
