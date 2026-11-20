@@ -5358,6 +5358,29 @@ describe("collapsing non-human activity", () => {
     ]);
   });
 
+  it("keeps a secret request and a link request on screen", () => {
+    const request = (id: string, type: "secret_request" | "link_request"): MessagesTimelineRow => ({
+      kind: "event",
+      id,
+      createdAt: time(9),
+      projectedItem: { item: { type } } as never,
+    });
+    const withRequests = [
+      rows[0]!,
+      rows[2]!,
+      request("secret-1", "secret_request"),
+      request("link-1", "link_request"),
+      rows[5]!,
+    ];
+    expect(collapseTimelineActivity(withRequests, new Set()).map((row) => row.id)).toEqual([
+      "kameron",
+      "activity:kameron",
+      "secret-1",
+      "link-1",
+      "jeff",
+    ]);
+  });
+
   it("names the pill after the message it follows, so streaming rows do not rename it", () => {
     const grown = [...rows.slice(0, 5), workRow("work-2", 9), ...rows.slice(5)];
     expect(collapseTimelineActivity(grown, new Set()).map((row) => row.id)).toEqual(

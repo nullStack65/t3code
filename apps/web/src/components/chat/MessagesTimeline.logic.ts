@@ -2415,6 +2415,14 @@ const KEPT_ACTIVITY_ROW_KINDS = new Set<MessagesTimelineRow["kind"]>([
 
 export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
   if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return true;
+  // A secret or a link is answered only on its own card, so it must not fold away.
+  if (
+    row.kind === "event" &&
+    (row.projectedItem.item.type === "secret_request" ||
+      row.projectedItem.item.type === "link_request")
+  ) {
+    return true;
+  }
   if (row.kind !== "message" && row.kind !== "assistant-meta") return false;
   const sender = resolveMessageSender(row.message);
   return sender.kind === "person" || sender.kind === "guest" || sender.kind === "model";
