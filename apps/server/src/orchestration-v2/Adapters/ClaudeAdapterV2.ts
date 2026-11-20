@@ -4369,13 +4369,12 @@ export function claudeCommandApprovalDisposition(input: {
     (/^Dangerous rm(?:dir)?\b/i.test(input.safetyReason) ||
       input.safetyReason === "This shell -c script runs rm and could not be checked" ||
       input.safetyReason === "A permission rule denies a command in this shell -c script");
-  // The thread's policy says full access, but the session may have opened lower. A workspace
-  // that disables bypass downgrades the session to auto, and that session still asks.
-  const policyBypass =
+  // Full access is the thread's policy, not the mode the session opened with. A workspace that
+  // disables bypass downgrades the session to auto, and that session still runs the command.
+  const fullAccess =
     permissionModeForClaudeRuntimePolicy(input.runtimePolicy) === "bypassPermissions";
-  const fullAccess = policyBypass && input.permissionMode === "bypassPermissions";
   // A removal check or deny rule fails closed in every mode a full-access thread can open.
-  if (safetyDenial && (policyBypass || input.permissionMode === "bypassPermissions")) {
+  if (safetyDenial && (fullAccess || input.permissionMode === "bypassPermissions")) {
     return "deny";
   }
   if (fullAccess) return "allow";

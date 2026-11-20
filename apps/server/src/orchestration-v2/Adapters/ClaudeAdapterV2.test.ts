@@ -1041,7 +1041,7 @@ describe("ClaudeAdapterV2 full-access command approval", () => {
       }),
       "allow",
     );
-    // A workspace that disables bypass downgrades the session to auto, and that session asks.
+    // A workspace that disables bypass downgrades the session to auto, and the command still runs.
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
         runtimePolicy: policy({}),
@@ -1049,7 +1049,7 @@ describe("ClaudeAdapterV2 full-access command approval", () => {
         toolName: "Bash",
         safetyReason: "",
       }),
-      "ask",
+      "allow",
     );
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
@@ -5161,18 +5161,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             Effect.map((result) => ({ type: "decision", result }) as const),
           ),
         );
+        // The workspace disables bypass, so the session opens in auto, but the thread is full
+        // access and the command still runs. A removal check or deny rule is what stops one.
         assert.equal(
           first.type,
-          "request",
-          "Full access must not auto-allow a policy-restricted command",
+          "decision",
+          "Full access runs the command even when the workspace downgrades the session",
         );
-        if (first.type !== "request") return;
-        assert.equal(first.event.runtimeRequest.kind, "command");
-        yield* harness.runtime.respondToRuntimeRequest({
-          requestId: first.event.runtimeRequest.id,
-          decision: "decline",
-        });
-        assert.equal((yield* Fiber.join(decision))?.behavior, "deny");
+        if (first.type !== "decision") return;
+        assert.equal(first.result?.behavior, "allow");
         assert.equal(openedOptions.permissionMode, "auto");
         assert.isUndefined(openedOptions.allowDangerouslySkipPermissions);
 
@@ -5331,15 +5328,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               Effect.map((result) => ({ type: "decision", result }) as const),
             ),
           );
-          // The rejected bypass restore left the session in default mode, so it asks again.
-          assert.equal(restoredFirst.type, "request");
-          if (restoredFirst.type !== "request") return;
-          assert.equal(restoredFirst.event.runtimeRequest.kind, "command");
-          yield* harness.runtime.respondToRuntimeRequest({
-            requestId: restoredFirst.event.runtimeRequest.id,
-            decision: "decline",
-          });
-          assert.equal((yield* Fiber.join(restoredDecision))?.behavior, "deny");
+          // The rejected bypass restore left the session in default mode. The thread is still full
+          // access, so the command runs instead of waiting for an approval that never comes.
+          assert.equal(restoredFirst.type, "decision");
+          if (restoredFirst.type !== "decision") return;
+          assert.equal(restoredFirst.result?.behavior, "allow");
           yield* finish;
           assert.equal(harness.terminalEvents().at(-1)?.status, "completed");
         }
