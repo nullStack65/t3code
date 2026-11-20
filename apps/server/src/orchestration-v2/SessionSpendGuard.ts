@@ -233,8 +233,15 @@ export interface LaunchCheckInput {
 const INTERACTIVE_SOURCES: ReadonlySet<OrchestrationV2ConversationMessage["creationSource"]> =
   new Set(["web", "mobile"]);
 
+export function refusesAutomatedTurn(
+  mode: SessionSpendGuardSettings["mode"],
+  creationSource: OrchestrationV2ConversationMessage["creationSource"],
+) {
+  return mode === "enforce" && !INTERACTIVE_SOURCES.has(creationSource);
+}
+
 export function checkLaunch(input: LaunchCheckInput): "untitled" | null {
-  if (input.mode !== "enforce" || INTERACTIVE_SOURCES.has(input.creationSource)) return null;
+  if (!refusesAutomatedTurn(input.mode, input.creationSource)) return null;
   const untitled = input.title.trim() === "" || input.title.trim() === "New thread";
   if (untitled && !input.titlePending && input.hasOtherUserMessages) return "untitled";
   return null;

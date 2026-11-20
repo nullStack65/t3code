@@ -68,6 +68,7 @@ import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
   checkLaunch,
+  refusesAutomatedTurn,
   describeSpendStop,
   evaluateThreadSpend,
   SPEND_GUARD_REFUSAL_TITLE,
@@ -577,7 +578,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      if (guardSettings.sessionSpendGuard.mode === "enforce") {
+      if (refusesAutomatedTurn(guardSettings.sessionSpendGuard.mode, message.creationSource)) {
         const { checkpoints } = yield* projectionStore.getThreadRecords(input.threadId, [
           "checkpoints",
         ]);

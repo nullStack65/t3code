@@ -425,12 +425,12 @@ effectIt.effect("refuses an automated follow-up on a thread that still has the d
 );
 
 effectIt.effect(
-  "refuses the next user turn at the session ceiling even after a linked pull request",
+  "refuses the next automated turn at the session ceiling even after a linked pull request",
   () =>
     Effect.gen(function* () {
       const harness = startWithSpendGuard({
         title: "Manager work",
-        creationSource: "web",
+        creationSource: "mcp",
         pullRequestLinkedAt: "2099-01-01T00:00:00.000Z",
         providerTurns: [
           { startedAt: "2099-01-01T00:00:01.000Z", inputTokens: 1 },
@@ -446,11 +446,23 @@ effectIt.effect(
     }),
 );
 
-effectIt.effect("counts every provider turn in the thread toward the session ceiling", () =>
+effectIt.effect("lets a founder's own turn through at the session ceiling", () =>
   Effect.gen(function* () {
     const harness = startWithSpendGuard({
       title: "Manager work",
       creationSource: "web",
+      providerTurns: [{ startedAt: "2099-01-01T00:00:01.000Z", inputTokens: 1 }],
+    });
+    yield* Effect.exit(harness.start);
+    expect(harness.refusal()?.title).not.toBe("Turn refused by the session spend guard");
+  }),
+);
+
+effectIt.effect("counts every provider turn in the thread toward the session ceiling", () =>
+  Effect.gen(function* () {
+    const harness = startWithSpendGuard({
+      title: "Manager work",
+      creationSource: "mcp",
       providerTurns: Array.from({ length: 501 }, (_, index) => ({
         startedAt: "2099-01-01T00:00:00.000Z",
         inputTokens: index === 0 ? 1 : 0,
