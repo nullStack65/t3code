@@ -1,6 +1,6 @@
 import type { MessageId, ThreadSeenMarker } from "@t3tools/contracts";
 
-export const SEEN_DWELL_MS = 2_000;
+const SEEN_DWELL_MS = 2_000;
 
 export interface SeenSample {
   active: boolean;
@@ -17,7 +17,7 @@ export interface SeenTimers {
   clear(handle: unknown): void;
 }
 
-export function createSeenDwellTracker(options: {
+function createSeenDwellTracker(options: {
   onSeen: (messageId: MessageId) => void;
   dwellMs?: number;
   timers: SeenTimers;
@@ -53,6 +53,7 @@ export function createSeenDwellTracker(options: {
 export interface SeenMessage {
   id: MessageId;
   role: string;
+  streaming?: boolean;
 }
 
 interface SeenEntry {
@@ -62,14 +63,14 @@ interface SeenEntry {
 
 const seenByThreadKey = new Map<string, SeenEntry>();
 
-export function recordSeenMessage(input: {
+function recordSeenMessage(input: {
   threadKey: string;
   messageId: MessageId;
   messages: ReadonlyArray<SeenMessage>;
   seenAt: string;
 }): boolean {
   const nextIndex = input.messages.findIndex((message) => message.id === input.messageId);
-  if (nextIndex < 0) return false;
+  if (nextIndex < 0 || input.messages[nextIndex]?.streaming === true) return false;
   const previous = seenByThreadKey.get(input.threadKey);
   if (previous) {
     const previousIndex = input.messages.findIndex((message) => message.id === previous.messageId);
@@ -86,6 +87,7 @@ export function pickNewestMessageId(
   const visible = new Set(visibleIds);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
+    if (message.streaming === true) continue;
     if (visible.has(message.id)) return message.id;
   }
   return null;

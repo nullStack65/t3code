@@ -192,9 +192,17 @@ describe("timeline seen sampling", () => {
     expect(clock.pendingCount()).toBe(1);
     page.state.focused = false;
     page.emit("win:blur");
-    page.flush();
+    expect(page.frames).toEqual([]);
     expect(clock.pendingCount()).toBe(0);
     expect(buildSeenMarker("env:thread")).toBeUndefined();
+    page.state.focused = true;
+    page.emit("win:focus");
+    expect(page.frames).toEqual([]);
+    expect(clock.pendingCount()).toBe(1);
+    page.state.visibility = "hidden";
+    page.emit("doc:visibilitychange");
+    expect(page.frames).toEqual([]);
+    expect(clock.pendingCount()).toBe(0);
     sampling.dispose();
   });
 
