@@ -1981,6 +1981,57 @@ it.effect("drops and logs a digest that expires before a turn picks it up", () =
   }),
 );
 
+it.effect("carries a digest along with a slash-prefixed message", () =>
+  Effect.gen(function* () {
+    const { started, layer, startFirstTurn, finishTurn, send } =
+      yield* deliveryHarness("slash-carries-digest");
+    yield* Effect.gen(function* () {
+      const threadId = yield* startFirstTurn;
+      const alert = yield* send(threadId, "lane a stuck", {
+        class: "digest",
+        category: "alert",
+      });
+      yield* finishTurn(started[0]!);
+      yield* send(threadId, "/review the PR");
+      assert.equal(started.length, 2);
+      assert.deepEqual(
+        started[1]?.message.text,
+        formatDigestForProvider("/review the PR", [
+          { messageId: alert, category: "alert", text: "lane a stuck" },
+        ]),
+      );
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("queues a digest on a thread that has never run", () =>
+  Effect.gen(function* () {
+    const { started, layer, send } = yield* deliveryHarness("digest-before-first-run");
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("thread:digest-before-first-run");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:digest-before-first-run"),
+        threadId,
+        projectId: ProjectId.make("project:digest-before-first-run"),
+        title: "delivery",
+        modelSelection: runSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const alert = yield* send(threadId, "lane a stuck", { class: "digest", category: "alert" });
+      assert.deepEqual(started, []);
+      const { runs } = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(runs.find((run) => run.userMessageId === alert)?.status, "queued");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
 // regression: #33454 a steer that restarts a completion wake run left its cohort claimed forever
 const restartCompletionWake = Effect.fn("restartCompletionWake")(function* (
   harness: Pick<

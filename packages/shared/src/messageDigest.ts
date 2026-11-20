@@ -12,7 +12,7 @@ export function formatDigestForProvider(
   text: string,
   digest: ReadonlyArray<OrchestrationV2DigestEntry> | undefined,
 ) {
-  if (digest === undefined || digest.length === 0 || text.trim().startsWith("/")) return text;
+  if (digest === undefined || digest.length === 0) return text;
   const sections = SECTIONS.flatMap(([category, title]) => {
     const entries = digest.filter((entry) => entry.category === category);
     return entries.length === 0

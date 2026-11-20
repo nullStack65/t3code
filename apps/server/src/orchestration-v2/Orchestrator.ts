@@ -2537,7 +2537,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly userStarted?: boolean;
       },
     ) {
-      if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
       let projection = yield* readCommandProjection(threadId);
       if (
         projection.thread.archivedAt !== null ||
@@ -2550,6 +2549,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (yield* cancelStaleQuestionWakes(projection)) {
         projection = yield* readCommandProjection(threadId);
       }
+      // A digest never starts a turn, so an expired one is dropped even when it is the only queue.
       const checkedAt = yield* DateTime.now;
       const expired = projection.runs.filter(
         (run) => run.status === "queued" && deliveryExpired(run, checkedAt),
@@ -2561,6 +2561,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         for (const run of expired) yield* logExpiredDelivery(run);
         projection = yield* readCommandProjection(threadId);
       }
+      if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
       let storedQueuedRun =
         options?.queuedRunId === undefined
           ? nextQueuedRun(projection)
@@ -7678,15 +7679,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection.thread.worktreePath === null
         ? latestRun
         : undefined;
-    // A digest waits on an idle thread too; only a thread that never ran starts one.
-    const queueBehindRun =
-      activeRun ?? worktreeMissingRun ?? (deliveryClass === "digest" ? (latestRun ?? undefined) : undefined);
+    const queueBehindRun = activeRun ?? worktreeMissingRun;
     const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
     const startsOrQueuesRun =
       dispatchMode.type === "defer_start" ||
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
-    const shouldQueue = queueBehindRun !== undefined && startsOrQueuesRun;
+    // A digest never starts a turn, so on a thread with nothing running it waits for one.
+    const holdDigest = deliveryClass === "digest" && queueBehindRun === undefined && startsOrQueuesRun;
+    const shouldQueue = (queueBehindRun !== undefined && startsOrQueuesRun) || holdDigest;
     // An explicit pick queued ahead reaches the thread only when its run starts. A goal or
     // restart command that stops the active run goes first, so nothing queued applies before it.
     // Buffered provider wakes drain output their own provider already produced.
@@ -7748,14 +7749,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const queueProviderThread =
         activeProviderThread ??
-        projection.providerThreads.find(
-          (candidate) => candidate.id === queueBehindRun.providerThreadId,
-        );
-      if (queueProviderThread === undefined) {
+        (queueBehindRun === undefined
+          ? undefined
+          : projection.providerThreads.find(
+              (candidate) => candidate.id === queueBehindRun.providerThreadId,
+            ));
+      if (queueProviderThread === undefined && !holdDigest) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Active run ${queueBehindRun.id} has no provider thread for queued dispatch.`,
+          cause: `Active run ${queueBehindRun?.id} has no provider thread for queued dispatch.`,
         });
       }
       const now = yield* DateTime.now;
@@ -7763,7 +7766,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
       const targetProviderThread = freshContext
         ? undefined
-        : modelSelection.instanceId === queueProviderThread.providerInstanceId
+        : queueProviderThread !== undefined &&
+            modelSelection.instanceId === queueProviderThread.providerInstanceId
           ? queueProviderThread
           : rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0];
       const queuedAdapter = yield* providerAdapters
@@ -7787,7 +7791,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           capabilities: queuedCapabilities,
         }),
       );
-      const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
+      const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ??
+        queueProviderThread ?? {
         id: idAllocator.derive.providerThread({
           driver: queuedAdapter.driver,
           nativeThreadId: `pending:${runId}`,
@@ -7810,7 +7815,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
       const rootNodeId = idAllocator.derive.rootNode({ runId });
       const checkpointScope =
-        queueBehindRun.status === "preparing" || worktreeMissingRun !== undefined
+        holdDigest || queueBehindRun?.status === "preparing" || worktreeMissingRun !== undefined
           ? null
           : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
               Effect.flatMap((resolvedRuntimePolicy) =>
@@ -9095,6 +9100,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   }),
               ),
             );
+    const forkFold = carriesDigest(command, command) ? digestFold(projection, now) : undefined;
     const checkpointScope = yield* checkpointService
       .prepareRootRunScope({
         threadId: command.threadId,
@@ -9152,6 +9158,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...wakeWorkStartedAt(projection, command),
+      ...(command.delivery === undefined ? {} : { delivery: command.delivery }),
+      ...(forkFold === undefined || forkFold.digest.length === 0 ? {} : { digest: forkFold.digest }),
     };
     const attempt: OrchestrationV2RunAttempt = {
       id: attemptId,
@@ -9500,6 +9508,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
     }
+    for (const spent of forkFold === undefined ? [] : [...forkFold.folded, ...forkFold.expired]) {
+      for (const event of queuedRunCancellationEvents(projection, spent, now)) {
+        yield* emitEvent(event);
+      }
+    }
+    for (const expired of forkFold?.expired ?? []) yield* logExpiredDelivery(expired);
     yield* emitEvent({
       type: "run.created",
       threadId: command.threadId,
@@ -16125,8 +16139,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (stored.event.payload.type === "compaction"
             ? TERMINAL_TURN_ITEM_STATUSES.has(stored.event.payload.status)
             : TOOL_TURN_ITEM_TYPES.has(stored.event.payload.type) &&
-              (stored.event.payload.status === "completed" ||
-                stored.event.payload.status === "failed"))),
+              TERMINAL_TURN_ITEM_STATUSES.has(stored.event.payload.status))),
     ),
     Stream.runForEach(
       Effect.fn("Orchestrator.deliverDeferredSteers")(
