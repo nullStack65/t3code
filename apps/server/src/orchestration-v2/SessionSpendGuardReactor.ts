@@ -57,6 +57,15 @@ export function spendGuardNotice(
       message: describeSpendStop(evaluation, settings),
     };
   }
+  if (evaluation.level === "flag" && evaluation.stopReason === "ceiling") {
+    if (evaluation.flaggedForCeiling) return null;
+    return {
+      kind: SPEND_GUARD_FLAGGED_KIND,
+      reason: "ceiling",
+      title: "Session spend ceiling reached",
+      message: describeSpendStop(evaluation, settings),
+    };
+  }
   if (evaluation.level === "flag" && !evaluation.flaggedSinceIdle) {
     return {
       kind: SPEND_GUARD_FLAGGED_KIND,
@@ -154,7 +163,7 @@ export const make = Effect.gen(function* () {
         } satisfies OrchestrationV2DomainEvent,
       ],
     });
-    if (notice.kind !== SPEND_GUARD_STOPPED_KIND) return;
+    if (notice.kind !== SPEND_GUARD_STOPPED_KIND || notice.reason !== "ceiling") return;
     for (const live of records.runs.filter(isLive)) {
       yield* orchestrator.dispatch({
         type: "run.interrupt",

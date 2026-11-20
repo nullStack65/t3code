@@ -446,6 +446,22 @@ effectIt.effect(
     }),
 );
 
+effectIt.effect("counts every provider turn in the thread toward the session ceiling", () =>
+  Effect.gen(function* () {
+    const harness = startWithSpendGuard({
+      title: "Manager work",
+      creationSource: "web",
+      providerTurns: Array.from({ length: 501 }, (_, index) => ({
+        startedAt: "2099-01-01T00:00:00.000Z",
+        inputTokens: index === 0 ? 1 : 0,
+      })),
+    });
+    yield* harness.start;
+    expect(harness.refusal()?.failure.message).toContain("session ceiling");
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+  }),
+);
+
 const restoreLeaseExists = vi.fn(() => Effect.succeed(false));
 const restoreLeaseCreateWorktree = vi.fn(() => Effect.succeed({} as never));
 const layerRestoreLeaseTest = layerThreadWorktreeRestore.pipe(

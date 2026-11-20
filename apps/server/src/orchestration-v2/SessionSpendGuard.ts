@@ -46,6 +46,7 @@ export interface SpendGuardEvaluation {
   readonly idleUsd: number;
   readonly idleSince: string | null;
   readonly flaggedSinceIdle: boolean;
+  readonly flaggedForCeiling: boolean;
   readonly stoppedSinceIdle: boolean;
   readonly stoppedForCeiling: boolean;
 }
@@ -148,6 +149,9 @@ export function evaluateSpendGuard(input: SpendGuardInput): SpendGuardEvaluation
   const flaggedSinceIdle = input.markers.some(
     (marker) => marker.kind === SPEND_GUARD_FLAGGED_KIND && afterIdle(marker.createdAt),
   );
+  const flaggedForCeiling = input.markers.some(
+    (marker) => marker.kind === SPEND_GUARD_FLAGGED_KIND && marker.reason === "ceiling",
+  );
   const stoppedSinceIdle = input.markers.some(
     (marker) =>
       marker.kind === SPEND_GUARD_STOPPED_KIND &&
@@ -163,6 +167,7 @@ export function evaluateSpendGuard(input: SpendGuardInput): SpendGuardEvaluation
     idleUsd,
     idleSince,
     flaggedSinceIdle,
+    flaggedForCeiling,
     stoppedSinceIdle,
     stoppedForCeiling,
   };
@@ -173,7 +178,7 @@ export function evaluateSpendGuard(input: SpendGuardInput): SpendGuardEvaluation
     return { ...base, level: "stop", stopReason };
   }
   if (stopReason !== null || idleUsd >= idleFlagUsd) {
-    return { ...base, level: "flag", stopReason: null };
+    return { ...base, level: "flag", stopReason };
   }
   return { ...base, level: "ok", stopReason: null };
 }

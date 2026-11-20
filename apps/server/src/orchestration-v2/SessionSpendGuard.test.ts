@@ -160,7 +160,7 @@ describe("evaluateSpendGuard", () => {
       settings: { ...settings, mode: "flag" },
       spend: [priced("2026-01-01T00:01:00.000Z", 6)],
     });
-    expect(result).toMatchObject({ level: "flag", stopReason: null, idleUsd: 6 });
+    expect(result).toMatchObject({ level: "flag", stopReason: "idle", idleUsd: 6 });
   });
 
   it("stops for the session ceiling ahead of the idle limit", () => {
@@ -202,6 +202,36 @@ describe("evaluateSpendGuard", () => {
     expect(idle.flaggedSinceIdle).toBe(true);
     expect(idle.stoppedSinceIdle).toBe(false);
     expect(idle.stoppedForCeiling).toBe(true);
+    expect(idle.flaggedForCeiling).toBe(false);
+  });
+
+  it("keeps a ceiling flag visible when an earlier idle flag is already recorded", () => {
+    const flagged = evaluate({
+      settings: { ...settings, mode: "flag" },
+      workSignalAts: ["2026-01-01T00:02:00.000Z"],
+      markers: [marker("flagged", "2026-01-01T00:03:00.000Z", "idle")],
+      spend: [priced("2026-01-01T00:01:00.000Z", 6), priced("2026-01-01T00:04:00.000Z", 4)],
+    });
+    expect(flagged).toMatchObject({
+      level: "flag",
+      stopReason: "ceiling",
+      flaggedSinceIdle: true,
+      flaggedForCeiling: false,
+      idleUsd: 4,
+      sessionUsd: 10,
+    });
+    expect(spendGuardNotice(flagged, settings)).toMatchObject({
+      kind: "flagged",
+      reason: "ceiling",
+    });
+    const recorded = evaluate({
+      settings: { ...settings, mode: "flag" },
+      spend: [priced("2026-01-01T00:01:00.000Z", 10)],
+      markers: [marker("flagged", "2026-01-01T00:02:00.000Z", "ceiling")],
+    });
+    expect(recorded.flaggedForCeiling).toBe(true);
+    expect(recorded.stopReason).toBe("ceiling");
+    expect(spendGuardNotice(recorded, settings)).toBeNull();
   });
 });
 
