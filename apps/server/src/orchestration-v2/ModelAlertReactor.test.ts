@@ -24,6 +24,7 @@ import {
   recordUsageLimit,
   RESUME_GRACE_MS,
   recordThreadEvents,
+  threadEventDestinations,
   watcherAlertMessage,
 } from "./ModelAlertReactor.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
@@ -293,6 +294,17 @@ it("queues one delivery per destination for a thread event, beside model alerts"
   );
   assert.include(watcherAlertMessage(alertFor("run:1")), "Model alert from");
   assert.include(watcherAlertMessage(eventAlert(finding("stuck", "run:1"))), "Thread event from");
+});
+
+it("a thread event with no launching thread to hear it goes only to a configured webhook", () => {
+  const cto = { environmentId: EnvironmentId.make("laptop"), threadId: ThreadId.make("cto") };
+  assert.deepEqual(threadEventDestinations(cto, ""), ["watcher"]);
+  assert.deepEqual(threadEventDestinations(cto, "https://hooks.example/alerts"), [
+    "watcher",
+    "webhook",
+  ]);
+  assert.deepEqual(threadEventDestinations(null, "https://hooks.example/alerts"), ["webhook"]);
+  assert.deepEqual(threadEventDestinations(null, "  "), []);
 });
 
 it.effect("forwards a thread event to a watcher on another environment with one retry key", () =>

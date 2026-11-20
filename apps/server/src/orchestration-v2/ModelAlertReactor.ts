@@ -45,6 +45,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   judgeThread,
   threadEventAlert,
+  launchingThreadId,
   ThreadEventAlert,
   type ThreadEventKind,
   threadEventMessage,
@@ -237,6 +238,14 @@ export function modelAlertDestinations(input: {
     ...(input.webhookUrl.trim() === "" ? [] : (["webhook"] as const)),
   ];
 }
+
+export const threadEventDestinations = (
+  recipient: ModelAlertWatcher | null,
+  webhookUrl: string,
+): ReadonlyArray<Destination> => [
+  ...(recipient === null ? [] : (["watcher"] as const)),
+  ...(webhookUrl.trim() === "" ? [] : (["webhook"] as const)),
+];
 
 const signature = (alert: ModelAlert) =>
   `${alert.reasons.join(",")}|${alert.executedModel ?? ""}|${alert.fallbackModels.join(",")}`;
@@ -1060,15 +1069,19 @@ export const make = Effect.gen(function* () {
       return { _tag: "sent" } satisfies DeliveryResult;
     }
     const watcher = current.modelAlertWatcher;
-    if (watcher === null) return { _tag: "sent" } satisfies DeliveryResult;
+    const target = alert.type === "thread-event" ? (alert.recipient ?? null) : watcher;
+    if (target === null) return { _tag: "sent" } satisfies DeliveryResult;
     const here = yield* environment.getEnvironmentId;
     const nowMs = yield* Clock.currentTimeMillis;
-    const view = yield* watcherView;
+    const view =
+      target.environmentId === watcher?.environmentId && target.threadId === watcher.threadId
+        ? yield* watcherView
+        : yield* readWatcher(target, here).pipe(Effect.catchCause(() => Effect.succeed(null)));
     const until =
       holdUntil(view, alert, nowMs) ??
       busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
-    yield* deliverToWatcher(alert, watcher, here);
+    yield* deliverToWatcher(alert, target, here);
     return { _tag: "sent" } satisfies DeliveryResult;
   });
 
@@ -1248,6 +1261,19 @@ export const make = Effect.gen(function* () {
     return { usageLimited: judged.alert?.reasons.includes("usage_limit") === true };
   });
 
+  const launchingThread = Effect.fnUntraced(function* (
+    shell: OrchestrationV2ThreadShell,
+    here: EnvironmentId,
+  ) {
+    const threadId = launchingThreadId(shell.inbox);
+    if (threadId === null || threadId === shell.id) return null;
+    const launcher = yield* projections.getThreadShell(ThreadId.make(threadId));
+    if (launcher === null || launcher.deletedAt !== null || launcher.archivedAt !== null) {
+      return null;
+    }
+    return { environmentId: here, threadId: launcher.id } satisfies ModelAlertWatcher;
+  });
+
   /** Judges one thread for the kinds a trigger can change, and queues what is newly true. */
   const handleThreadEvents = Effect.fnUntraced(function* (
     threadId: ThreadId,
@@ -1275,12 +1301,8 @@ export const make = Effect.gen(function* () {
     });
     const label = (yield* environment.getDescriptor).label;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
-    const destinations = modelAlertDestinations({
-      watcher,
-      webhookUrl: current.modelAlertWebhookUrl,
-      here,
-      lineage: shell.lineage,
-    });
+    const recipient = yield* launchingThread(shell, here);
+    const destinations = threadEventDestinations(recipient, current.modelAlertWebhookUrl);
     const enqueued = yield* update((state) => {
       const result = recordThreadEvents(
         state,
@@ -1292,6 +1314,7 @@ export const make = Effect.gen(function* () {
             shell,
             finding,
             occurredAt,
+            recipient,
           }),
         destinations,
         nowMs,
