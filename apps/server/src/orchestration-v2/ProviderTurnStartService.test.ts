@@ -297,7 +297,10 @@ function startWithSpendGuard(input: {
   readonly title: string;
   readonly creationSource: "web" | "mcp";
   readonly pullRequestLinkedAt?: string;
-  readonly providerTurns: ReadonlyArray<{ readonly startedAt: string; readonly inputTokens: number }>;
+  readonly providerTurns: ReadonlyArray<{
+    readonly startedAt: string;
+    readonly inputTokens: number;
+  }>;
 }) {
   const threadId = ThreadId.make("thread_provider_turn_start_spend_guard");
   const runId = RunId.make("run_provider_turn_start_spend_guard");
@@ -419,6 +422,28 @@ effectIt.effect("refuses an automated follow-up on a thread that still has the d
     });
     expect(harness.startRootRun).not.toHaveBeenCalled();
   }),
+);
+
+effectIt.effect(
+  "refuses the next user turn at the session ceiling even after a linked pull request",
+  () =>
+    Effect.gen(function* () {
+      const harness = startWithSpendGuard({
+        title: "Manager work",
+        creationSource: "web",
+        pullRequestLinkedAt: "2099-01-01T00:00:00.000Z",
+        providerTurns: [
+          { startedAt: "2099-01-01T00:00:01.000Z", inputTokens: 1 },
+          { startedAt: "2099-01-01T00:00:02.000Z", inputTokens: 1 },
+        ],
+      });
+      yield* harness.start;
+      const refusal = harness.refusal();
+      expect(refusal?.title).toBe("Turn refused by the session spend guard");
+      expect(refusal?.failure.message).toContain("session ceiling");
+      expect(refusal?.failure.message).not.toContain("idle limit");
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+    }),
 );
 
 const restoreLeaseExists = vi.fn(() => Effect.succeed(false));
