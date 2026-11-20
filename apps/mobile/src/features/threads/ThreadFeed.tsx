@@ -245,6 +245,7 @@ import {
   ThreadWorkLog,
   WORK_GROUP_TOGGLE_HEIGHT,
 } from "./thread-work-log";
+import { seenMessagesFromFeed, useThreadSeenMarker } from "./useThreadSeenMarker";
 import {
   appendGuestPendingMessages,
   appendPendingThreadMessages,
@@ -3525,6 +3526,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     onHeaderMaterialVisibilityChange?.(visible);
   };
   const feedThreadKey = scopedThreadKey(props.environmentId, props.threadId);
+  const seenMessages = useMemo(() => seenMessagesFromFeed(props.feed), [props.feed]);
+  const handleViewableItemsChanged = useThreadSeenMarker({
+    threadKey: feedThreadKey,
+    messages: seenMessages,
+  });
   const [loadedListKey, setLoadedListKey] = useState<string | null>(null);
   const [landedListKey, setLandedListKey] = useState<string | null>(null);
   // LegendList reports ready, and shows its rows, while rows measured during its initial scroll can
@@ -4036,6 +4042,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             extraData={listAppearanceData}
             renderItem={renderItem}
             viewabilityConfig={THREAD_MEDIA_VIEWABILITY_CONFIG}
+            onViewableItemsChanged={handleViewableItemsChanged}
             keyExtractor={(entry) => entry.id}
             getItemType={(entry) => {
               if (entry.type !== "message") return entry.type;

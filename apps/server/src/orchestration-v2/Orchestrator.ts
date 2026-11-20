@@ -6895,6 +6895,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     }
+    const unseenCount =
+      command.seenMarker === undefined
+        ? null
+        : yield* projectionStore
+            .countAssistantMessagesAfter(command.threadId, command.seenMarker.lastSeenMessageId)
+            .pipe(mapDispatchError(command));
+    const seenMarker =
+      command.seenMarker !== undefined && unseenCount !== null && unseenCount > 0
+        ? { ...command.seenMarker, unseenCount }
+        : undefined;
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -7500,7 +7510,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
-        ...(command.seenMarker === undefined ? {} : { seenMarker: command.seenMarker }),
+        ...(seenMarker === undefined ? {} : { seenMarker }),
         forceRestart: dispatchMode.type === "restart_active",
       });
       return;
@@ -7797,7 +7807,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
-        ...(command.seenMarker === undefined ? {} : { seenMarker: command.seenMarker }),
+        ...(seenMarker === undefined ? {} : { seenMarker }),
         ...(command.scheduledTaskId !== undefined && command.modelSelection === undefined
           ? { followsThreadSelection: true as const }
           : {}),
@@ -8217,7 +8227,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
-        ...(command.seenMarker === undefined ? {} : { seenMarker: command.seenMarker }),
+        ...(seenMarker === undefined ? {} : { seenMarker }),
         ...(command.scheduledTaskId !== undefined && command.modelSelection === undefined
           ? { followsThreadSelection: true as const }
           : {}),
@@ -9016,7 +9026,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
       ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
       ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
-      ...(command.seenMarker === undefined ? {} : { seenMarker: command.seenMarker }),
+      ...(seenMarker === undefined ? {} : { seenMarker }),
       id: command.messageId,
       threadId: command.threadId,
       runId,

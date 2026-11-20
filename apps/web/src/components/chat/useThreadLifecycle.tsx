@@ -78,6 +78,7 @@ import { Atom } from "effect/reactivity";
 import { environmentThreadDetails } from "../../state/threads";
 import { resolveThreadOpenRoute } from "../../lib/sideChatPane";
 import type { useLocalDispatchState } from "./useLocalDispatchState";
+import { seenMarkerForSend } from "./useComposerSend";
 const RELATED_THREAD_SHELL_WAIT_MS = 1_000;
 const NO_RUN_STOP_ATOM = Atom.make<RunStopPresentation | null>(null).pipe(
   Atom.withLabel("web-thread-run-stop:empty"),
@@ -555,6 +556,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
               modelSelection: context.selectedModelSelection,
               runtimeMode,
               interactionMode: DEFAULT_INTERACTION_MODE,
+              ...seenMarkerForSend(scopedThreadKey(scopeThreadRef(environmentId, threadId))),
               createdAt,
             },
           });

@@ -2978,7 +2978,6 @@ export default function ChatView(props: ChatViewProps) {
     activeProjectIsScratch,
     activeProjectDefaultModelSelection,
     activeMessageCount,
-    seenMessages: serverProjection?.messages ?? EMPTY_SEEN_MESSAGES,
     isServerThread,
     isLocalDraftThread,
     isGitRepo,

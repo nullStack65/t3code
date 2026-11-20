@@ -30,7 +30,7 @@ import {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
-import { buildSeenMarker, type SeenMessage } from "@t3tools/client-runtime/seen-marker";
+import { buildSeenMarker } from "@t3tools/client-runtime/seen-marker";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   declinePendingApprovals,
@@ -187,7 +187,6 @@ interface ComposerSendInput {
   readonly draftId: DraftId | null;
   readonly draftThread: DraftSessionState | null;
   readonly activeThread: EnvironmentThreadShell | undefined;
-  readonly seenMessages: ReadonlyArray<SeenMessage>;
   readonly activeThreadKey: string | null;
   readonly activeThreadBranch: string | null;
   readonly activeProject: EnvironmentProject | null;
@@ -275,8 +274,8 @@ interface ComposerSendInput {
   readonly linkCheckoutPullRequest: (threadRef: ScopedThreadRef, url: string) => void;
 }
 
-function seenMarkerForSend(threadKey: string, messages: ReadonlyArray<SeenMessage>) {
-  const seenMarker = buildSeenMarker({ threadKey, messages });
+export function seenMarkerForSend(threadKey: string) {
+  const seenMarker = buildSeenMarker(threadKey);
   return seenMarker ? { seenMarker } : {};
 }
 
@@ -300,7 +299,6 @@ export function useComposerSend(input: ComposerSendInput) {
     activeProjectIsScratch,
     activeProjectDefaultModelSelection,
     activeMessageCount,
-    seenMessages,
     isServerThread,
     isLocalDraftThread,
     isGitRepo,
@@ -1478,10 +1476,7 @@ export function useComposerSend(input: ComposerSendInput) {
               dispatchMode: turnDispatchMode,
               ...(freshArm === undefined ? {} : { freshContext: true }),
               ...(bootstrap ? { bootstrap } : {}),
-              ...seenMarkerForSend(
-                scopedThreadKey(scopeThreadRef(environmentId, threadIdForSend)),
-                seenMessages,
-              ),
+              ...seenMarkerForSend(scopedThreadKey(scopeThreadRef(environmentId, threadIdForSend))),
               createdAt: messageCreatedAt,
             },
           }

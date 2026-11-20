@@ -26,6 +26,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { createDebugLogger } from "../lib/debugLog";
+import { buildSeenMarker } from "@t3tools/client-runtime/seen-marker";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn";
 import { serializeComposerMessageForServer, uploadedComposerContext } from "../lib/composerContext";
@@ -947,6 +948,9 @@ export function createThreadOutboxDelivery(): {
       if (!isQueuedMessagePayloadCurrent(persistedMessage, deliveryRevision)) return true;
     }
     if (!hasAccess()) return true;
+    const seenMarker = buildSeenMarker(
+      scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId),
+    );
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
       input: {
@@ -976,6 +980,7 @@ export function createThreadOutboxDelivery(): {
         createdAt: queuedMessage.createdAt,
         dispatchMode: queuedMessage.dispatchMode ?? "start",
         ...(queuedMessage.freshContext ? { freshContext: true } : {}),
+        ...(seenMarker ? { seenMarker } : {}),
         resendAfterSocketLoss: false,
       },
     });

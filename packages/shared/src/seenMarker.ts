@@ -1,6 +1,9 @@
-import type { ThreadSeenMarker } from "@t3tools/contracts";
+import type { ThreadSeenMarkerSummary } from "@t3tools/contracts";
 
-export function formatSeenMarkerForProvider(text: string, marker: ThreadSeenMarker | undefined) {
+export function formatSeenMarkerForProvider(
+  text: string,
+  marker: ThreadSeenMarkerSummary | undefined,
+) {
   if (marker === undefined || marker.unseenCount === 0) return text;
   const noun = marker.unseenCount === 1 ? "message" : "messages";
   return [
