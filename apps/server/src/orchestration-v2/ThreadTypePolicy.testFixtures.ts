@@ -6,7 +6,7 @@ export const THREAD_TYPE_POLICY_FIXTURE: ThreadTypePolicyFile = {
   schema: "thread-type-policy-v1",
   source: "closura-agent-config config/thread-type-policy.json",
   decision: "CLO-924",
-  context_window: 272_000,
+  context_window: { claude: 200_000, codex: 272_000 },
   default_type: "coding",
   classify: [
     {
@@ -39,7 +39,12 @@ export const THREAD_TYPE_POLICY_FIXTURE: ThreadTypePolicyFile = {
     },
   ],
   types: {
-    standing: { compact_at: 100_000, cache_ttl: "1h", refused_models: ["gpt-6-astra"] },
+    standing: {
+      compact_at: 165_000,
+      cache_ttl: "1h",
+      refused_models: ["gpt-6-astra"],
+      summary_cap: 8_000,
+    },
     coding: { compact_at: 168_000, cache_ttl: "5m", refused_models: [] },
     review: { compact_at: 120_000, cache_ttl: "5m", refused_models: [] },
     research: { compact_at: 168_000, cache_ttl: "1h", refused_models: [] },

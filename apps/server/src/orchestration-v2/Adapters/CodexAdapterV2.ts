@@ -106,6 +106,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
+import * as ThreadTypePolicy from "../ThreadTypePolicy.ts";
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
@@ -1510,6 +1511,9 @@ export function codexThreadTypeConfig(
     ? {}
     : {
         model_auto_compact_token_limit: threadType.compactAt,
+        ...(threadType.summaryCap === undefined
+          ? {}
+          : { compact_prompt: ThreadTypePolicy.carriedSummaryInstruction(threadType.summaryCap) }),
       };
 }
 

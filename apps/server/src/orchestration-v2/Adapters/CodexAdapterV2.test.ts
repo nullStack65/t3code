@@ -99,11 +99,19 @@ describe("CodexAdapterV2 thread type policy", () => {
         runtimeMode: "full-access",
         interactionMode: "default",
         cwd: "/workspace",
-        threadType: { type: "review", contextWindow: 272_000, compactAt: 120_000, cacheTtl: "5m" },
+        threadType: {
+          type: "standing",
+          claudeContextWindow: 200_000,
+          codexContextWindow: 272_000,
+          compactAt: 165_000,
+          cacheTtl: "1h",
+          summaryCap: 8_000,
+        },
       },
     });
-    assert.equal(params.config.model_auto_compact_token_limit, 120_000);
+    assert.equal(params.config.model_auto_compact_token_limit, 165_000);
     assert.isUndefined(params.config.model_context_window);
+    assert.match(String(params.config.compact_prompt), /within 8000 tokens/);
   });
 
   it("leaves Codex defaults alone without a thread type", () => {

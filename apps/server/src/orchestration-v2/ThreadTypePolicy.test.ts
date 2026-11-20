@@ -14,6 +14,8 @@ describe("ThreadTypePolicy", () => {
     ["JEFFDESK:DESK — Jeff Omarchy operations desktop", false, "standing"],
     ["CoS", true, "coding"],
     ["[standing] PR landing manager", true, "standing"],
+    ["[Standing] PR landing manager", true, "standing"],
+    ["[CODING] a standing role thread", true, "coding"],
     ["[research] CoS notes", false, "research"],
     ["KSS ----> analyses with Kameron", false, "conversational"],
     ["Independent code-review of CLO-924", true, "review"],
@@ -74,7 +76,8 @@ describe("ThreadTypePolicy", () => {
       );
       assert.deepEqual(review, {
         type: "review",
-        contextWindow: 272_000,
+        claudeContextWindow: 200_000,
+        codexContextWindow: 272_000,
         compactAt: 120_000,
         cacheTtl: "5m",
       });
@@ -85,9 +88,11 @@ describe("ThreadTypePolicy", () => {
       );
       assert.deepEqual(standing, {
         type: "standing",
-        contextWindow: 272_000,
-        compactAt: 100_000,
+        claudeContextWindow: 200_000,
+        codexContextWindow: 272_000,
+        compactAt: 165_000,
         cacheTtl: "1h",
+        summaryCap: 8_000,
       });
     }),
   );
@@ -117,6 +122,12 @@ describe("ThreadTypePolicy", () => {
       assert.isUndefined(yield* ThreadTypePolicy.readThreadTypePolicy(possessive));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it("caps a carried summary at one token per two characters", () => {
+    assert.equal(ThreadTypePolicy.carriedSummaryWithinCap(8_000, "a".repeat(16_000)), true);
+    assert.equal(ThreadTypePolicy.carriedSummaryWithinCap(8_000, "a".repeat(16_001)), false);
+    assert.match(ThreadTypePolicy.carriedSummaryInstruction(8_000), /8000 tokens/);
+  });
 
   it("reads the policy from the Closura config path unless the environment overrides it", () => {
     assert.match(
