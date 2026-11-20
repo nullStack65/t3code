@@ -24,6 +24,24 @@ describe("resolveBotPresence", () => {
     });
   });
 
+  it("holds a calm waiting state for waiting and usage-limited bots", () => {
+    expect(resolveBotPresence({ label: "Waiting" }, "Ops")).toEqual({
+      avatarState: "waiting",
+      line: "Waiting",
+      badge: null,
+    });
+    expect(resolveBotPresence({ label: "Failed", errorClass: "usage_limit" }, "Ops")).toEqual({
+      avatarState: "waiting",
+      line: "Limited",
+      badge: null,
+    });
+    expect(
+      resolveBotPresence({ label: "Failed", errorClass: "provider_error" }, "Ops").avatarState,
+    ).toBe(
+      "failed",
+    );
+  });
+
   it("falls back to the role line when idle", () => {
     expect(resolveBotPresence(null, "Daily digest")).toEqual({
       avatarState: "idle",

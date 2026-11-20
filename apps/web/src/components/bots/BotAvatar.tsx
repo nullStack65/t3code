@@ -25,7 +25,7 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M12.8 2.5 11 5.5h2l-1.8 2.5" />
+        <path data-bot-antenna d="M12.8 2.5 11 5.5h2l-1.8 2.5" />
         <path d="M9 17h6" />
       </>
     ),
@@ -40,8 +40,8 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M8.5 5.5a3.5 3.5 0 0 0 7 0Z" />
-        <path d="M12 5.5V8" />
+        <path data-bot-antenna d="M8.5 5.5a3.5 3.5 0 0 0 7 0Z" />
+        <path data-bot-antenna d="M12 5.5V8" />
         <path d="M10 17.2q2 1 4 0" />
       </>
     ),
@@ -56,8 +56,8 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M12 8V5.5" />
-        <circle cx="12" cy="4.5" r="1" />
+        <path data-bot-antenna d="M12 8V5.5" />
+        <circle data-bot-antenna cx="12" cy="4.5" r="1" />
         <path d="M10.5 17.5h3" />
       </>
     ),
@@ -69,7 +69,7 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M8 8 6.5 5M16 8l1.5-3" />
+        <path data-bot-antenna d="M8 8 6.5 5M16 8l1.5-3" />
         <path d="M9.5 17.5h5" />
       </>
     ),
@@ -84,8 +84,8 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M12 8V4h3" />
-        <rect x="15" y="2.8" width="2.4" height="2.4" rx="0.6" />
+        <path data-bot-antenna d="M12 8V4h3" />
+        <rect data-bot-antenna x="15" y="2.8" width="2.4" height="2.4" rx="0.6" />
         <path d="M9 17h6" />
       </>
     ),
@@ -100,9 +100,9 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M9 8V5M15 8V5" />
-        <circle cx="9" cy="4" r="1" fill="currentColor" stroke="none" />
-        <circle cx="15" cy="4" r="1" fill="currentColor" stroke="none" />
+        <path data-bot-antenna d="M9 8V5M15 8V5" />
+        <circle data-bot-antenna cx="9" cy="4" r="1" fill="currentColor" stroke="none" />
+        <circle data-bot-antenna cx="15" cy="4" r="1" fill="currentColor" stroke="none" />
         <path d="M9.5 17q2.5 1.5 5 0" />
       </>
     ),
@@ -117,9 +117,9 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M12 8V5.5" />
-        <path d="M12 5.5q-3-.2-3.5-3 3 .2 3.5 3Z" />
-        <path d="M12 5.5q2.5-.4 3.2-2.6-2.6.2-3.2 2.6Z" />
+        <path data-bot-antenna d="M12 8V5.5" />
+        <path data-bot-antenna d="M12 5.5q-3-.2-3.5-3 3 .2 3.5 3Z" />
+        <path data-bot-antenna d="M12 5.5q2.5-.4 3.2-2.6-2.6.2-3.2 2.6Z" />
         <path d="M10 17.2h4" />
       </>
     ),
@@ -134,7 +134,7 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <ellipse cx="12" cy="4.5" rx="4.5" ry="1.4" />
+        <ellipse data-bot-antenna cx="12" cy="4.5" rx="4.5" ry="1.4" />
         <path d="M10 17.5q2 .8 4 0" />
       </>
     ),
@@ -149,7 +149,7 @@ const AVATARS: Record<
       <>
         {FACE}
         <path d="M4 12H2.5M20 12h1.5" />
-        <path d="M12 8V6" />
+        <path data-bot-antenna d="M12 8V6" />
         <path d="M8.5 16.5h7M8.5 18h7" />
       </>
     ),
@@ -164,7 +164,7 @@ const AVATARS: Record<
     head: (
       <>
         {FACE}
-        <path d="M7 8 9 5.5h6L17 8" />
+        <path data-bot-antenna d="M7 8 9 5.5h6L17 8" />
         <path d="M17.6 14.8 19 19" />
         <path d="M9.5 17.5h4" />
       </>
@@ -226,7 +226,7 @@ export const BOT_ACCENT_CLASSES: Record<
   },
 };
 
-export type BotAvatarState = "idle" | "running" | "needs-you" | "failed";
+export type BotAvatarState = "idle" | "running" | "waiting" | "needs-you" | "failed";
 
 export function BotAvatar(props: {
   readonly avatarId: string;
@@ -246,6 +246,9 @@ export function BotAvatar(props: {
         "inline-flex shrink-0 items-center justify-center rounded-full bg-current/8",
         props.size === "lg" ? "size-9" : props.size === "md" ? "size-7" : "size-5",
         accent.text,
+        state === "idle" && "motion-safe:animate-bot-breathe",
+        state === "running" && "motion-safe:animate-status-pulse",
+        state === "waiting" && "motion-safe:animate-bot-wait",
         state === "needs-you" && cn("ring-2", accent.ring),
         state === "failed" && "ring-2 ring-destructive/80",
         props.className,
@@ -260,11 +263,25 @@ export function BotAvatar(props: {
         strokeLinejoin="round"
         className={props.size === "lg" ? "size-7" : props.size === "md" ? "size-5.5" : "size-4"}
       >
-        {avatar.head}
+        <g className={cn(state === "running" && "**:data-bot-antenna:motion-safe:animate-bot-antenna")}>
+          {avatar.head}
+        </g>
+        {state === "running" ? (
+          <rect
+            x="9"
+            y="11"
+            width="3"
+            height="4"
+            fill="currentColor"
+            stroke="none"
+            opacity="0.28"
+            className="motion-safe:animate-bot-scan"
+          />
+        ) : null}
         <g
           className={cn(
             "origin-[12px_13px]",
-            state === "running" && "motion-safe:animate-bot-blink",
+            (state === "idle" || state === "running") && "motion-safe:animate-bot-blink",
           )}
         >
           {avatar.eyes}

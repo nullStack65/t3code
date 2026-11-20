@@ -20,7 +20,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { isTrailingDoubleClick } from "../Sidebar.logic";
+import { isTrailingDoubleClick, resolveThreadStatusPill } from "../Sidebar.logic";
 import { Badge } from "../ui/badge";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -44,7 +44,8 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
-import { BotAvatar } from "../bots/BotAvatar";
+import { BotAvatar, type BotAvatarState } from "../bots/BotAvatar";
+import { resolveBotPresence } from "../bots/botPresence";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -61,6 +62,8 @@ interface ChatHeaderProps {
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
   /** A standing bot shows who it is instead of the project/thread breadcrumb. */
   standing?: ThreadStanding | null | undefined;
+  /** Drives the bot avatar's motion in the header; idle when absent. */
+  botAvatarState?: BotAvatarState | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -87,6 +90,7 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenProjectSettings,
   onFindInThread,
   standing,
+  botAvatarState,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -260,7 +264,12 @@ export const ChatHeader = memo(function ChatHeader({
         data-testid="bot-thread-header"
         onContextMenu={handleHeaderContextMenu}
       >
-        <BotAvatar avatarId={standing.avatarId} accent={standing.accent} size="md" />
+        <BotAvatar
+          avatarId={standing.avatarId}
+          accent={standing.accent}
+          size="md"
+          state={botAvatarState ?? "idle"}
+        />
         <button
           type="button"
           aria-label={`Bot actions for ${standing.name}`}

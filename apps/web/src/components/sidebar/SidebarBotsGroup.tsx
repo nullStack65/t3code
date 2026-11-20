@@ -72,8 +72,9 @@ const SidebarBotRow = memo(function SidebarBotRow(
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
+  const pill = resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } });
   const presence = resolveBotPresence(
-    resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } }),
+    pill === null ? null : { ...pill, errorClass: thread.runtime?.lastErrorClass },
     standing.role,
   );
   const accent = BOT_ACCENT_CLASSES[standing.accent];
@@ -101,6 +102,9 @@ const SidebarBotRow = memo(function SidebarBotRow(
         }`}
         className={cn(
           "group/sidebar-row relative flex h-8 w-full cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          presence.avatarState === "running" &&
+            "before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-current before:content-[''] motion-safe:before:animate-status-pulse",
+          accent.text,
           props.isActive
             ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
             : isSelected
@@ -132,7 +136,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
               "min-w-0 flex-1 truncate text-xs",
               presence.avatarState === "failed"
                 ? "text-destructive-foreground"
-                : presence.badge === "needs-you"
+                : presence.badge === "needs-you" || presence.avatarState === "running"
                   ? accent.text
                   : "text-sidebar-muted-foreground",
             )}
