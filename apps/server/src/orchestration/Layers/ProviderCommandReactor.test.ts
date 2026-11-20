@@ -516,7 +516,17 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest(input?.serverSettingsOverrides ?? {})),
+      Layer.provideMerge(
+        ServerSettingsService.layerTest({
+          ...input?.serverSettingsOverrides,
+          // These fixtures are imported threads with no scope, which the guard
+          // refuses. Leave it off unless a test opts back into enforcement.
+          sessionSpendGuard: {
+            mode: "off",
+            ...input?.serverSettingsOverrides?.sessionSpendGuard,
+          },
+        }),
+      ),
       Layer.provideMerge(serverEnvironmentIdentityTestLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -875,6 +885,61 @@ describe("ProviderCommandReactor", () => {
           ...(attachments.length > 0 ? { attachments } : {}),
         }),
       );
+    }),
+  );
+
+  effectIt.effect("refuses an automated turn on an imported thread with no execution scope", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          serverSettingsOverrides: { sessionSpendGuard: { mode: "enforce" } },
+        }),
+      );
+      const threadId = ThreadId.make("thread-imported");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-imported-thread"),
+        threadId,
+        projectId: asProjectId("project-1"),
+        title: "Imported session",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        historyImport: true,
+        createdAt,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-imported-turn"),
+        threadId,
+        message: {
+          messageId: MessageId.make("message-imported-turn"),
+          role: "user",
+          text: "continue the imported session",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      });
+      yield* Effect.promise(() => harness.drain());
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.activities).toContainEqual(
+        expect.objectContaining({
+          kind: "provider.turn.start.failed",
+          summary: "Turn refused by the session spend guard",
+        }),
+      );
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.startSession).not.toHaveBeenCalled();
     }),
   );
 

@@ -797,6 +797,32 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       });
       const routineEvents = Array.isArray(routineResult) ? routineResult : [routineResult];
       expect(routineEvents.map((event) => event.type)).toEqual(["thread.activity-appended"]);
+
+      for (const kind of ["spend-guard.flagged", "spend-guard.stopped"] as const) {
+        const guardResult = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.activity.append",
+            commandId: CommandId.make(`cmd-activity-${kind}`),
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make(`activity-${kind}`),
+              tone: "error",
+              kind,
+              summary: kind,
+              payload: null,
+              turnId: null,
+              createdAt: NOW,
+            },
+            createdAt: NOW,
+          },
+          readModel: makeReadModel("settled"),
+        });
+        const guardEvents = Array.isArray(guardResult) ? guardResult : [guardResult];
+        expect(guardEvents.map((event) => event.type)).toEqual([
+          "thread.unsettled",
+          "thread.activity-appended",
+        ]);
+      }
     }),
   );
 

@@ -67,6 +67,13 @@ import {
 } from "../../textGeneration/ThreadTitleContext.ts";
 import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import {
+  checkLaunch,
+  describeLaunchRefusal,
+  describeSpendStop,
+  evaluateThreadSpend,
+  SPEND_GUARD_ACTIVITY_KINDS,
+} from "../SessionSpendGuard.ts";
+import {
   resolveSourceControlWriterModelSelection,
   ServerSettingsService,
 } from "../../serverSettings.ts";
@@ -1377,6 +1384,36 @@ const make = Effect.gen(function* () {
         "Callback destination route changed",
         `The business result is already preserved in this thread. Do not resend it. Review the existing message '${event.payload.messageId}' here, restore a compatible destination route, then continue from its existing content.`,
       );
+    }
+
+    const guardSettings = yield* serverSettingsService.getSettings;
+    const launchRefusal = checkLaunch({
+      title: thread.title,
+      titleSeed: event.payload.titleSeed,
+      executionScope: thread.executionScope,
+      hasOtherUserMessages,
+      fromClientSurface: event.metadata.origin?.surface !== undefined,
+      mode: guardSettings.sessionSpendGuard.mode,
+    });
+    if (launchRefusal !== null) {
+      return yield* appendTurnStartFailure(
+        "Turn refused by the session spend guard",
+        describeLaunchRefusal(launchRefusal),
+      );
+    }
+    if (guardSettings.sessionSpendGuard.mode === "enforce") {
+      const guardThread = yield* projectionSnapshotQuery.getThreadDetailById(thread.id, {
+        activityKinds: SPEND_GUARD_ACTIVITY_KINDS,
+      });
+      const spend = Option.isSome(guardThread)
+        ? evaluateThreadSpend(guardThread.value, guardSettings)
+        : undefined;
+      if (spend?.level === "stop") {
+        return yield* appendTurnStartFailure(
+          "Turn refused by the session spend guard",
+          describeSpendStop(spend, guardSettings.sessionSpendGuard),
+        );
+      }
     }
 
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
