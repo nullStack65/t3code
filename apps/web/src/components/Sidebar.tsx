@@ -1,5 +1,9 @@
 import { SidebarThreadFilterMenu } from "./sidebar/SidebarThreadFilterMenu";
-import { matchesThreadListFilter, threadListFilterOf } from "./sidebar/threadListFilter.logic";
+import {
+  matchesThreadListFilter,
+  olderSettledFilterCounts,
+  threadListFilterOf,
+} from "./sidebar/threadListFilter.logic";
 import {
   launchingThreadIdOf,
   resolveMachineOwners,
@@ -359,6 +363,7 @@ const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Ma
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
+const NO_THREAD_KEYS: ReadonlySet<string> = new Set();
 const SETTLED_TAIL_PAGE_COUNT = 25;
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
@@ -3112,11 +3117,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 <SidebarThreadFilterMenu
                   attributionOf={attributionOf}
                   countedThreads={() =>
-                    filterSidebarV2VisibleThreads(
-                      threads,
-                      scopedProjectKeys,
-                      delegatedUnderParent,
-                    ).filter((thread) => thread.settledOverride !== "settled")
+                    filterSidebarV2VisibleThreads(threads, scopedProjectKeys, NO_THREAD_KEYS)
+                  }
+                  olderSettled={() =>
+                    olderSettledFilterCounts(
+                      olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
+                      (environmentId) =>
+                        olderSettledShelf.environments.get(environmentId)?.older ?? null,
+                      machineOwners,
+                    )
                   }
                 />
               }

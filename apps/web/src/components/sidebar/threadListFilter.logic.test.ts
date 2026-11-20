@@ -1,10 +1,12 @@
-import { EnvironmentId, makeThreadInbox } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId, makeThreadInbox } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   changedThreadListFilters,
   inboxMenuOrder,
   matchesThreadListFilter,
+  olderSettledFilterCounts,
   threadListFilterBucket,
   threadListFilterCounts,
   threadListFilterOf,
@@ -57,16 +59,16 @@ describe("thread list filter", () => {
       (candidate) => candidate.from,
     );
     expect(Object.fromEntries(counts.inboxes)).toEqual({
-      kameron: { working: 0, done: 1, needsMe: 0 },
-      agents: { working: 0, done: 1, needsMe: 0 },
+      kameron: { working: 0, done: 1, needsMe: 0, settled: 0 },
+      agents: { working: 0, done: 1, needsMe: 0, settled: 0 },
     });
     expect(Object.fromEntries(counts.environments)).toEqual({
-      laptop: { working: 0, done: 1, needsMe: 0 },
-      crown: { working: 0, done: 1, needsMe: 0 },
+      laptop: { working: 0, done: 1, needsMe: 0, settled: 0 },
+      crown: { working: 0, done: 1, needsMe: 0, settled: 0 },
     });
     expect(Object.fromEntries(counts.from)).toEqual({
-      kameron: { working: 0, done: 1, needsMe: 0 },
-      unknown: { working: 0, done: 1, needsMe: 0 },
+      kameron: { working: 0, done: 1, needsMe: 0, settled: 0 },
+      unknown: { working: 0, done: 1, needsMe: 0, settled: 0 },
     });
     expect(
       matchesThreadListFilter(
@@ -233,7 +235,7 @@ describe("thread list filter", () => {
     expect(threadListFilterBucket(fixtures.attention, "kameron")).toBe("needsMe");
     expect(threadListFilterBucket(fixtures.parked, "kameron")).toBe("working");
     expect(threadListFilterBucket(fixtures.parkedAttention, "kameron")).toBe("working");
-    expect(threadListFilterBucket(fixtures.settled, "kameron")).toBeNull();
+    expect(threadListFilterBucket(fixtures.settled, "kameron")).toBe("settled");
     expect(threadListFilterBucket(fixtures.otherFounder, "kameron")).toBe("done");
     expect(threadListFilterBucket(fixtures.unstarted, "kameron")).toBeNull();
 
@@ -251,11 +253,95 @@ describe("thread list filter", () => {
       (candidate) => candidate.from,
       "kameron",
     );
-    const kameronRow = { working: 4, done: 2, needsMe: 4 };
-    const everyRow = { working: 4, done: 3, needsMe: 4 };
+    const kameronRow = { working: 4, done: 2, needsMe: 4, settled: 1 };
+    const everyRow = { working: 4, done: 3, needsMe: 4, settled: 1 };
     expect(counts.inboxes.get("kameron")).toEqual(kameronRow);
-    expect(counts.inboxes.get("jeff")).toEqual({ working: 0, done: 1, needsMe: 0 });
+    expect(counts.inboxes.get("jeff")).toEqual({ working: 0, done: 1, needsMe: 0, settled: 0 });
     expect(counts.environments.get(laptop)).toEqual(everyRow);
     expect(counts.from.get("kameron")).toEqual(everyRow);
+  });
+
+  it("counts older settled threads from the servers' groups instead of the loaded rows", () => {
+    const beforeMs = Date.parse("2026-11-18T00:00:00.000Z");
+    const lineage = {
+      relationshipToParent: null,
+      parentThreadId: null,
+      rootThreadId: ThreadId.make("root"),
+    };
+    const settledRow = (environmentId: EnvironmentId, settledAt: string) => ({
+      ...thread(environmentId, kameron),
+      settledOverride: "settled" as const,
+      source: {
+        ...thread(environmentId, kameron).source,
+        lineage,
+        settledOverride: "settled" as const,
+        settledAt: DateTime.makeUnsafe(settledAt),
+      },
+    });
+    const group = (inbox: "kameron" | "jeff" | null, count: number, agentCreated = false) => ({
+      inbox,
+      agentCreated,
+      founder: "kameron" as const,
+      byAgent: false,
+      count,
+    });
+    const project = ProjectId.make("app");
+    const other = ProjectId.make("other");
+    const older = new Map([
+      [
+        laptop,
+        {
+          before: new Date(beforeMs).toISOString(),
+          beforeMs,
+          counts: new Map([
+            [project, 55],
+            [other, 9],
+          ]),
+          groups: new Map([
+            [
+              project,
+              [group("kameron", 40), group("jeff", 7), group(null, 5), group(null, 3, true)],
+            ],
+            [other, [group("kameron", 9)]],
+          ]),
+        },
+      ],
+      [
+        crown,
+        {
+          before: new Date(beforeMs).toISOString(),
+          beforeMs,
+          counts: new Map([[project, 12]]),
+          groups: null,
+        },
+      ],
+    ]);
+    const source = olderSettledFilterCounts(
+      [
+        { environmentId: laptop, projectIds: [project] },
+        { environmentId: crown, projectIds: null },
+      ],
+      (environmentId) => older.get(environmentId) ?? null,
+      {},
+    );
+    expect(source.lowerBound).toBe(true);
+    const loaded = [
+      settledRow(laptop, "2026-11-19T00:00:00.000Z"),
+      settledRow(laptop, "2026-11-17T00:00:00.000Z"),
+      settledRow(crown, "2026-11-17T00:00:00.000Z"),
+    ];
+    const counts = threadListFilterCounts(
+      loaded.filter((row) => !source.covers(row)),
+      threadListFilterOf({ founderInboxOwner: "kameron" }),
+      () => "kameron" as const,
+      "kameron",
+      source.groups,
+    );
+    expect(counts.inboxes.get("kameron")?.settled).toBe(1 + 40 + 1);
+    expect(counts.inboxes.get("jeff")?.settled).toBe(7);
+    expect(counts.inboxes.get("agents")?.settled).toBe(3);
+    expect(counts.environments.get(laptop)?.settled).toBe(1 + 40 + 3);
+    expect(counts.environments.get(crown)?.settled).toBe(1);
+    expect(counts.unclassified).toBe(5);
   });
 });
