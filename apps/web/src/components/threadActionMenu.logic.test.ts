@@ -15,6 +15,7 @@ const baseState: ThreadActionMenuState = {
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
+  routing: { owners: ["Kameron", "Jeff"], owner: null, threadType: null },
 };
 
 function ids(state: ThreadActionMenuState): string[] {
@@ -34,7 +35,16 @@ describe("buildThreadActionMenuItems", () => {
         ...baseState,
         supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
       }),
-    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
+    ).toEqual([
+      "routing-owner",
+      "routing-type",
+      "rename",
+      "mark-unread",
+      "copy",
+      "project-settings",
+      "archive",
+      "delete",
+    ]);
   });
 
   it("groups project settings with utility actions before archive", () => {

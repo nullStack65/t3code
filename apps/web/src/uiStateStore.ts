@@ -1,7 +1,9 @@
 import { Debouncer } from "@tanstack/react-pacer";
-import type { PullRequestMergeMethod } from "@t3tools/contracts";
+import type { PullRequestMergeMethod, ThreadInboxType } from "@t3tools/contracts";
 import { create } from "zustand";
 import { normalizeProjectPathForComparison } from "./lib/projectPaths";
+
+const THREAD_INBOX_TYPES = ["needs-human", "fyi", "bot-work"] as const;
 
 export const PERSISTED_STATE_KEY = "t3code:ui-state:v1";
 // Version 1 stored card visibility, not folder expansion.
@@ -31,6 +33,11 @@ export interface PersistedUiState {
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
+  inboxIdentity?: string | null;
+  showBotWork?: boolean;
+  inboxOwners?: string[];
+  createOwner?: string | null;
+  createThreadType?: string | null;
 }
 
 export interface UiProjectState {
@@ -55,8 +62,21 @@ export interface UiPullRequestState {
   pullRequestMergeMethod: PullRequestMergeMethod;
 }
 
+export interface UiInboxState {
+  /** Founder whose filtered inbox is showing. Null is every untagged and tagged thread. */
+  inboxIdentity: string | null;
+  /** Reveals bot-to-bot threads. Search does this on its own. */
+  showBotWork: boolean;
+  /** Extra owner names beyond the built-in founders. */
+  inboxOwners: string[];
+  /** Owner stamped on threads this browser starts. */
+  createOwner: string | null;
+  /** Type stamped on threads this browser starts. */
+  createThreadType: ThreadInboxType | null;
+}
+
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState {}
+  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState, UiInboxState {}
 
 const initialState: UiState = {
   projectExpandedById: {},
@@ -66,6 +86,11 @@ const initialState: UiState = {
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
   pullRequestMergeMethod: "merge",
+  inboxIdentity: null,
+  showBotWork: false,
+  inboxOwners: [],
+  createOwner: null,
+  createThreadType: null,
 };
 
 const LEGACY_PROJECT_CWD_PREFERENCE_PREFIX = "legacy-project-cwd:";
@@ -121,6 +146,16 @@ function isPullRequestMergeMethod(value: unknown): value is PullRequestMergeMeth
   return value === "merge" || value === "squash" || value === "rebase";
 }
 
+function isThreadInboxType(value: unknown): value is ThreadInboxType {
+  return typeof value === "string" && (THREAD_INBOX_TYPES as readonly string[]).includes(value);
+}
+
+function sanitizeOwner(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= 80 ? trimmed : null;
+}
+
 export function parsePersistedState(parsed: PersistedUiState): UiState {
   const projectExpandedById =
     parsed.projectExpandedById === undefined
@@ -158,6 +193,11 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
+    inboxIdentity: sanitizeOwner(parsed.inboxIdentity),
+    showBotWork: parsed.showBotWork === true,
+    inboxOwners: sanitizeStringArray(parsed.inboxOwners),
+    createOwner: sanitizeOwner(parsed.createOwner),
+    createThreadType: isThreadInboxType(parsed.createThreadType) ? parsed.createThreadType : null,
   };
 }
 
@@ -232,6 +272,11 @@ export function persistState(state: UiState): void {
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
+        inboxIdentity: state.inboxIdentity,
+        showBotWork: state.showBotWork,
+        inboxOwners: state.inboxOwners,
+        createOwner: state.createOwner,
+        createThreadType: state.createThreadType,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -340,6 +385,32 @@ export function setSidebarProjectScopeKey(state: UiState, projectKey: string | n
   };
 }
 
+function setInboxIdentity(state: UiState, identity: string | null): UiState {
+  const next = sanitizeOwner(identity);
+  return state.inboxIdentity === next ? state : { ...state, inboxIdentity: next };
+}
+
+function setShowBotWork(state: UiState, showBotWork: boolean): UiState {
+  return state.showBotWork === showBotWork ? state : { ...state, showBotWork };
+}
+
+function setInboxOwners(state: UiState, owners: readonly string[]): UiState {
+  const inboxOwners = sanitizeStringArray(owners);
+  return state.inboxOwners.join("\0") === inboxOwners.join("\0")
+    ? state
+    : { ...state, inboxOwners };
+}
+
+function setCreateOwner(state: UiState, owner: string | null): UiState {
+  const next = sanitizeOwner(owner);
+  return state.createOwner === next ? state : { ...state, createOwner: next };
+}
+
+function setCreateThreadType(state: UiState, threadType: ThreadInboxType | null): UiState {
+  const next = threadType && isThreadInboxType(threadType) ? threadType : null;
+  return state.createThreadType === next ? state : { ...state, createThreadType: next };
+}
+
 function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMethod): UiState {
   return state.pullRequestMergeMethod === method
     ? state
@@ -430,6 +501,11 @@ interface UiStateStore extends UiState {
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
+  setInboxIdentity: (identity: string | null) => void;
+  setShowBotWork: (showBotWork: boolean) => void;
+  setInboxOwners: (owners: readonly string[]) => void;
+  setCreateOwner: (owner: string | null) => void;
+  setCreateThreadType: (threadType: ThreadInboxType | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
@@ -451,6 +527,11 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setSidebarProjectScopeKey: (projectKey) =>
     set((state) => setSidebarProjectScopeKey(state, projectKey)),
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
+  setInboxIdentity: (identity) => set((state) => setInboxIdentity(state, identity)),
+  setShowBotWork: (showBotWork) => set((state) => setShowBotWork(state, showBotWork)),
+  setInboxOwners: (owners) => set((state) => setInboxOwners(state, owners)),
+  setCreateOwner: (owner) => set((state) => setCreateOwner(state, owner)),
+  setCreateThreadType: (threadType) => set((state) => setCreateThreadType(state, threadType)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
@@ -460,6 +541,18 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
 }));
 
 useUiStateStore.subscribe((state) => debouncedPersistState.maybeExecute(state));
+
+export function readInboxCreateRouting(state: UiState = useUiStateStore.getState()): {
+  readonly owner?: string;
+  readonly threadType?: ThreadInboxType;
+  readonly startedBy?: string;
+} {
+  return {
+    ...(state.inboxIdentity ? { startedBy: state.inboxIdentity } : {}),
+    ...(state.createOwner ? { owner: state.createOwner } : {}),
+    ...(state.createThreadType ? { threadType: state.createThreadType } : {}),
+  };
+}
 
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("beforeunload", () => {

@@ -1,5 +1,12 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, ThreadInboxType } from "@t3tools/contracts";
+import { THREAD_INBOX_TYPE_LABELS } from "@t3tools/client-runtime/state/thread-inbox";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+
+const THREAD_INBOX_TYPES = [
+  "needs-human",
+  "fyi",
+  "bot-work",
+] as const satisfies readonly ThreadInboxType[];
 
 /**
  * Ids for the per-thread action menu. Snooze presets are dispatched as
@@ -17,6 +24,10 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  | "routing-owner"
+  | `owner:${string}`
+  | "routing-type"
+  | `type:${string}`
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -52,6 +63,32 @@ export interface ThreadActionMenuState {
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+  readonly routing: {
+    readonly owners: readonly string[];
+    readonly owner: string | null;
+    readonly threadType: ThreadInboxType | null;
+  };
+}
+
+const ROUTING_CLEAR = "__clear__";
+
+/** Menu id for an owner or type change, or null when the id is something else. */
+export function threadRoutingUpdateFromMenuAction(action: string): {
+  readonly owner?: string | null;
+  readonly threadType?: ThreadInboxType | null;
+} | null {
+  if (action.startsWith("owner:")) {
+    const value = action.slice("owner:".length);
+    return { owner: value === ROUTING_CLEAR ? null : value };
+  }
+  if (action.startsWith("type:")) {
+    const value = action.slice("type:".length);
+    if (value === ROUTING_CLEAR) return { threadType: null };
+    if ((THREAD_INBOX_TYPES as readonly string[]).includes(value)) {
+      return { threadType: value as ThreadInboxType };
+    }
+  }
+  return null;
 }
 
 /**
@@ -108,6 +145,33 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    {
+      id: "routing-owner",
+      label: state.routing.owner ? `Owner: ${state.routing.owner}` : "Set owner",
+      icon: "user",
+      separatorBefore: true,
+      children: [
+        { id: "owner:__clear__", label: "Unassigned" },
+        ...state.routing.owners.map((owner) => ({
+          id: `owner:${owner}` as const,
+          label: owner,
+        })),
+      ],
+    },
+    {
+      id: "routing-type",
+      label: state.routing.threadType
+        ? `Type: ${THREAD_INBOX_TYPE_LABELS[state.routing.threadType]}`
+        : "Set type",
+      icon: "tag",
+      children: [
+        { id: "type:__clear__", label: "Untyped" },
+        ...THREAD_INBOX_TYPES.map((type) => ({
+          id: `type:${type}` as const,
+          label: THREAD_INBOX_TYPE_LABELS[type],
+        })),
+      ],
+    },
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [

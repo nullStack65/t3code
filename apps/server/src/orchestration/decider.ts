@@ -407,6 +407,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           worktreePath: command.worktreePath,
           executionScope:
             command.executionScope ?? (command.historyImport === true ? null : "coding"),
+          ...(command.owner !== undefined ? { owner: command.owner } : {}),
+          ...(command.threadType !== undefined ? { threadType: command.threadType } : {}),
+          ...(command.startedBy !== undefined ? { startedBy: command.startedBy } : {}),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -1032,6 +1035,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.linkedPullRequest !== undefined
             ? { linkedPullRequest: command.linkedPullRequest }
             : {}),
+          ...(command.owner !== undefined ? { owner: command.owner } : {}),
+          ...(command.threadType !== undefined ? { threadType: command.threadType } : {}),
+          ...(command.startedBy !== undefined ? { startedBy: command.startedBy } : {}),
           updatedAt: occurredAt,
         },
       };

@@ -45,6 +45,19 @@ const ICON_PATHS: Record<string, ReadonlyArray<{ tag: string; attrs: Record<stri
     { tag: "circle", attrs: { cx: "6", cy: "18", r: "3" } },
     { tag: "path", attrs: { d: "M18 9a9 9 0 0 1-9 9" } },
   ],
+  user: [
+    { tag: "circle", attrs: { cx: "12", cy: "8", r: "4" } },
+    { tag: "path", attrs: { d: "M20 21a8 8 0 0 0-16 0" } },
+  ],
+  tag: [
+    {
+      tag: "path",
+      attrs: {
+        d: "M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z",
+      },
+    },
+    { tag: "circle", attrs: { cx: "7.5", cy: "7.5", r: ".5" } },
+  ],
   hash: [
     { tag: "line", attrs: { x1: "4", x2: "20", y1: "9", y2: "9" } },
     { tag: "line", attrs: { x1: "4", x2: "20", y1: "15", y2: "15" } },

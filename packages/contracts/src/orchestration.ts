@@ -841,6 +841,27 @@ export type ThreadPullRequestLink = typeof ThreadPullRequestLink.Type;
 export const ThreadExecutionScope = Schema.Literals(["coding", "coordinator"]);
 export type ThreadExecutionScope = typeof ThreadExecutionScope.Type;
 
+/**
+ * How a thread should show up in a shared inbox.
+ * `needs-human` is work a person should act on, `fyi` is visible context,
+ * and `bot-work` is bot-to-bot traffic hidden until someone asks for it.
+ * Absent means the thread predates tagging and keeps today's placement.
+ */
+export const ThreadInboxType = Schema.Literals(["needs-human", "fyi", "bot-work"]);
+export type ThreadInboxType = typeof ThreadInboxType.Type;
+
+/** Suggested owner names. The field itself stays a free-form string. */
+export const DEFAULT_THREAD_OWNERS = ["Kameron", "Jeff", "Lead", "Jeff's Lead"] as const;
+
+const threadRoutingFields = {
+  /** Who the thread is for. Null clears a previous owner. */
+  owner: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /** Inbox class. Null clears a previous type. */
+  threadType: Schema.optional(Schema.NullOr(ThreadInboxType)),
+  /** Who opened the thread. Null clears a previous starter. */
+  startedBy: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+};
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -890,6 +911,9 @@ export const OrchestrationThread = Schema.Struct({
   // Manual Active placement. Keyless threads retain their creation/re-entry
   // order above the arranged run. Settling clears this slot.
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Shared-inbox routing. Optional so threads and servers from before
+  // tagging still decode; absent means untagged and listed as today.
+  ...threadRoutingFields,
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
@@ -961,6 +985,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // See OrchestrationThread routing fields.
+  ...threadRoutingFields,
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
   session: Schema.NullOr(OrchestrationSession),
@@ -1181,6 +1207,7 @@ const ThreadCreateCommand = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  ...threadRoutingFields,
   createdAt: IsoDateTime,
   historyImport: Schema.optional(Schema.Literal(true)),
 });
@@ -1293,6 +1320,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  ...threadRoutingFields,
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -1342,6 +1370,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  ...threadRoutingFields,
   createdAt: IsoDateTime,
 });
 
@@ -1825,6 +1854,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   executionScope: Schema.optional(Schema.NullOr(ThreadExecutionScope)),
+  ...threadRoutingFields,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1915,6 +1945,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   // thread.pull-request-linked still decode and replay into the link table.
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  ...threadRoutingFields,
   updatedAt: IsoDateTime,
 });
 

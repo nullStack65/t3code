@@ -1573,6 +1573,15 @@ const makeWsRpcLayer = (
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
                 executionScope: bootstrap.createThread.executionScope ?? "coding",
+                ...(bootstrap.createThread.owner !== undefined
+                  ? { owner: bootstrap.createThread.owner }
+                  : {}),
+                ...(bootstrap.createThread.threadType !== undefined
+                  ? { threadType: bootstrap.createThread.threadType }
+                  : {}),
+                ...(bootstrap.createThread.startedBy !== undefined
+                  ? { startedBy: bootstrap.createThread.startedBy }
+                  : {}),
                 createdAt: bootstrap.createThread.createdAt,
               });
               // The successful create is a fence in the engine command queue:
@@ -1753,6 +1762,15 @@ const makeWsRpcLayer = (
                   branch,
                   worktreePath: targetWorktreePath,
                   executionScope: "coding",
+                  ...(bootstrap.createThread.owner !== undefined
+                    ? { owner: bootstrap.createThread.owner }
+                    : {}),
+                  ...(bootstrap.createThread.threadType !== undefined
+                    ? { threadType: bootstrap.createThread.threadType }
+                    : {}),
+                  ...(bootstrap.createThread.startedBy !== undefined
+                    ? { startedBy: bootstrap.createThread.startedBy }
+                    : {}),
                   createdAt: bootstrap.createThread.createdAt,
                 });
                 createdThread = true;

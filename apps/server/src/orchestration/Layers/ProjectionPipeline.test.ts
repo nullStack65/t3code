@@ -4821,3 +4821,99 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-inbox-routing-")))(
+  "OrchestrationProjectionPipeline inbox routing",
+  (it) => {
+    it.effect("persists owner, type, and starter, then a later retag", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-11-14T00:00:00.000Z";
+        const later = "2026-11-14T00:00:01.000Z";
+        const projectId = ProjectId.make("project-inbox");
+        const threadId = ThreadId.make("thread-inbox");
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make("evt-inbox-1"),
+          aggregateKind: "project",
+          aggregateId: projectId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-inbox-1"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-inbox-1"),
+          metadata: {},
+          payload: {
+            projectId,
+            title: "Inbox",
+            workspaceRoot: "/tmp/inbox",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-inbox-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-inbox-2"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-inbox-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId,
+            title: "Needs Kameron",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            owner: "Kameron",
+            threadType: "needs-human",
+            startedBy: "Lead",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.meta-updated",
+          eventId: EventId.make("evt-inbox-3"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: later,
+          commandId: CommandId.make("cmd-inbox-3"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-inbox-3"),
+          metadata: {},
+          payload: {
+            threadId,
+            threadType: "bot-work",
+            owner: null,
+            updatedAt: later,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        const rows = yield* sql<{
+          readonly owner: string | null;
+          readonly threadType: string | null;
+          readonly startedBy: string | null;
+        }>`
+          SELECT owner, thread_type AS "threadType", started_by AS "startedBy"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(rows, [{ owner: null, threadType: "bot-work", startedBy: "Lead" }]);
+      }),
+    );
+  },
+);
