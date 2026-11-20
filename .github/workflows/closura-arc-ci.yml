@@ -351,10 +351,16 @@ jobs:
   # and fails when any of them failed, was cancelled, or was skipped. A skipped
   # worker means the trust gate refused the run, and a required check must not
   # turn green for a run that did no work.
+  #
+  # `if: always()` would also start this job when the workflow is cancelled, and
+  # a worker that never started reports `success`. The concurrency group cancels
+  # the previous in-progress run on every new push, so that would mark the
+  # required check green for a run whose tests never ran. `!cancelled()` still
+  # runs when a worker failed or was skipped.
   voice-and-inbox:
     name: Voice + founder inbox (Linux ARC)
     needs: [voice-and-inbox-core, voice-and-inbox-web, voice-and-inbox-mobile]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: t3code-ci-arc
     timeout-minutes: 5
     steps:

@@ -132,17 +132,17 @@ runs:
     # Concurrent jobs with the same install args reserve one key, so the losers
     # compress the store for nothing; all but one pass save-pnpm-store: false.
     #
-    # This fork's default branch is the stale `main` line, while every release PR
-    # targets `release/native-0.1.10`. Gating the save on the default branch alone
-    # would leave the release line restoring forever and never writing a store, so
-    # a push to either release branch, and a PR into one, also saves.
+    # A pull_request cache is scoped to that PR, so only the push to the default
+    # branch writes the store later runs share. This fork's default branch is
+    # `release/native-0.1.10`, so that push writes it and a PR into it reads it.
+    # A push to `feat/assemblyai-current` writes a store only that branch's own
+    # runs can read, which is the same scoping the action already gives any
+    # non-default branch.
     - name: Save pnpm store
       if: >-
         inputs.install == 'true' && inputs.save-pnpm-store == 'true' &&
         (github.event_name != 'pull_request' ||
-          github.base_ref == github.event.repository.default_branch ||
-          github.base_ref == 'release/native-0.1.10' ||
-          github.base_ref == 'feat/assemblyai-current') &&
+          github.base_ref == github.event.repository.default_branch) &&
         steps.pnpm_cache.outputs.cache-hit != 'true' &&
         (steps.pnpm_store.outputs.namespace == 'full' ||
           steps.pnpm_cache.outputs.cache-matched-key != format('pnpm-full-v1-{0}-{1}-{2}', runner.os, runner.arch, hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package.json')))

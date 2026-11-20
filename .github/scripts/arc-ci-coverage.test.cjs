@@ -24,3 +24,18 @@ test("renaming the aggregator or dropping a test fails the check", () => {
   const dropped = workflow.replace(`            ${REQUIRED_TESTS[0]} \\\n`, "");
   assert.ok(checkCoverage(dropped).some((problem) => problem.includes(REQUIRED_TESTS[0])));
 });
+
+test("a test that only appears in dead code does not count as run", () => {
+  const buried = workflow.replace(
+    `            ${REQUIRED_TESTS[0]} \\\n`,
+    `          if false; then echo ${REQUIRED_TESTS[0]}; fi\n`,
+  );
+  assert.ok(checkCoverage(buried).some((problem) => problem.includes(REQUIRED_TESTS[0])));
+});
+
+test("an aggregator that runs on cancellation fails the check", () => {
+  const always = workflow.replace("if: ${{ !cancelled() }}", "if: always()");
+  assert.ok(
+    checkCoverage(always).some((problem) => problem.includes("cancelled")),
+  );
+});

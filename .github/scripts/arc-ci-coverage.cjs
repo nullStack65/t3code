@@ -77,6 +77,7 @@ function parseWorkflow(source) {
   let current = null;
   let inRun = false;
   let runIndent = 0;
+  let inTriggers = true;
   const lines = source.split("\n");
   for (const line of lines) {
     if (inRun) {
@@ -87,10 +88,20 @@ function parseWorkflow(source) {
         continue;
       }
     }
+    if (inTriggers) {
+      if (line === "jobs:") inTriggers = false;
+      continue;
+    }
     const job = line.match(/^ {2}([\w-]+):\s*$/);
-    if (job && !line.startsWith("    ")) {
-      current = { id: job[1], name: null, needs: [], steps: [] };
+    if (job) {
+      current = { id: job[1], name: null, needs: [], condition: null, steps: [] };
       jobs[current.id] = current;
+      continue;
+    }
+    if (!current) continue;
+    const condition = line.match(/^ {4}if:\s*(.+)$/);
+    if (condition && current.condition === null && current.steps.length === 0) {
+      current.condition = unquote(condition[1]);
       continue;
     }
     if (!current) continue;
@@ -125,11 +136,18 @@ function parseWorkflow(source) {
   return jobs;
 }
 
+// A test path only counts when a worker actually invokes it. A path that only
+// appears inside a comment or a branch that never runs would otherwise let the
+// guard pass while the required check runs nothing.
 function testsIn(job) {
   const found = [];
   for (const step of job.steps) {
     const prefix = step.directory ? `${step.directory}/` : "";
+    let skipping = false;
     for (const line of step.run) {
+      if (/^(?:if\s+false\b|exit\b)/.test(line)) skipping = true;
+      else if (skipping && /^(?:fi|else|elif)\b/.test(line)) skipping = false;
+      if (skipping || line.startsWith("#")) continue;
       if (/^[\w./-]+\.(ts|tsx)$/.test(line)) found.push(prefix + line);
     }
   }
@@ -148,6 +166,11 @@ function checkCoverage(source) {
     const needs = [...aggregator.needs].sort();
     if (needs.join() !== [...WORKERS].sort().join()) {
       problems.push(`aggregator needs ${needs.join(", ") || "nothing"}`);
+    }
+    // `always()` is true for a cancelled run, and a worker that never started
+    // reports success, so the required check would pass with nothing tested.
+    if (!aggregator.condition || !aggregator.condition.includes("!cancelled()")) {
+      problems.push("aggregator runs when the workflow is cancelled");
     }
   }
   const ran = [];
