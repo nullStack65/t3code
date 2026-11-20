@@ -1,5 +1,7 @@
 import type { HostResourcesSnapshot } from "@t3tools/contracts";
-import { chooseLoadBalancedEnvironment } from "./loadBalancing.ts";
+import { chooseLoadBalancedEnvironment, type PlacementHostCap } from "./loadBalancing.ts";
+
+const GiB = 1024 ** 3;
 
 /** Evidence the deciding server gathered itself; caller-supplied labels are not evidence. */
 export interface ThreadPlacementCandidate {
@@ -14,6 +16,8 @@ export interface ThreadPlacementCandidate {
   readonly projectAvailable: boolean;
   /** The requested provider, model and modes run there. */
   readonly modelAvailable: boolean;
+  readonly rank?: number | undefined;
+  readonly cap?: PlacementHostCap | undefined;
 }
 
 export interface ThreadPlacementRequest {
@@ -62,8 +66,25 @@ export function chooseThreadPlacement(
     .sort((a, b) =>
       a.environmentId < b.environmentId ? -1 : a.environmentId > b.environmentId ? 1 : 0,
     );
-  const environmentId = chooseLoadBalancedEnvironment(eligible, now, request.originEnvironmentId);
+  const environmentId = chooseLoadBalancedEnvironment(eligible, now);
   return environmentId === null
     ? { accepted: false, reason: "no-eligible-environment" }
     : { accepted: true, environmentId, reason: "capacity" };
+}
+
+export function placementHostLimits(
+  hosts: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly maxLanes: number;
+    readonly minAvailableMemoryGiB: number;
+  }>,
+  environmentId: string,
+): { readonly rank?: number; readonly cap?: PlacementHostCap } {
+  const rank = hosts.findIndex((host) => host.environmentId === environmentId);
+  const host = hosts[rank];
+  if (host === undefined) return {};
+  return {
+    rank,
+    cap: { maxLanes: host.maxLanes, minAvailableMemoryBytes: host.minAvailableMemoryGiB * GiB },
+  };
 }

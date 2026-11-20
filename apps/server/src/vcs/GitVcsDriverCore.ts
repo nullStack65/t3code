@@ -4593,13 +4593,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     operation: string,
     input: GitVcsDriver.GitCreateBranchInput,
     fallbackErrorDetail: string,
+    force = false,
   ) {
     // `git branch` does not read a lone - as the previous checkout.
     const startPoint = input.startPoint === "-" ? "@{-1}" : input.startPoint;
     yield* executeGitWithStableDiagnostics(
       operation,
       input.cwd,
-      ["branch", "--no-track", "--", input.branch, startPoint],
+      ["branch", ...(force ? ["--force"] : []), "--no-track", "--", input.branch, startPoint],
       { fallbackErrorDetail },
     );
     const startRef = yield* executeGit(
@@ -5157,11 +5158,46 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         : undefined;
 
     if (newRefName) {
+      const branch = { cwd: input.cwd, branch: newRefName, startPoint: input.refName };
       // Kept apart from the checkout so the shared-config lock only covers the tracking write.
       yield* createBranchAt(
         "GitVcsDriver.createWorktree.createBranch",
-        { cwd: input.cwd, branch: newRefName, startPoint: input.refName },
+        branch,
         "git branch failed",
+      ).pipe(
+        Effect.catchIf(
+          (error) => error.reason === "branch_already_exists",
+          (error) =>
+            Effect.gen(function* () {
+              const checkedOut = (yield* executeWorktreeList(
+                "GitVcsDriver.createWorktree.branchCheckedOut",
+                input.cwd,
+                [],
+              )).stdout
+                .split("\0")
+                .includes(`branch refs/heads/${newRefName}`);
+              const keep =
+                checkedOut ||
+                (yield* executeGit(
+                  "GitVcsDriver.createWorktree.branchHasNoUniqueCommits",
+                  input.cwd,
+                  [
+                    "merge-base",
+                    "--is-ancestor",
+                    `refs/heads/${newRefName}`,
+                    input.refName === "-" ? "@{-1}" : input.refName,
+                  ],
+                  { allowNonZeroExit: true },
+                )).exitCode !== 0;
+              if (keep) return yield* error;
+              yield* createBranchAt(
+                "GitVcsDriver.createWorktree.reuseBranch",
+                branch,
+                "git branch failed",
+                true,
+              );
+            }),
+        ),
       );
     }
     const checkoutRef = newRefName ?? input.refName;

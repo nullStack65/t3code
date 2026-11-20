@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_AUTOMATIC_PLACEMENT_HOSTS,
   EnvironmentId,
   isRuntimeModeAbove,
   type ModelSelection,
@@ -29,6 +30,7 @@ import {
 } from "@t3tools/contracts";
 import {
   chooseThreadPlacement,
+  placementHostLimits,
   type ThreadPlacementCandidate,
 } from "@t3tools/shared/threadPlacement";
 import * as Cause from "effect/Cause";
@@ -510,6 +512,9 @@ const make = Effect.gen(function* () {
     },
   ) {
     const askable = yield* askableLinks(input);
+    const hosts = yield* links.placementHosts.pipe(
+      Effect.orElseSucceed(() => DEFAULT_AUTOMATIC_PLACEMENT_HOSTS),
+    );
     const peers = (yield* Effect.forEach(askable, (link) => peerCandidate(ask, link, input), {
       concurrency: "unbounded",
     })).flatMap((peer) => (Option.isSome(peer) ? [peer.value] : []));
@@ -530,10 +535,14 @@ const make = Effect.gen(function* () {
                 operable: true,
                 projectAvailable: true,
                 modelAvailable: input.here.modelAvailable,
+                ...placementHostLimits(hosts, hereId),
               },
             ]
           : []),
-        ...peers.map((peer) => peer.candidate),
+        ...peers.map((peer) => ({
+          ...peer.candidate,
+          ...placementHostLimits(hosts, peer.candidate.environmentId),
+        })),
       ],
       now,
     );
@@ -601,7 +610,7 @@ const make = Effect.gen(function* () {
       if (!decision.accepted) {
         return yield* new OrchestratorMcpFailure({
           code: "target_required",
-          message: `No environment can take this task now (${decision.reason}): none answered with spare capacity, this repository's project and ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Name an environment, or omit placement to run it here.`,
+          message: `No environment can take this task now (${decision.reason}): every machine automatic placement may use is at its lane or memory limit, or lacks this repository's project or ${input.modelSelection.instanceId}/${input.modelSelection.model}. Nothing was started. Retry later or send it to cloud overflow; name an environment only for work bound to that machine.`,
         });
       }
       return yield* threads

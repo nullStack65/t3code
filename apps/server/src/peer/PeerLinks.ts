@@ -1,5 +1,6 @@
 import {
   type AppConnectionReport,
+  type AutomaticPlacementHost,
   AuthMcpClientAccess,
   AuthMcpRegistrationError,
   AuthMcpTokenError,
@@ -126,6 +127,7 @@ export class PeerLinks extends Context.Service<
      * fail, so placement contacts nobody rather than everyone.
      */
     readonly placementExclusions: Effect.Effect<ReadonlySet<EnvironmentId>, PeerLinkError>;
+    readonly placementHosts: Effect.Effect<ReadonlyArray<AutomaticPlacementHost>, PeerLinkError>;
     /** The stored links, read here only: no peer is asked whether it answers. */
     readonly stored: Effect.Effect<ReadonlyArray<PeerLink>, PeerLinkError>;
     /**
@@ -280,6 +282,10 @@ const make = Effect.gen(function* () {
   const enabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
     Effect.orElseSucceed(() => false),
+  );
+  const placementHosts = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.automaticPlacementHosts),
+    Effect.catch(failStorage),
   );
   const placementExclusions = serverSettings.getSettings.pipe(
     Effect.map(
@@ -853,6 +859,7 @@ const make = Effect.gen(function* () {
     environments,
     stored,
     placementExclusions,
+    placementHosts,
     session,
     get,
     renewed,

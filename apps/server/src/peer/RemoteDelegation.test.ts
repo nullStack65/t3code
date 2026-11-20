@@ -1710,6 +1710,49 @@ it.effect("placement nobody asked for runs here when no machine has room", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("a host at its lane cap refuses, and a laptop capped at no lanes keeps nothing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      yield* Ref.set(thread.resources, { ...loadOf(0.1), runningAgents: 4 });
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const localLaunches = yield* Ref.make(0);
+      const a = yield* makeLaptop(database, offers, undefined, Effect.void, {
+        localLaunch: Ref.update(localLaunches, (count) => count + 1),
+      });
+      yield* linkTo(a.links, b, "full-access");
+      yield* a.settings.updateSettings({
+        automaticPlacementHosts: [
+          { environmentId: box.environmentId, maxLanes: 4, minAvailableMemoryGiB: 4 },
+          { environmentId: laptop.environmentId, maxLanes: 0, minAvailableMemoryGiB: 4 },
+        ],
+      });
+      const fresh = { type: "worktree", baseRef: "main", startFromOrigin: true };
+      const capped = yield* launchUnplaced(a, {
+        clientRequestId: "capped",
+        workspaceStrategy: fresh,
+      });
+      expect(capped.isError).toBe(true);
+      expect(JSON.stringify(capped.content)).toContain("no-eligible-environment");
+      expect(yield* Ref.get(localLaunches)).toBe(0);
+      expect(yield* Ref.get(thread.launched)).toBeNull();
+
+      yield* Ref.set(thread.resources, { ...loadOf(0.1), runningAgents: 3 });
+      const placed = yield* launchUnplaced(a, {
+        clientRequestId: "room",
+        workspaceStrategy: fresh,
+      });
+      expect(placed.isError, JSON.stringify(placed.content)).toBe(false);
+      expect(placed.structuredContent).toMatchObject({ environmentId: box.environmentId });
+      expect(yield* Ref.get(localLaunches)).toBe(0);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect(
   "a retry that drops placement or asks for this checkout reaches the thread placed there",
   () =>
