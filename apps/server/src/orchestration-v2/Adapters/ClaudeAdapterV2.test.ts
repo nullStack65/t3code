@@ -948,6 +948,51 @@ describe("ClaudeAdapterV2 context usage", () => {
   });
 });
 
+describe("ClaudeAdapterV2 full-access command approval", () => {
+  it("runs a full-access command instead of waiting, and still denies removal and permission-rule checks", () => {
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        permissionMode: "auto",
+        toolName: "Bash",
+        safetyReason: "",
+      }),
+      "allow",
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        permissionMode: "auto",
+        toolName: "Bash",
+        safetyReason: "Dangerous rm on a path built from a variable",
+      }),
+      "deny",
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        permissionMode: "bypassPermissions",
+        toolName: "Bash",
+        safetyReason: "A permission rule denies a command in this shell -c script",
+      }),
+      "deny",
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        permissionMode: "default",
+        toolName: "Bash",
+        safetyReason: "",
+      }),
+      "ask",
+    );
+  });
+});
+
 describe("ClaudeAdapterV2 approval presentation", () => {
   it("marks asks that full access could not auto-allow and keeps the CLI's reason", () => {
     const presentation = ClaudeAdapterV2.claudeApprovalPresentation({
@@ -2016,25 +2061,38 @@ describe("ClaudeAdapterV2 resume compaction", () => {
             Effect.map((event) => ({ type: "approval", event }) as const),
           ),
         );
-        assert.equal(safety.type, askRule ? "approval" : "decision");
+        assert.equal(safety.type, "decision");
         if (safety.type === "decision") {
           assert.equal(safety.result?.behavior, "deny");
           if (safety.result?.behavior === "deny") {
             assert.include(safety.result.message, reason);
             assert.notInclude(safety.result.message, "\u001b[");
           }
-        } else if (
-          Option.isSome(safety.event) &&
-          safety.event.value.type === "runtime_request.updated"
-        ) {
-          yield* runtime.respondToRuntimeRequest({
-            requestId: safety.event.value.runtimeRequest.id,
-            decision: "decline",
-          });
-          assert.equal((yield* Fiber.join(safetyDecision))?.behavior, "deny");
         }
         yield* Fiber.interrupt(safetyRequest);
       }
+      const mergeSignal = yield* Effect.abortSignal;
+      const mergeDecision = yield* Effect.promise(() =>
+        canUseTool!(
+          "Bash",
+          {
+            command:
+              "gh pr merge 1968 -R nullStack65/Closura --squash --match-head-commit b2fdb044ce56f30784c10f4a2daf59c51f8a0346",
+          },
+          {
+            signal: mergeSignal,
+            toolUseID: "tool-merge-ask-rule",
+            requestId: "request-merge-ask-rule",
+            matchedAskRule: {
+              source: "projectSettings" as const,
+              toolName: "Bash",
+              ruleContent: "gh pr merge *",
+            },
+          },
+        ),
+      );
+      assert.equal(mergeDecision.behavior, "allow");
+
       const longQuestion = `Choose a deployment target: ${"region ".repeat(80)}`;
       const questionRequestEvent = yield* runtime.events.pipe(
         Stream.filter((event) => event.type === "runtime_request.updated"),

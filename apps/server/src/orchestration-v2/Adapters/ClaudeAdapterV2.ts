@@ -4280,6 +4280,26 @@ const CLAUDE_NO_STANDING_GRANT_OPTIONS = [
   { decision: "accept", label: "Approve" },
 ] satisfies ReadonlyArray<ProviderApprovalOption>;
 
+export function claudeCommandApprovalDisposition(input: {
+  readonly runtimeMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
+  readonly interactionMode: ProviderAdapter.ProviderAdapterV2RuntimePolicy["interactionMode"];
+  readonly permissionMode: PermissionMode;
+  readonly toolName: string;
+  readonly safetyReason: string;
+}): "allow" | "deny" | "ask" {
+  const safetyDenial =
+    input.toolName === "Bash" &&
+    (/^Dangerous rm(?:dir)?\b/i.test(input.safetyReason) ||
+      input.safetyReason === "This shell -c script runs rm and could not be checked" ||
+      input.safetyReason === "A permission rule denies a command in this shell -c script");
+  const fullAccess = input.runtimeMode === "full-access" && input.interactionMode !== "plan";
+  if (safetyDenial && (fullAccess || input.permissionMode === "bypassPermissions")) {
+    return "deny";
+  }
+  if (fullAccess) return "allow";
+  return "ask";
+}
+
 export function claudeApprovalPresentation(input: {
   readonly permissionMode: PermissionMode;
   readonly prompt: string;
@@ -12234,17 +12254,30 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             callbackOptions.decisionReason ?? "",
           ).trim();
           // The SDK omits the CLI's dangerousRemoval discriminator, so match its removal warnings.
-          if (
-            toolName === "Bash" &&
-            activePermissionMode === "bypassPermissions" &&
-            callbackOptions.matchedAskRule === undefined &&
-            (/^Dangerous rm(?:dir)?\b/i.test(safetyReason) ||
-              safetyReason === "This shell -c script runs rm and could not be checked" ||
-              safetyReason === "A permission rule denies a command in this shell -c script")
-          ) {
+          const disposition = claudeCommandApprovalDisposition({
+            runtimeMode: context.input.runtimePolicy.runtimeMode,
+            interactionMode: context.input.runtimePolicy.interactionMode,
+            permissionMode: activePermissionMode,
+            toolName,
+            safetyReason,
+          });
+          if (disposition === "deny") {
+            const removal =
+              /^Dangerous rm(?:dir)?\b/i.test(safetyReason) ||
+              safetyReason === "This shell -c script runs rm and could not be checked";
+            const message = removal
+              ? `Claude Code's removal safety check denied this command; the user did not reject it. The command did not run. Do not bypass the check by splitting the removal, putting it in a script, or using another tool or shell. If the warning below supplies a safe rewrite, use it and let the same check evaluate it. Otherwise continue the rest of the task without the removal and tell the user what you needed to delete and why. Warning: ${safetyReason}`
+              : `A permission rule denied this command before it ran. Nobody is waiting to approve it. Do not bypass the rule by splitting the command, putting it in a script, or using another tool. Warning: ${safetyReason}`;
             return {
               behavior: "deny",
-              message: `Claude Code's removal safety check denied this command; the user did not reject it. The command did not run. Do not bypass the check by splitting the removal, putting it in a script, or using another tool or shell. If the warning below supplies a safe rewrite, use it and let the same check evaluate it. Otherwise continue the rest of the task without the removal and tell the user what you needed to delete and why. Warning: ${safetyReason}`,
+              message,
+              toolUseID: callbackOptions.toolUseID,
+            } satisfies PermissionResult;
+          }
+          if (disposition === "allow") {
+            return {
+              behavior: "allow",
+              updatedInput: toolInput,
               toolUseID: callbackOptions.toolUseID,
             } satisfies PermissionResult;
           }
@@ -13215,7 +13248,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }
                 const nativeItemId = `bypass-policy-downgrade:${context.providerTurnId}`;
                 const notice =
-                  "T3 could not confirm Claude bypass permissions here, so Full access is running with approval checks.";
+                  "Claude settings disable bypass permissions here. Full access will not wait for approval. A deny rule or Claude's removal check still fails the command immediately.";
                 yield* emitProviderEvent({
                   type: "turn_item.updated",
                   driver: CLAUDE_PROVIDER,
