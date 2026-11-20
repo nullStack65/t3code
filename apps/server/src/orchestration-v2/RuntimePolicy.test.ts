@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type ManagedPolicySummary,
   type ModelSelection,
@@ -11,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
@@ -20,6 +22,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { THREAD_TYPE_POLICY_FIXTURE } from "./ThreadTypePolicy.testFixtures.ts";
 
 const projectId = ProjectId.make("project:runtime-policy");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -32,6 +35,7 @@ function makeThread(input: {
   readonly now: DateTime.Utc;
   readonly worktreePath: string | null;
   readonly runtimeMode?: RuntimeMode;
+  readonly title?: string;
 }): OrchestrationV2AppThread {
   const threadId = ThreadId.make("thread:runtime-policy");
   return {
@@ -39,7 +43,7 @@ function makeThread(input: {
     creationSource: "web",
     id: threadId,
     projectId,
-    title: "Runtime policy",
+    title: input.title ?? "Runtime policy",
     providerInstanceId,
     modelSelection,
     runtimeMode: input.runtimeMode ?? "full-access",
@@ -78,8 +82,14 @@ const providerInstanceFor = (instanceId: ProviderInstanceId) =>
     },
   }) as ProviderInstance;
 
-const layerWithPolicy = (policy?: ManagedPolicySummary) =>
-  RuntimePolicy.layerFromProjectStore.pipe(
+const missingThreadTypePolicyPath = "/nonexistent/closura/thread-type-policy.json";
+
+const layerWithPolicy = (
+  policy?: ManagedPolicySummary,
+  threadTypePolicyPath: string = missingThreadTypePolicyPath,
+) =>
+  RuntimePolicy.makeLayerFromProjectStore(threadTypePolicyPath).pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest({}, policy)),
     Layer.provide(
       Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
@@ -157,7 +167,64 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
       assert.equal(yield* modeFor(providerInstanceId, "auto-accept-edits"), "auto-accept-edits");
     }),
   );
+
+  it.effect("starts a turn with no thread type when no policy file is installed", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const resolved = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: "/work", title: "Lead" }),
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-6-astra" },
+      });
+      assert.isUndefined(resolved.threadType);
+    }),
+  );
 });
+
+it.effect("applies the installed thread type policy when a turn starts", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const dir = yield* fileSystem.makeTempDirectoryScoped();
+    const path = `${dir}/thread-type-policy.json`;
+    yield* fileSystem.writeFileString(path, JSON.stringify(THREAD_TYPE_POLICY_FIXTURE));
+    const now = yield* DateTime.now;
+    const resolve = (title: string, model: string) =>
+      Effect.gen(function* () {
+        const policy = yield* RuntimePolicy.RuntimePolicyV2;
+        return yield* policy.resolve({
+          thread: makeThread({ now, worktreePath: "/work", title }),
+          modelSelection: { instanceId: providerInstanceId, model },
+        });
+      }).pipe(Effect.provide(layerWithPolicy(undefined, path)));
+
+    const refused = yield* resolve("Lead", "gpt-6-astra").pipe(Effect.flip);
+    assert.equal(refused._tag, "ThreadTypeModelRefusedError");
+    assert.equal(
+      refused.message,
+      "gpt-6-astra is refused on standing threads by the Closura thread type policy. Pick another model to continue.",
+    );
+
+    const standing = yield* resolve("Lead", "gpt-6.1-sol");
+    assert.deepEqual(standing.threadType, {
+      type: "standing",
+      contextWindow: 272_000,
+      compactAt: 100_000,
+      cacheTtl: "1h",
+    });
+
+    const review = yield* resolve("Review PR 953", "gpt-6-astra");
+    assert.deepEqual(review.threadType, {
+      type: "review",
+      contextWindow: 272_000,
+      compactAt: 120_000,
+      cacheTtl: "5m",
+    });
+
+    const coding = yield* resolve("CLO-924 per-thread-type policy", "gpt-6-astra");
+    assert.equal(coding.threadType?.type, "coding");
+    assert.equal(coding.threadType?.compactAt, 168_000);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 it.layer(
   layerWithPolicy({

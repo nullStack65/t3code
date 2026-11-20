@@ -698,6 +698,15 @@ export const layer: Layer.Layer<
         .pipe(Effect.result);
       if (resolvedPolicy._tag === "Failure") {
         const error = resolvedPolicy.failure;
+        if (error._tag === "ThreadTypeModelRefusedError") {
+          yield* settleStartFailure({
+            signal: "thread-type-model-refused",
+            title: "Model refused on this thread type",
+            error,
+            message: error.message,
+          });
+          return;
+        }
         if (error._tag !== "RuntimePolicyAboveCeilingError") return yield* error;
         yield* settleStartFailure({
           signal: "runtime-mode-above-ceiling",

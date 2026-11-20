@@ -340,7 +340,10 @@ describe("Grok launch permission mode", () => {
         });
       }).pipe(
         Effect.provide(
-          RuntimePolicy.layerFromProjectStore.pipe(
+          RuntimePolicy.makeLayerFromProjectStore(
+            "/nonexistent/closura/thread-type-policy.json",
+          ).pipe(
+            Layer.provide(NodeServices.layer),
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(
               Layer.mock(ProjectStore.ProjectStoreV2)({

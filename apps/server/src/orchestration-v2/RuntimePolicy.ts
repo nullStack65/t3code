@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -18,6 +19,7 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as ThreadTypePolicy from "./ThreadTypePolicy.ts";
 
 export class RuntimePolicyResolveError extends Schema.TaggedError<RuntimePolicyResolveError>()(
   "RuntimePolicyResolveError",
@@ -56,6 +58,7 @@ export const isRuntimePolicyAboveCeilingError = Schema.is(RuntimePolicyAboveCeil
 export const RuntimePolicyV2Error = Schema.Union([
   RuntimePolicyResolveError,
   RuntimePolicyAboveCeilingError,
+  ThreadTypePolicy.ThreadTypeModelRefusedError,
 ]);
 export type RuntimePolicyV2Error = typeof RuntimePolicyV2Error.Type;
 
@@ -137,62 +140,89 @@ export const layerEnforcingCeiling: Layer.Layer<
   }),
 );
 
-export const layerFromProjectStore: Layer.Layer<
+export const applyThreadTypePolicy = Effect.fn("RuntimePolicyV2.applyThreadTypePolicy")(function* (
+  policyPath: string,
+  input: { readonly thread: OrchestrationV2AppThread; readonly modelSelection: ModelSelection },
+) {
+  const policy = yield* ThreadTypePolicy.readThreadTypePolicy(policyPath);
+  return policy === undefined
+    ? undefined
+    : yield* ThreadTypePolicy.resolveThreadTypeLaunch(
+        policy,
+        input.thread,
+        input.modelSelection.model,
+      );
+});
+
+export const makeLayerFromProjectStore = (
+  threadTypePolicyPath: string,
+): Layer.Layer<
   RuntimePolicyV2,
   never,
   | ProjectStore.ProjectStoreV2
   | ProviderInstanceRegistry.ProviderInstanceRegistry
   | ServerSettings.ServerSettingsService
-> = Layer.effect(
-  RuntimePolicyV2,
-  Effect.gen(function* () {
-    const projects = yield* ProjectStore.ProjectStoreV2;
-    const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
-    // The same ceiling the orchestrator enforces, fixed for the server's life.
-    const { managedPolicy } = yield* ServerSettings.ServerSettingsService;
-    const maxRuntimeMode = managedPolicy?.limits?.maxRuntimeMode;
-    return RuntimePolicyV2.of({
-      resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
-        yield* refuseAboveCeiling(managedPolicy, input.thread);
-        const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
-        const supportedRuntimeModes =
-          instance === undefined
-            ? undefined
-            : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
-        const cwd =
-          input.thread.worktreePath ??
-          (yield* projects.get(input.thread.projectId).pipe(
-            Effect.mapError(
-              (cause) =>
-                new RuntimePolicyResolveError({
-                  projectId: input.thread.projectId,
-                  providerInstanceId: input.modelSelection.instanceId,
-                  cause,
+  | FileSystem.FileSystem
+> =>
+  Layer.effect(
+    RuntimePolicyV2,
+    Effect.gen(function* () {
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+      // The same ceiling the orchestrator enforces, fixed for the server's life.
+      const { managedPolicy } = yield* ServerSettings.ServerSettingsService;
+      const maxRuntimeMode = managedPolicy?.limits?.maxRuntimeMode;
+      const fileSystem = yield* FileSystem.FileSystem;
+      return RuntimePolicyV2.of({
+        resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
+          yield* refuseAboveCeiling(managedPolicy, input.thread);
+          const threadType = yield* applyThreadTypePolicy(threadTypePolicyPath, input).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+          );
+          const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
+          const supportedRuntimeModes =
+            instance === undefined
+              ? undefined
+              : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+          const cwd =
+            input.thread.worktreePath ??
+            (yield* projects.get(input.thread.projectId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new RuntimePolicyResolveError({
+                    projectId: input.thread.projectId,
+                    providerInstanceId: input.modelSelection.instanceId,
+                    cause,
+                  }),
+              ),
+              Effect.flatMap(
+                Option.match({
+                  onNone: () =>
+                    Effect.fail(
+                      new RuntimePolicyResolveError({
+                        projectId: input.thread.projectId,
+                        providerInstanceId: input.modelSelection.instanceId,
+                        cause: "Project not found.",
+                      }),
+                    ),
+                  onSome: (project) => Effect.succeed(project.workspaceRoot),
                 }),
-            ),
-            Effect.flatMap(
-              Option.match({
-                onNone: () =>
-                  Effect.fail(
-                    new RuntimePolicyResolveError({
-                      projectId: input.thread.projectId,
-                      providerInstanceId: input.modelSelection.instanceId,
-                      cause: "Project not found.",
-                    }),
-                  ),
-                onSome: (project) => Effect.succeed(project.workspaceRoot),
-              }),
-            ),
-          ));
-        return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
-          interactionMode: input.thread.interactionMode,
-          cwd,
-          ...(maxRuntimeMode === undefined ? {} : { maxRuntimeMode }),
-        });
-      }),
-    });
-  }),
+              ),
+            ));
+          return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
+            interactionMode: input.thread.interactionMode,
+            cwd,
+            ...(maxRuntimeMode === undefined ? {} : { maxRuntimeMode }),
+            ...(threadType === undefined ? {} : { threadType }),
+          });
+        }),
+      });
+    }),
+  );
+
+export const layerFromProjectStore = makeLayerFromProjectStore(
+  ThreadTypePolicy.threadTypePolicyPath(),
 );
 
 export function layerWithOverride(

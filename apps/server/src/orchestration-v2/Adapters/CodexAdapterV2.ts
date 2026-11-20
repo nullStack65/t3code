@@ -1503,7 +1503,18 @@ const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 const CODEX_T3_DIRECT_MCP_SERVER = "t3-code-direct";
 const CODEX_DIRECT_ONLY_T3_TOOLS = ["t3_thread_wait", "delegate_task"];
 
-function codexThreadRuntimeParams(input: {
+export function codexThreadTypeConfig(
+  threadType: ProviderAdapter.ProviderAdapterV2RuntimePolicy["threadType"],
+): Readonly<Record<string, Schema.Json>> {
+  return threadType === undefined
+    ? {}
+    : {
+        model_context_window: threadType.contextWindow,
+        model_auto_compact_token_limit: threadType.compactAt,
+      };
+}
+
+export function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly modelSelection?: { readonly model: string };
@@ -1527,6 +1538,7 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...codexThreadTypeConfig(input.runtimePolicy?.threadType),
       // One app-server serves many threads, so the id goes in per-thread shell config, not its env.
       ...(input.threadId === null
         ? {}
