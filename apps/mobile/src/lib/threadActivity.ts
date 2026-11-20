@@ -293,7 +293,6 @@ export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = fa
   const commandless = commandlessCommandLabel(
     entry,
     liveActivityToolStatus(entry.toolLifecycleStatus, false),
-    resolve,
   );
   if (commandless) return commandless;
   const action = toolGroupAction(entry);
@@ -2250,7 +2249,7 @@ function liveToolActivitySummary(activity: ThreadFeedActivity, presentTense: boo
     return `${verb} ${program ?? "command"}`;
   }
   return (
-    commandlessCommandLabel(activity.workEntry, status, resolve) ??
+    commandlessCommandLabel(activity.workEntry, status) ??
     compactWorkEntryText(activity.detail ?? activity.summary)
   );
 }

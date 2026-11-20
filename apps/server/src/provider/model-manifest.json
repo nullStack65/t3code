@@ -74,7 +74,7 @@
     },
     {
       "driver": "antigravity",
-      "t3CodeRange": ">=0.0.42 <0.1.10",
+      "t3CodeRange": ">=0.0.42 <0.1.9",
       "recommendedRange": "=1.4.5 || =1.4.1",
       "ranges": [
         { "range": "=1.4.5", "status": "supported" },
@@ -85,7 +85,7 @@
     },
     {
       "driver": "antigravity",
-      "t3CodeRange": ">=0.1.10",
+      "t3CodeRange": ">=0.1.9",
       "recommendedRange": ">=1.5.12 <2",
       "ranges": [
         { "range": ">=1.5.0 <2", "status": "supported" },

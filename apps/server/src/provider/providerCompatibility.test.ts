@@ -129,9 +129,10 @@ describe("provider compatibility", () => {
     const supported = resolveProviderCompatibility(policies, antigravity, "1.5.11");
     assert.strictEqual(supported?.status, "supported");
     assert.strictEqual(supported?.recommendedRange, ">=1.5.12 <2");
-    // Stable releases before 0.1.10 cannot install the CLI, so they keep the policy they shipped with.
+    // Closura: apps/server still reports 0.1.9 on release/native-0.1.10, so the
+    // 1.5 floor starts at 0.1.9. Older builds keep the policy they shipped with.
     assert.strictEqual(
-      resolveProviderCompatibility(policies, antigravity, "1.4.5", "0.1.9")?.status,
+      resolveProviderCompatibility(policies, antigravity, "1.4.5", "0.1.8")?.status,
       "supported",
     );
   });

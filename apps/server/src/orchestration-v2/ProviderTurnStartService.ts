@@ -1180,13 +1180,25 @@ export const layer: Layer.Layer<
             coveredRunOrdinals: { from, to: Math.max(from, run.ordinal - 1) },
             strategy: "full_thread_summary",
             runs: projection.runs,
-            items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter(
-              (item) =>
-                item.runId === null ||
-                projection.runs.some(
-                  (source) => source.id === item.runId && source.ordinal < run.ordinal,
-                ),
-            ),
+            items: [
+              ...(boundary === 0
+                ? yield* ContextHandoffService.readInheritedHandoffItems(
+                    projectionStore,
+                    projection.thread,
+                  )
+                : []),
+              ...history.filter((item) =>
+                item.runId === null
+                  ? boundary === 0
+                  : projection.runs.some(
+                      (source) =>
+                        source.id === item.runId &&
+                        source.ordinal >= boundary &&
+                        source.ordinal < run.ordinal &&
+                        source.status !== "rolled_back",
+                    ),
+              ),
+            ],
             createdAt,
           });
           return { handoff, transferId, createdAt };

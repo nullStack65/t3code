@@ -702,7 +702,7 @@ describe("Antigravity subscription limits", () => {
         keyringSecret: keyringSecret("2026-10-09T14:00:00Z"),
       });
       expect((yield* personal.probe).unavailable?.message).toBe(
-        "Sign in with Google to see Antigravity limits.",
+        "Sign in with Google to see limits.",
       );
       expect(personal.requests).toEqual([]);
 
