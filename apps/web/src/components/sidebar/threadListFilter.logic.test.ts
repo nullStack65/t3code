@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   changedThreadListFilters,
+  sidebarFilterIconClass,
   inboxMenuOrder,
   matchesThreadListFilter,
   olderSettledFilterCounts,
@@ -94,6 +95,13 @@ describe("thread list filter", () => {
         threadListFilterOf({ sidebarHiddenThreadAttributions: ["unknown"] }),
       ),
     ).toBe(true);
+  });
+
+  it("tints a changed filter with an important primary color", () => {
+    // SidebarMenuButton's `[&>svg]:text-[var(--sidebar-icon-color)]` beats a
+    // plain text-primary on the icon, so the default class must not claim one.
+    expect(sidebarFilterIconClass(false)).toBe("size-4");
+    expect(sidebarFilterIconClass(true)).toBe("size-4 text-primary!");
   });
 
   it("reports only sections that differ from this device's default", () => {
