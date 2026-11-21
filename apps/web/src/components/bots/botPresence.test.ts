@@ -100,4 +100,36 @@ describe("partitionBotGroups", () => {
       mine: [thread("jeff", "jeff"), thread("open")],
     });
   });
+
+  it("shows every standing bot to both founders", () => {
+    const thread = (id: string, audience?: string) => ({
+      id,
+      source: { inbox: audience === undefined ? null : { audience } },
+    });
+    const threads = [
+      thread("shared", "shared"),
+      thread("mine", "kameron"),
+      thread("other", "jeff"),
+      thread("agents", "agent-only"),
+      thread("open"),
+    ];
+    expect(partitionBotGroups(threads, "kameron")).toEqual({
+      mine: [thread("mine", "kameron")],
+      shared: [
+        thread("shared", "shared"),
+        thread("other", "jeff"),
+        thread("agents", "agent-only"),
+        thread("open"),
+      ],
+    });
+    expect(partitionBotGroups(threads, "jeff")).toEqual({
+      mine: [thread("other", "jeff")],
+      shared: [
+        thread("shared", "shared"),
+        thread("mine", "kameron"),
+        thread("agents", "agent-only"),
+        thread("open"),
+      ],
+    });
+  });
 });

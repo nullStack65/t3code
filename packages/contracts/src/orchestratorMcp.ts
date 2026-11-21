@@ -296,6 +296,7 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
 import { InboxChoiceParameter, ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
+import { StoredThreadStanding } from "./threadStanding.ts";
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   inbox: Schema.optional(InboxChoiceParameter),
@@ -421,6 +422,8 @@ export type OrchestratorMcpThreadBackgroundTask = typeof OrchestratorMcpThreadBa
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   inbox: Schema.optionalKey(ThreadInbox),
+  /** Absent from linked environments that predate standing bots on the list. */
+  standing: Schema.optional(StoredThreadStanding),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,

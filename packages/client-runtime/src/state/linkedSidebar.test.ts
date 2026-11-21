@@ -81,6 +81,48 @@ describe("sidebarFromServerLinks", () => {
     expect(matchesThreadListFilter(linked, { ...filter, inboxes: ["jeff"] })).toBe(true);
   });
 
+  it("keeps a remote standing bot's persona so both founders can list it", () => {
+    const standing = { name: "Infra", role: "ARC", avatarId: "bolt", accent: "teal" };
+    const listed = sidebarFromServerLinks({
+      catalogEnvironmentIds: [laptop],
+      environments: [
+        {
+          environmentId: omarcy,
+          label: "primary-r720",
+          projects: [],
+          threads: [
+            {
+              ...jeffThread,
+              threadId: ThreadId.make("thread-infra"),
+              standing,
+              inbox: makeThreadInbox({
+                actor: { kind: "agent", id: "cos" },
+                routing: {
+                  audience: "kameron",
+                  attentionKind: "background",
+                  owner: "kameron",
+                  assignee: { kind: "human", id: "kameron" },
+                  reason: "fyi",
+                },
+              }),
+            },
+          ],
+        },
+      ],
+    });
+    const thread = listed.threads[0];
+    expect(thread?.standing).toEqual(standing);
+    const hiddenInbox = {
+      inboxes: ["jeff"] as const,
+      hiddenEnvironmentIds: [],
+      hiddenAttributions: [],
+    };
+    expect(matchesThreadListFilter(thread!, hiddenInbox, "unknown")).toBe(true);
+    expect(matchesThreadListFilter({ ...thread!, standing: null }, hiddenInbox, "unknown")).toBe(
+      false,
+    );
+  });
+
   it("lists one copy when two hosts report the same server-only link", () => {
     const listed = sidebarFromServerLinks({
       catalogEnvironmentIds: [laptop],
