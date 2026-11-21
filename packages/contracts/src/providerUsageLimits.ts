@@ -78,6 +78,14 @@ export const UsageLimitSourceAccount = Schema.Struct({
   email: Schema.optional(TrimmedNonEmptyString),
   plan: Schema.optional(TrimmedNonEmptyString),
   workspaceId: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * Alias, or another label that tells two seats of one product apart.
+   * An email stays on `email` and is not repeated here.
+   */
+  displayName: Schema.optional(TrimmedNonEmptyString),
+  /** Held seats and lapsed sign-ins stay listed, with why, instead of looking like a healthy bar. */
+  status: Schema.optional(Schema.Literals(["held", "signed-out"])),
+  statusDetail: Schema.optional(TrimmedNonEmptyString),
   usageLimits: ServerProviderUsageLimits,
 });
 export type UsageLimitSourceAccount = typeof UsageLimitSourceAccount.Type;
@@ -153,6 +161,8 @@ export const UsageLimitsReport = Schema.Struct({
       resetCreditInput: Schema.optional(ProviderConsumeResetCreditInput),
       displayName: Schema.optional(Schema.String),
       accentColor: Schema.optional(Schema.String),
+      status: Schema.optional(Schema.Literals(["held", "signed-out"])),
+      statusDetail: Schema.optional(TrimmedNonEmptyString),
       limits: ServerProviderUsageLimits,
     }),
   ),

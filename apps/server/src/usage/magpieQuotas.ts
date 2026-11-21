@@ -40,6 +40,11 @@ const QuotaEntry = Schema.Struct({
   kind: Schema.optional(Schema.String),
   plan: Schema.optional(Schema.String),
   user: Schema.optional(Schema.String),
+  // Null is a present-but-empty alias. Omitting the key and rejecting null would drop the whole read.
+  alias: Schema.optional(Schema.NullOr(Schema.String)),
+  held: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  until: Schema.optional(Schema.NullOr(Schema.String)),
+  lapsed: Schema.optional(Schema.NullOr(Schema.Union([Schema.Boolean, Schema.String]))),
   windows: Schema.optional(Schema.Array(QuotaWindow)),
   readAt: Schema.optional(Schema.String),
   error: Schema.optional(Schema.String),
@@ -95,9 +100,7 @@ function magpieWindow(
   const [span = window.name, ...scopeParts] = window.name.split("·").map((part) => part.trim());
   const scope = scopeParts.join(" · ");
   const match = /^(?:(\d+(?:\.\d+)?)\s+)?(minute|hour|day|week|month)s?$/i.exec(span);
-  const mins = match
-    ? Number(match[1] ?? 1) * MINUTES[match[2]!.toLowerCase()]!
-    : undefined;
+  const mins = match ? Number(match[1] ?? 1) * MINUTES[match[2]!.toLowerCase()]! : undefined;
   const kind: ServerProviderUsageWindow["kind"] =
     mins === undefined
       ? "other"
@@ -169,13 +172,93 @@ function shortReason(error: string): string {
   return sentence.endsWith(".") ? sentence : `${sentence}.`;
 }
 
+function trimmed(value: string | null | undefined): string | undefined {
+  const text = value?.trim();
+  return text ? text : undefined;
+}
+
+function emailAddress(user: string): string | undefined {
+  const head = user.split(" · ")[0]?.trim() ?? "";
+  return /^[^\s@]+@[^\s@]+$/.test(head) ? head : undefined;
+}
+
+function personFromEmail(email: string): string {
+  const local = email.split("@")[0] ?? email;
+  const parts = local.split(/[._+-]+/).filter(Boolean);
+  if (parts.length === 0) return local;
+  return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()).join(" ");
+}
+
+/**
+ * Seats that share one product name (both Grok rows are "Grok (SuperGrok)",
+ * and grok has no native alias) need a label that is not that shared name.
+ * A real alias always wins. A unique emailed seat stays unnamed so the chip
+ * can stand in for the address.
+ */
+function displayNamesFor(
+  entries: ReadonlyArray<MagpieQuotaEntry>,
+): ReadonlyArray<string | undefined> {
+  const draft = entries.map((entry) => {
+    const alias = trimmed(entry.alias);
+    if (alias) return { name: alias, fromAlias: true };
+    const user = trimmed(entry.user) ?? "";
+    const email = emailAddress(user);
+    if (!email) return { name: undefined, fromAlias: false };
+    const nameKey = (entry.name ?? "").trim().toLowerCase();
+    const sharedEmails = new Set<string>();
+    for (const other of entries) {
+      if (other.provider !== entry.provider) continue;
+      if ((other.name ?? "").trim().toLowerCase() !== nameKey) continue;
+      const otherEmail = emailAddress(trimmed(other.user) ?? "");
+      if (otherEmail) sharedEmails.add(otherEmail.toLowerCase());
+    }
+    // A repeated payload for one address is still one seat.
+    if (sharedEmails.size < 2) return { name: undefined, fromAlias: false };
+    const seat = user.includes(" · ") ? user.split(" · ").slice(1).join(" · ").trim() : "";
+    const person = personFromEmail(email);
+    const who = seat ? `${person} · ${seat}` : person;
+    const product = trimmed(entry.name?.match(/\(([^)]+)\)/)?.[1]);
+    return { name: product ? `${who} · ${product}` : who, fromAlias: false };
+  });
+  const counts = new Map<string, number>();
+  for (const item of draft) {
+    if (item.name) counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
+  }
+  return draft.map((item, index) => {
+    // An alias is the operator's label. Only a derived name gets a domain suffix.
+    if (!item.name || item.fromAlias || (counts.get(item.name) ?? 0) < 2) return item.name;
+    const email = emailAddress(trimmed(entries[index]?.user) ?? "");
+    const domain = email?.split("@")[1]?.split(".")[0];
+    return domain ? `${item.name} · ${domain}` : item.name;
+  });
+}
+
+function accountFlags(entry: MagpieQuotaEntry): {
+  readonly status?: "held" | "signed-out";
+  readonly statusDetail?: string;
+} {
+  const lapsed = entry.lapsed;
+  if (typeof lapsed === "string" && lapsed.trim()) {
+    return { status: "signed-out", statusDetail: shortReason(lapsed) };
+  }
+  if (lapsed === true) {
+    return { status: "signed-out", statusDetail: "Sign-in required." };
+  }
+  if (entry.held === true) {
+    const day = /^\d{4}-\d{2}-\d{2}/.exec(trimmed(entry.until) ?? "")?.[0];
+    return { status: "held", statusDetail: day ? `Held until ${day}.` : "Held." };
+  }
+  return {};
+}
+
 export function magpieQuotasToAccounts(
   entries: ReadonlyArray<MagpieQuotaEntry>,
   checkedAt: string,
 ): ReadonlyArray<UsageLimitSourceAccount> {
   const accounts: UsageLimitSourceAccount[] = [];
   const seen = new Set<string>();
-  for (const entry of entries) {
+  const names = displayNamesFor(entries);
+  for (const [index, entry] of entries.entries()) {
     const driver = driverFor(entry.provider);
     if (!driver) continue;
     if (driver === "opencode" && entry.error && isDeadGoSubscription(entry.error)) {
@@ -194,12 +277,16 @@ export function magpieQuotasToAccounts(
           message: shortReason(entry.error),
         })
       : makeUsageLimits({ checkedAt: entry.readAt ?? checkedAt, windows });
+    const displayName = names[index];
+    const flags = accountFlags(entry);
     accounts.push({
       id,
       driver,
       // Only a real address is an email; Go keys carry a key name instead.
       ...(/^[^\s@]+@[^\s@]+$/.test(user.split(" · ")[0]!) ? { email: user } : {}),
       ...(plan ? { plan } : {}),
+      ...(displayName ? { displayName } : {}),
+      ...flags,
       usageLimits,
     });
   }
