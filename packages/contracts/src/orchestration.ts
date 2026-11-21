@@ -1079,6 +1079,14 @@ export const OrchestrationSubscribeShellInput = Schema.Struct({
    * snapshot or catch-up replay and before it begins emitting live events.
    */
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Scopes the shell to one founder's inbox. The server returns only threads
+   * that founder owns, started, or is asked to act on, and it drops bot-work
+   * and untagged threads from both the snapshot and the live stream. Absent
+   * returns every thread, which is what the desktop and web clients rely on
+   * while they filter locally.
+   */
+  inbox: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
 

@@ -8864,6 +8864,165 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
+  it.effect("scopes a shell subscription to one founder inbox", () =>
+    Effect.gen(function* () {
+      const jeff = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-jeff"),
+        title: "Jeff",
+        owner: "jeff",
+        threadType: "fyi",
+      });
+      const shared = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-shared"),
+        title: "Shared",
+        owner: "jeff",
+        threadType: "needs-human",
+      });
+      const kameron = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-kameron"),
+        title: "Kameron",
+        owner: "kameron",
+        threadType: "needs-human",
+      });
+      const botWork = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-bot"),
+        title: "Bot work",
+        owner: "jeff",
+        threadType: "bot-work",
+        startedBy: "jeff",
+      });
+      const allThreads = [jeff, shared, kameron, botWork];
+      const liveEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+      const pendingPublishes: Array<boolean> = [];
+      const shellSnapshot = {
+        snapshotSequence: 1,
+        projects: [],
+        threads: allThreads,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
+      const messageSent = (threadId: ThreadId, sequence: number) =>
+        ({
+          sequence,
+          eventId: EventId.make(`event-shell-scope-${sequence}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-01-01T00:00:01.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {
+            threadId,
+            messageId: MessageId.make(`message-scope-${sequence}`),
+            role: "user",
+            text: "Update",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+        }) satisfies Extract<OrchestrationEvent, { type: "thread.message-sent" }>;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            streamDomainEvents: Stream.fromPubSub(liveEvents),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.gen(function* () {
+                // Publish while the subscriber is attached. The live buffer only
+                // retains events that arrive after a subscription starts, and the
+                // snapshot load is the one point guaranteed to run then.
+                const shouldPublish = pendingPublishes.shift();
+                if (shouldPublish) {
+                  yield* PubSub.publishAll(liveEvents, [
+                    messageSent(jeff.id, 2),
+                    messageSent(kameron.id, 3),
+                    messageSent(botWork.id, 4),
+                  ]);
+                }
+                return shellSnapshot;
+              }),
+            getThreadShellById: (threadId) => {
+              const thread = allThreads.find((candidate) => candidate.id === threadId);
+              return Effect.succeed(thread === undefined ? Option.none() : Option.some(thread));
+            },
+          },
+        },
+      });
+
+      const baseUrl = yield* getHttpServerUrl();
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const scopedHttp = yield* measureHttpGet({
+        url: `${baseUrl}/api/orchestration/shell?inbox=jeff`,
+        headers: { cookie },
+      });
+      assert.equal(scopedHttp.status, 200);
+      const scopedShell = yield* decodeTransferShellSnapshot(
+        Buffer.from(scopedHttp.decodedBody).toString("utf8"),
+      );
+      assert.deepEqual(
+        scopedShell.threads.map((thread) => thread.id),
+        ["thread-jeff", "thread-shared"],
+      );
+      const unscopedHttp = yield* measureHttpGet({
+        url: `${baseUrl}/api/orchestration/shell`,
+        headers: { cookie },
+      });
+      const unscopedShell = yield* decodeTransferShellSnapshot(
+        Buffer.from(unscopedHttp.decodedBody).toString("utf8"),
+      );
+      assert.equal(unscopedShell.threads.length, allThreads.length);
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const subscribe = (inbox?: string) =>
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+              requestCompletionMarker: true,
+              ...(inbox !== undefined ? { inbox } : {}),
+            }).pipe(
+              Stream.takeUntil((item) => item.kind === "synchronized"),
+              Stream.runCollect,
+            ),
+          ),
+        );
+      pendingPublishes.push(true);
+      const unscopedItems = yield* subscribe();
+      pendingPublishes.push(true);
+      const scopedItems = yield* subscribe("jeff");
+
+      const threadIds = (items: ReadonlyArray<OrchestrationShellStreamItem>) =>
+        items.flatMap((item) =>
+          item.kind === "snapshot"
+            ? item.snapshot.threads.map((thread) => thread.id)
+            : item.kind === "thread-upserted"
+              ? [item.thread.id]
+              : item.kind === "thread-removed"
+                ? [`removed:${item.threadId}`]
+                : [],
+        );
+      assert.deepEqual(threadIds(scopedItems), [
+        "thread-jeff",
+        "thread-shared",
+        "thread-jeff",
+        "removed:thread-kameron",
+        "removed:thread-bot",
+      ]);
+      assert.deepEqual(threadIds(unscopedItems), [
+        "thread-jeff",
+        "thread-shared",
+        "thread-kameron",
+        "thread-bot",
+        "thread-jeff",
+        "thread-kameron",
+        "thread-bot",
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
   it.effect("buffers thread events published while the initial snapshot loads", () =>
     Effect.gen(function* () {
       const thread = makeDefaultOrchestrationReadModel().threads[0]!;

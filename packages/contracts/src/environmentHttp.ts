@@ -497,6 +497,10 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
 // Query-string window for windowed thread snapshots (GET payloads must encode
 // to strings). Both fields optional: omitting them keeps the full-snapshot
 // behavior, so pagination stays opt-in per request.
+const EnvironmentOrchestrationShellSnapshotQuery = {
+  inbox: Schema.optional(TrimmedNonEmptyString),
+};
+
 const EnvironmentOrchestrationThreadSnapshotQuery = {
   reasoningMessages: Schema.optional(Schema.Literal("true")),
   turnLimit: Schema.optional(
@@ -516,6 +520,7 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
   .add(
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OptionalBearerHeaders,
+      payload: EnvironmentOrchestrationShellSnapshotQuery,
       success: OrchestrationShellSnapshot,
       error: EnvironmentOrchestrationSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),

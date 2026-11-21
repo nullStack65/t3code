@@ -3,6 +3,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
+import { threadVisibleInInbox } from "@t3tools/contracts/threadInbox";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
@@ -53,13 +54,23 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* projectionSnapshotQuery
+          const snapshot = yield* projectionSnapshotQuery
             .getShellSnapshot()
             .pipe(
               Effect.catch((cause) =>
                 failEnvironmentInternal("orchestration_snapshot_failed", cause),
               ),
             );
+          const inbox = args.payload.inbox;
+          if (inbox === undefined) {
+            return snapshot;
+          }
+          return {
+            ...snapshot,
+            threads: snapshot.threads.filter((thread) =>
+              threadVisibleInInbox(thread, { identity: inbox, showBotWork: false }),
+            ),
+          };
         }),
       )
       .handle(
