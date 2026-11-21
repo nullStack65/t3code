@@ -370,10 +370,11 @@ jobs:
           key: ${{ steps.playwright_cache.outputs.cache-primary-key }}
 
   # Reports the exact check name the release-native-protection ruleset requires.
-  # It runs no build and installs nothing; it only waits for the three workers
-  # and fails when any of them failed, was cancelled, or was skipped. A skipped
-  # worker means the trust gate refused the run, and a required check must not
-  # turn green for a run that did no work.
+  # It runs no build and installs no workspace dependencies. The ARC image has
+  # no `node` on PATH, so this job sets up the repo's Node before the coverage
+  # guard. It fails when any worker failed, was cancelled, or was skipped. A
+  # skipped worker means the trust gate refused the run, and a required check
+  # must not turn green for a run that did no work.
   #
   # `if: always()` would also start this job when the workflow is cancelled, and
   # a worker that never started reports `success`. The concurrency group cancels
@@ -392,7 +393,21 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 2
-          sparse-checkout: .github
+          # package.json is the Node version file. Cone mode on Git 2.43 accepts
+          # that root file alongside the .github directory.
+          sparse-checkout: |
+            .github
+            package.json
+
+      # Official Node 26 links libatomic.so.1, which this image does not ship.
+      # The library path has to be set before setup-node runs that binary.
+      - name: Provide libatomic for official Node binaries
+        uses: ./.github/actions/provide-libatomic
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: package.json
 
       # Fails the required check when a worker no longer runs one of the 48
       # tests the serial job ran, so coverage cannot shrink without this going red.

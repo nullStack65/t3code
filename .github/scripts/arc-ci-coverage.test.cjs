@@ -33,6 +33,17 @@ test("a test that only appears in dead code does not count as run", () => {
   assert.ok(checkCoverage(buried).some((problem) => problem.includes(REQUIRED_TESTS[0])));
 });
 
+test("the coverage guard refuses to run before Node is on PATH", () => {
+  const withoutNode = workflow.replace(
+    / {6}- name: Provide libatomic for official Node binaries\n {8}uses: \.\/\.github\/actions\/provide-libatomic\n\n {6}- name: Setup Node\n {8}uses: actions\/setup-node@\S+ # v6\.5\.0\n {8}with:\n {10}node-version-file: package\.json\n\n/,
+    "",
+  );
+  assert.notEqual(withoutNode, workflow);
+  assert.ok(
+    checkCoverage(withoutNode).some((problem) => problem.includes("Node is on PATH")),
+  );
+});
+
 test("an aggregator that runs on cancellation fails the check", () => {
   const always = workflow.replace("if: ${{ !cancelled() }}", "if: always()");
   assert.ok(

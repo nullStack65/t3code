@@ -154,6 +154,15 @@ function testsIn(job) {
   return found;
 }
 
+function jobBody(source, id) {
+  const marker = `\n  ${id}:`;
+  const start = source.indexOf(marker);
+  if (start < 0) return "";
+  const rest = source.slice(start + marker.length);
+  const next = rest.search(/\n {2}[\w-]+:\s*\n/);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
 function checkCoverage(source) {
   const jobs = parseWorkflow(source);
   const problems = [];
@@ -171,6 +180,20 @@ function checkCoverage(source) {
     // reports success, so the required check would pass with nothing tested.
     if (!aggregator.condition || !aggregator.condition.includes("!cancelled()")) {
       problems.push("aggregator runs when the workflow is cancelled");
+    }
+    // The ARC image has no node on PATH. setup-node downloads an official
+    // Node 26 binary that needs libatomic, so both have to run first.
+    const body = jobBody(source, "voice-and-inbox");
+    const libatomic = body.indexOf("uses: ./.github/actions/provide-libatomic");
+    const setupNode = body.indexOf("uses: actions/setup-node@");
+    const guard = body.indexOf("run: node .github/scripts/arc-ci-coverage.cjs");
+    if (
+      libatomic < 0 ||
+      setupNode < 0 ||
+      guard < 0 ||
+      !(libatomic < setupNode && setupNode < guard)
+    ) {
+      problems.push("coverage guard runs before Node is on PATH");
     }
   }
   const ran = [];
