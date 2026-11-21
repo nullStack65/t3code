@@ -40,6 +40,11 @@ function AccountSummary({ account }: { readonly account: UsageLimitsReport["acco
         label
       )}
       {account.plan ? ` · ${account.plan}` : null}
+      {account.status === "held"
+        ? " · Held"
+        : account.status === "signed-out"
+          ? " · Sign in"
+          : null}
     </>
   );
 }

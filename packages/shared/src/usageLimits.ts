@@ -14,6 +14,7 @@ import {
   type ServerProviderResetCredits,
   type ServerProviderUsageLimits,
   type ServerProviderUsageWindow,
+  type UsageLimitSourceAccount,
   type UsageLimitSourceSnapshot,
   type UsageLimitSourceSnapshots,
 } from "@t3tools/contracts";
@@ -332,6 +333,8 @@ export interface LimitAccount {
   readonly displayName: string | null;
   readonly email: string | undefined;
   readonly plan: string | undefined;
+  readonly status: UsageLimitSourceAccount["status"] | null;
+  readonly statusDetail: string | null;
   readonly accentColor: string | undefined;
   readonly environments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
@@ -391,18 +394,39 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
     ];
     const winner = fresher ? next : previous;
     const creditSource = creditSources.get(key);
-    // A hub e-mail names the account better than the driver's default instance name.
-    const hubEmail = [previous, next].some(
-      (account) => account.environments.length === 0 && account.email,
-    );
-    const displayName = previous.displayName ?? next.displayName;
+    const sides = [previous, next];
+    const generic = (name: string | null | undefined) =>
+      !!name && name.toLowerCase() === PROVIDER_DISPLAY_NAMES[previous.driver]?.toLowerCase();
+    // Either row may arrive first. A renamed instance names that route; a
+    // generic "Grok" does not hide a later "Grok · Emergency (direct)". A hub
+    // alias replaces only that generic name, and a null hub name does not hide
+    // a later alias.
+    const chosen = sides.find(
+      (account) =>
+        account.environments.length > 0 && account.displayName && !generic(account.displayName),
+    )?.displayName;
+    const hubNames = sides
+      .filter((account) => account.environments.length === 0)
+      .map((account) => account.displayName?.trim() || null);
+    const hubName = hubNames.find((name) => name) ?? null;
+    const anyHub = hubNames.length > 0;
+    const nativeName =
+      sides.find((account) => account.environments.length > 0)?.displayName ?? null;
+    const displayName = chosen
+      ? chosen
+      : anyHub
+        ? (hubName ?? (generic(nativeName) ? null : nativeName))
+        : nativeName;
+    const statusAccount =
+      sides.find((account) => account.status === "signed-out") ??
+      sides.find((account) => account.status);
+    const status = statusAccount?.status ?? null;
+    const statusDetail = statusAccount?.statusDetail ?? null;
     accounts.set(key, {
       ...previous,
-      displayName:
-        hubEmail &&
-        displayName?.toLowerCase() === PROVIDER_DISPLAY_NAMES[previous.driver]?.toLowerCase()
-          ? null
-          : displayName,
+      displayName,
+      status,
+      statusDetail,
       plan: planSources.get(key)?.plan ?? previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
@@ -436,6 +460,8 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         displayName: provider.displayName?.trim() || null,
         email: provider.auth.email,
         plan: provider.auth.label,
+        status: null,
+        statusDetail: null,
         accentColor: provider.accentColor,
         environments: [{ environmentId, label }],
         sourceLabel: null,
@@ -459,9 +485,12 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         merge(resolved ?? key, {
           key,
           driver: account.driver,
-          displayName: account.email ? null : hubAccountName(account),
+          displayName:
+            account.displayName?.trim() || (account.email ? null : hubAccountName(account)),
           email: account.email,
           plan: account.plan,
+          status: account.status ?? null,
+          statusDetail: account.statusDetail ?? null,
           accentColor: undefined,
           environments: [],
           sourceLabel,
@@ -533,8 +562,12 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
 }
 
 /** A hub account by its email, else its id without the `provider:` prefix sources add. */
-function sourceAccountName(account: { readonly id: string; readonly email?: string | undefined }) {
-  return account.email ?? account.id.replace(/^[\w-]+:/, "");
+function sourceAccountName(account: {
+  readonly id: string;
+  readonly email?: string | undefined;
+  readonly displayName?: string | undefined;
+}) {
+  return account.displayName?.trim() || account.email || account.id.replace(/^[\w-]+:/, "");
 }
 
 /** "Payment Required" from a vendor: a lapsed or unpaid subscription, which needs a person. */
@@ -1184,7 +1217,7 @@ export function collectProviderUsageLimits(
   type NativeSnapshot = { provider: ServerProvider; limits: ServerProviderUsageLimits };
   const nativeByAccount = new Map<
     string,
-    { usage: NativeSnapshot; credits: NativeSnapshot | null }
+    { usage: NativeSnapshot; credits: NativeSnapshot | null; chosenName: string | null }
   >();
   for (const provider of providersWithLimits(providers)) {
     if (provider.driver !== selected.driver || !provider.usageLimits) continue;
@@ -1205,9 +1238,16 @@ export function collectProviderUsageLimits(
         Date.parse(snapshot.limits.checkedAt) > Date.parse(previousCredit.limits.checkedAt))
         ? snapshot
         : (previousCredit ?? null);
+    const trimmedName = provider.displayName?.trim() || null;
+    const chosenName =
+      trimmedName &&
+      trimmedName.toLowerCase() !== PROVIDER_DISPLAY_NAMES[provider.driver]?.toLowerCase()
+        ? trimmedName
+        : null;
     nativeByAccount.set(key, {
       usage: providerWins ? snapshot : previous.usage,
       credits,
+      chosenName: previous?.chosenName ?? chosenName,
     });
   }
   const native = [...nativeByAccount.values()];
@@ -1222,6 +1262,7 @@ export function collectProviderUsageLimits(
   for (const {
     usage: { provider, limits },
     credits,
+    chosenName,
   } of native) {
     const key = resolveKey(nativeReport(provider));
     const hubCredits = sources
@@ -1246,6 +1287,23 @@ export function collectProviderUsageLimits(
     const shownCredits = showHubCredits
       ? hubCredits.account.usageLimits.resetCredits
       : credits?.limits.resetCredits;
+    const relatedHubs = sources
+      .flatMap((source) => source.accounts.map((account) => ({ source, account })))
+      .filter(
+        ({ account }) =>
+          key !== null && resolveKey(account) === key && account.driver === provider.driver,
+      );
+    const statusAccount =
+      relatedHubs.find(({ account }) => account.status === "signed-out")?.account ??
+      relatedHubs.find(({ account }) => account.status)?.account;
+    const nativeLabel = chosenName ?? (provider.displayName?.trim() || null);
+    const hubLabel =
+      relatedHubs.map(({ account }) => account.displayName?.trim() || null).find((name) => name) ??
+      null;
+    const generic =
+      !!nativeLabel &&
+      nativeLabel.toLowerCase() === PROVIDER_DISPLAY_NAMES[provider.driver]?.toLowerCase();
+    const displayName = nativeLabel && !generic ? nativeLabel : (hubLabel ?? nativeLabel);
     accounts.push({
       id: provider.instanceId,
       driver: provider.driver,
@@ -1260,7 +1318,9 @@ export function collectProviderUsageLimits(
               creditId: hubCreditId,
             }
           : { instanceId: credits?.provider.instanceId ?? provider.instanceId },
-      ...(provider.displayName ? { displayName: provider.displayName } : {}),
+      ...(displayName ? { displayName } : {}),
+      ...(statusAccount?.status ? { status: statusAccount.status } : {}),
+      ...(statusAccount?.statusDetail ? { statusDetail: statusAccount.statusDetail } : {}),
       ...(provider.accentColor ? { accentColor: provider.accentColor } : {}),
       ...(provider.auth.email ? { email: provider.auth.email } : {}),
       limits: shownCredits ? { ...limits, resetCredits: shownCredits } : limits,
@@ -1271,10 +1331,11 @@ export function collectProviderUsageLimits(
     for (const account of matching) {
       const key = resolveKey(account);
       if (key && nativeAccountKeys.has(key)) continue;
+      const hubName = account.displayName?.trim();
       accounts.push({
         id: `${source.id}:${account.id}`,
         driver: account.driver,
-        label: `${source.label} · ${hubAccountName(account)}`,
+        label: hubName || `${source.label} · ${hubAccountName(account)}`,
         sourceLabel: "CLI Proxy",
         ...(account.usageLimits.resetCredits?.nextCreditId
           ? {
@@ -1286,6 +1347,9 @@ export function collectProviderUsageLimits(
             }
           : {}),
         ...(account.plan ? { plan: account.plan } : {}),
+        ...(hubName ? { displayName: hubName } : {}),
+        ...(account.status ? { status: account.status } : {}),
+        ...(account.statusDetail ? { statusDetail: account.statusDetail } : {}),
         ...(account.email ? { email: account.email } : {}),
         limits: account.usageLimits,
       });
