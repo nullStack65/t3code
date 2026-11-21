@@ -213,6 +213,78 @@ jobs:
             packages/contracts/src/environment.test.ts \
             scripts/feature-map.test.ts
 
+      - name: Gate interaction latency at 400 ms
+        shell: bash
+        working-directory: apps/web
+        run: |
+          set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ms-playwright"
+          vp exec playwright install --only-shell chromium
+          shell=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -name chrome-headless-shell | head -1)
+          if ! test -x "$shell"; then
+            echo "::error::Playwright installed no chrome-headless-shell under $PLAYWRIGHT_BROWSERS_PATH."
+            exit 1
+          fi
+          packages=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2
+            libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0
+            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2)
+          # -o Dir::Etc is applied after apt has already read /etc/apt/apt.conf.d, so the
+          # image Post-Invoke still runs and its rm of /var/cache/apt/archives/partial fails
+          # the step. APT_CONFIG is read first, which is what points Dir::Etc away from
+          # those hooks. Downloads stay under the job temp dir. Status stays the image
+          # dpkg database, so apt fetches only libraries the image does not already have
+          # and the extract does not replace the image libc.
+          apt_dir="$RUNNER_TEMP/chromium-apt"
+          mkdir -p "$apt_dir/etc/apt.conf.d" "$apt_dir/etc/sources.list.d" "$apt_dir/etc/preferences.d" \
+            "$apt_dir/lists/partial" "$apt_dir/archives/partial" "$apt_dir/root"
+          printf '%s\n' \
+            'deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe' \
+            'deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe' \
+            'deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe' \
+            > "$apt_dir/etc/sources.list"
+          cat > "$apt_dir/apt.conf" <<EOF
+          Dir::Etc "$apt_dir/etc";
+          Dir::Etc::sourcelist "$apt_dir/etc/sources.list";
+          Dir::Etc::sourceparts "$apt_dir/etc/sources.list.d";
+          Dir::Etc::parts "$apt_dir/etc/apt.conf.d";
+          Dir::State::lists "$apt_dir/lists";
+          Dir::State::status "/var/lib/dpkg/status";
+          Dir::Cache::archives "$apt_dir/archives";
+          Dir::Cache::pkgcache "$apt_dir/pkgcache.bin";
+          Dir::Cache::srcpkgcache "$apt_dir/srcpkgcache.bin";
+          Debug::NoLocking "1";
+          APT::Get::List-Cleanup "0";
+          EOF
+          sed -i -E 's/^[[:space:]]+//' "$apt_dir/apt.conf"
+          export APT_CONFIG="$apt_dir/apt.conf"
+          apt-get update -qq
+          apt-get -qq install --download-only --no-install-recommends -y "${packages[@]}"
+          shopt -s nullglob
+          debs=("$apt_dir"/archives/*.deb)
+          shopt -u nullglob
+          for deb in "${debs[@]}"; do dpkg-deb -x "$deb" "$apt_dir/root"; done
+          export LD_LIBRARY_PATH="$apt_dir/root/usr/lib/x86_64-linux-gnu:$apt_dir/root/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          mkdir -p "$RUNNER_TEMP/fontconfig-cache"
+          printf '<?xml version="1.0"?>\n<fontconfig><dir>/usr/share/fonts</dir><dir>%s</dir><cachedir>%s</cachedir></fontconfig>\n' \
+            "$apt_dir/root/usr/share/fonts" "$RUNNER_TEMP/fontconfig-cache" > "$RUNNER_TEMP/fonts.conf"
+          export FONTCONFIG_FILE="$RUNNER_TEMP/fonts.conf"
+          fonts=0
+          for font_dir in /usr/share/fonts "$apt_dir/root/usr/share/fonts"; do
+            if test -d "$font_dir"; then
+              fonts=$((fonts + $(find "$font_dir" -name '*.ttf' | wc -l)))
+            fi
+          done
+          if test "$fonts" -eq 0; then
+            echo "::error::No fonts for headless Chromium, so text has no size and is never visible."
+            exit 1
+          fi
+          printf 'Fonts available to Chromium: %s\n' "$fonts"
+          if ldd "$shell" | grep 'not found'; then
+            echo "::error::Headless Chromium still misses the libraries above."
+            exit 1
+          fi
+          vp run test:latency
+
       - name: Test mobile new-task placement, outbox and uploads
         shell: bash
         working-directory: apps/mobile
