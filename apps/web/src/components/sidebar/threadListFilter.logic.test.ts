@@ -41,6 +41,7 @@ describe("thread list filter", () => {
         environmentId: laptop,
         source: {
           inbox: makeThreadInbox({ actor: kameron, routing: { audience: "shared" } }),
+          createdBy: undefined,
         },
       }),
     ).toBe(true);

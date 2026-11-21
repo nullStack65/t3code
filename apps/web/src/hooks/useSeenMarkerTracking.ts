@@ -56,7 +56,7 @@ export function startSeenMarkerSampling(input: {
   const { window: win, document: doc } = input.host;
   const session = createSeenMarkerSession({
     threadKey: input.threadKey,
-    founder: input.founder,
+    ...(input.founder === undefined ? {} : { founder: input.founder }),
     getMessages: input.getMessages,
     seenAt: () => (input.now ?? (() => new Date()))().toISOString(),
     ...(input.notBefore === undefined ? {} : { notBefore: input.notBefore }),
