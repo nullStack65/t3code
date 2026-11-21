@@ -1,7 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId, RunId } from "@t3tools/contracts";
+import type { EnvironmentId, Founder, RunId } from "@t3tools/contracts";
 import type { HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 import {
+  founderSenderBadge,
   messageSenderDetail,
   messageSenderLabel,
   type MessageSender,
@@ -65,4 +66,24 @@ export function useRunModelSender(
       : getTriggerDisplayModelName(known, entry?.driverKind);
   });
   return { kind: "model", provider, model };
+}
+
+/** Kameron or Jeff, on a person's message in a shared thread. */
+export function FounderSenderBadge({ founder }: { readonly founder: Founder }) {
+  const badge = founderSenderBadge(founder);
+  const tint = founder === "kameron" ? "bg-foreground/15" : "bg-foreground/40";
+  return (
+    <p
+      className="me-1 flex items-center justify-end gap-1.5 text-2xs text-muted-foreground/80"
+      data-founder-badge={founder}
+    >
+      <span
+        aria-hidden
+        className={`flex size-4 items-center justify-center rounded-full text-2xs font-medium text-foreground ${tint}`}
+      >
+        {badge.initial}
+      </span>
+      <span className="font-medium">{badge.name}</span>
+    </p>
+  );
 }

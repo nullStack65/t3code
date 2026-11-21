@@ -4,6 +4,7 @@ import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-v
 import { type ScopedThreadRef } from "@t3tools/contracts";
 
 import { environmentCatalog } from "../../connection/catalog";
+import { getClientSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 
@@ -11,6 +12,7 @@ const threadVisitTracker = createThreadVisitTracker({
   threadShellAtom: environmentThreadShells.threadShellAtom,
   sessionGenerationAtom: environmentCatalog.sessionGenerationAtom,
   visit: threadEnvironment.visit,
+  visitFounder: () => getClientSettings().founderInboxOwner ?? null,
   markLocalVisit: (ref, visitedAt) =>
     useUiStateStore.getState().markThreadVisited(scopedThreadKey(ref), visitedAt),
 });

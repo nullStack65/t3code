@@ -138,9 +138,16 @@ export interface VisitThreadInput extends ThreadCommandInput {
   /** Counts toward search frecency; `searchQuery` is the palette query that picked it. */
   readonly opened?: boolean;
   readonly searchQuery?: string;
+  /** Whose read cursor this visit moves. Shared threads leave the other founder unread. */
+  readonly founder?: import("@t3tools/contracts").Founder;
+  /** Last message this founder was shown. The visit still does not start a turn. */
+  readonly lastSeenMessageId?: import("@t3tools/contracts").MessageId;
 }
 
-export type MarkThreadUnreadInput = ThreadCommandInput;
+export interface MarkThreadUnreadInput extends ThreadCommandInput {
+  /** On a shared thread, rewind only this founder's cursor. */
+  readonly founder?: import("@t3tools/contracts").Founder;
+}
 
 export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
@@ -690,6 +697,10 @@ export const visitThread = Effect.fn("EnvironmentCommands.visitThread")(function
     visitedAt: input.visitedAt,
     ...(input.opened ? { opened: true } : {}),
     ...(input.searchQuery ? { searchQuery: input.searchQuery } : {}),
+    ...(input.founder === undefined ? {} : { founder: input.founder }),
+    ...(input.lastSeenMessageId === undefined
+      ? {}
+      : { lastSeenMessageId: input.lastSeenMessageId }),
   });
 });
 
@@ -700,6 +711,7 @@ export const markThreadUnread = Effect.fn("EnvironmentCommands.markThreadUnread"
     type: "thread.mark-unread",
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
+    ...(input.founder === undefined ? {} : { founder: input.founder }),
   });
 });
 

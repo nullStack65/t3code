@@ -101,6 +101,12 @@ export function resolveMessageSender(
 
 const FOUNDER_NAMES = { kameron: "Kameron", jeff: "Jeff" } satisfies Record<Founder, string>;
 
+/** The initial and name on a shared-thread message. */
+export function founderSenderBadge(founder: Founder) {
+  const name = FOUNDER_NAMES[founder];
+  return { name, initial: name.slice(0, 1) } as const;
+}
+
 const DEVICE_TYPE_NAMES = {
   desktop: "Desktop",
   mobile: "Phone",

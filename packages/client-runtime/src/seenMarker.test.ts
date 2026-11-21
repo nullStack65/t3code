@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   buildSeenMarker,
+  catchUpOffer,
   createSeenMarkerSession,
   pickNewestMessageId,
   resetSeenMarkersForTest,
@@ -123,5 +124,75 @@ describe("seen dwell", () => {
     clock.fireNext();
     expect(buildSeenMarker("env:thread")?.lastSeenMessageId).toBe(assistantId);
     tracker.dispose();
+  });
+});
+
+describe("catch-up offer", () => {
+  it("offers a marker only when a finished assistant message is still unseen", () => {
+    expect(
+      catchUpOffer({
+        messages,
+        lastSeenMessageId: assistantId,
+        seenAt,
+      }),
+    ).toEqual({ lastSeenMessageId: assistantId, seenAt });
+    expect(
+      catchUpOffer({
+        messages,
+        lastSeenMessageId: laterId,
+        seenAt,
+      }),
+    ).toBeNull();
+    expect(
+      catchUpOffer({
+        messages: [
+          ...messages,
+          { id: MessageId.make("streaming"), role: "assistant", streaming: true },
+        ],
+        lastSeenMessageId: laterId,
+        seenAt,
+      }),
+    ).toBeNull();
+    expect(catchUpOffer({ messages, lastSeenMessageId: null, seenAt })).toBeNull();
+    expect(catchUpOffer({ messages, lastSeenMessageId: assistantId, seenAt: null })).toBeNull();
+    expect(
+      catchUpOffer({
+        messages,
+        lastSeenMessageId: MessageId.make("missing"),
+        seenAt,
+      }),
+    ).toEqual({ lastSeenMessageId: MessageId.make("missing"), seenAt });
+  });
+});
+
+describe("per founder", () => {
+  it("keeps a separate place for each founder of one thread", () => {
+    const clock = manualTimers();
+    const jeff = createSeenMarkerSession({
+      threadKey: "env:thread",
+      founder: "jeff",
+      getMessages: () => messages,
+      seenAt: () => seenAt,
+      timers: clock.timers,
+    });
+    jeff.update({ active: true, visibleIds: [assistantId] });
+    clock.fireNext();
+    expect(buildSeenMarker("env:thread", "jeff")?.lastSeenMessageId).toBe(assistantId);
+    expect(buildSeenMarker("env:thread", "kameron")).toBeUndefined();
+    expect(buildSeenMarker("env:thread")).toBeUndefined();
+
+    const kameron = createSeenMarkerSession({
+      threadKey: "env:thread",
+      founder: "kameron",
+      getMessages: () => messages,
+      seenAt: () => seenAt,
+      timers: clock.timers,
+    });
+    kameron.update({ active: true, visibleIds: [userId] });
+    clock.fireNext();
+    expect(buildSeenMarker("env:thread", "kameron")?.lastSeenMessageId).toBe(userId);
+    expect(buildSeenMarker("env:thread", "jeff")?.lastSeenMessageId).toBe(assistantId);
+    jeff.dispose();
+    kameron.dispose();
   });
 });

@@ -6,7 +6,14 @@ import type {
   OrchestrationV2ThreadHistoryPage,
   ProjectId,
 } from "@t3tools/contracts";
-import { makeThreadInbox, routeThreadInbox, type ThreadInbox } from "@t3tools/contracts";
+import {
+  makeThreadInbox,
+  nextFounderSeenMessage,
+  nextFounderVisits,
+  rewindFounderVisit,
+  routeThreadInbox,
+  type ThreadInbox,
+} from "@t3tools/contracts";
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import {
   latestExecutedRun,
@@ -3937,6 +3944,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const movesForward =
       thread.lastVisitedAt === null ||
       DateTime.toEpochMillis(visitedAt.value) > DateTime.toEpochMillis(thread.lastVisitedAt);
+    // A named founder on a shared thread moves only their unread cursor. The shared watermark
+    // stays, so the other founder's unread mark does not clear. The message they were shown is
+    // stored for any named founder and still starts no turn.
+    const namedFounder = command.founder;
+    const sharedFounder =
+      namedFounder !== undefined && thread.inbox?.audience === "shared" ? namedFounder : null;
+    const nextVisits =
+      sharedFounder === null
+        ? undefined
+        : nextFounderVisits(thread, sharedFounder, visitedAt.value);
+    const founderMoved = nextVisits !== undefined && nextVisits !== thread.visitsByFounder;
+    const nextSeen =
+      namedFounder === undefined || command.lastSeenMessageId === undefined
+        ? undefined
+        : nextFounderSeenMessage(thread, namedFounder, command.lastSeenMessageId);
+    const seenMoved = nextSeen !== undefined && nextSeen !== thread.seenMessageByFounder;
+    const globalMoves = sharedFounder === null && movesForward;
     const occurredAt = yield* DateTime.now;
     // Opens are timed by the server clock so devices with skewed clocks agree.
     const opens = command.opened
@@ -3946,7 +3970,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.searchQuery,
         )
       : null;
-    if (!movesForward && opens === null) return;
+    if (!globalMoves && !founderMoved && !seenMoved && opens === null) return;
     // Viewing a thread changes read state only. Loading its transcript, bumping
     // updatedAt, or copying the thread into the event makes a read receipt scale with it.
     yield* emit(
@@ -3958,8 +3982,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: thread.providerInstanceId,
       occurredAt,
       payload: {
-        lastVisitedAt: movesForward ? visitedAt.value : thread.lastVisitedAt,
+        lastVisitedAt: globalMoves ? visitedAt.value : thread.lastVisitedAt,
         ...(opens ? { opens } : {}),
+        ...(founderMoved && nextVisits !== undefined ? { visitsByFounder: nextVisits } : {}),
+        ...(seenMoved && nextSeen !== undefined ? { seenMessageByFounder: nextSeen } : {}),
       },
     });
   });
@@ -4884,12 +4910,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const snoozeExpired =
             thread.snoozedUntil != null &&
             DateTime.toEpochMillis(thread.snoozedUntil) <= DateTime.toEpochMillis(now);
+          const snoozeClear = snoozeExpired
+            ? { snoozedUntil: null, snoozedAt: null, lastSnoozeWakeAt: thread.snoozedUntil }
+            : {};
+          // A named founder marking a shared thread unread rewinds only their cursor.
+          if (
+            command.founder !== undefined &&
+            thread.inbox?.audience === "shared" &&
+            markUnreadVisitedAt !== null
+          ) {
+            return {
+              ...thread,
+              visitsByFounder: rewindFounderVisit(thread, command.founder, markUnreadVisitedAt),
+              ...snoozeClear,
+            };
+          }
           return {
             ...thread,
             lastVisitedAt: markUnreadVisitedAt,
-            ...(snoozeExpired
-              ? { snoozedUntil: null, snoozedAt: null, lastSnoozeWakeAt: thread.snoozedUntil }
-              : {}),
+            ...snoozeClear,
           };
         }
         case "thread.metadata.update": {

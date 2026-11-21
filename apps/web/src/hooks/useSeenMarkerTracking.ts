@@ -1,4 +1,4 @@
-import type { MessageId } from "@t3tools/contracts";
+import type { Founder, MessageId } from "@t3tools/contracts";
 import {
   createSeenMarkerSession,
   type SeenMessage,
@@ -44,16 +44,20 @@ export function visibleMessageIds(node: SeenScrollNode): MessageId[] {
 export function startSeenMarkerSampling(input: {
   host: SeenSamplingHost;
   threadKey: string;
+  founder?: Founder | null;
   getScrollNode: () => SeenScrollNode | null | undefined;
   getMessages: () => ReadonlyArray<SeenMessage>;
   now?: () => Date;
   timers?: SeenTimers;
+  onRecorded?: (messageId: MessageId, seenAt: string) => void;
 }) {
   const { window: win, document: doc } = input.host;
   const session = createSeenMarkerSession({
     threadKey: input.threadKey,
+    founder: input.founder,
     getMessages: input.getMessages,
     seenAt: () => (input.now ?? (() => new Date()))().toISOString(),
+    ...(input.onRecorded === undefined ? {} : { onRecorded: input.onRecorded }),
     timers: input.timers ?? {
       set: (callback, ms) => setTimeout(callback, ms),
       clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -104,12 +108,17 @@ export function startSeenMarkerSampling(input: {
 
 export function useSeenMarkerTracking(input: {
   threadKey: string | null;
+  founder?: Founder | null;
   getScrollNode: () => SeenScrollNode | null | undefined;
   messages: ReadonlyArray<SeenMessage>;
+  /** Persist the place that was shown. Must not start a model turn. */
+  onRecorded?: (messageId: MessageId, seenAt: string) => void;
 }) {
-  const { threadKey, messages } = input;
+  const { threadKey, founder = null, messages, onRecorded } = input;
   const getScrollNode = useEffectEvent(() => input.getScrollNode());
   const getMessages = useEffectEvent(() => messages);
+  const onRecordedRef = useRef(onRecorded);
+  onRecordedRef.current = onRecorded;
   const samplingRef = useRef<ReturnType<typeof startSeenMarkerSampling> | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window focus, visibility and scroll listeners plus the dwell timer for this thread
@@ -118,15 +127,17 @@ export function useSeenMarkerTracking(input: {
     const sampling = startSeenMarkerSampling({
       host: { window, document },
       threadKey,
+      founder,
       getScrollNode,
       getMessages,
+      onRecorded: (messageId, seenAt) => onRecordedRef.current?.(messageId, seenAt),
     });
     samplingRef.current = sampling;
     return () => {
       sampling.dispose();
       samplingRef.current = null;
     };
-  }, [threadKey]);
+  }, [threadKey, founder]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- resamples the visible DOM rows when the thread's messages change
   useEffect(() => {

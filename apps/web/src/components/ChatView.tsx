@@ -47,6 +47,7 @@ import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useSeenMarkerTracking } from "../hooks/useSeenMarkerTracking";
+import { useClientSettings } from "../hooks/useSettings";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
 import { RightPanelSurfaceContent } from "./chat/RightPanelSurfaceContent";
 import { usePendingThreadRequests } from "./chat/usePendingThreadRequests";
@@ -78,6 +79,7 @@ import {
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
+  type ThreadSeenMarker,
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
@@ -120,7 +122,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { type SeenMessage } from "@t3tools/client-runtime/seen-marker";
+import { CATCH_ME_UP_TEXT, type SeenMessage } from "@t3tools/client-runtime/seen-marker";
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
 import { projectScriptCwd, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -287,6 +289,7 @@ import {
   useThreadCheckpointSummaries,
 } from "../state/entities";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
+import { CatchMeUpControl } from "./chat/CatchMeUpControl";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
@@ -405,9 +408,7 @@ import {
   makeThreadErrorSetter,
 } from "./ChatView.logic";
 
-const activityCollapsedThreadsSchema = Schema.NullOr(
-  Schema.Record(Schema.String, Schema.Boolean),
-);
+const activityCollapsedThreadsSchema = Schema.NullOr(Schema.Record(Schema.String, Schema.Boolean));
 
 const EMPTY_SEEN_MESSAGES: ReadonlyArray<SeenMessage> = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -503,6 +504,9 @@ export default function ChatView(props: ChatViewProps) {
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
+  const visitThread = useOrchestrationCommand(threadEnvironment.visit, {
+    reportFailure: false,
+  });
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
@@ -537,16 +541,23 @@ export default function ChatView(props: ChatViewProps) {
   const serverThreadProjection = useQuietThreadProjection(routeThreadDetailRef);
   const serverProjection = serverThreadProjection?.projection ?? null;
   // Only the shell-less fallback needs these; with a shell, the shell carries them.
+  const viewerFounder = useClientSettings((settings) => settings.founderInboxOwner ?? null);
   const fallbackDetailRef = serverThreadShell === null ? routeThreadDetailRef : null;
   const fallbackUpdatedAt = useThreadUpdatedAt(fallbackDetailRef);
   const fallbackLastVisitedAt = useThreadLastVisitedAt(fallbackDetailRef);
   const serverThread =
     serverThreadShell !== null || serverProjection === null || fallbackUpdatedAt === null
       ? serverThreadShell
-      : presentThreadShellFromProjection(environmentId, threadId, serverProjection, {
-          updatedAt: fallbackUpdatedAt,
-          lastVisitedAt: fallbackLastVisitedAt,
-        });
+      : presentThreadShellFromProjection(
+          environmentId,
+          threadId,
+          serverProjection,
+          {
+            updatedAt: fallbackUpdatedAt,
+            lastVisitedAt: fallbackLastVisitedAt,
+          },
+          viewerFounder,
+        );
   const promptRef = useRef("");
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
@@ -1628,10 +1639,24 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timelineEmpty = timelineEntries.length === 0 && !hasStreamedTimelineRows;
   const displayedTimelineKey = activeThreadKey ?? routeThreadKey;
+  const recordSeenPlace = useStableCallback((messageId: MessageId, seenAt: string) => {
+    if (!isServerThread || activeThreadId === null || viewerFounder == null) return;
+    void visitThread({
+      environmentId,
+      input: {
+        threadId: activeThreadId,
+        visitedAt: seenAt,
+        founder: viewerFounder,
+        lastSeenMessageId: messageId,
+      },
+    });
+  });
   useSeenMarkerTracking({
     threadKey: isServerThread ? activeThreadKey : null,
+    founder: viewerFounder,
     getScrollNode: () => legendListRef.current?.getScrollableNode() ?? null,
     messages: serverProjection?.messages ?? EMPTY_SEEN_MESSAGES,
+    onRecorded: recordSeenPlace,
   });
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const {
@@ -2001,6 +2026,26 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
+  const onCatchUp = useStableCallback(async (marker: ThreadSeenMarker) => {
+    if (!isServerThread || activeThreadId === null) return false;
+    const result = await startThreadTurn({
+      environmentId,
+      input: {
+        threadId: activeThreadId,
+        message: {
+          messageId: newMessageId(),
+          role: "user",
+          text: CATCH_ME_UP_TEXT,
+          attachments: [],
+        },
+        runtimeMode,
+        interactionMode: DEFAULT_INTERACTION_MODE,
+        seenMarker: marker,
+        dispatchMode: "queue",
+      },
+    });
+    return result._tag !== "Failure";
+  });
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
   const {
@@ -3533,6 +3578,7 @@ export default function ChatView(props: ChatViewProps) {
                   draftEntries={isServerThread ? null : draftTimelineEntries}
                   activeThreadKey={activeThreadKey}
                   collapseActivity={isStandingBot && activityCollapsed}
+                  sharedThread={activeThreadShell?.source.inbox?.audience === "shared"}
                   syncing={threadSyncPhase !== null}
                   detailLoading={threadDetailLoading}
                   citationRequest={citationRequest}
@@ -3714,6 +3760,24 @@ export default function ChatView(props: ChatViewProps) {
                                     />
                                   ) : null
                                 }
+                              />
+                            ) : null}
+                            {isServerThread ? (
+                              <CatchMeUpControl
+                                threadKey={activeThreadKey}
+                                viewer={viewerFounder}
+                                shellReady={activeThreadShell != null}
+                                lastSeenMessageId={
+                                  viewerFounder == null
+                                    ? null
+                                    : (activeThreadShell?.source.seenMessageByFounder?.[
+                                        viewerFounder
+                                      ] ?? null)
+                                }
+                                seenAt={activeThreadShell?.lastVisitedAt ?? null}
+                                messages={serverProjection?.messages ?? EMPTY_SEEN_MESSAGES}
+                                canSend={canOperateThread}
+                                onCatchUp={onCatchUp}
                               />
                             ) : null}
                             {!composerMounted ? null : (

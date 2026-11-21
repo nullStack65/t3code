@@ -31,6 +31,7 @@ import { environmentServerConfigsAtom } from "../state/server";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { orchestrationEnvironment } from "../state/orchestration";
 import { projectEnvironment } from "../state/projects";
+import { getClientSettings } from "./useSettings";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
@@ -225,7 +226,12 @@ function useMarkThreadUnread() {
     if (readEnvironmentServerConfigLoaded(target.environmentId)) {
       void markThreadUnreadMutation({
         environmentId: target.environmentId,
-        input: { threadId: target.threadId },
+        input: {
+          threadId: target.threadId,
+          ...(getClientSettings().founderInboxOwner === undefined
+            ? {}
+            : { founder: getClientSettings().founderInboxOwner }),
+        },
       });
       return;
     }
@@ -241,7 +247,13 @@ export function useAcknowledgeThreadWoke() {
     if (readEnvironmentServerConfigLoaded(target.environmentId)) {
       void visitThreadMutation({
         environmentId: target.environmentId,
-        input: { threadId: target.threadId, visitedAt: wokeAt },
+        input: {
+          threadId: target.threadId,
+          visitedAt: wokeAt,
+          ...(getClientSettings().founderInboxOwner === undefined
+            ? {}
+            : { founder: getClientSettings().founderInboxOwner }),
+        },
       });
       return;
     }
