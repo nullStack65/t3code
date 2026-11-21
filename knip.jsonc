@@ -39,6 +39,9 @@
         "setup-worktree.ts",
         "sign-macos.ts",
         "prepare-server-compile-cache.cjs",
+        // The daily upstream sync runs these by path.
+        "fork-drift-receipt.mjs",
+        "fork-sync-plan.mjs",
         "smoke-desktop-app.ts",
         "verify-windows-desktop-artifact.ts",
       ],
