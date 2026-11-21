@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
+import * as NodeAsyncHooks from "node:async_hooks";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createMemoryStorage } from "../../lib/storage";
 
@@ -46,7 +47,19 @@ const modelSelection = {
   model: "claude-sonnet-4-6",
 };
 
-async function openTab() {
+// A timed-out test is not cancelled: its import can finish after the next test has
+// stubbed storage. The epoch is the test that owns the globals; a continuation
+// whose epoch lost that race stops instead of resetting the next test's modules.
+const storageRuns = new NodeAsyncHooks.AsyncLocalStorage<number>();
+let storageEpoch = 0;
+
+class SupersededStorageRun extends Error {}
+
+function assertStorageOwner() {
+  if (storageRuns.getStore() !== storageEpoch) throw new SupersededStorageRun();
+}
+
+async function loadTab() {
   return {
     store: await import("../../composerDraftStore"),
     send: await import("./chatViewSend"),
@@ -54,6 +67,13 @@ async function openTab() {
     view: await import("../ChatView.logic"),
     uploads: await import("../../lib/attachmentUploadQueue"),
   };
+}
+
+async function openTab() {
+  const epoch = storageRuns.getStore();
+  const tab = await loadTab();
+  if (epoch !== storageEpoch) throw new SupersededStorageRun();
+  return tab;
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
@@ -85,28 +105,48 @@ function faultyStorage() {
 }
 
 async function withReloadableStorage(run: () => Promise<void>) {
-  vi.stubGlobal("localStorage", faultyStorage());
-  vi.stubGlobal("window", new EventTarget());
-  vi.stubGlobal("FileReader", BlobFileReader);
-  vi.useFakeTimers();
-  vi.resetModules();
-  try {
-    await run();
-  } finally {
-    gate = null;
-    resetStorageFaults();
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
+  const epoch = ++storageEpoch;
+  return storageRuns.run(epoch, async () => {
+    vi.stubGlobal("localStorage", faultyStorage());
+    vi.stubGlobal("window", new EventTarget());
+    vi.stubGlobal("FileReader", BlobFileReader);
+    vi.useFakeTimers();
     vi.resetModules();
-  }
+    try {
+      await run();
+    } catch (error) {
+      if (error instanceof SupersededStorageRun) return;
+      throw error;
+    } finally {
+      if (storageRuns.getStore() === storageEpoch) {
+        gate = null;
+        resetStorageFaults();
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        vi.resetModules();
+      }
+    }
+  });
 }
 
 /** The renderer dies: the next tab reads only what storage holds. */
 async function reload() {
+  assertStorageOwner();
   vi.clearAllTimers();
   vi.resetModules();
   return openTab();
 }
+
+// Evaluating ChatView and the draft store the first time exceeds the 15s unit
+// timeout on a loaded CI worker, and that abandoned test then races the next one.
+// Pay for the graph while this file loads. Each test still resets and re-imports
+// after it stubs storage; a repeat evaluation stays inside the timeout.
+vi.stubGlobal("localStorage", createMemoryStorage());
+vi.stubGlobal("window", new EventTarget());
+vi.stubGlobal("FileReader", BlobFileReader);
+await loadTab();
+vi.resetModules();
+vi.unstubAllGlobals();
 
 const launchRequest = (tab: Tab, branch: string | null = null) =>
   tab.logic.draftLaunchRequest({
@@ -261,6 +301,7 @@ async function sendDraft(
     gate = null;
   }
   const composer = await sentComposer;
+  assertStorageOwner();
   if (options.bindFault) storageFaults[options.bindFault] = true;
   const bound = tab.store.markPromotedDraftThreadByRef(sentRef, { ...operation, composer });
   resetStorageFaults();
@@ -287,6 +328,7 @@ async function sendDraft(
   if (!bound) return { bound, committed: false, cleared: false, failed: cleanUp(false), before };
   if (options.stopAfterBind) return null;
   const attachments = await prepared;
+  assertStorageOwner();
   options.editBeforeCommit?.();
   const turn = {
     environmentId,
@@ -688,6 +730,34 @@ describe("a draft launch whose file's first upload failed", () => {
       expectEdited(tab);
       await vi.advanceTimersByTimeAsync(300);
       expectEdited(await reload());
+    });
+  });
+});
+
+describe("a storage run that the timeout did not cancel", () => {
+  it("leaves the run that replaced it still owning storage and timers", async () => {
+    let release!: () => void;
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const older = withReloadableStorage(async () => {
+      await openTab();
+      reached();
+      await held;
+      await reload();
+    });
+    await ready;
+    await withReloadableStorage(async () => {
+      await openTab();
+      release();
+      await older;
+      expect(vi.isFakeTimers()).toBe(true);
+      expect(typeof localStorage.getItem).toBe("function");
+      expect(localStorage.getItem("t3code:composer-drafts:v1")).toBeNull();
     });
   });
 });
