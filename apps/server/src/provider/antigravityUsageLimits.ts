@@ -9,6 +9,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   makeUnavailableUsageLimits,
@@ -124,6 +125,121 @@ function summaryResetTime(
   return untouched ? undefined : bucket.resetTime;
 }
 
+const CLI_ACCESS_CACHE_MS = 5 * 60 * 1000;
+const KEYRING_SERVICE = "gemini";
+const KEYRING_ACCOUNT = "antigravity";
+
+export interface AntigravityCliAccess {
+  readonly accessToken: string;
+  readonly identity: string;
+  readonly expiresAtMs?: number;
+}
+
+/** Google writes nanoseconds. `Date.parse` only has to accept milliseconds. */
+function trimAntigravityTimestamp(value: string) {
+  const normalized = value.endsWith("Z") ? `${value.slice(0, -1)}+00:00` : value;
+  const dot = normalized.indexOf(".");
+  if (dot < 0) return normalized;
+  let index = dot + 1;
+  let digits = "";
+  while (
+    index < normalized.length &&
+    normalized.charCodeAt(index) >= 48 &&
+    normalized.charCodeAt(index) <= 57
+  ) {
+    if (digits.length < 3) digits += normalized[index];
+    index += 1;
+  }
+  return `${normalized.slice(0, dot)}${digits ? `.${digits}` : ""}${normalized.slice(index)}`;
+}
+
+function timestampMillis(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 10_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const parsed = Date.parse(trimAntigravityTimestamp(value));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * `agy` 1.5 stores this JSON in the Secret Service (service `gemini`, account
+ * `antigravity`) and does not write `acp_token.json`. There is no client secret,
+ * so the access token is used as-is.
+ */
+export function parseAntigravityCliCredential(
+  raw: string,
+  nowMs: number,
+): AntigravityCliAccess | "expired" | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const record = parsed as Record<string, unknown>;
+  const token =
+    record.token && typeof record.token === "object"
+      ? (record.token as Record<string, unknown>)
+      : record;
+  const accessToken = typeof token.access_token === "string" ? token.access_token : "";
+  if (!accessToken) return undefined;
+  const refreshToken = typeof token.refresh_token === "string" ? token.refresh_token : "";
+  const expiresAtMs = timestampMillis(token.expiry ?? record.expiry);
+  if (expiresAtMs !== undefined && expiresAtMs <= nowMs) return "expired";
+  return {
+    accessToken,
+    identity: refreshToken || accessToken,
+    ...(expiresAtMs === undefined ? {} : { expiresAtMs }),
+  };
+}
+
+// The stored value is the OAuth token. Keep it out of span attributes.
+const readDefaultStoredSecret = Effect.fnUntraced(function* (
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+) {
+  const fromModule = yield* Effect.tryPromise({
+    try: async () => {
+      const keyring = (await import("@napi-rs/keyring")) as {
+        readonly AsyncEntry?: new (
+          service: string,
+          account: string,
+        ) => { getPassword(): Promise<string | null> };
+        readonly Entry?: new (
+          service: string,
+          account: string,
+        ) => { getPassword(): Promise<string | null> | string | null };
+      };
+      const Entry = keyring.AsyncEntry ?? keyring.Entry;
+      if (!Entry) return null;
+      const secret = await new Entry(KEYRING_SERVICE, KEYRING_ACCOUNT).getPassword();
+      return typeof secret === "string" && secret.length > 0 ? secret : null;
+    },
+    catch: () => null,
+  }).pipe(Effect.orElseSucceed(() => null));
+  if (fromModule) return fromModule;
+  const platform = yield* HostProcess.Platform;
+  const command =
+    platform === "linux"
+      ? {
+          command: "secret-tool",
+          args: ["lookup", "service", KEYRING_SERVICE, "username", KEYRING_ACCOUNT],
+        }
+      : platform === "darwin"
+        ? {
+            command: "security",
+            args: ["find-generic-password", "-s", KEYRING_SERVICE, "-a", KEYRING_ACCOUNT, "-w"],
+          }
+        : undefined;
+  if (!command) return null;
+  const output = yield* spawner
+    .string(ChildProcess.make(command.command, command.args, { stderr: "ignore" }))
+    .pipe(Effect.orElseSucceed(() => ""));
+  const secret = output.trim();
+  return secret.length > 0 ? secret : null;
+});
+
 const sha256 = Effect.fnUntraced(function* (text: string) {
   const digest = yield* (yield* Digest.Digest).digest(
     Digest.sha256,
@@ -207,9 +323,52 @@ function modelWindows(models: typeof Models.Type) {
   return [...windows.values()];
 }
 
+const discoverAntigravityCliAccess = Effect.fn("AntigravityUsageProbe.discoverCliAccess")(
+  function* (input: {
+    readonly fs: FileSystem.FileSystem;
+    readonly path: Path.Path;
+    readonly homeDirectory: string;
+    readonly profileDirectory: string;
+    readonly nowMs: number;
+    readonly readStoredSecret?: Effect.Effect<string | null>;
+    readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  }) {
+    const files = [
+      input.path.join(input.profileDirectory, "antigravity-acp", "antigravity-oauth-token"),
+      input.path.join(input.profileDirectory, "antigravity-oauth-token"),
+      input.path.join(input.homeDirectory, ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+    ];
+    let expired = false;
+    for (const file of files) {
+      if (!(yield* input.fs.exists(file))) continue;
+      const raw = yield* input.fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
+      const parsed = parseAntigravityCliCredential(raw, input.nowMs);
+      if (parsed === "expired") {
+        expired = true;
+        continue;
+      }
+      if (parsed) return parsed;
+    }
+    const secret = yield* input.readStoredSecret ?? readDefaultStoredSecret(input.spawner);
+    if (secret) {
+      const parsed = parseAntigravityCliCredential(secret, input.nowMs);
+      if (parsed === "expired") return "expired" as const;
+      if (parsed) return parsed;
+    }
+    return expired ? ("expired" as const) : null;
+  },
+);
+
 export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
   readonly profileDirectory: string;
   readonly authMethod: AntigravitySettings["authMethod"];
+  /**
+   * Present only in tests. `null` is signed out, `"expired"` is a lapsed CLI
+   * token, and an access value is used directly. Omitting it reads the CLI files
+   * and the keyring.
+   */
+  readonly cliAccess?: AntigravityCliAccess | "expired" | null;
+  readonly readStoredSecret?: Effect.Effect<string | null>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -217,6 +376,8 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
   const crypto = yield* Digest.Digest;
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const tokenPath = path.join(input.profileDirectory, "antigravity-acp", "acp_token.json");
   let cached:
     | { fingerprint: string; account: string; accessToken: string; expiresAt: number }
@@ -241,54 +402,106 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
           "Not applicable: Antigravity API keys and Agent Platform are billed by Google. T3 has no quota window for them.",
       });
     }
-    if (!(yield* fs.exists(tokenPath))) {
-      cached = undefined;
-      return makeUnavailableUsageLimits({
-        checkedAt,
-        reason: "unsupported",
-        message: "Sign in with Google to see limits.",
-      });
-    }
-    const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
-    const fingerprint = yield* sha256(
-      `${token.client_id}\0${token.refresh_token}\0${token.project_id ?? ""}`,
-    );
     const now = yield* Clock.currentTimeMillis;
+    const signedOut = makeUnavailableUsageLimits({
+      checkedAt,
+      reason: "unsupported",
+      message: "Sign in with Google to see limits.",
+    });
+    const lapsed = makeUnavailableUsageLimits({
+      checkedAt,
+      reason: "probeFailed",
+      message:
+        "Antigravity's saved access token has lapsed. A running agy session refreshes it; the Antigravity app does not need to be open.",
+    });
     let accessToken: string;
     let account: string;
-    if (cached?.fingerprint !== fingerprint || cached.expiresAt <= now + 60_000) {
-      cached = undefined;
-      const refreshed = yield* request(
-        HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
-          HttpClientRequest.bodyUrlParams({
-            client_id: token.client_id,
-            client_secret: token.client_secret,
-            refresh_token: token.refresh_token,
-            grant_type: "refresh_token",
-          }),
-        ),
-      ).pipe(Effect.flatMap(decodeTokenResponse));
-      accessToken = refreshed.access_token;
-      // Use Google account IDs to merge accounts across environments; refresh tokens differ per machine.
-      account = yield* request(
-        HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
-          HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
-        ),
-      ).pipe(
-        Effect.flatMap(antigravityAccountFingerprint),
-        Effect.orElseSucceed(() => fingerprint),
+    let projectId: string | undefined;
+    if (yield* fs.exists(tokenPath)) {
+      const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
+      projectId = token.project_id;
+      const fingerprint = yield* sha256(
+        `${token.client_id}\0${token.refresh_token}\0${token.project_id ?? ""}`,
       );
-      if (generation === startedGeneration) {
-        cached = {
-          fingerprint,
-          account,
-          accessToken,
-          expiresAt: now + refreshed.expires_in * 1000,
-        };
+      if (cached?.fingerprint !== fingerprint || cached.expiresAt <= now + 60_000) {
+        cached = undefined;
+        const refreshed = yield* request(
+          HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
+            HttpClientRequest.bodyUrlParams({
+              client_id: token.client_id,
+              client_secret: token.client_secret,
+              refresh_token: token.refresh_token,
+              grant_type: "refresh_token",
+            }),
+          ),
+        ).pipe(Effect.flatMap(decodeTokenResponse));
+        accessToken = refreshed.access_token;
+        // Use Google account IDs to merge accounts across environments; refresh tokens differ per machine.
+        account = yield* request(
+          HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
+            HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
+          ),
+        ).pipe(
+          Effect.flatMap(antigravityAccountFingerprint),
+          Effect.orElseSucceed(() => fingerprint),
+        );
+        if (generation === startedGeneration) {
+          cached = {
+            fingerprint,
+            account,
+            accessToken,
+            expiresAt: now + refreshed.expires_in * 1000,
+          };
+        }
+      } else {
+        accessToken = cached.accessToken;
+        account = cached.account;
       }
     } else {
-      accessToken = cached.accessToken;
-      account = cached.account;
+      const cli =
+        "cliAccess" in input
+          ? (input.cliAccess ?? null)
+          : yield* discoverAntigravityCliAccess({
+              fs,
+              path,
+              homeDirectory,
+              profileDirectory: input.profileDirectory,
+              nowMs: now,
+              spawner,
+              ...(input.readStoredSecret ? { readStoredSecret: input.readStoredSecret } : {}),
+            });
+      if (cli === null) {
+        cached = undefined;
+        return signedOut;
+      }
+      if (cli === "expired") {
+        cached = undefined;
+        return lapsed;
+      }
+      const fingerprint = yield* sha256(`cli-access\0${cli.identity}`);
+      if (cached?.fingerprint !== fingerprint || cached.expiresAt <= now) {
+        cached = undefined;
+        accessToken = cli.accessToken;
+        account = yield* request(
+          HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
+            HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
+          ),
+        ).pipe(
+          Effect.flatMap(antigravityAccountFingerprint),
+          Effect.orElseSucceed(() => fingerprint),
+        );
+        if (generation === startedGeneration) {
+          cached = {
+            fingerprint,
+            account,
+            accessToken,
+            expiresAt: cli.expiresAtMs ?? now + CLI_ACCESS_CACHE_MS,
+          };
+        }
+      } else {
+        accessToken = cached.accessToken;
+        account = cached.account;
+      }
     }
     const endpoints = ENDPOINTS[input.authMethod];
     // Merge endpoints because quota groups differ; the metered host's reading of a bucket wins.
@@ -311,9 +524,7 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
                   Authorization: `Bearer ${accessToken}`,
                   "User-Agent": antigravityUserAgent(platform, architecture),
                 }),
-                HttpClientRequest.bodyJsonUnsafe(
-                  token.project_id ? { project: token.project_id } : {},
-                ),
+                HttpClientRequest.bodyJsonUnsafe(projectId ? { project: projectId } : {}),
               ),
             ).pipe(
               Effect.flatMap((response) => parse(response, requestedAt)),
@@ -329,11 +540,16 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       return [...windows.values()];
     });
     const summary = yield* fetchWindows("retrieveUserQuotaSummary", antigravitySummaryWindows);
-    const windows = summary.length
-      ? summary
+    // A summary of only untouched buckets is not a Gemini reading.
+    const metered = summary.some(
+      (window) => window.usedPercent > 0 || window.resetsAt !== undefined,
+    );
+    const models = metered
+      ? []
       : yield* fetchWindows("fetchAvailableModels", (response) =>
           decodeModels(response).pipe(Effect.map(modelWindows)),
         );
+    const windows = models.length > 0 ? models : summary;
     if (windows.length === 0) {
       return makeUnavailableUsageLimits({
         checkedAt,
