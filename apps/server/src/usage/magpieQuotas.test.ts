@@ -137,6 +137,8 @@ describe("magpieQuotasToAccounts", () => {
       "magpie-go:oc-billed",
       "magpie-go:oc-other",
       "claude:second@example.com",
+      "grok:jeffrey.smith@closura.ai",
+      "grok:kameron.smith@closura.ai",
     ]);
     const team = accounts[2]!;
     const billed = accounts[3]!;
@@ -173,6 +175,129 @@ describe("magpieQuotasToAccounts", () => {
       "weekly",
       "monthly",
     ]);
+    // Both seats share the product name "Grok" and neither has an alias.
+    expect(grok.map((account) => account.displayName)).toEqual(["Jeffrey Smith", "Kameron Smith"]);
+  });
+
+  it("prefers an alias, splits a shared product name, and keeps held and lapsed seats", () => {
+    const labeled = magpieQuotasToAccounts(
+      [
+        {
+          provider: "claude",
+          name: "Claude Code",
+          plan: "max",
+          user: "a@example.com",
+          alias: "Kameron · Claude work",
+          windows: [{ name: "5 hours", used: 0 }],
+        },
+        {
+          provider: "claude",
+          name: "Claude Code",
+          plan: "max",
+          user: "bee.person@example.com",
+          alias: null,
+          windows: [{ name: "5 hours", used: 10 }],
+        },
+        {
+          provider: "grok",
+          name: "Grok (SuperGrok)",
+          user: "jeffrey.smith@example.com",
+          alias: null,
+          windows: [{ name: "7 days", used: 65 }],
+        },
+        {
+          provider: "grok",
+          name: "Grok (SuperGrok)",
+          user: "kameron.smith@example.com",
+          windows: [{ name: "7 days", used: 7 }],
+        },
+        {
+          provider: "codex",
+          name: "Codex",
+          plan: "pro",
+          user: "a@example.com",
+          held: true,
+          until: "2026-12-02T00:00:00Z",
+          windows: [{ name: "7 days", used: 100 }],
+        },
+        {
+          provider: "claude",
+          user: "old@example.com",
+          lapsed: "Claude Code is no longer signed in",
+          windows: [{ name: "7 days", used: 100 }],
+        },
+      ],
+      checkedAt,
+    );
+    expect(labeled.find((account) => account.email === "a@example.com")?.displayName).toBe(
+      "Kameron · Claude work",
+    );
+    // The second Claude seat shares the product name and has no alias.
+    expect(labeled.find((account) => account.email === "bee.person@example.com")?.displayName).toBe(
+      "Bee Person",
+    );
+    expect(
+      labeled.filter((account) => account.driver === "grok").map((account) => account.displayName),
+    ).toEqual(["Jeffrey Smith · SuperGrok", "Kameron Smith · SuperGrok"]);
+    const held = labeled.find((account) => account.driver === "codex");
+    expect(held?.status).toBe("held");
+    expect(held?.statusDetail).toBe("Held until 2026-12-02.");
+    const lapsed = labeled.find((account) => account.email === "old@example.com");
+    expect(lapsed?.status).toBe("signed-out");
+    expect(lapsed?.statusDetail).toBe("Claude Code is no longer signed in.");
+    expect(lapsed?.usageLimits.windows).toHaveLength(1);
+  });
+
+  it("leaves one emailed seat unnamed, including a duplicate row, and keeps a colliding alias", () => {
+    const lone = magpieQuotasToAccounts(
+      [
+        {
+          provider: "grok",
+          name: "Grok (SuperGrok)",
+          user: "only@example.com",
+          alias: null,
+          held: null,
+          lapsed: null,
+          windows: [{ name: "7 days", used: 10 }],
+        },
+        {
+          provider: "grok",
+          name: "Grok (SuperGrok)",
+          user: "only@example.com",
+          windows: [{ name: "7 days", used: 12 }],
+        },
+        {
+          provider: "claude",
+          name: "Claude Code",
+          user: "a@example.com",
+          alias: "Bee Person",
+          windows: [{ name: "5 hours", used: 1 }],
+        },
+        {
+          provider: "claude",
+          name: "Claude Code",
+          user: "bee.person@example.com",
+          alias: null,
+          windows: [{ name: "5 hours", used: 2 }],
+        },
+        {
+          provider: "claude",
+          name: "Claude Code",
+          user: "c@example.com",
+          windows: [{ name: "5 hours", used: 3 }],
+        },
+      ],
+      checkedAt,
+    );
+    const grok = lone.filter((account) => account.driver === "grok");
+    expect(grok.map((account) => account.email)).toEqual(["only@example.com"]);
+    expect(grok[0]?.displayName).toBeUndefined();
+    expect(lone.find((account) => account.email === "a@example.com")?.displayName).toBe(
+      "Bee Person",
+    );
+    expect(lone.find((account) => account.email === "bee.person@example.com")?.displayName).toBe(
+      "Bee Person · example",
+    );
   });
 });
 
@@ -324,6 +449,45 @@ describe("makeMagpieApi", () => {
       yield* TestClock.adjust("5 seconds");
       const result = yield* Fiber.join(fiber);
       expect(result._tag === "Failure" && result.failure.detail).toMatch(/did not answer/);
+    }),
+  );
+
+  it.effect("accepts null alias, held, and lapsed on a quota row", () =>
+    Effect.gen(function* () {
+      const http = HttpClient.make((request) =>
+        Effect.sync(() =>
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              object: "list",
+              data: [
+                {
+                  provider: "grok",
+                  name: "Grok (SuperGrok)",
+                  user: "only@example.com",
+                  alias: null,
+                  held: null,
+                  until: null,
+                  lapsed: null,
+                  windows: [{ name: "7 days", used: 4, resetsAt: null }],
+                },
+              ],
+            }),
+          ),
+        ),
+      );
+      const result = yield* makeMagpieApi.pipe(
+        Effect.flatMap((api) =>
+          api.readAccounts({ url: "http://127.0.0.1:3425", managementKey: "" }),
+        ),
+        Effect.result,
+        Effect.provideService(HttpClient.HttpClient, http),
+      );
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(result.success.map((account) => account.id)).toEqual(["grok:only@example.com"]);
+      expect(result.success[0]?.displayName).toBeUndefined();
+      expect(result.success[0]?.status).toBeUndefined();
     }),
   );
 

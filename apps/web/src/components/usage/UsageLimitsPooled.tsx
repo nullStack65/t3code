@@ -110,6 +110,24 @@ function AccountAvatar({
   return account.email ? <AccountChip email={account.email} /> : null;
 }
 
+function accountAccessibleName(account: LimitAccount): string {
+  const name =
+    account.displayName ??
+    (account.email ? accountInitials(account.email) : String(account.driver));
+  if (account.status === "held") return `${name}, held`;
+  if (account.status === "signed-out") return `${name}, sign-in required`;
+  return name;
+}
+
+function AccountStatus({ status }: { readonly status: LimitAccount["status"] }) {
+  if (!status) return null;
+  return (
+    <span className="shrink-0 rounded-sm bg-muted px-1 py-px text-2xs font-medium text-muted-foreground">
+      {status === "held" ? "Held" : "Sign in"}
+    </span>
+  );
+}
+
 function AccountName({
   account,
   className,
@@ -117,17 +135,29 @@ function AccountName({
   readonly account: LimitAccount;
   readonly className?: string;
 }) {
-  if (account.displayName) return <span className={className}>{account.displayName}</span>;
+  const status = <AccountStatus status={account.status} />;
+  if (account.displayName) {
+    return (
+      <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
+        <span className="min-w-0 truncate">{account.displayName}</span>
+        {status}
+      </span>
+    );
+  }
   if (account.email) {
     return (
-      <span className={cn("inline-flex min-w-0 items-center", className)}>
+      <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
         <AccountChip email={account.email} />
+        {status}
       </span>
     );
   }
   return (
-    <span className={className}>
-      {providerClients.get(account.driver)?.label ?? String(account.driver)}
+    <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
+      <span className="min-w-0 truncate">
+        {providerClients.get(account.driver)?.label ?? String(account.driver)}
+      </span>
+      {status}
     </span>
   );
 }
@@ -173,10 +203,16 @@ function SegmentPopover({
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="flex items-center gap-2 text-sm font-medium text-foreground">
           <AccountAvatar account={account} />
-          <span className="truncate">
-            {account.displayName ?? providerClients.get(account.driver)?.label ?? account.driver}
+          <span className="inline-flex min-w-0 items-center gap-1.5 truncate">
+            <span className="truncate">
+              {account.displayName ?? providerClients.get(account.driver)?.label ?? account.driver}
+            </span>
+            <AccountStatus status={account.status} />
           </span>
         </span>
+        {account.statusDetail ? (
+          <span className="text-xs text-muted-foreground">{account.statusDetail}</span>
+        ) : null}
         {account.email ? (
           <RedactedSensitiveText
             value={account.email}
@@ -374,7 +410,7 @@ function SegmentTriggers({
             ref={segmentRef}
             type="button"
             style={{ gridColumn: index, gridRow: 1, ...paceMark?.gappedTrack }}
-            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${resetsIn ? `, ${resetsIn}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
+            aria-label={`${accountAccessibleName(account)}: ${remaining}% left${resetsIn ? `, ${resetsIn}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
             className="relative h-5 min-w-0 cursor-pointer rounded-md bg-muted text-start outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background data-[popup-open]:ring-1 data-[popup-open]:ring-inset data-[popup-open]:ring-border @2xl/pool:h-8"
           />
         }
@@ -413,13 +449,7 @@ function SegmentTriggers({
           {index}
         </span>
         <div className="relative hidden h-full min-w-0 items-center gap-1.5 overflow-hidden rounded-md px-2 text-xs @2xl/pool:flex">
-          {showAccountName ? (
-            <AccountName
-              account={account}
-              className="min-w-0 truncate font-medium text-foreground"
-            />
-          ) : null}
-          {/* A single-account bar repeats the headline percentage. */}
+          {/* Names live in the legend. A half-width segment truncates them into the reset chip. */}
           {showAccountName ? (
             <span className="shrink-0 font-semibold text-foreground tabular-nums">
               {remaining}%
@@ -445,7 +475,13 @@ function SegmentTriggers({
           ) : null}
         </div>
       </PopoverTrigger>
-      <LegendRow payload={payload} color={color} now={now} index={index} />
+      <LegendRow
+        payload={payload}
+        color={color}
+        now={now}
+        index={index}
+        showAccountName={showAccountName}
+      />
     </>
   );
 }
@@ -455,11 +491,13 @@ function LegendRow({
   color,
   now,
   index,
+  showAccountName,
 }: {
   readonly payload: SegmentPayload;
   readonly color: string;
   readonly now: number;
   readonly index: number;
+  readonly showAccountName: boolean;
 }) {
   const popover = use(SegmentPopoverContext) ?? undefined;
   const { account, window } = payload;
@@ -472,7 +510,7 @@ function LegendRow({
       payload={payload}
       style={{ gridColumn: "1 / -1", gridRow: index + 1 }}
       render={<Button variant="ghost" size="compact" />}
-      className="min-w-0 @2xl/pool:hidden"
+      className={cn("min-w-0", showAccountName ? undefined : "@2xl/pool:hidden")}
     >
       <span className="relative inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-3xs leading-none font-semibold text-foreground/80 tabular-nums">
         <span
@@ -517,6 +555,9 @@ function PoolBar({
   readonly now: number;
 }) {
   const restores = new Map(pool.resets.map((reset) => [reset.member.account.key, reset]));
+  const showAccountName =
+    pool.columns.length > 1 ||
+    pool.columns.some((member) => member.account.displayName || member.account.status);
   return (
     <div className="@container/pool min-w-0">
       <div
@@ -534,7 +575,7 @@ function PoolBar({
               color={normalizeProviderAccentColor(member.account.accentColor) ?? color}
               now={now}
               index={position + 1}
-              showAccountName={pool.columns.length > 1}
+              showAccountName={showAccountName}
             />
           ) : pool.kind === "monthly" && member.account.limits.zeroSpendCap ? (
             <div
