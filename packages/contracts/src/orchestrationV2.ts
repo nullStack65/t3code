@@ -835,6 +835,44 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
+/**
+ * How a message reaches a thread. `digest` never starts a turn: it rides along with the next
+ * turn another message starts. `when_idle` starts only after every other queued message.
+ */
+export const OrchestrationV2DeliveryClass = Schema.Literals([
+  "interrupt",
+  "steer_at_tool_boundary",
+  "next_turn",
+  "when_idle",
+  "digest",
+]);
+export type OrchestrationV2DeliveryClass = typeof OrchestrationV2DeliveryClass.Type;
+
+export const OrchestrationV2DigestCategory = Schema.Literals([
+  "alert",
+  "lane_result",
+  "fyi",
+  "decision_needed",
+]);
+export type OrchestrationV2DigestCategory = typeof OrchestrationV2DigestCategory.Type;
+
+export const OrchestrationV2MessageDelivery = Schema.Struct({
+  class: OrchestrationV2DeliveryClass,
+  /** An undelivered message with the same key is replaced by the newer one. */
+  coalesceKey: Schema.optional(TrimmedNonEmptyString),
+  /** Undelivered at this time, the message is dropped. */
+  expiresAt: Schema.optional(Schema.DateTimeUtc),
+  category: Schema.optional(OrchestrationV2DigestCategory),
+});
+export type OrchestrationV2MessageDelivery = typeof OrchestrationV2MessageDelivery.Type;
+
+export const OrchestrationV2DigestEntry = Schema.Struct({
+  messageId: MessageId,
+  category: OrchestrationV2DigestCategory,
+  text: Schema.String,
+});
+export type OrchestrationV2DigestEntry = typeof OrchestrationV2DigestEntry.Type;
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -872,6 +910,9 @@ export const OrchestrationV2Run = Schema.Struct({
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
+  delivery: Schema.optional(OrchestrationV2MessageDelivery),
+  /** Digest messages folded into this run's turn, sent to the provider ahead of its message. */
+  digest: Schema.optional(Schema.Array(OrchestrationV2DigestEntry)),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
@@ -2655,6 +2696,12 @@ export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => (
   startedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   completedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   workStartedAt: Schema.optional(Schema.DateTimeUtcFromString),
+  delivery: Schema.optional(
+    OrchestrationV2MessageDelivery.mapFields((delivery) => ({
+      ...delivery,
+      expiresAt: Schema.optional(Schema.DateTimeUtcFromString),
+    })),
+  ),
 }));
 export type OrchestrationV2RunJson = typeof OrchestrationV2RunJson.Type;
 
@@ -3596,6 +3643,7 @@ export const OrchestrationV2Command = Schema.Union([
     steerFollowUpAfterRunOrdinal: Schema.optional(NonNegativeInt),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
+    delivery: Schema.optional(OrchestrationV2MessageDelivery),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
         parentRunId: RunId,

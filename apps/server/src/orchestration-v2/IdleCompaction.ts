@@ -1,6 +1,7 @@
 import { isListedThreadLineage, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import { COMPACTION_SUGGESTION_MIN_TOKENS } from "@t3tools/shared/claudeCompaction";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { isWaitingDigestRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
 
 // Claude Code's idleCompaction defaults to 200K and won't go below 100K. Below
@@ -53,7 +54,9 @@ export function idleCompactionWindow(
   if (!isListedThreadLineage(thread.lineage)) return null;
   // A removed or steered queued message leaves a cancelled run that never started.
   const latestRun = runs
-    .filter((run) => run.status !== "cancelled" || run.startedAt !== null)
+    .filter(
+      (run) => (run.status !== "cancelled" || run.startedAt !== null) && !isWaitingDigestRun(run),
+    )
     .reduce<(typeof runs)[number] | null>(
       (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
       null,

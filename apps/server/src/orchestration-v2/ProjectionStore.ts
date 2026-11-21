@@ -1974,6 +1974,7 @@ function isSilentRunForShell(
   run: OrchestrationV2ThreadProjection["runs"][number],
   projection: Pick<OrchestrationV2ThreadProjection, "messages" | "turnItems">,
 ): boolean {
+  if (run.delivery?.class === "digest" && run.startedAt == null) return true;
   return (
     run.status !== "failed" &&
     projection.messages.some(
@@ -4955,6 +4956,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE status = 'queued'
                   AND CASE WHEN json_valid(payload_json)
                     THEN json_extract(payload_json, '$.queueHeld') IS NOT 1
+                      AND json_extract(payload_json, '$.delivery.class') IS NOT 'digest'
                     ELSE 1 END
                 UNION
                 SELECT thread_id FROM orchestration_v2_projection_runtime_requests
@@ -6275,7 +6277,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE thread.thread_id = ${threadId} AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
             AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
               WHERE thread_id = ${threadId} AND status = 'queued'
-                AND json_extract(payload_json, '$.queueHeld') IS NOT 1)
+                AND json_extract(payload_json, '$.queueHeld') IS NOT 1
+                AND json_extract(payload_json, '$.delivery.class') IS NOT 'digest')
             AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
               WHERE thread_id = ${threadId}
                 AND status IN ('preparing', 'starting', 'running', 'waiting'))`;
@@ -7932,7 +7935,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     // Mirrors isSilentRunForShell.
     const isSilentShellRun = (alias: string) => {
       const run = sql.literal(alias);
-      return sql`(
+      return sql`((
+        json_extract(${run}.payload_json, '$.delivery.class') IS 'digest'
+        AND json_extract(${run}.payload_json, '$.startedAt') IS NULL
+      ) OR (
         ${run}.status <> 'failed'
         AND EXISTS (
           SELECT 1 FROM orchestration_v2_projection_messages prompt
@@ -7944,7 +7950,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND compaction.type = 'compaction'
             AND compaction.status = 'failed'
         )
-      )`;
+      ))`;
     };
     // The newest run not held or outlived before it started, matching latestUnheldRun.
     const presentedShellRunId = (threadId: Statement.Fragment) => sql`(

@@ -46,14 +46,39 @@ const modelSelection = {
   model: "claude-sonnet-4-6",
 };
 
+// Only one test may own the fake clock. A timed-out test keeps running, and its
+// finally used to uninstall the next test's timers and module graph.
+let timerScope = 0;
+
+function useScopedFakeTimers() {
+  // setImmediate and performance stay real. The loader and fake-timer clock
+  // both yield through them; faking them before import leaves the import pending
+  // until the 15s test timeout.
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
+}
+
+async function importFresh<T>(load: () => Promise<T>): Promise<T> {
+  const scope = timerScope;
+  const restore = vi.isFakeTimers();
+  if (restore) vi.useRealTimers();
+  vi.resetModules();
+  try {
+    return await load();
+  } finally {
+    if (restore && scope === timerScope) useScopedFakeTimers();
+  }
+}
+
 async function openTab() {
-  return {
+  return importFresh(async () => ({
     store: await import("../../composerDraftStore"),
     send: await import("./chatViewSend"),
     logic: await import("./composerSend.logic"),
     view: await import("../ChatView.logic"),
     uploads: await import("../../lib/attachmentUploadQueue"),
-  };
+  }));
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
@@ -85,19 +110,21 @@ function faultyStorage() {
 }
 
 async function withReloadableStorage(run: () => Promise<void>) {
+  const scope = ++timerScope;
   vi.stubGlobal("localStorage", faultyStorage());
   vi.stubGlobal("window", new EventTarget());
   vi.stubGlobal("FileReader", BlobFileReader);
-  vi.useFakeTimers();
-  vi.resetModules();
+  useScopedFakeTimers();
   try {
     await run();
   } finally {
-    gate = null;
-    resetStorageFaults();
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.resetModules();
+    if (scope === timerScope) {
+      gate = null;
+      resetStorageFaults();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   }
 }
 

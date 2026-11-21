@@ -17,12 +17,15 @@ import {
   TurnItemId,
   type ModelSelection,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2MessageDelivery,
 } from "@t3tools/contracts";
+import { formatDigestForProvider } from "@t3tools/shared/messageDigest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -515,6 +518,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
     turn: ProviderAdapter.ProviderAdapterV2SteerInput,
   ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error> = () => Effect.void,
   extraAdapters: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]> = [],
+  steersDuringCompaction = true,
 ) {
   const driver = ProviderDriverKind.make(nativeGoals === undefined ? "codex" : "opencode");
   const cwd = yield* checkpointWorkspace(name);
@@ -530,6 +534,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
       supportsActiveSteering: canSteer,
       supportsSteeringByInterruptRestart: canRestart,
       activeSteeringAcceptsAttachments: steeringAcceptsAttachments,
+      activeSteeringDuringCompaction: steersDuringCompaction,
       ...(nativeGoals === undefined ? {} : { supportsNativeGoals: nativeGoals }),
     },
   };
@@ -1705,6 +1710,324 @@ it.effect("queues a steer until the turn ends when the provider cannot steer it"
       assert.equal(started.length, 2);
       assert.equal(started[1]?.runId, queued?.id);
       assert.equal(started[1]?.message.text, "follow up");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+const deliveryHarness = Effect.fn("deliveryHarness")(function* (
+  name: string,
+  steersDuringCompaction = true,
+) {
+  const steeredOnce = yield* Deferred.make<void>();
+  const harness = yield* nextTurnSelectionHarness(
+    name,
+    false,
+    true,
+    Effect.void,
+    true,
+    undefined,
+    () => Deferred.succeed(steeredOnce, undefined).pipe(Effect.asVoid),
+    [],
+    steersDuringCompaction,
+  );
+  const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      return yield* orchestrator.streamDomainEvents.pipe(
+        Stream.filter(predicate),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+    });
+  const finishTurn = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const now = yield* DateTime.now;
+      // The harness's running update for this turn may still be queued, so rebuild it.
+      const turn = {
+        id: ProviderTurnId.make(`provider-turn:${turnInput.attemptId}`),
+        providerThreadId: turnInput.providerThread.id,
+        nodeId: turnInput.rootNodeId,
+        runAttemptId: turnInput.attemptId,
+        nativeTurnRef: { driver, nativeId: `native:${turnInput.attemptId}`, strength: "strong" },
+        ordinal: turnInput.providerTurnOrdinal,
+        status: "completed",
+        startedAt: now,
+        completedAt: now,
+      } as const;
+      const settled = yield* watch(
+        (event) =>
+          event.type === "run.updated" &&
+          event.payload.id === turnInput.runId &&
+          event.payload.status === "waiting",
+      );
+      yield* Queue.offer(harness.events, { type: "provider_turn.updated", driver, providerTurn: turn });
+      yield* Queue.offer(harness.events, {
+        type: "turn.terminal",
+        driver,
+        providerThreadId: turn.providerThreadId,
+        providerTurnId: turn.id,
+        runOrdinal: turnInput.runOrdinal,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      yield* Fiber.join(settled);
+      yield* worker.drain();
+      yield* orchestrator.resumeQueuedRuns;
+      yield* worker.drain();
+    });
+  const send = (
+    threadId: ThreadId,
+    id: string,
+    delivery?: OrchestrationV2MessageDelivery,
+  ) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`command:${id}`),
+        threadId,
+        messageId: MessageId.make(`message:${id}`),
+        text: id,
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        ...(delivery === undefined
+          ? { createdBy: "user", creationSource: "web" }
+          : { delivery, createdBy: "agent", creationSource: "server" }),
+      });
+      yield* worker.drain();
+      return MessageId.make(`message:${id}`);
+    });
+  return { ...harness, steeredOnce, watch, finishTurn, send };
+});
+
+it.effect("holds a steer sent during compaction until the compaction completes", () =>
+  Effect.gen(function* () {
+    const { events, started, steered, interrupted, layer, startFirstTurn, steeredOnce, watch } =
+      yield* deliveryHarness("compaction-holds-steer", false);
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = yield* startFirstTurn;
+      const first = started[0]!;
+      const turn = (yield* orchestrator.getThreadProjection(threadId)).providerTurns[0]!;
+      const now = yield* DateTime.now;
+      const compaction = (status: "running" | "completed") =>
+        ({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            id: TurnItemId.make("compaction"),
+            threadId,
+            runId: first.runId,
+            nodeId: first.rootNodeId,
+            providerThreadId: turn.providerThreadId,
+            providerTurnId: turn.id,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status,
+            title: null,
+            startedAt: now,
+            completedAt: status === "running" ? null : now,
+            updatedAt: now,
+            type: "compaction",
+            driver,
+          },
+        }) satisfies ProviderAdapter.ProviderAdapterV2Event;
+      const compacting = yield* watch(
+        (event) => event.type === "turn-item.updated" && event.payload.type === "compaction",
+      );
+      yield* Queue.offer(events, compaction("running"));
+      yield* Fiber.join(compacting);
+      const dbg = yield* orchestrator.getThreadProjection(threadId);
+
+      const messageId = MessageId.make("message:steer");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("steer"),
+        threadId,
+        messageId,
+        text: "follow up",
+        attachments: [],
+        dispatchMode: { type: "steer_active", targetRunId: first.runId },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* worker.drain();
+      const held = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(steered, []);
+      assert.deepEqual(interrupted, []);
+      const queued = held.runs.find((run) => run.userMessageId === messageId);
+      assert.equal(queued?.status, "queued");
+      assert.equal(queued?.steerWhenReadyRunId, first.runId);
+
+      const promoted = yield* watch(
+        (event) =>
+          event.type === "run.updated" &&
+          event.payload.id === queued?.id &&
+          event.payload.status !== "queued",
+      );
+      yield* Queue.offer(events, compaction("completed"));
+      yield* Fiber.join(promoted);
+      yield* worker.drain();
+      yield* Deferred.await(steeredOnce);
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(steered, ["follow up"]);
+      assert.deepEqual(interrupted, []);
+      assert.equal(after.turnItems.find((item) => item.type === "compaction")?.status, "completed");
+      assert.equal(after.runs.find((run) => run.id === first.runId)?.status, "running");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("starts a when_idle message only after the active run and the next turn end", () =>
+  Effect.gen(function* () {
+    const { started, layer, startFirstTurn, finishTurn, send } =
+      yield* deliveryHarness("when-idle");
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = yield* startFirstTurn;
+      const idle = yield* send(threadId, "idle", { class: "when_idle" });
+      const next = yield* send(threadId, "next", { class: "next_turn" });
+      const runOf = (messageId: MessageId) =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(Effect.map(({ runs }) => runs.find((run) => run.userMessageId === messageId)));
+      assert.equal(started.length, 1);
+      assert.equal((yield* runOf(idle))?.status, "queued");
+
+      yield* finishTurn(started[0]!);
+      assert.equal(started.length, 2);
+      assert.equal(started[1]?.message.text, "next");
+      assert.equal((yield* runOf(next))?.status, "running");
+      assert.equal((yield* runOf(idle))?.status, "queued");
+
+      yield* finishTurn(started[1]!);
+      assert.equal(started.length, 3);
+      assert.equal(started[2]?.message.text, "idle");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("coalesces alerts into one digest that rides along with the next turn", () =>
+  Effect.gen(function* () {
+    const { started, layer, startFirstTurn, finishTurn, send } =
+      yield* deliveryHarness("coalesced-digest");
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = yield* startFirstTurn;
+      const alert = { class: "digest", coalesceKey: "lane:a", category: "alert" } as const;
+      const older = yield* send(threadId, "lane a stuck", alert);
+      const newer = yield* send(threadId, "lane a stuck again", alert);
+      const fyi = yield* send(threadId, "lane b merged", { class: "digest", category: "fyi" });
+
+      yield* finishTurn(started[0]!);
+      assert.equal(started.length, 1, "a digest never starts a turn");
+      yield* send(threadId, "what now?");
+
+      const { runs } = yield* orchestrator.getThreadProjection(threadId);
+      const statusOf = (messageId: MessageId) =>
+        runs.find((run) => run.userMessageId === messageId)?.status;
+      assert.equal(started.length, 2);
+      assert.deepEqual(
+        started[1]?.message.text,
+        formatDigestForProvider("what now?", [
+          { messageId: newer, category: "alert", text: "lane a stuck again" },
+          { messageId: fyi, category: "fyi", text: "lane b merged" },
+        ]),
+      );
+      assert.deepEqual(
+        [statusOf(older), statusOf(newer), statusOf(fyi)],
+        ["cancelled", "cancelled", "cancelled"],
+      );
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("drops and logs a digest that expires before a turn picks it up", () =>
+  Effect.gen(function* () {
+    const { started, layer, startFirstTurn, finishTurn, send } =
+      yield* deliveryHarness("expired-digest");
+    const logs: Array<unknown> = [];
+    const logger = Logger.make(({ message }) => logs.push(message));
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = yield* startFirstTurn;
+      const expiresAt = DateTime.add(yield* DateTime.now, { minutes: 1 });
+      const expiring = yield* send(threadId, "stale alert", {
+        class: "digest",
+        coalesceKey: "lane:a",
+        expiresAt,
+        category: "alert",
+      });
+      yield* finishTurn(started[0]!);
+      yield* TestClock.adjust("2 minutes");
+      yield* send(threadId, "what now?");
+
+      const { runs } = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(started[1]?.message.text, "what now?");
+      assert.equal(runs.find((run) => run.userMessageId === expiring)?.status, "cancelled");
+      assert.isTrue(
+        logs.some((message) => JSON.stringify(message).includes("Dropped an expired message")),
+      );
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Logger.layer([logger], { mergeWithExisting: true }))),
+    );
+  }),
+);
+
+it.effect("carries a digest along with a slash-prefixed message", () =>
+  Effect.gen(function* () {
+    const { started, layer, startFirstTurn, finishTurn, send } =
+      yield* deliveryHarness("slash-carries-digest");
+    yield* Effect.gen(function* () {
+      const threadId = yield* startFirstTurn;
+      const alert = yield* send(threadId, "lane a stuck", {
+        class: "digest",
+        category: "alert",
+      });
+      yield* finishTurn(started[0]!);
+      yield* send(threadId, "/review the PR");
+      assert.equal(started.length, 2);
+      assert.deepEqual(
+        started[1]?.message.text,
+        formatDigestForProvider("/review the PR", [
+          { messageId: alert, category: "alert", text: "lane a stuck" },
+        ]),
+      );
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("queues a digest on a thread that has never run", () =>
+  Effect.gen(function* () {
+    const { started, layer, send } = yield* deliveryHarness("digest-before-first-run");
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("thread:digest-before-first-run");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:digest-before-first-run"),
+        threadId,
+        projectId: ProjectId.make("project:digest-before-first-run"),
+        title: "delivery",
+        modelSelection: runSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const alert = yield* send(threadId, "lane a stuck", { class: "digest", category: "alert" });
+      assert.deepEqual(started, []);
+      const { runs } = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(runs.find((run) => run.userMessageId === alert)?.status, "queued");
     }).pipe(Effect.provide(layer));
   }),
 );

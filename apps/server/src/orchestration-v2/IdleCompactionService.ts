@@ -7,6 +7,7 @@ import {
   type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
+import { isWaitingDigestRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -89,7 +90,10 @@ export const make = Effect.gen(function* () {
         )
           return;
         const latestRun = records.runs
-          .filter((run) => run.status !== "cancelled" || run.startedAt !== null)
+          .filter(
+            (run) =>
+              (run.status !== "cancelled" || run.startedAt !== null) && !isWaitingDigestRun(run),
+          )
           .reduce<(typeof records.runs)[number] | undefined>(
             (latest, run) => (latest === undefined || run.ordinal > latest.ordinal ? run : latest),
             undefined,
