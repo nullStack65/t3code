@@ -17,6 +17,8 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
 import {
+  scheduledTaskThreadMode,
+  SYS_DAEMON_STANDING_ROLE,
   type ContextMenuItem,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
@@ -1480,4 +1482,73 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+/**
+ * A thread belongs on the System shelf when its standing role is the daemon
+ * marker, or when a fresh-session scheduled task keeps it as its thread.
+ * Continue-mode tasks stay in the conversation they were bound to.
+ */
+export function isSystemScheduledThread(input: {
+  readonly key: string;
+  readonly standingRole: string | null;
+  readonly scheduledThreadKeys: ReadonlySet<string>;
+}): boolean {
+  return (
+    input.standingRole === SYS_DAEMON_STANDING_ROLE || input.scheduledThreadKeys.has(input.key)
+  );
+}
+
+/** Scoped keys of fresh-session scheduled tasks. Unbound and continue-mode tasks are left out. */
+export function freshSessionThreadKeys(
+  entries: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly tasks: ReadonlyArray<{
+      readonly threadId: ThreadId | null;
+      readonly threadMode?: "new_thread" | "continue" | "fresh_session" | undefined;
+    }>;
+  }>,
+): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    for (const task of entry.tasks) {
+      if (task.threadId === null) continue;
+      if (scheduledTaskThreadMode(task) !== "fresh_session") continue;
+      keys.add(scopedThreadKey(scopeThreadRef(entry.environmentId, task.threadId)));
+    }
+  }
+  return keys;
+}
+
+/**
+ * Pulls system threads out of the founder list. `section` is null until the
+ * shelf is opened, and then it keeps every match, including a failed run.
+ */
+export function placeSystemScheduledThreads<T>(input: {
+  readonly threads: readonly T[];
+  readonly revealed: boolean;
+  readonly scheduledThreadKeys: ReadonlySet<string>;
+  readonly keyOf: (thread: T) => string;
+  readonly standingRoleOf: (thread: T) => string | null;
+}): {
+  readonly rest: T[];
+  readonly system: T[];
+  readonly section: T[] | null;
+} {
+  const rest: T[] = [];
+  const system: T[] = [];
+  for (const thread of input.threads) {
+    if (
+      isSystemScheduledThread({
+        key: input.keyOf(thread),
+        standingRole: input.standingRoleOf(thread),
+        scheduledThreadKeys: input.scheduledThreadKeys,
+      })
+    ) {
+      system.push(thread);
+    } else {
+      rest.push(thread);
+    }
+  }
+  return { rest, system, section: input.revealed ? system : null };
 }
