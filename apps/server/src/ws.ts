@@ -82,6 +82,7 @@ import {
   worktreeSetupActivityId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
+import { threadVisibleInInbox } from "@t3tools/contracts/threadInbox";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
@@ -1015,6 +1016,7 @@ const makeWsRpcLayer = (
       const SHELL_REFETCH_CONCURRENCY = 8;
       const coalesceShellEvents = (
         events: ReadonlyArray<ShellEvent>,
+        inbox?: string,
       ): Effect.Effect<ReadonlyArray<OrchestrationShellStreamEvent>, never, never> =>
         Effect.gen(function* () {
           if (events.length === 0) {
@@ -1030,7 +1032,28 @@ const makeWsRpcLayer = (
           const shellEvents = yield* Effect.forEach(survivors, toShellStreamEvent, {
             concurrency: SHELL_REFETCH_CONCURRENCY,
           });
-          return shellEvents.flatMap((option) => (Option.isSome(option) ? [option.value] : []));
+          return shellEvents.flatMap((option) => {
+            if (Option.isNone(option)) return [];
+            const event = option.value;
+            // A scoped session never sees threads outside its founder inbox.
+            // Removing rather than dropping matters when a thread the client
+            // already holds moves out of scope: a dropped upsert would leave it
+            // on screen, while a removal is a no-op for one it never had.
+            if (
+              inbox !== undefined &&
+              event.kind === "thread-upserted" &&
+              !threadVisibleInInbox(event.thread, { identity: inbox, showBotWork: false })
+            ) {
+              return [
+                {
+                  kind: "thread-removed" as const,
+                  sequence: event.sequence,
+                  threadId: event.thread.id,
+                },
+              ];
+            }
+            return [event];
+          });
         });
 
       // Small time/size window over which to coalesce shell events. The window
@@ -1041,11 +1064,12 @@ const makeWsRpcLayer = (
       const SHELL_COALESCE_MAX_CHUNK = 512;
       const coalesceShellStream = <E, R>(
         stream: Stream.Stream<OrchestrationEvent, E, R>,
+        inbox?: string,
       ): Stream.Stream<OrchestrationShellStreamEvent, E, R> =>
         stream.pipe(
           Stream.map(toShellEvent),
           Stream.groupedWithin(SHELL_COALESCE_MAX_CHUNK, SHELL_COALESCE_WINDOW),
-          Stream.mapEffect(coalesceShellEvents),
+          Stream.mapEffect((events) => coalesceShellEvents(events, inbox)),
           Stream.flatMap((items) => Stream.fromIterable(items)),
         );
 
@@ -1058,6 +1082,7 @@ const makeWsRpcLayer = (
       // batch at markers and coalesce only the event segments on either side.
       const coalesceShellLiveInputs = (
         inputs: ReadonlyArray<ShellLiveInput>,
+        inbox?: string,
       ): Effect.Effect<ReadonlyArray<OrchestrationShellStreamItem>, never, never> =>
         Effect.gen(function* () {
           const output: Array<OrchestrationShellStreamItem> = [];
@@ -1069,12 +1094,12 @@ const makeWsRpcLayer = (
               continue;
             }
 
-            output.push(...(yield* coalesceShellEvents(pendingEvents)));
+            output.push(...(yield* coalesceShellEvents(pendingEvents, inbox)));
             pendingEvents = [];
             output.push({ kind: "synchronized" });
           }
 
-          output.push(...(yield* coalesceShellEvents(pendingEvents)));
+          output.push(...(yield* coalesceShellEvents(pendingEvents, inbox)));
           return output;
         });
 
@@ -2346,6 +2371,7 @@ const makeWsRpcLayer = (
               // sequence but the live subscription is not attached yet). Every
               // path below emits from this same buffered live tail. Overlapping
               // events are deduped by sequence on the client.
+              const inbox = input.inbox;
               const liveBudget = yield* makeLiveStreamBudget();
               const liveBuffer = yield* Queue.unbounded<
                 RetainedLiveItem<ShellLiveInput>,
@@ -2388,9 +2414,10 @@ const makeWsRpcLayer = (
               const coalesceRetainedInputs = (
                 items: ReadonlyArray<RetainedLiveItem<ShellLiveInput>>,
               ) =>
-                coalesceShellLiveInputs(items.map((item) => item.value)).pipe(
-                  Effect.flatMap((output) => liveBudget.replace(items, output)),
-                );
+                coalesceShellLiveInputs(
+                  items.map((item) => item.value),
+                  inbox,
+                ).pipe(Effect.flatMap((output) => liveBudget.replace(items, output)));
               const bufferedLiveStream = Stream.fromQueue(liveBuffer).pipe(
                 Stream.groupedWithin(SHELL_COALESCE_MAX_CHUNK, SHELL_COALESCE_WINDOW),
                 Stream.mapEffect(coalesceRetainedInputs),
@@ -2398,6 +2425,16 @@ const makeWsRpcLayer = (
               );
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
+                Effect.map((snapshot) =>
+                  inbox === undefined
+                    ? snapshot
+                    : {
+                        ...snapshot,
+                        threads: snapshot.threads.filter((thread) =>
+                          threadVisibleInInbox(thread, { identity: inbox, showBotWork: false }),
+                        ),
+                      },
+                ),
                 Effect.tapError((cause) =>
                   Effect.logError("orchestration shell snapshot load failed", { cause }),
                 ),
@@ -2464,6 +2501,7 @@ const makeWsRpcLayer = (
                   // cannot chase a moving event-store head or grow the live
                   // buffer indefinitely while waiting for an empty page.
                   orchestrationEngine.readEvents(afterSequence, replayGap),
+                  inbox,
                 ).pipe(
                   Stream.mapError(
                     (cause) =>
