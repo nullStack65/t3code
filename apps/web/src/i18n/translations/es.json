@@ -70,5 +70,11 @@
   "7e4d81ca21a72019": "Confirmación al desfijar",
   "1d5052cbe70d0b28": "Confirmación al archivar",
   "d5dd27a4eb853248": "Confirmación al eliminar",
-  "86b43caa9ff41ea2": "Atajo para salir"
+  "86b43caa9ff41ea2": "Atajo para salir",
+  "0fd6b38d7839f885": "Sesión iniciada en {server}",
+  "54789628a737f557": "Iniciar sesión en {server}",
+  "8aecbd38f1facf71": "Aprueba el acceso en tu navegador. Después abrirá una página que puede no cargar: copia la dirección de esa página y pégala aquí.",
+  "2281dc87b05d4a4c": "Iniciando sesión…",
+  "880d3e6e7ff86899": "Dirección de la página que abrió tu navegador",
+  "e52585cdfcf317cf": "Terminar de iniciar sesión"
 }
