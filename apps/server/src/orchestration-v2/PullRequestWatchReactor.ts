@@ -45,6 +45,16 @@ import {
   stalePullRequestWatch,
   pullRequestWatchStaleness,
 } from "./pullRequestWatch.ts";
+import {
+  cursorOf,
+  planPullRequestSubscription,
+  pullRequestSelectorKey,
+  subscriptionWake,
+  virtualLegacySubscription,
+  withCursor,
+} from "./eventSubscription.ts";
+import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
+import type { EventSubscription } from "@t3tools/contracts";
 
 /** Checks take minutes; faster sweeps waste the account's shared host quota. */
 const SWEEP_MINUTES = 2;
@@ -241,6 +251,7 @@ export const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const random = yield* SecureRandom.SecureRandom;
+  const subscriptions = yield* Effect.serviceOption(EventSubscriptionStore.EventSubscriptionStore);
   const bootedAt = yield* Clock.currentTimeMillis;
   const lives = new Map<string, WatchLife>();
 
@@ -546,13 +557,16 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const closed = (groupKey: string, target: WatchTarget) =>
+  const closed = (groupKey: string, target: WatchTarget, pending: readonly string[] = []) =>
     hold({
       groupKey,
       target,
       next: null,
       wake: {
-        text: `Pull request #${target.link.number} (${target.link.url}) was closed, so T3 Code stopped watching it. Call watch_pull_request if it reopens.`,
+        text: [
+          `Pull request #${target.link.number} (${target.link.url}) was closed, so T3 Code stopped watching it. Call watch_pull_request if it reopens.`,
+          ...pending,
+        ].join("\n"),
         notification: {
           source: { kind: "monitor" },
           outcome: "updated",
@@ -561,6 +575,113 @@ export const make = Effect.gen(function* () {
       },
       reason: "closed",
     });
+
+  const loadSubscription = Effect.fnUntraced(function* (target: WatchTarget) {
+    if (Option.isNone(subscriptions)) return { mode: "absent" as const };
+    const key = pullRequestSelectorKey(target.link.url);
+    if (key === null) return { mode: "legacy" as const };
+    const row = yield* subscriptions.value.get(target.thread.id, key).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("event subscription read failed", {
+          threadId: target.thread.id,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+    return row === null ? { mode: "legacy" as const } : { mode: "row" as const, row };
+  });
+
+  const saveSubscription = (row: EventSubscription, state: EventSubscription) =>
+    Option.isNone(subscriptions)
+      ? Effect.void
+      : subscriptions.value
+          .put(state)
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("event subscription update failed", { id: row.id, cause }),
+            ),
+          );
+
+  const dropSubscription = (row: EventSubscription) =>
+    Option.isNone(subscriptions)
+      ? Effect.void
+      : subscriptions.value.remove(row.subscriberThreadId, row.id).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("event subscription removal failed", { id: row.id, cause }),
+          ),
+          Effect.asVoid,
+        );
+
+  const subscriberIdle = Effect.fnUntraced(function* (
+    threadId: WatchTarget["thread"]["id"],
+    needed: boolean,
+  ) {
+    if (!needed) return true;
+    const shell = yield* projections
+      .getThreadShell(threadId)
+      .pipe(Effect.catchCause(() => Effect.succeed(null)));
+    return (
+      shell !== null &&
+      shell.deletedAt === null &&
+      shell.activeRunId === null &&
+      (shell.activityRunStatus ?? null) === null
+    );
+  });
+
+  const finishClosed = Effect.fnUntraced(function* (groupKey: string, target: WatchTarget) {
+    const loaded = yield* loadSubscription(target);
+    const pending = loaded.mode === "row" ? loaded.row.pendingSummaries : [];
+    yield* closed(groupKey, target, pending);
+    if (loaded.mode === "row" && loaded.row.delivery.autoExpireOnClose) {
+      yield* dropSubscription(loaded.row);
+    }
+  });
+
+  const finishMerged = Effect.fnUntraced(function* (target: WatchTarget) {
+    const loaded = yield* loadSubscription(target);
+    if (loaded.mode === "absent") {
+      yield* record(target, null);
+      yield* ended(target, "merged");
+      return;
+    }
+    const subscription =
+      loaded.mode === "row"
+        ? loaded.row
+        : virtualLegacySubscription(target.thread.id, target.link.url);
+    const decision = planPullRequestSubscription({
+      changes: [],
+      events: subscription.events,
+      ignoreAuthors: subscription.ignoreAuthors,
+      delivery: subscription.delivery,
+      idle: true,
+      nowMs: yield* Clock.currentTimeMillis,
+      state: cursorOf(subscription),
+      terminal: "merged",
+    });
+    yield* record(
+      target,
+      null,
+      decision.action === "wake"
+        ? {
+            ...subscriptionWake({
+              number: target.link.number,
+              url: target.link.url,
+              summaries: decision.summaries,
+            }),
+            includesRemarks: false,
+          }
+        : undefined,
+    );
+    if (loaded.mode === "row" && decision.expire) yield* dropSubscription(loaded.row);
+    yield* ended(target, "merged");
+  });
+
+  const expireOnSettle = Effect.fnUntraced(function* (target: WatchTarget) {
+    const loaded = yield* loadSubscription(target);
+    if (loaded.mode === "row" && loaded.row.delivery.autoExpireOnClose) {
+      yield* dropSubscription(loaded.row);
+    }
+  });
 
   const endsWithoutRead = ({ thread, link }: WatchTarget): WatchEndReason | undefined =>
     link.snapshot?.state === "merged"
@@ -710,9 +831,7 @@ export const make = Effect.gen(function* () {
     if (detail.state !== "open") {
       lastReads.delete(group.key);
       return yield* eachTarget(group, (target) =>
-        detail.state === "closed"
-          ? closed(group.key, target)
-          : record(target, null).pipe(Effect.tap(() => ended(target, "merged"))),
+        detail.state === "closed" ? finishClosed(group.key, target) : finishMerged(target),
       );
     }
 
@@ -754,49 +873,107 @@ export const make = Effect.gen(function* () {
       status: fingerprint?.status ?? null,
       remarks: fingerprint?.remarks ?? null,
     });
-    yield* eachTarget(group, (target) => {
-      const report = evaluatePullRequestWatch(
-        target.watch,
-        detail,
-        remarks,
-        now,
-        detail.reviewDecision === undefined
-          ? target.link.snapshot?.reviewDecision
-          : detail.reviewDecision,
-      );
-      if (report.changes.length > 0) {
-        const wake = {
-          ...pullRequestWatchMessage({
-            number: target.link.number,
-            url: target.link.url,
-            baseBranch: detail.baseBranch,
-            headSha: report.next.headSha,
-            report,
-          }),
-          includesRemarks: report.changes.some((change) => change.kind === "remarks"),
-        };
-        // An ending watch keeps what this pass saw, so watching again starts from it.
-        return hold(
-          report.exhausted
-            ? {
-                groupKey: group.key,
-                target,
-                next: null,
-                endedWatch: report.next,
-                wake,
-                reason: "comment-limit",
-              }
-            : { groupKey: group.key, target, next: report.next, wake },
+    yield* eachTarget(group, (target) =>
+      Effect.gen(function* () {
+        const report = evaluatePullRequestWatch(
+          target.watch,
+          detail,
+          remarks,
+          now,
+          detail.reviewDecision === undefined
+            ? target.link.snapshot?.reviewDecision
+            : detail.reviewDecision,
         );
-      }
-      return sendStale(target, report.next, now, "current").pipe(
-        Effect.flatMap((held) =>
-          held || watchesEqual(report.next, target.watch)
-            ? Effect.void
-            : record(target, report.next).pipe(Effect.asVoid),
-        ),
-      );
-    });
+        // With nothing to deliver, a long quiet period wakes the thread once.
+        const settle = (next: ThreadPullRequestWatch) =>
+          sendStale(target, next, now, "current").pipe(
+            Effect.flatMap((held) =>
+              held || watchesEqual(next, target.watch)
+                ? Effect.void
+                : record(target, next).pipe(Effect.asVoid),
+            ),
+          );
+        const loaded = yield* loadSubscription(target);
+        if (loaded.mode === "absent") {
+          if (report.changes.length === 0) {
+            yield* settle(report.next);
+            return;
+          }
+          const wake = {
+            ...pullRequestWatchMessage({
+              number: target.link.number,
+              url: target.link.url,
+              baseBranch: detail.baseBranch,
+              headSha: report.next.headSha,
+              report,
+            }),
+            includesRemarks: report.changes.some((change) => change.kind === "remarks"),
+          };
+          // An ending watch keeps what this pass saw, so watching again starts from it.
+          yield* hold(
+            report.exhausted
+              ? {
+                  groupKey: group.key,
+                  target,
+                  next: null,
+                  endedWatch: report.next,
+                  wake,
+                  reason: "comment-limit",
+                }
+              : { groupKey: group.key, target, next: report.next, wake },
+          );
+          return;
+        }
+        const subscription =
+          loaded.mode === "row"
+            ? loaded.row
+            : virtualLegacySubscription(target.thread.id, target.link.url);
+        const decision = planPullRequestSubscription({
+          changes: report.changes,
+          events: subscription.events,
+          ignoreAuthors: subscription.ignoreAuthors,
+          delivery: subscription.delivery,
+          idle: yield* subscriberIdle(target.thread.id, subscription.delivery.onlyWhenIdle),
+          nowMs: now,
+          state: cursorOf(subscription),
+        });
+        const remarksOnlyDropped =
+          report.changes.length > 0 &&
+          report.changes.every((change) => change.kind === "remarks") &&
+          !decision.includesRemarks;
+        const next = remarksOnlyDropped
+          ? { ...report.next, wakes: target.watch.wakes }
+          : report.next;
+        if (decision.action === "hold") return;
+        if (loaded.mode === "row")
+          yield* saveSubscription(loaded.row, withCursor(loaded.row, decision.state));
+        if (decision.action === "wake") {
+          const wake = {
+            ...subscriptionWake({
+              number: target.link.number,
+              url: target.link.url,
+              summaries: decision.summaries,
+            }),
+            includesRemarks: decision.includesRemarks,
+          };
+          const endForComments = report.exhausted && decision.includesRemarks;
+          yield* hold(
+            endForComments
+              ? {
+                  groupKey: group.key,
+                  target,
+                  next: null,
+                  endedWatch: next,
+                  wake,
+                  reason: "comment-limit",
+                }
+              : { groupKey: group.key, target, next, wake },
+          );
+          return;
+        }
+        yield* settle(next);
+      }),
+    );
   });
 
   /** Every watch, or with `changed`, only that pull request's after its host reported a change. */
@@ -847,8 +1024,13 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       ending,
       ([target, reason]) =>
-        record(target, null).pipe(
-          Effect.tap(() => ended(target, reason)),
+        (reason === "merged"
+          ? finishMerged(target)
+          : record(target, null).pipe(
+              Effect.tap(() => (reason === "settled" ? expireOnSettle(target) : Effect.void)),
+              Effect.tap(() => ended(target, reason)),
+            )
+        ).pipe(
           Effect.catchCause(
             logFailure("pull request watch stop failed", {
               threadId: target.thread.id,
@@ -975,4 +1157,6 @@ export const make = Effect.gen(function* () {
   return { start, sweep } satisfies PullRequestWatchReactor["Service"];
 });
 
-export const layer = Layer.effect(PullRequestWatchReactor, make);
+export const layer = Layer.effect(PullRequestWatchReactor, make).pipe(
+  Layer.provide(EventSubscriptionStore.layer),
+);

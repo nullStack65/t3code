@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EventSubscriptionInvalidError,
   type OrchestrationProjectShell,
   type PullRequestState,
   type OrchestrationV2ThreadShell,
@@ -8,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -16,6 +18,11 @@ import * as ProjectService from "../../../project/ProjectService.ts";
 import * as PullRequestWatchService from "../../../pullRequest/PullRequestWatchService.ts";
 import { resolveTarget, type ResolvedTarget } from "../../../pullRequest/pullRequestTarget.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
+import {
+  pullRequestSelectorKey,
+  watchSubscription,
+} from "../../../orchestration-v2/eventSubscription.ts";
+import * as EventSubscriptionStore from "../../../persistence/EventSubscriptions.ts";
 import { pullRequestSyncKey } from "../../../pullRequest/pullRequestSyncKey.ts";
 import { sourceControlDefinitions } from "../../../sourceControl/sourceControlDefinitions.ts";
 import {
@@ -40,6 +47,7 @@ import {
   PullRequestProjectNotFoundError,
   PullRequestsToolkit,
   type ThreadPullRequestEntry,
+  type WatchPullRequestInput,
   CHILD_PULL_REQUEST_REPORT_NEXT,
 } from "./tools.ts";
 
@@ -147,6 +155,9 @@ const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
   const watches = yield* PullRequestWatchService.PullRequestWatchService;
+  const subscriptions = Option.getOrNull(
+    yield* Effect.serviceOption(EventSubscriptionStore.EventSubscriptionStore),
+  );
 
   const projects = yield* ProjectService.ProjectService;
   const random = yield* SecureRandom.SecureRandom;
@@ -218,6 +229,62 @@ const make = Effect.gen(function* () {
             threadNotFound(engine, scope, error.threadId, error.message),
         }),
       );
+  });
+
+  const watchFiltersSet = (input: WatchPullRequestInput) =>
+    input.events !== undefined ||
+    input.ignoreAuthors !== undefined ||
+    input.coalesceWindowSeconds !== undefined ||
+    input.autoExpireOnClose !== undefined;
+
+  const syncWatchSubscription = Effect.fnUntraced(function* (
+    input: WatchPullRequestInput,
+    threadId: ThreadId,
+    url: string,
+    watching: boolean,
+  ) {
+    if (subscriptions === null) {
+      if (watching && watchFiltersSet(input)) {
+        return yield* new EventSubscriptionInvalidError({
+          detail: "Event subscriptions are not available on this server.",
+        });
+      }
+      return;
+    }
+    const key = pullRequestSelectorKey(url);
+    if (key === null) {
+      return yield* new EventSubscriptionInvalidError({
+        detail: "The pull request URL is not valid.",
+      });
+    }
+    const stored = <A, E>(effect: Effect.Effect<A, E>) =>
+      effect.pipe(
+        Effect.tapError((cause) =>
+          Effect.logWarning("event subscription update failed", { threadId, cause }),
+        ),
+        Effect.mapError(
+          () =>
+            new EventSubscriptionInvalidError({
+              detail: "Could not update the event subscription.",
+            }),
+        ),
+      );
+    if (!watching || !watchFiltersSet(input)) {
+      yield* stored(subscriptions.removeKey(threadId, key));
+      return;
+    }
+    const prepared = watchSubscription({
+      id: `evt_${yield* random.uuidV4().pipe(Effect.orDie)}`,
+      subscriberThreadId: threadId,
+      url,
+      events: input.events,
+      ignoreAuthors: input.ignoreAuthors,
+      coalesceWindowSeconds: input.coalesceWindowSeconds,
+      autoExpireOnClose: input.autoExpireOnClose,
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    });
+    if (!prepared.ok) return yield* prepared.error;
+    yield* stored(subscriptions.put(prepared.subscription));
   });
 
   const locateAll = Effect.fn("PullRequestsToolkit.locateAll")(function* (
@@ -446,8 +513,28 @@ const make = Effect.gen(function* () {
         Effect.map((thread) => listThreadPullRequests(thread, input.cursor, input.states)),
       ),
     ),
-    watch_pull_request: writesThread((input) => setWatching(input, true)),
-    unwatch_pull_request: writesThread((input) => setWatching(input, false)),
+    watch_pull_request: writesThread((input: WatchPullRequestInput) =>
+      Effect.gen(function* () {
+        const result = yield* setWatching(input, true);
+        const scope = yield* McpInvocationContext.requireMcpCapability("pull-requests");
+        const threadId = input.threadId ?? scope.thread?.threadId;
+        if (threadId !== undefined) {
+          yield* syncWatchSubscription(input, threadId, result.url, true);
+        }
+        return result;
+      }),
+    ),
+    unwatch_pull_request: writesThread((input) =>
+      Effect.gen(function* () {
+        const result = yield* setWatching(input, false);
+        const scope = yield* McpInvocationContext.requireMcpCapability("pull-requests");
+        const threadId = input.threadId ?? scope.thread?.threadId;
+        if (threadId !== undefined) {
+          yield* syncWatchSubscription(input, threadId, result.url, false);
+        }
+        return result;
+      }),
+    ),
     write_pull_request_guides: McpToolAccess.writesWithCapability((input) =>
       Effect.gen(function* () {
         const located = yield* locateAll(input.pullRequests);

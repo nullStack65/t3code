@@ -429,6 +429,15 @@ export function summarizeT3ToolCalls(
         quantity(selected.length, "pull request"),
       );
       break;
+    case "event-subscribe":
+      label = phrase("Subscribed", "subscribe", `to events ${times}`);
+      break;
+    case "event-unsubscribe":
+      label = phrase("Unsubscribed", "unsubscribe", `from events ${times}`);
+      break;
+    case "event-list":
+      label = phrase("Listed", "list", `event subscriptions ${times}`);
+      break;
     case "list-prs":
       label = phrase(
         "Checked",
