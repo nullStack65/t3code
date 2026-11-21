@@ -2027,6 +2027,19 @@ const WsOrchestrationV2SubscribePromptSuggestionRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2ReportTypingRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.reportTyping, {
+  payload: OrchestrationV2RpcSchemas.reportTyping.input,
+  success: OrchestrationV2RpcSchemas.reportTyping.output,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsOrchestrationV2SubscribeTypingRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.subscribeTyping, {
+  payload: OrchestrationV2RpcSchemas.subscribeTyping.input,
+  success: OrchestrationV2RpcSchemas.subscribeTyping.output,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
 const WsSubscribeTerminalMetadataRpc = Rpc.make(WS_METHODS.subscribeTerminalMetadata, {
   payload: Schema.Struct({}),
   success: TerminalMetadataStreamEvent,
@@ -2380,4 +2393,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
   WsOrchestrationV2SubscribePromptSuggestionRpc,
+  WsOrchestrationV2ReportTypingRpc,
+  WsOrchestrationV2SubscribeTypingRpc,
 ).middleware(RpcScopeAuthorization);

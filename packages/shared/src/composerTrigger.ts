@@ -140,3 +140,9 @@ export function parseSideChatCommand(text: string): { prompt: string } | null {
   const match = /^\/(?:side|btw)(?:\s+([\s\S]*))?$/i.exec(text.trim());
   return match ? { prompt: match[1]?.trim() ?? "" } : null;
 }
+
+/** `/note [text]` as the whole message. A note is for the other founder, not the bot. */
+export function parseNoteCommand(text: string): { prompt: string } | null {
+  const match = /^\/note(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  return match ? { prompt: match[1]?.trim() ?? "" } : null;
+}

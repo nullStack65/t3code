@@ -191,6 +191,8 @@ export interface StartThreadTurnInput extends ThreadCommandInput {
     readonly attachments: ReadonlyArray<ChatAttachment | UploadChatAttachment>;
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext;
     readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
+    /** A side note on a shared thread. The server stores it and does not start a turn. */
+    readonly humanNote?: true;
   };
   readonly modelSelection?: ModelSelection;
   readonly titleSeed?: string;
@@ -850,6 +852,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
         ...(input.message.idleCompaction === undefined
           ? {}
           : { idleCompaction: input.message.idleCompaction }),
+        ...(input.message.humanNote === true ? { humanNote: true as const } : {}),
         attachments,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
         ...(input.sourceProposedPlan === undefined
@@ -880,6 +883,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       ...(input.message.idleCompaction === undefined
         ? {}
         : { idleCompaction: input.message.idleCompaction }),
+      ...(input.message.humanNote === true ? { humanNote: true as const } : {}),
       attachments,
       ...(input.titleSeed === undefined ? {} : { titleSeed: input.titleSeed }),
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),

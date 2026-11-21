@@ -77,3 +77,5 @@ export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
 
 export * from "./threadInbox.ts";
+export * from "./botAttention.ts";
+export * from "./typingPresence.ts";

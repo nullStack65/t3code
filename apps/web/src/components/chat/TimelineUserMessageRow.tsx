@@ -864,6 +864,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           Sent by T3 Code
         </p>
       ) : null}
+      {row.message.humanNote ? (
+        <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-note="">
+          Note
+        </p>
+      ) : null}
       {showSender ? (
         <div aria-hidden>
           <MessageSenderLine sender={sender} align="end" />
