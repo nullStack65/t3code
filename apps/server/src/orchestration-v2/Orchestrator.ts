@@ -7,6 +7,7 @@ import type {
   ProjectId,
 } from "@t3tools/contracts";
 import {
+  inboxAfterStandingSet,
   makeThreadInbox,
   nextFounderSeenMessage,
   nextFounderVisits,
@@ -4891,8 +4892,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.standing.set": {
-          // Standing is identity, not activity: it never bumps updatedAt.
-          return { ...thread, standing: command.standing };
+          // Standing is identity, not activity: it never bumps updatedAt. A new persona
+          // still leaves Agents: background attention is what hid standing bots.
+          const inbox = inboxAfterStandingSet(thread.inbox, command.standing);
+          return {
+            ...thread,
+            standing: command.standing,
+            ...(inbox === undefined ? {} : { inbox }),
+          };
         }
         case "thread.tag.set": {
           const current = thread.tags ?? [];

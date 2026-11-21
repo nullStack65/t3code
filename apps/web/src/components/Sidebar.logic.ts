@@ -608,6 +608,7 @@ export async function deleteSelectedThreadEntries<
 export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
     projectId: string;
+    readonly standing?: unknown;
   },
 >(
   threads: readonly T[],
@@ -622,7 +623,10 @@ export function filterSidebarV2VisibleThreads<
         thread.lineage,
         delegatedUnderParent,
       ) &&
-      (scopedProjectKeys === null ||
+      // A standing bot on another machine's project still belongs in Bots. Project scope
+      // continues to hide ordinary threads.
+      (thread.standing != null ||
+        scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
 }

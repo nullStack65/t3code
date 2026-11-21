@@ -14,6 +14,7 @@ import {
   compositeThreadKey,
   agentLaunchInboxRouting,
   agentLaunchInboxError,
+  inboxAfterStandingSet,
   agentInboxRoutingError,
   projectThreadInbox,
   inboxRoutingFor,
@@ -128,6 +129,18 @@ describe("shared fleet organizational inbox", () => {
     const because = { reason: "conversation" } as const;
     expect(visibleIn(launched({}))).toEqual(["agents"]);
     expect(agentLaunchInboxError({})).toBeNull();
+    const standing = { name: "Infra" };
+    const standingBot = launched({ standing });
+    expect(standingBot.audience).toBe("shared");
+    expect(standingBot.attentionKind).toBe("FYI");
+    expect(standingBot.reason).toBe("fyi");
+    expect(agentLaunchInboxError({ standing })).toBeNull();
+    expect(visibleIn(standingBot)).toEqual(["shared", "agents"]);
+    // An explicit inbox still wins over the standing default.
+    expect(launched({ standing, inbox: "agents" }).attentionKind).toBe("background");
+    expect(launched({ standing, inbox: "kameron", inboxRouting: because }).audience).toBe(
+      "kameron",
+    );
     for (const inbox of ["kameron", "jeff", "shared"] as const) {
       expect(agentLaunchInboxError({ inbox })).toContain("request_decision");
       expect(agentLaunchInboxError({ inbox, inboxRouting: because })).toBeNull();
@@ -153,6 +166,47 @@ describe("shared fleet organizational inbox", () => {
     const quieter = launched({ inbox: "kameron", inboxRouting: { reason: "fyi" } });
     expect(visibleIn(quieter)).toEqual(["kameron", "agents"]);
     expect(founderInboxLane(quieter, "kameron")).toBe("FYI");
+  });
+
+  it("lifts background attention when a route leaves Agents for a founder or Shared", () => {
+    const agents = makeThreadInbox({ actor: bot, routing: agentLaunchInboxRouting({}) });
+    expect(agents.attentionKind).toBe("background");
+    const toKameron = routeThreadInbox(agents, { audience: "kameron", reason: "fyi" });
+    expect(toKameron.audience).toBe("kameron");
+    expect(toKameron.attentionKind).toBe("FYI");
+    expect(toKameron.assignee).toEqual(kameron);
+    expect(toKameron.owner).toBe("kameron");
+    expect(founderInboxLane(toKameron, "kameron")).toBe("FYI");
+    expect(matchesInboxView(toKameron, "kameron")).toBe(true);
+    expect(matchesInboxView(toKameron, "jeff")).toBe(false);
+    const toShared = routeThreadInbox(agents, { audience: "shared", reason: "fyi" });
+    expect([toShared.audience, toShared.attentionKind]).toEqual(["shared", "FYI"]);
+    expect(matchesInboxView(toShared, "shared")).toBe(true);
+    const kept = routeThreadInbox(agents, {
+      audience: "kameron",
+      attentionKind: "background",
+      reason: "fyi",
+    });
+    expect(kept.attentionKind).toBe("background");
+    const persona = { name: "CTO" };
+    const refiled = inboxAfterStandingSet(agents, persona);
+    expect(refiled?.audience).toBe("shared");
+    expect(refiled?.attentionKind).toBe("FYI");
+    expect(inboxAfterStandingSet(refiled, null)).toBe(refiled);
+    const stuck = routeThreadInbox(agents, {
+      audience: "kameron",
+      attentionKind: "background",
+      assignee: kameron,
+      reason: "fyi",
+    });
+    const lifted = inboxAfterStandingSet(stuck, persona);
+    expect(lifted?.audience).toBe("kameron");
+    expect(lifted?.attentionKind).toBe("FYI");
+    const already = makeThreadInbox({
+      actor: kameron,
+      routing: { ...inboxRoutingFor("kameron"), reason: "conversation" },
+    });
+    expect(inboxAfterStandingSet(already, persona)).toBe(already);
   });
 
   it("files an older linked environment's reason-less founder routes as FYI instead of failing", () => {
@@ -251,7 +305,13 @@ describe("shared fleet organizational inbox", () => {
     const toAgents = routeThreadInbox(asked, agentLaunchInboxRouting({}));
     expect([toAgents.decisionRequest, ...lanes(toAgents)]).toEqual([undefined, "hidden", "hidden"]);
     const toJeff = routeThreadInbox(asked, { assignee: { kind: "human", id: "jeff" } });
-    expect([toJeff.decisionRequest, ...lanes(toJeff)]).toEqual([undefined, "hidden", "action"]);
+    // Leaving Agents without an attention kind is FYI, the attention a standing bot uses.
+    expect([toJeff.decisionRequest, toJeff.attentionKind, ...lanes(toJeff)]).toEqual([
+      undefined,
+      "FYI",
+      "hidden",
+      "FYI",
+    ]);
     expect(lanes(project("2026-11-18T20:59:00.000Z"))).toEqual(["action", "hidden"]);
     const answered = project("2026-11-18T21:01:00.000Z");
     expect(answered.decisionRequest).toBeUndefined();
@@ -311,7 +371,11 @@ describe("shared fleet organizational inbox", () => {
       const filed = routeThreadInbox(makeThreadInbox({ actor: bot }), {
         assignee: { kind: "human", id },
       });
-      expect([founderInboxLane(filed, id), filed.reason]).toEqual(["action", "conversation"]);
+      expect([founderInboxLane(filed, id), filed.attentionKind, filed.reason]).toEqual([
+        "FYI",
+        "FYI",
+        "conversation",
+      ]);
       const returned = routeThreadInbox(filed, {
         owner: null,
         assignee: null,

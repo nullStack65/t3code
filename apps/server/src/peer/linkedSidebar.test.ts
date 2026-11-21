@@ -71,6 +71,7 @@ it.effect("reads a reachable server-only link and skips catalog and unreachable 
           threads: [
             {
               inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }),
+              standing: { name: "Growth", role: "Pipeline", avatarId: "sprout", accent: "emerald" },
               threadId: ThreadId.make("thread-eval"),
               projectId: ProjectId.make("project-eval"),
               title: "10-model copy eval",
@@ -105,6 +106,12 @@ it.effect("reads a reachable server-only link and skips catalog and unreachable 
       "10-model copy eval",
     ]);
     expect(result.environments[0]?.threads[0]?.inbox?.owner).toBe("jeff");
+    expect(result.environments[0]?.threads[0]?.standing).toEqual({
+      name: "Growth",
+      role: "Pipeline",
+      avatarId: "sprout",
+      accent: "emerald",
+    });
     expect(result.environments[0]?.threads[0]?.lastVisitedAt).toBe("2026-11-20T03:59:00.000Z");
     expect(result.environments[0]?.threads[0]?.latestRunCompletedAt).toBe(
       "2026-11-20T03:58:00.000Z",

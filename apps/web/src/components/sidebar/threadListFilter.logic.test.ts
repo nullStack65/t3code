@@ -7,6 +7,8 @@ import {
   inboxMenuOrder,
   matchesThreadListFilter,
   olderSettledFilterCounts,
+  SIDEBAR_FILTER_OPTION_LABEL_CLASS,
+  SIDEBAR_FILTER_POPUP_CLASS,
   threadListFilterBucket,
   threadListFilterCounts,
   threadListFilterOf,
@@ -353,5 +355,81 @@ describe("thread list filter", () => {
     expect(counts.environments.get(laptop)?.settled).toBe(1 + 40 + 3);
     expect(counts.environments.get(crown)?.settled).toBe(1);
     expect(counts.unclassified).toBe(5);
+  });
+});
+
+describe("standing bots stay listed for both founders", () => {
+  const persona = { name: "Infra" };
+  const stuck = {
+    environmentId: crown,
+    standing: persona,
+    archivedAt: null,
+    runtime: { status: "running" },
+    source: {
+      inbox: makeThreadInbox({
+        actor: bot,
+        routing: {
+          audience: "kameron",
+          attentionKind: "background",
+          owner: "kameron",
+          assignee: kameron,
+          reason: "fyi",
+        },
+      }),
+      createdBy: "agent" as const,
+    },
+  };
+
+  it("lists a background standing bot when Agents is unchecked, for either founder", () => {
+    for (const owner of ["kameron", "jeff"] as const) {
+      const filter = {
+        ...threadListFilterOf({ founderInboxOwner: owner }),
+        inboxes: [owner] as const,
+      };
+      expect(matchesThreadListFilter(stuck, filter, "unknown")).toBe(true);
+    }
+    expect(
+      matchesThreadListFilter(
+        stuck,
+        {
+          inboxes: ["kameron", "jeff", "shared", "agents"],
+          hiddenEnvironmentIds: [crown],
+          hiddenAttributions: [],
+        },
+        "unknown",
+      ),
+    ).toBe(false);
+    const jeffWithoutAgents = {
+      ...threadListFilterOf({ founderInboxOwner: "jeff" }),
+      inboxes: ["jeff", "shared"] as const,
+    };
+    // Background attention files the lane under Agents, so unchecking Agents hides it.
+    expect(matchesThreadListFilter({ ...stuck, standing: null }, jeffWithoutAgents)).toBe(false);
+    expect(matchesThreadListFilter(stuck, jeffWithoutAgents, "unknown")).toBe(true);
+  });
+
+  it("counts a running remote standing bot even when its inbox is unchecked", () => {
+    const counts = threadListFilterCounts(
+      [stuck],
+      { inboxes: ["jeff"], hiddenEnvironmentIds: [], hiddenAttributions: ["unknown"] },
+      () => "unknown",
+      "jeff",
+    );
+    expect(counts.environments.get(crown)).toEqual({
+      working: 1,
+      done: 0,
+      needsMe: 0,
+      settled: 0,
+    });
+  });
+});
+
+describe("sidebar filter labels", () => {
+  it("keeps the popover wide enough to show full inbox and environment names", () => {
+    expect(SIDEBAR_FILTER_POPUP_CLASS).not.toContain("available-width");
+    expect(SIDEBAR_FILTER_POPUP_CLASS).toContain("40rem");
+    expect(SIDEBAR_FILTER_OPTION_LABEL_CLASS).not.toContain("truncate");
+    expect(SIDEBAR_FILTER_OPTION_LABEL_CLASS).toContain("whitespace-nowrap");
+    expect(SIDEBAR_FILTER_OPTION_LABEL_CLASS).toContain("min-w-[16rem]");
   });
 });

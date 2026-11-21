@@ -933,6 +933,7 @@ function listItemFromShell(
 ): OrchestratorMcpThreadListItem {
   return {
     ...(shell.inbox === undefined ? {} : { inbox: shell.inbox }),
+    ...(shell.standing == null ? {} : { standing: shell.standing }),
     threadId: shell.id,
     projectId: shell.projectId,
     title: shell.title,

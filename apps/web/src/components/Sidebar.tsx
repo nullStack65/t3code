@@ -392,6 +392,7 @@ interface SidebarThreadPartitionInput {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly workingShelfEnabled: boolean;
   readonly inboxFilter: ReadonlyArray<InboxChoice>;
+  readonly founderInboxOwner: "kameron" | "jeff" | undefined;
   /** Boring mode: folders list active threads by the user's latest message. */
   readonly sortActiveBySend: boolean;
   // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
@@ -483,6 +484,7 @@ function useSidebarThreads(input: {
   const workingShelfEnabled =
     useClientSettings((s) => s.sidebarWorkingShelfEnabled) && folderGroups === null;
   const inboxFilter = useClientSettings(effectiveInboxFilter);
+  const founderInboxOwner = useClientSettings((settings) => settings.founderInboxOwner);
   const inboxReturnsVersion = useSyncExternalStore(
     inboxReturns.subscribe,
     inboxReturns.getSnapshot,
@@ -527,6 +529,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     workingShelfEnabled,
     inboxFilter,
+    founderInboxOwner,
     sortActiveBySend: folderGroups !== null,
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
@@ -681,6 +684,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     optimisticDrop,
     workingShelfEnabled,
     sortActiveBySend,
+    founderInboxOwner,
   } = input;
   const preciseNow = new Date().toISOString();
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
@@ -754,7 +758,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
       ? sortInboxThreadsByReturn(active, inboxObservation.returnedAt)
       : sortThreadsForSidebar(active);
   const sortedBots = sortBotThreads(bots);
-  const botGroups = partitionBotGroups(sortedBots);
+  const botGroups = partitionBotGroups(sortedBots, founderInboxOwner);
   return {
     botThreads: sortedBots,
     myBotThreads: botGroups.mine,

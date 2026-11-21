@@ -35,6 +35,8 @@ import {
   EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
   type olderSettledFilterCounts,
+  SIDEBAR_FILTER_OPTION_LABEL_CLASS,
+  SIDEBAR_FILTER_POPUP_CLASS,
   threadListFilterCounts,
   threadListFilterOf,
   toggleFilterOption,
@@ -93,7 +95,7 @@ export function SidebarThreadFilterMenu<T extends CountedThread>({
       <MenuTrigger render={<SidebarHeaderIconButton label={label} />}>
         <SlidersHorizontalIcon className={cn("size-4", summary.length > 0 && "text-primary")} />
       </MenuTrigger>
-      <MenuPopup align="end" className="w-[min(19rem,var(--available-width))]">
+      <MenuPopup align="end" className={SIDEBAR_FILTER_POPUP_CLASS}>
         <SidebarThreadFilterOptions
           countedThreads={countedThreads}
           olderSettled={olderSettled}
@@ -299,7 +301,7 @@ function FilterOptionRow({
   return (
     <span className="flex min-w-0 items-center gap-2">
       {indicator}
-      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className={SIDEBAR_FILTER_OPTION_LABEL_CLASS}>{label}</span>
       <span className="grid shrink-0 grid-cols-4 gap-x-1.5 text-center">
         {STATE_COUNT_COLUMNS.map(([key, name]) => {
           const value = count[key];

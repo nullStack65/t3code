@@ -38,6 +38,7 @@ function threadShellFromLinkedThread(
   try {
     const shell = decodeShell({
       ...(thread.inbox === undefined ? {} : { inbox: thread.inbox }),
+      ...(thread.standing == null ? {} : { standing: thread.standing }),
       createdBy: thread.createdBy,
       creationSource: thread.creationSource,
       id: thread.threadId,
