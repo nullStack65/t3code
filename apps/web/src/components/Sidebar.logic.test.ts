@@ -38,6 +38,7 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  filterSidebarV2VisibleThreads,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -1727,6 +1728,32 @@ describe("resolveSidebarFolderDot", () => {
     expect(resolveSidebarFolderDot([idle, working])).toBe("working");
     expect(resolveSidebarFolderDot([working, unread])).toBe("unread");
     expect(resolveSidebarFolderDot([unread, limited])).toBe("attention");
+  });
+});
+
+describe("filterSidebarV2VisibleThreads", () => {
+  it("keeps a standing bot outside the scoped project and hides an ordinary thread there", () => {
+    const remote = EnvironmentId.make("primary-r720");
+    const local = EnvironmentId.make("primary-mac-laptop");
+    const lineage = {
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: ThreadId.make("root"),
+    };
+    const row = (id: string, standing: { name: string } | null) => ({
+      archivedAt: null,
+      environmentId: remote,
+      id: ThreadId.make(id),
+      projectId: ProjectId.make("remote-project"),
+      lineage: { ...lineage, rootThreadId: ThreadId.make(id) },
+      standing,
+    });
+    const visible = filterSidebarV2VisibleThreads(
+      [row("infra", { name: "Infra" }), row("note", null)],
+      new Set([`${local}:local-project`]),
+      new Set(),
+    );
+    expect(visible.map((thread) => thread.id)).toEqual([ThreadId.make("infra")]);
   });
 });
 

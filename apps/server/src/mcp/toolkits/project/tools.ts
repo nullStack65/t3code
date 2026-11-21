@@ -149,7 +149,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     standing: Schema.optional(
       ThreadStanding.annotate({
         description:
-          "Make it a standing bot thread with this persona ({name, role?, avatarId, accent}). Change later with t3_thread_update set_standing.",
+          "Make it a standing bot thread with this persona ({name, role?, avatarId, accent}). With inbox omitted, the thread is Shared with FYI attention so both founders see it. Change later with t3_thread_update set_standing.",
       }),
     ),
     modelSelection: Schema.optional(ModelSelection),

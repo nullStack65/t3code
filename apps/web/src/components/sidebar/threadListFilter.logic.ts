@@ -1,5 +1,6 @@
 import {
   matchesListedInboxes,
+  standingBotBypassesListFilters,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
 import {
@@ -22,12 +23,15 @@ import type { ThreadAttribution } from "@t3tools/contracts/settings";
 
 export {
   matchesThreadListFilter,
+  standingBotBypassesListFilters,
   threadListFilterOf,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
 
 interface FilterableThread {
   readonly environmentId: EnvironmentId;
+  readonly standing?: unknown;
+  readonly archivedAt?: unknown;
   readonly settledOverride?: "settled" | "active" | null;
   readonly hasPendingApprovals?: boolean;
   readonly hasPendingUserInput?: boolean;
@@ -171,6 +175,15 @@ export function threadListFilterBucket(
   return null;
 }
 
+/**
+ * The filter popover must not size itself from the sidebar's collision width.
+ * `--available-width` there is only a few characters, which truncated every label.
+ */
+export const SIDEBAR_FILTER_POPUP_CLASS = "w-[40rem] max-w-[calc(100vw-1rem)]";
+
+/** Labels stay one full line beside the four count columns. */
+export const SIDEBAR_FILTER_OPTION_LABEL_CLASS = "min-w-[16rem] shrink-0 whitespace-nowrap";
+
 /** The chosen founder's inbox first, then Agents, so the common pair sits together. */
 export const inboxMenuOrder = (owner: Founder | undefined): ReadonlyArray<InboxChoice> => {
   const first = owner ?? Founder.literals[0];
@@ -245,10 +258,15 @@ export function threadListFilterCounts<T extends FilterableThread>(
     readonly attribution: ThreadAttribution;
     readonly bucket: ThreadListFilterBucket | null;
     readonly amount: number;
+    readonly standingVisible?: boolean;
   }) => {
     const environmentShown = !filter.hiddenEnvironmentIds.includes(entry.environmentId);
-    const fromShown = !filter.hiddenAttributions.includes(entry.attribution);
-    const inboxShown = matchesListedInboxes(entry.inbox, entry.agentCreated, filter.inboxes);
+    // Standing bots stay listed, so their environment still counts when Inbox or From would drop them.
+    const fromShown =
+      entry.standingVisible || !filter.hiddenAttributions.includes(entry.attribution);
+    const inboxShown =
+      entry.standingVisible ||
+      matchesListedInboxes(entry.inbox, entry.agentCreated, filter.inboxes);
     if (environmentShown && fromShown) {
       for (const choice of InboxChoice.literals) {
         if (matchesListedInboxes(entry.inbox, entry.agentCreated, [choice])) {
@@ -274,6 +292,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
       attribution: attributionOf(thread),
       bucket: threadListFilterBucket(thread, viewingFounder),
       amount: 1,
+      standingVisible: standingBotBypassesListFilters(thread),
     });
   }
   for (const group of olderGroups) {
