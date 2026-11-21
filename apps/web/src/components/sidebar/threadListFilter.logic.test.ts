@@ -35,6 +35,16 @@ describe("thread list filter", () => {
       matchesThreadListFilter(candidate, filter);
     expect(visible(thread(laptop, kameron))).toBe(true);
     expect(visible(thread(laptop, bot))).toBe(true);
+    // Shared threads stay visible without opening the filter.
+    expect(
+      visible({
+        environmentId: laptop,
+        source: {
+          inbox: makeThreadInbox({ actor: kameron, routing: { audience: "shared" } }),
+          createdBy: undefined,
+        },
+      }),
+    ).toBe(true);
     // Agent threads from before inbox routing count as Agents.
     expect(visible(thread(laptop, null, "agent"))).toBe(true);
     expect(visible(thread(laptop, jeff))).toBe(false);
@@ -94,7 +104,7 @@ describe("thread list filter", () => {
       environments: false,
       from: false,
     });
-    const reordered = { ...unchanged, inboxes: ["agents", "jeff"] as const };
+    const reordered = { ...unchanged, inboxes: ["agents", "jeff", "shared"] as const };
     expect(changedThreadListFilters(reordered, "jeff", environments).inboxes).toBe(false);
     // A hidden environment that was since removed is not a visible filter.
     const removed = { ...unchanged, hiddenEnvironmentIds: [EnvironmentId.make("gone")] };

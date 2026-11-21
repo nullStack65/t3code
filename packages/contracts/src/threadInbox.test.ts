@@ -39,7 +39,7 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxView(j, "all")).toBe(true);
     expect(matchesInboxView(k, "all")).toBe(true);
   });
-  it("keeps All until a founder is chosen, then defaults to that founder plus Agents", () => {
+  it("keeps All until a founder is chosen, then defaults to that founder plus Agents and Shared", () => {
     const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
     const encode = Schema.encodeSync(ClientSettingsSchema);
     // Settings saved by the single-choice selector still decode; that choice is not carried over.
@@ -54,10 +54,16 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxFilter(undefined, effectiveInboxFilter(upgraded))).toBe(true);
     const jeffClient = decode(encode({ ...upgraded, founderInboxOwner: "jeff" }));
     const filter = effectiveInboxFilter(jeffClient);
-    expect(filter).toEqual(["jeff", "agents"]);
+    expect(filter).toEqual(["jeff", "agents", "shared"]);
     expect(matchesInboxFilter(makeThreadInbox({ actor: jeff }), filter)).toBe(true);
     expect(matchesInboxFilter(makeThreadInbox({ actor: bot }), filter)).toBe(true);
     expect(matchesInboxFilter(makeThreadInbox({ actor: kameron }), filter)).toBe(false);
+    expect(
+      matchesInboxFilter(
+        makeThreadInbox({ actor: kameron, routing: { audience: "shared" } }),
+        filter,
+      ),
+    ).toBe(true);
     expect(matchesInboxFilter(undefined, filter)).toBe(false);
     const picked = decode(encode({ ...jeffClient, founderInboxFilter: ["kameron", "shared"] }));
     expect([effectiveInboxFilter(picked), picked.founderInboxOwner]).toEqual([
@@ -90,6 +96,7 @@ describe("shared fleet organizational inbox", () => {
     expect(effectiveInboxFilter({ founderInboxOwner: "jeff", founderInboxFilter: [] })).toEqual([
       "jeff",
       "agents",
+      "shared",
     ]);
     // Every inbox is All, which keeps unclassified history.
     const every = ["shared", "jeff", "agents", "kameron"] as const;

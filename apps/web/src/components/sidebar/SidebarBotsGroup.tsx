@@ -30,13 +30,21 @@ export function SidebarBotsGroup(
   props: BotRowHandlers & {
     readonly threads: readonly EnvironmentThreadShell[];
     readonly activeThreadKey: string | null;
+    /** The group's heading; "Bots" keeps the single group for a search or an older list. */
+    readonly label?: string;
+    readonly testId?: string;
   },
 ) {
   if (props.threads.length === 0) return null;
+  const label = props.label ?? "Bots";
   return (
-    <section aria-label="Bots" data-testid="sidebar-bots-group" className="mx-0.5 mb-1">
+    <section
+      aria-label={label}
+      data-testid={props.testId ?? "sidebar-bots-group"}
+      className="mx-0.5 mb-1"
+    >
       <div className="flex h-6 items-center gap-2 px-2">
-        <span className="shrink-0 text-xs font-medium text-sidebar-foreground/80">Bots</span>
+        <span className="shrink-0 text-xs font-medium text-sidebar-foreground/80">{label}</span>
         <span aria-hidden className="h-px flex-1 bg-sidebar-foreground/15" />
       </div>
       <ul role="list" className="flex flex-col gap-px">

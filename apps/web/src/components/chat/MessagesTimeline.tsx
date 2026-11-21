@@ -348,6 +348,8 @@ interface MessagesTimelineProps {
    * Off by default; a standing thread turns it on.
    */
   collapseActivity?: boolean;
+  /** Person messages name which founder sent them. */
+  sharedThread?: boolean;
 }
 
 export function MessagesTimeline(props: MessagesTimelineProps) {
@@ -396,6 +398,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   findNavigationId = 0,
   findSender = null,
   collapseActivity = false,
+  sharedThread = false,
   latestRun,
   announcedRun = null,
   detailBehindShell = false,
@@ -1220,6 +1223,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     skills,
     runs,
     activeThreadEnvironmentId,
+    sharedThread,
     onRevertToTurnCount,
     onRunShellCommand,
     findActive,

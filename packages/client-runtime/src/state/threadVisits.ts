@@ -1,5 +1,5 @@
 // @effect-diagnostics globalTimers:off globalDate:off - The tracker runs in atom subscriptions, outside an Effect runtime.
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, Founder, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { parseThreadKey, threadKey } from "./entities.ts";
@@ -44,6 +44,8 @@ export interface ThreadVisitTrackerOptions {
    * that keeps its own watermark for them records the visit here instead.
    */
   readonly markLocalVisit?: (ref: ScopedThreadRef, visitedAt: string) => void;
+  /** The founder this client is. Shared-thread visits move only that cursor. */
+  readonly visitFounder?: () => Founder | null | undefined;
 }
 
 /**
@@ -95,6 +97,7 @@ export function createThreadVisitTracker(options: ThreadVisitTrackerOptions) {
         lastDispatchedUpdatedAt = visitedAt;
         lastDispatchAt = Date.now();
         lastDispatchGeneration = registry.get(sessionGenerationAtom);
+        const founder = options.visitFounder?.() ?? undefined;
         void runAtomCommand(
           registry,
           options.visit,
@@ -104,6 +107,7 @@ export function createThreadVisitTracker(options: ThreadVisitTrackerOptions) {
               threadId: shell.id,
               visitedAt,
               ...(opened ? { opened: true } : {}),
+              ...(founder == null ? {} : { founder }),
             },
           },
           { reportFailure: false },

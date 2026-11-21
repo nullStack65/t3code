@@ -62,3 +62,23 @@ export function splitStandingThreads<T extends { readonly standing: unknown }>(
   for (const thread of threads) (thread.standing != null ? bots : rest).push(thread);
   return { bots, rest };
 }
+
+/** A shared bot belongs to both founders; every other standing bot is one's own. */
+export function isSharedBotThread(thread: {
+  readonly source: { readonly inbox?: { readonly audience?: string } | null | undefined };
+}): boolean {
+  return thread.source.inbox?.audience === "shared";
+}
+
+/**
+ * The two bot groups the sidebar shows without an inbox filter: the viewer's own bots, then the
+ * bots both founders share. A shared bot is never also listed as one's own.
+ */
+export function partitionBotGroups<
+  T extends { readonly source: { readonly inbox?: { readonly audience?: string } | null } },
+>(threads: readonly T[]): { readonly mine: T[]; readonly shared: T[] } {
+  const mine: T[] = [];
+  const shared: T[] = [];
+  for (const thread of threads) (isSharedBotThread(thread) ? shared : mine).push(thread);
+  return { mine, shared };
+}

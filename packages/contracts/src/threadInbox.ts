@@ -263,8 +263,9 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
 }
 
 /**
- * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents, else
- * every inbox so unclassified history stays visible.
+ * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents and
+ * Shared, else every inbox so unclassified history stays visible. Shared is a default so both
+ * founders see shared bots without opening the filter.
  */
 export const effectiveInboxFilter = (settings: {
   readonly founderInboxFilter?: ReadonlyArray<InboxChoice> | undefined;
@@ -275,7 +276,7 @@ export const effectiveInboxFilter = (settings: {
     ? settings.founderInboxFilter
     : settings.founderInboxOwner === undefined
       ? InboxChoice.literals
-      : [settings.founderInboxOwner, "agents"];
+      : [settings.founderInboxOwner, "agents", "shared"];
 
 /** Choosing every inbox means All, which also keeps unclassified history. */
 const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>

@@ -2,6 +2,7 @@ import { AuthSessionId, EnvironmentId, ScheduledTaskId, ThreadId } from "@t3tool
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  founderSenderBadge,
   messageSenderDetail,
   messageSenderLabel,
   messageSenderMatches,
@@ -101,5 +102,12 @@ describe("resolveMessageSender", () => {
     const c = resolveMessageSender({ role: "user", text: "c", sentBy: sentBy("jeff") });
     expect(sameMessageSender(a, b)).toBe(true);
     expect(sameMessageSender(a, c)).toBe(false);
+  });
+});
+
+describe("founderSenderBadge", () => {
+  it("uses the founder's initial and name", () => {
+    expect(founderSenderBadge("kameron")).toEqual({ name: "Kameron", initial: "K" });
+    expect(founderSenderBadge("jeff")).toEqual({ name: "Jeff", initial: "J" });
   });
 });
