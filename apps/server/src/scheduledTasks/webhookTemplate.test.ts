@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import { collectComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
+
 import { renderWebhookPrompt, type WebhookRequest } from "./webhookTemplate.ts";
 
 const githubPullRequest: WebhookRequest = {
@@ -179,6 +181,66 @@ describe("renderWebhookPrompt", () => {
     );
     assert.equal(rendered.prompt, 'Labels: [\n  "bug",\n  "ui"\n] Names: [\n  "ada",\n  "bob"\n]');
     assert.deepEqual(rendered.missing, []);
+  });
+
+  it("appends the request when the prompt names nothing from it", () => {
+    const rendered = renderWebhookPrompt("Triage this event.", githubPullRequest, "id");
+    assert.include(rendered.prompt, "Triage this event.\n\n<webhook-data-id>POST /api/hooks/task-1?source=github\n");
+    assert.include(rendered.prompt, "x-github-event: pull_request");
+    assert.include(rendered.prompt, githubPullRequest.bodyText);
+    assert.include(rendered.prompt, NOTE);
+    assert.deepEqual(rendered.missing, []);
+  });
+
+  it("does not append the request when the prompt already names it", () => {
+    const rendered = renderWebhookPrompt("Review {{body.pull_request.url}}", githubPullRequest, "id");
+    assert.notInclude(rendered.prompt, "POST /api/hooks/task-1");
+  });
+
+  it("does not append the request when a placeholder resolved empty", () => {
+    const rendered = renderWebhookPrompt("Event: {{body.missing}}", githubPullRequest, "id");
+    assert.equal(rendered.prompt, "Event: ");
+    assert.deepEqual(rendered.missing, ["body.missing"]);
+  });
+
+  it("marks an appended request that exceeds the copy limit", () => {
+    const rendered = renderWebhookPrompt(
+      "Triage this event.",
+      { ...githubPullRequest, bodyText: "x".repeat(200_000) },
+      "id",
+    );
+    assert.include(rendered.prompt, "[truncated]</webhook-data-id>");
+    assert.isAtMost(rendered.prompt.length, PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+  });
+
+  it("keeps an appended request inside the send cap, even for a prompt near it", () => {
+    const bare: WebhookRequest = {
+      method: "POST",
+      path: "/api/hooks/task-1",
+      query: "",
+      headers: {},
+      bodyText: "x".repeat(1_000),
+    };
+    const rendered = renderWebhookPrompt("a".repeat(119_780), bare, "id");
+    assert.isAtMost(rendered.prompt.length, PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    assert.include(rendered.prompt, "[truncated]");
+  });
+
+  it("does not split a surrogate pair when the copy is cut", () => {
+    const rendered = renderWebhookPrompt(
+      "Triage.",
+      {
+        method: "POST",
+        path: "/api/hooks/task-1",
+        query: "",
+        headers: {},
+        bodyText: `${"x".repeat(119_900)}😀tail`,
+      },
+      "id",
+    );
+    assert.isTrue(rendered.prompt.isWellFormed());
+    assert.include(rendered.prompt, "[truncated]");
+    assert.notInclude(rendered.prompt, "tail");
   });
 
   it("does not resolve inherited object properties", () => {

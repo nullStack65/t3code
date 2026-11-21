@@ -488,6 +488,25 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
+/** One read cursor per founder. Absent until a named founder visits a shared thread. */
+export const FounderVisits = Schema.Struct({
+  kameron: Schema.optional(Schema.DateTimeUtc),
+  jeff: Schema.optional(Schema.DateTimeUtc),
+});
+export type FounderVisits = typeof FounderVisits.Type;
+
+const FounderVisitsJson = Schema.Struct({
+  kameron: Schema.optional(Schema.DateTimeUtcFromString),
+  jeff: Schema.optional(Schema.DateTimeUtcFromString),
+});
+
+/** The last message each founder has actually been shown. Absent until they open or scroll. */
+export const FounderSeenMessages = Schema.Struct({
+  kameron: Schema.optional(MessageId),
+  jeff: Schema.optional(MessageId),
+});
+export type FounderSeenMessages = typeof FounderSeenMessages.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   inbox: Schema.optionalKey(ThreadInbox),
@@ -545,6 +564,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /**
+   * Per-founder read cursors. A shared thread keeps these apart so one founder reading does not
+   * move the other's unread mark. Absent on threads that still share `lastVisitedAt`.
+   */
+  visitsByFounder: Schema.optional(FounderVisits),
+  /** Last message each founder was shown. Writing it does not start a turn. */
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -572,6 +598,8 @@ export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 export const OrchestrationV2ThreadVisit = Schema.Struct({
   lastVisitedAt: OrchestrationV2AppThread.fields.lastVisitedAt,
   opens: OrchestrationV2AppThread.fields.opens,
+  visitsByFounder: Schema.optional(FounderVisits),
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
 });
 export type OrchestrationV2ThreadVisit = typeof OrchestrationV2ThreadVisit.Type;
 
@@ -583,7 +611,65 @@ export function applyOrchestrationV2ThreadVisit<Thread extends OrchestrationV2Ap
     ...thread,
     lastVisitedAt: visit.lastVisitedAt,
     ...(visit.opens === undefined ? {} : { opens: visit.opens }),
+    ...(visit.visitsByFounder === undefined ? {} : { visitsByFounder: visit.visitsByFounder }),
+    ...(visit.seenMessageByFounder === undefined
+      ? {}
+      : { seenMessageByFounder: visit.seenMessageByFounder }),
   };
+}
+
+/**
+ * The cursors after `founder` reads a shared thread. The first such visit copies the old shared
+ * cursor onto the other founder, then moves only the reader. A thread nobody has visited marks
+ * both founders read as of this visit, so a later reply is still unread for the founder who was
+ * not here. Leaving that founder unset hides the badge, because a missing stamp is not unread.
+ * A visit that is not newer returns the existing map, so the caller can skip a write.
+ */
+export function nextFounderVisits(
+  thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
+  founder: Founder,
+  visitedAt: DateTime.Utc,
+): FounderVisits {
+  const current = thread.visitsByFounder;
+  const seeded: FounderVisits =
+    current ??
+    (thread.lastVisitedAt === null
+      ? { kameron: visitedAt, jeff: visitedAt }
+      : { kameron: thread.lastVisitedAt, jeff: thread.lastVisitedAt });
+  const previous = seeded[founder];
+  if (
+    previous !== undefined &&
+    DateTime.toEpochMillis(previous) >= DateTime.toEpochMillis(visitedAt)
+  ) {
+    return current ?? seeded;
+  }
+  return { ...seeded, [founder]: visitedAt };
+}
+
+/** Mark-unread rewinds one founder's cursor and leaves the other's where it is. */
+export function rewindFounderVisit(
+  thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
+  founder: Founder,
+  visitedAt: DateTime.Utc,
+): FounderVisits {
+  const current = thread.visitsByFounder;
+  const seeded: FounderVisits =
+    current ??
+    (thread.lastVisitedAt === null
+      ? {}
+      : { kameron: thread.lastVisitedAt, jeff: thread.lastVisitedAt });
+  return { ...seeded, [founder]: visitedAt };
+}
+
+/** The message map after `founder` is shown a message. The same id returns the existing map. */
+export function nextFounderSeenMessage(
+  thread: Pick<OrchestrationV2AppThread, "seenMessageByFounder">,
+  founder: Founder,
+  messageId: MessageId,
+): FounderSeenMessages {
+  const current = thread.seenMessageByFounder;
+  if (current?.[founder] === messageId) return current ?? { [founder]: messageId };
+  return { ...(current ?? {}), [founder]: messageId };
 }
 
 /** A thread another agent drives: a local subagent or a task delegated from a linked environment. */
@@ -1184,6 +1270,14 @@ export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   forkHeadMessageId: Schema.optional(TrimmedNonEmptyString),
   claudeAttachmentBudget: Schema.optional(
     Schema.Struct({ bytesUsed: NonNegativeInt, pagesUsed: NonNegativeInt }),
+  ),
+  claudeModelLedger: Schema.optional(
+    Schema.NullOr(
+      Schema.Record(
+        Schema.String,
+        Schema.Struct({ input: NonNegativeInt, output: NonNegativeInt }),
+      ),
+    ),
   ),
 });
 export type OrchestrationV2ProviderThreadNativeMetadata =
@@ -2374,6 +2468,9 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
   standing: Schema.optional(StoredThreadStanding),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Per-founder read cursors. Older servers omit them; clients then keep the shared cursor. */
+  visitsByFounder: Schema.optional(FounderVisits),
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -2565,6 +2662,7 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  visitsByFounder: Schema.optional(FounderVisitsJson),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -2588,6 +2686,8 @@ export type OrchestrationV2AppThreadJson = typeof OrchestrationV2AppThreadJson.T
 export const OrchestrationV2ThreadVisitJson = Schema.Struct({
   lastVisitedAt: OrchestrationV2AppThreadJson.fields.lastVisitedAt,
   opens: OrchestrationV2AppThreadJson.fields.opens,
+  visitsByFounder: Schema.optional(FounderVisitsJson),
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
 });
 
 export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => ({
@@ -3027,6 +3127,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  visitsByFounder: Schema.optional(FounderVisitsJson),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -3387,11 +3488,23 @@ export const OrchestrationV2Command = Schema.Union([
     // Older servers ignore both fields and only move the read watermark.
     opened: Schema.optional(Schema.Boolean),
     searchQuery: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+    /**
+     * Whose cursor this visit moves. On a shared thread the other founder's cursor stays.
+     * Older servers ignore it and move the one shared watermark.
+     */
+    founder: Schema.optional(Founder),
+    /**
+     * The last message this founder was shown. Recorded with the visit so unread can move.
+     * It never starts a turn.
+     */
+    lastSeenMessageId: Schema.optional(MessageId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.mark-unread"),
     commandId: CommandId,
     threadId: ThreadId,
+    /** On a shared thread, rewind only this founder's cursor. Older servers ignore it. */
+    founder: Schema.optional(Founder),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),

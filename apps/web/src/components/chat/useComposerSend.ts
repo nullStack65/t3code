@@ -30,7 +30,6 @@ import {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
-import { buildSeenMarker } from "@t3tools/client-runtime/seen-marker";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   declinePendingApprovals,
@@ -272,11 +271,6 @@ interface ComposerSendInput {
   }) => Promise<AtomCommandResult<void, unknown>>;
   /** Links a checked-out pull request to its thread; best effort, failures only logged. */
   readonly linkCheckoutPullRequest: (threadRef: ScopedThreadRef, url: string) => void;
-}
-
-export function seenMarkerForSend(threadKey: string) {
-  const seenMarker = buildSeenMarker(threadKey);
-  return seenMarker ? { seenMarker } : {};
 }
 
 /**
@@ -1476,7 +1470,6 @@ export function useComposerSend(input: ComposerSendInput) {
               dispatchMode: turnDispatchMode,
               ...(freshArm === undefined ? {} : { freshContext: true }),
               ...(bootstrap ? { bootstrap } : {}),
-              ...seenMarkerForSend(scopedThreadKey(scopeThreadRef(environmentId, threadIdForSend))),
               createdAt: messageCreatedAt,
             },
           }

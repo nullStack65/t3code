@@ -425,6 +425,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
+  /** Absent from linked environments that predate it. */
+  latestRunCompletedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
   runtimeMode: RuntimeMode,
@@ -451,6 +453,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /** Absent from linked environments that predate it. */
+  lastVisitedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type OrchestratorMcpThreadListItem = typeof OrchestratorMcpThreadListItem.Type;
 

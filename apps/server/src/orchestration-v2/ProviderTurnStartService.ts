@@ -1,7 +1,10 @@
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { formatDigestForProvider } from "@t3tools/shared/messageDigest";
-import { formatSeenMarkerForProvider } from "@t3tools/shared/seenMarker";
+import {
+  formatSeenMarkerForProvider,
+  formatSharedSenderForProvider,
+} from "@t3tools/shared/seenMarker";
 import {
   CommandId,
   latestProviderTurnForAttempt,
@@ -912,13 +915,21 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
+      const sharedFounder =
+        projection.thread.inbox?.audience === "shared"
+          ? (providerMessage.sentBy?.founder ?? null)
+          : null;
       const userText = formatDigestForProvider(
         formatSeenMarkerForProvider(
-          projectComposerContextForProvider({
-            text: providerMessage.text,
-            records: providerMessage.context?.records ?? [],
-          }),
+          formatSharedSenderForProvider(
+            projectComposerContextForProvider({
+              text: providerMessage.text,
+              records: providerMessage.context?.records ?? [],
+            }),
+            sharedFounder,
+          ),
           providerMessage.seenMarker,
+          sharedFounder,
         ),
         run.digest,
       );

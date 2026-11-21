@@ -92,6 +92,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import { PreviewControlsToolkit } from "../../mcp/toolkits/previewControls/tools.ts";
 import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
 import { MessageToolkit } from "../../mcp/toolkits/message/tools.ts";
+import { ShowFileToolkit } from "../../mcp/toolkits/showFile/tools.ts";
 import { EnvironmentToolkit } from "../../mcp/toolkits/environment/tools.ts";
 import { ThemeToolkit } from "../../mcp/toolkits/theme/tools.ts";
 import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
@@ -496,25 +497,38 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
       cwd: "/workspace",
       settings: { ...DEFAULT_CLAUDE_SETTINGS, autoCompactWindow: "400000" },
       environment: { CLAUDE_CODE_PROMPT_CACHE_TTL: "5m" },
-      threadType: { type: "standing", contextWindow: 272_000, compactAt: 100_000, cacheTtl: "1h" },
+      threadType: {
+        type: "standing",
+        claudeContextWindow: 200_000,
+        codexContextWindow: 272_000,
+        compactAt: 165_000,
+        cacheTtl: "1h",
+        summaryCap: 8_000,
+      },
     });
     const settings = options.settings as {
       autoCompactWindow?: number;
       promptCacheTtl?: string;
       env?: Record<string, string>;
     };
-    assert.equal(settings.autoCompactWindow, 272_000);
+    assert.equal(settings.autoCompactWindow, 200_000);
     assert.equal(settings.promptCacheTtl, "1h");
-    assert.equal(settings.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "272000");
-    assert.equal(settings.env?.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "39.69");
+    assert.equal(settings.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "200000");
+    assert.equal(settings.env?.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, "91.66");
     assert.equal(settings.env?.CLAUDE_CODE_PROMPT_CACHE_TTL, "1h");
     assert.equal(options.env?.CLAUDE_CODE_PROMPT_CACHE_TTL, "1h");
+    const append = (options.systemPrompt as { append?: string }).append ?? "";
+    assert.match(append, /within 8000 tokens/);
     assert.equal(
-      ClaudeAdapterV2.claudeAutoCompactPercent(
-        { contextWindow: 272_000, compactAt: 100_000 },
+      ClaudeAdapterV2.claudeAppliedCompactAt({ contextWindow: 200_000, compactAt: 165_000 }),
+      164_988,
+    );
+    assert.equal(
+      ClaudeAdapterV2.claudeAppliedCompactAt(
+        { contextWindow: 200_000, compactAt: 168_000 },
         200_000,
       ),
-      "55.56",
+      166_986,
     );
   });
 
@@ -527,7 +541,7 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
       undefined,
       120_000,
     );
-    assert.equal(usage.autoCompactThreshold, 120_002);
+    assert.equal(usage.autoCompactThreshold, 119_977);
     assert.equal(
       ClaudeAdapterV2.claudeProviderTurnTokenUsage(
         { input_tokens: 10, output_tokens: 5 },
@@ -794,6 +808,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       ...Object.values(PreviewControlsToolkit.tools),
       ...Object.values(HtmlToolkit.tools),
       ...Object.values(MessageToolkit.tools),
+      ...Object.values(ShowFileToolkit.tools),
     ]
       .filter((tool) => Context.get(tool.annotations, Tool.Readonly))
       .map((tool) => `mcp__t3-code__${tool.name}`)
@@ -1019,6 +1034,16 @@ describe("ClaudeAdapterV2 full-access command approval", () => {
     });
 
   it("runs a full-access command instead of waiting, and still denies removal and permission-rule checks", () => {
+    assert.equal(
+      ClaudeAdapterV2.claudeCommandApprovalDisposition({
+        runtimePolicy: policy({}),
+        permissionMode: "bypassPermissions",
+        toolName: "Bash",
+        safetyReason: "",
+      }),
+      "allow",
+    );
+    // A workspace that disables bypass downgrades the session to auto, and the command still runs.
     assert.equal(
       ClaudeAdapterV2.claudeCommandApprovalDisposition({
         runtimePolicy: policy({}),
@@ -5138,18 +5163,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             Effect.map((result) => ({ type: "decision", result }) as const),
           ),
         );
+        // The workspace disables bypass, so the session opens in auto, but the thread is full
+        // access and the command still runs. A removal check or deny rule is what stops one.
         assert.equal(
           first.type,
-          "request",
-          "Full access must not auto-allow a policy-restricted command",
+          "decision",
+          "Full access runs the command even when the workspace downgrades the session",
         );
-        if (first.type !== "request") return;
-        assert.equal(first.event.runtimeRequest.kind, "command");
-        yield* harness.runtime.respondToRuntimeRequest({
-          requestId: first.event.runtimeRequest.id,
-          decision: "decline",
-        });
-        assert.equal((yield* Fiber.join(decision))?.behavior, "deny");
+        if (first.type !== "decision") return;
+        assert.equal(first.result?.behavior, "allow");
         assert.equal(openedOptions.permissionMode, "auto");
         assert.isUndefined(openedOptions.allowDangerouslySkipPermissions);
 
@@ -5180,7 +5202,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* start("/unrestricted");
         assert.equal(harness.getOpenedOptions()?.permissionMode, "bypassPermissions");
         assert.equal(harness.getOpenedOptions()?.allowDangerouslySkipPermissions, true);
-        // Forwarded asks (including ask rules and settings fallback) still need a decision
+        // The session opened with bypass, so a full-access command runs without a prompt,
         // before queued init/status frames arrive.
         for (const { phase, frame } of [
           {
@@ -5226,16 +5248,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.equal(
             forwardedFirst.type,
-            "request",
-            `CLI-forwarded Bash must ask before the queued ${phase} frame reaches the adapter`,
+            "decision",
+            `Full access runs the command before the queued ${phase} frame reaches the adapter`,
           );
-          if (forwardedFirst.type !== "request") return;
-          assert.equal(forwardedFirst.event.runtimeRequest.kind, "command");
-          yield* harness.runtime.respondToRuntimeRequest({
-            requestId: forwardedFirst.event.runtimeRequest.id,
-            decision: "decline",
-          });
-          assert.equal((yield* Fiber.join(forwardedDecision))?.behavior, "deny");
+          if (forwardedFirst.type !== "decision") return;
+          assert.equal(forwardedFirst.result?.behavior, "allow");
           yield* harness.offerAndWait(frame);
         }
         const fallbackDecision = yield* Effect.promise(() =>
@@ -5255,15 +5272,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           Queue.take(harness.runtimeRequestReceipts).pipe(
             Effect.map((event) => ({ type: "request", event }) as const),
           ),
-          Fiber.join(fallbackDecision).pipe(Effect.map(() => ({ type: "decision" }) as const)),
+          Fiber.join(fallbackDecision).pipe(
+            Effect.map((result) => ({ type: "decision", result }) as const),
+          ),
         );
-        assert.equal(fallbackFirst.type, "request");
-        if (fallbackFirst.type !== "request") return;
-        yield* harness.runtime.respondToRuntimeRequest({
-          requestId: fallbackFirst.event.runtimeRequest.id,
-          decision: "decline",
-        });
-        assert.equal((yield* Fiber.join(fallbackDecision))?.behavior, "deny");
+        assert.equal(fallbackFirst.type, "decision");
+        if (fallbackFirst.type !== "decision") return;
+        assert.equal(fallbackFirst.result?.behavior, "deny");
         yield* finish;
         const unrestrictedOptions = harness.getOpenedOptions();
         yield* start("/unrestricted");
@@ -5315,14 +5330,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               Effect.map((result) => ({ type: "decision", result }) as const),
             ),
           );
-          assert.equal(restoredFirst.type, "request");
-          if (restoredFirst.type !== "request") return;
-          assert.equal(restoredFirst.event.runtimeRequest.kind, "command");
-          yield* harness.runtime.respondToRuntimeRequest({
-            requestId: restoredFirst.event.runtimeRequest.id,
-            decision: "decline",
-          });
-          assert.equal((yield* Fiber.join(restoredDecision))?.behavior, "deny");
+          // The rejected bypass restore left the session in default mode. The thread is still full
+          // access, so the command runs instead of waiting for an approval that never comes.
+          assert.equal(restoredFirst.type, "decision");
+          if (restoredFirst.type !== "decision") return;
+          assert.equal(restoredFirst.result?.behavior, "allow");
           yield* finish;
           assert.equal(harness.terminalEvents().at(-1)?.status, "completed");
         }
@@ -6312,6 +6324,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       );
       const toolName = "mcp__weather__get_weather";
       const id = "weather-call";
+      // Full access runs the tool instead of waiting for approval, and the call starts either way.
       const permission = yield* Effect.promise(() =>
         harness.getOpenedOptions()!.canUseTool!(
           toolName,
@@ -6322,13 +6335,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             requestId: "weather-request",
           },
         ),
-      ).pipe(Effect.forkScoped);
-      const request = yield* Queue.take(harness.runtimeRequestReceipts);
-      yield* harness.runtime.respondToRuntimeRequest({
-        requestId: request.runtimeRequest.id,
-        decision: "accept",
-      });
-      yield* Fiber.join(permission);
+      );
+      assert.equal(permission?.behavior, "allow");
       yield* harness.offerAndWait(
         claudeSdkFrame({
           type: "assistant",

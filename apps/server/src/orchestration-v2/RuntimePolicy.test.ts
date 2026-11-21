@@ -213,15 +213,18 @@ it.effect("applies the installed thread type policy when a turn starts", () =>
     const standing = yield* resolve("Lead", "gpt-6.1-sol");
     assert.deepEqual(standing.threadType, {
       type: "standing",
-      contextWindow: 272_000,
-      compactAt: 100_000,
+      claudeContextWindow: 200_000,
+      codexContextWindow: 272_000,
+      compactAt: 165_000,
       cacheTtl: "1h",
+      summaryCap: 8_000,
     });
 
     const review = yield* resolve("Review PR 953", "gpt-6-astra");
     assert.deepEqual(review.threadType, {
       type: "review",
-      contextWindow: 272_000,
+      claudeContextWindow: 200_000,
+      codexContextWindow: 272_000,
       compactAt: 120_000,
       cacheTtl: "5m",
     });

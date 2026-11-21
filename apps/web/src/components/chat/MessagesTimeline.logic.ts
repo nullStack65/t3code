@@ -573,6 +573,18 @@ type MessagesTimelineRowContent =
       paths: ReadonlyArray<string>;
     }
   | {
+      /**
+       * Consecutive non-human turns (agent relays, automations, system notices
+       * and the work between them) collapsed into one expandable pill.
+       */
+      kind: "activity";
+      id: string;
+      createdAt: string | null;
+      count: number;
+      summary: string;
+      expanded: boolean;
+    }
+  | {
       kind: "turn-fold";
       deferredWorkItemIds?: ReadonlyArray<string>;
       id: string;
@@ -2387,6 +2399,148 @@ export function deriveMessagesTimelineRows(input: {
  * The timeline with only `sender`'s messages, for find's "From" filter. Tool calls, plans and
  * other rows say nothing about who sent them, so they drop out too.
  */
+/**
+ * Rows that stay on screen in a standing thread: a person's message, a guest's,
+ * the model's reply, and the cards a turn hands the reader (a plan to accept,
+ * a render, a message the agent sent on). Work logs, agent relays, automations
+ * and T3 Code notices collapse instead.
+ */
+const KEPT_ACTIVITY_ROW_KINDS = new Set<MessagesTimelineRow["kind"]>([
+  "proposed-plan",
+  "html-render",
+  "mcp-app",
+  "sent-message",
+  "viewed-images",
+]);
+
+export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
+  if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return true;
+  // A secret or a link is answered only on its own card, so it must not fold away.
+  if (
+    row.kind === "event" &&
+    (row.projectedItem.item.type === "secret_request" ||
+      row.projectedItem.item.type === "link_request")
+  ) {
+    return true;
+  }
+  if (row.kind !== "message" && row.kind !== "assistant-meta") return false;
+  const sender = resolveMessageSender(row.message);
+  return sender.kind === "person" || sender.kind === "guest" || sender.kind === "model";
+}
+
+/**
+ * The pill's key. Anchored to the human message the run sits after, or to the
+ * first row when the thread opens on activity, so the key survives rows
+ * streaming in and earlier history loading above it. A live turn's own rows use
+ * constant ids that vanish when the turn settles, so they never anchor a pill.
+ */
+function activityPillId(anchor: MessagesTimelineRow | undefined, run: MessagesTimelineRow[]): string {
+  return `activity:${anchor?.id ?? run[0]!.id}`;
+}
+
+/**
+ * The short word for one kind of collapsed activity, pluralized with a count.
+ * Kinds the row does not record stay "update".
+ */
+function activityUpdateWord(row: MessagesTimelineRow): string {
+  if (row.kind !== "message" && row.kind !== "assistant-meta") return "update";
+  switch (resolveMessageSender(row.message).kind) {
+    case "agent":
+      return "agent update";
+    case "automation":
+      return "automation";
+    case "system":
+      return "system notice";
+    default:
+      return "update";
+  }
+}
+
+/** `14 agent updates`, `3 automations and 1 system notice`. */
+export function activityUpdateSummary(rows: ReadonlyArray<MessagesTimelineRow>): string {
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+  for (const row of rows) {
+    if (row.kind !== "message" && row.kind !== "assistant-meta") continue;
+    const word = activityUpdateWord(row);
+    if (!counts.has(word)) order.push(word);
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  if (order.length === 0) {
+    return rows.length === 1 ? "1 update" : `${rows.length} updates`;
+  }
+  return order
+    .map((word) => {
+      const count = counts.get(word) ?? 0;
+      const plural =
+        word === "automation" ? (count === 1 ? "automation" : "automations") : `${word}s`;
+      return `${count} ${count === 1 ? word : plural}`;
+    })
+    .join(" and ");
+}
+
+/**
+ * Collapse each run of activity between human turns into one expandable pill,
+ * so the founder's messages and the model's replies to them stay in place.
+ * Expanding a run shows exactly the rows it replaced; nothing is dropped.
+ */
+export function collapseTimelineActivity(
+  rows: MessagesTimelineRow[],
+  expandedIds: ReadonlySet<string>,
+): MessagesTimelineRow[] {
+  const collapsed: MessagesTimelineRow[] = [];
+  let run: MessagesTimelineRow[] = [];
+  let anchor: MessagesTimelineRow | undefined;
+  const flush = () => {
+    if (run.length === 0) return;
+    const id = activityPillId(anchor, run);
+    const pill: MessagesTimelineRow = {
+      kind: "activity",
+      id,
+      createdAt: run[0]!.createdAt,
+      count: run.length,
+      summary: activityUpdateSummary(run),
+      expanded: expandedIds.has(id),
+    };
+    collapsed.push(pill);
+    if (pill.expanded) for (const row of run) collapsed.push(row);
+    run = [];
+  };
+  for (const row of rows) {
+    if (timelineRowIsHumanConversation(row)) {
+      flush();
+      collapsed.push(row);
+      anchor = row;
+    } else {
+      run.push(row);
+    }
+  }
+  flush();
+  return collapsed;
+}
+
+/** The pill hiding `entryId`, if one does, so a search hit or a restored scroll position can open it. */
+export function activityPillIdForEntry(
+  rows: MessagesTimelineRow[],
+  entryId: string,
+): string | undefined {
+  let anchor: MessagesTimelineRow | undefined;
+  let run: MessagesTimelineRow[] = [];
+  const match = (): string | undefined =>
+    run.some((row) => row.id === entryId) ? activityPillId(anchor, run) : undefined;
+  for (const row of rows) {
+    if (timelineRowIsHumanConversation(row)) {
+      const found = match();
+      if (found !== undefined) return found;
+      run = [];
+      anchor = row;
+    } else {
+      run.push(row);
+    }
+  }
+  return match();
+}
+
 export function filterTimelineRowsBySender(
   rows: MessagesTimelineRow[],
   sender: OrchestrationMessageSenderFilter | null,
@@ -2859,6 +3013,16 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.toolSurface === bw.toolSurface &&
         Equal.equals(a.toolIcon, bw.toolIcon) &&
         a.hasFailure === bw.hasFailure
+      );
+    }
+
+    case "activity": {
+      const ba = b as typeof a;
+      return (
+        a.createdAt === ba.createdAt &&
+        a.count === ba.count &&
+        a.summary === ba.summary &&
+        a.expanded === ba.expanded
       );
     }
 

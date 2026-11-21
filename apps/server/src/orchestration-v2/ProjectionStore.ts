@@ -1928,6 +1928,12 @@ export function threadShellFromProjection(
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     ...(projection.thread.standing ? { standing: projection.thread.standing } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
+    ...(projection.thread.visitsByFounder === undefined
+      ? {}
+      : { visitsByFounder: projection.thread.visitsByFounder }),
+    ...(projection.thread.seenMessageByFounder === undefined
+      ? {}
+      : { seenMessageByFounder: projection.thread.seenMessageByFounder }),
     opens: projection.thread.opens ?? null,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     lastTitleRegeneration: projection.thread.lastTitleRegeneration ?? null,
@@ -2252,7 +2258,7 @@ const INLINE_WORK_OUTPUT = new RegExp(
   "i",
 );
 const TOOL_NAME_PREFIX = /"toolName":"/i;
-const INLINE_TOOL_NAME = /(?:delegate.task|send.to.user)"/is;
+const INLINE_TOOL_NAME = /(?:delegate.task|send.to.user|show.file)"/is;
 
 const isInlineWorkOutput = (payloadJson: string) => {
   if (INLINE_WORK_OUTPUT.test(payloadJson)) return true;

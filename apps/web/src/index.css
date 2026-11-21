@@ -227,6 +227,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --animate-status-ping: status-ping 2s infinite;
   /* A running bot blinks once every 4s: two discrete frames, nothing in between. */
   --animate-bot-blink: bot-blink 4s step-end infinite;
+  /* Idle bots breathe once every 6s, a slow stepped opacity dip. */
+  --animate-bot-breathe: bot-breathe 6s infinite;
+  /* A working bot's visor sweeps from the left eye to the right, four discrete stops. */
+  --animate-bot-scan: bot-scan 1.4s steps(4, end) infinite;
+  /* A working bot's antenna tip pulses on the same cadence as the scan. */
+  --animate-bot-antenna: bot-antenna 1.4s steps(4, end) infinite;
+  /* A bot that is waiting holds a slow stepped glow, calmer than working. */
+  --animate-bot-wait: bot-wait 3.2s infinite;
   /* Stash pulses hold a highlight for 1.2s; the row then eases back over 200ms, the count snaps.
      The row alternates two identical keyframes so each stash restarts it without a remount. */
   --animate-stash-pulse-row: stash-pulse-row 1400ms;
@@ -339,6 +347,67 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     95%,
     98% {
       transform: scaleY(0.15);
+    }
+  }
+  @keyframes bot-breathe {
+    0%,
+    70% {
+      opacity: 1;
+      animation-timing-function: steps(4);
+    }
+    80%,
+    92% {
+      opacity: 0.55;
+      animation-timing-function: steps(4);
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+  @keyframes bot-scan {
+    /* Four equal holds from the left eye to the right. The distance is in
+       viewBox units: a px translate would shrink with the avatar. The first and
+       last keyframes match so steps(4, end) rests on every stop. */
+    0%,
+    24% {
+      transform: translateX(0);
+    }
+    25%,
+    49% {
+      transform: translateX(3);
+    }
+    50%,
+    74% {
+      transform: translateX(6);
+    }
+    75%,
+    100% {
+      transform: translateX(9);
+    }
+  }
+  @keyframes bot-antenna {
+    0%,
+    50% {
+      opacity: 1;
+    }
+    75%,
+    100% {
+      opacity: 0.35;
+    }
+  }
+  @keyframes bot-wait {
+    0%,
+    60% {
+      opacity: 1;
+      animation-timing-function: steps(3);
+    }
+    75%,
+    90% {
+      opacity: 0.4;
+      animation-timing-function: steps(3);
+    }
+    100% {
+      opacity: 1;
     }
   }
   @keyframes status-pulse {

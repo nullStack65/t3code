@@ -12,6 +12,9 @@ import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../test/render";
+// useSettings loads the mocked command module while threads.ts is still evaluating,
+// so the factory reads threadEnvironment from here instead of importing it itself.
+import { threadEnvironment } from "../state/threads";
 import { useRightPanelStore } from "../rightPanelStore";
 
 const state = vi.hoisted(() => ({
@@ -32,18 +35,15 @@ vi.mock(import("../state/use-atom-query-runner"), async (original) => ({
   ...(await original()),
   useAtomQueryRunner: (() => state.search) as never,
 }));
-vi.mock(import("../state/use-atom-command"), async (original) => {
-  const { threadEnvironment } = await import("../state/threads");
-  return {
-    ...(await original()),
-    useAtomCommand: ((command: unknown) =>
-      command === threadEnvironment.linkPullRequest
-        ? state.link
-        : command === threadEnvironment.unlinkPullRequest
-          ? state.unlink
-          : state.openEditor) as never,
-  };
-});
+vi.mock(import("../state/use-atom-command"), async (original) => ({
+  ...(await original()),
+  useAtomCommand: ((command: unknown) =>
+    command === threadEnvironment.linkPullRequest
+      ? state.link
+      : command === threadEnvironment.unlinkPullRequest
+        ? state.unlink
+        : state.openEditor) as never,
+}));
 vi.mock(import("../state/session"), async (original) => {
   const { useSyncExternalStore } = await import("react");
   const readEnvironmentScope = (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>

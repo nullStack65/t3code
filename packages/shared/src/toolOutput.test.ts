@@ -6,6 +6,7 @@ import {
   mcpToolResultOutput,
   SEND_TO_USER_MAX_LENGTH,
   sentMessageFromToolItem,
+  showFileFromToolItem,
   toolOutputImages,
   toolOutputIndicatesFailure,
 } from "./toolOutput.ts";
@@ -25,6 +26,50 @@ describe("compactDynamicToolOutput", () => {
     }
   });
 
+  it("keeps a shown file's path, size, and type and drops its bytes", () => {
+    const secret = "SECRET_FILE_BYTES_9f3a";
+    const showFile = {
+      path: "/tmp/answers.md",
+      byteSize: secret.length,
+      mediaType: "text/markdown",
+      line: 3,
+      contents: secret,
+    };
+    const output = {
+      showFile,
+      contents: secret,
+      message: "Shown in the file viewer. Do not read or quote the file.",
+    };
+    expect(compactDynamicToolOutput(output)).toEqual({
+      showFile: {
+        path: "/tmp/answers.md",
+        byteSize: secret.length,
+        mediaType: "text/markdown",
+        line: 3,
+      },
+    });
+    expect(JSON.stringify(compactDynamicToolOutput(output))).not.toContain(secret);
+    expect(compactDynamicToolOutput({ ...showFile, contents: secret })).toBeUndefined();
+    expect(showFileFromToolItem({ toolName: "show_file", output })).toEqual({
+      path: "/tmp/answers.md",
+      byteSize: secret.length,
+      mediaType: "text/markdown",
+      line: 3,
+    });
+    expect(showFileFromToolItem({ toolName: "execute", output })).toEqual({
+      path: "/tmp/answers.md",
+      byteSize: secret.length,
+      mediaType: "text/markdown",
+      line: 3,
+    });
+    expect(
+      showFileFromToolItem({
+        toolName: "execute",
+        output: { path: "/tmp/answers.md", byteSize: 1, mediaType: "text/plain", contents: secret },
+      }),
+    ).toBeUndefined();
+    expect(showFileFromToolItem({ toolName: "read_file", output })).toBeUndefined();
+  });
   it("keeps a send_to_user message up to its limit, even in 3-byte characters", () => {
     const longest = "界".repeat(SEND_TO_USER_MAX_LENGTH);
     for (const sentMessage of ["Draft:\n\n> Hi Sam,", longest]) {

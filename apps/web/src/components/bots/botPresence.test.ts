@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveBotPresence, sortBotThreads, splitStandingThreads } from "./botPresence";
+import {
+  partitionBotGroups,
+  resolveBotPresence,
+  sortBotThreads,
+  splitStandingThreads,
+} from "./botPresence";
 
 describe("resolveBotPresence", () => {
   it.each(["Pending Approval", "Awaiting Input", "Guest Request", "Plan Ready"] as const)(
@@ -22,6 +27,22 @@ describe("resolveBotPresence", () => {
       line: "Failed",
       badge: null,
     });
+  });
+
+  it("holds a calm waiting state for waiting and usage-limited bots", () => {
+    expect(resolveBotPresence({ label: "Waiting" }, "Ops")).toEqual({
+      avatarState: "waiting",
+      line: "Waiting",
+      badge: null,
+    });
+    expect(resolveBotPresence({ label: "Failed", errorClass: "usage_limit" }, "Ops")).toEqual({
+      avatarState: "waiting",
+      line: "Limited",
+      badge: null,
+    });
+    expect(
+      resolveBotPresence({ label: "Failed", errorClass: "provider_error" }, "Ops").avatarState,
+    ).toBe("failed");
   });
 
   it("falls back to the role line when idle", () => {
@@ -63,5 +84,20 @@ describe("splitStandingThreads", () => {
     const { bots, rest } = splitStandingThreads(threads);
     expect(bots.map((thread) => thread.id)).toEqual(["b", "c", "d"]);
     expect(rest.map((thread) => thread.id)).toEqual(["a", "e"]);
+  });
+});
+
+describe("partitionBotGroups", () => {
+  it("puts shared-inbox bots in their own group and leaves the rest as mine", () => {
+    const thread = (id: string, audience?: string) => ({
+      id,
+      source: { inbox: audience === undefined ? null : { audience } },
+    });
+    expect(
+      partitionBotGroups([thread("shared", "shared"), thread("jeff", "jeff"), thread("open")]),
+    ).toEqual({
+      shared: [thread("shared", "shared")],
+      mine: [thread("jeff", "jeff"), thread("open")],
+    });
   });
 });

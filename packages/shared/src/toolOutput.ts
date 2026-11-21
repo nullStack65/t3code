@@ -9,6 +9,7 @@ import {
   readHtmlRenderReference,
   type HtmlRenderReference,
 } from "./htmlRender.ts";
+import { readShowFileReference, SHOW_FILE_TOOL_NAME, type ShowFileReference } from "./showFile.ts";
 import {
   claudeMcpToolName,
   MCP_APP_OUTPUT_KEY,
@@ -49,6 +50,7 @@ interface CompactToolOutput {
   scheduledTaskId?: string;
   status?: "rolled_back";
   htmlRender?: HtmlRenderReference;
+  showFile?: ShowFileReference;
   [MCP_APP_OUTPUT_KEY]?: McpAppReference;
   thread?: { threadId: string };
   threads?: Array<{ threadId?: string; status?: "rolled_back" }>;
@@ -148,6 +150,8 @@ export function compactDynamicToolOutput(value: unknown): CompactToolOutput | un
     }
     const htmlRender = readHtmlRenderReference(data.htmlRender);
     if (htmlRender !== undefined) output.htmlRender = htmlRender;
+    const showFile = readShowFileReference(data);
+    if (showFile !== undefined) output.showFile = showFile;
     const mcpApp = readMcpAppReference(data[MCP_APP_OUTPUT_KEY]);
     if (mcpApp !== undefined) output[MCP_APP_OUTPUT_KEY] = mcpApp;
     const nestedThreadId = Predicate.isObject(data.thread)
@@ -214,6 +218,20 @@ export function htmlRenderFromToolItem(item: {
   }
   const output = compactDynamicToolOutput(item.output);
   return output?.isError ? undefined : output?.htmlRender;
+}
+
+export function showFileFromToolItem(item: {
+  readonly toolName: string | null | undefined;
+  readonly output?: unknown;
+}): ShowFileReference | undefined {
+  if (
+    item.toolName !== OPENCODE_CODE_MODE_TOOL_NAME &&
+    resolveT3McpToolId(item.toolName) !== SHOW_FILE_TOOL_NAME
+  ) {
+    return undefined;
+  }
+  const output = compactDynamicToolOutput(item.output);
+  return output?.isError ? undefined : output?.showFile;
 }
 
 /** The text `send_to_user` showed the user, which clients render as the agent's own words. */

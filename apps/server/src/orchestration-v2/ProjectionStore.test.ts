@@ -4702,6 +4702,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         { toolName: "view_image", viewedImagePath: "/repo/screenshot.png" },
         { toolName: "mcp__docs__chart", output: { [MCP_APP_OUTPUT_KEY]: { uri: "ui://chart" } } },
         { toolName: "mcp__t3-code__send_to_user" },
+        { toolName: "mcp__t3-code__show_file" },
         // OpenCode Code Mode reports a nested send_to_user call as one `execute` item.
         { toolName: "execute", output: JSON.stringify({ sentMessage: "Draft" }) },
       ]) {
@@ -8944,17 +8945,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         { now, autoResume: true, snooze: false },
         { now, autoResume: false, snooze: true },
       ]) {
+        // The query still returns a snooze-only candidate. A usage limit no longer snoozes,
+        // so the worker is what drops it.
         const armed = (yield* store.getLimitRecoveryCandidates(options))
           .filter((row) => children.includes(row.id))
-          .filter(
-            (row) =>
-              limitRecoveryCommand(
-                row,
-                options.autoResume,
-                DateTime.toEpochMillis(now),
-                options.snooze,
-              )?.type === "thread.metadata.update",
-          )
           .map((row) => row.id);
         assert.deepEqual(
           armed,

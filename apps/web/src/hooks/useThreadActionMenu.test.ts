@@ -35,10 +35,9 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
-vi.mock("react", () => ({
-  useCallback: (callback: unknown) => callback,
-  useMemo: (factory: () => unknown) => factory(),
-}));
+// The hook no longer calls React itself. A total `react` mock here leaks
+// through the import graph (tooltip.tsx needs createContext) and the suite
+// fails to load. Leave the real module in place.
 vi.mock("@tanstack/react-router", () => ({
   useRouter: () => ({ navigate: async () => recordEffect("project-settings") }),
 }));
@@ -49,6 +48,8 @@ vi.mock("../state/session", () => ({
 vi.mock("../state/entities", () => ({
   readEnvironmentServerConfigLoaded: () => true,
   readEnvironmentSupportsAutoSettleOptOut: () => true,
+  // Standing support is off so these cases stay about operate permission.
+  readEnvironmentSupportsThreadStanding: () => false,
   readThreadShell: () => ({
     id: "thread",
     environmentId: "secondary",
