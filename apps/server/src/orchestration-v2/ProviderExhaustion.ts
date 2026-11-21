@@ -30,4 +30,13 @@ export const ProviderExhaustion = {
     if (instanceId === undefined) exhaustedUntil.clear();
     else exhaustedUntil.delete(instanceId);
   },
+  /**
+   * Drop the remembered limit, then mark it again when the probe still sees one.
+   * The probe runs after the clear, so a vendor that is still out is not left available.
+   */
+  reapply(instanceId: string, probe: () => number | null): void {
+    ProviderExhaustion.clear(instanceId);
+    const until = probe();
+    if (until !== null) ProviderExhaustion.mark(instanceId, until);
+  },
 };

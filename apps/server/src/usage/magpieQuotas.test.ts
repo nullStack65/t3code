@@ -14,6 +14,7 @@ import {
   gatewayOrigin,
   isPrivateOrigin,
   magpieQuotasToAccounts,
+  magpieRefreshTargets,
   makeMagpieApi,
   openCodeBaseUrls,
 } from "./magpieQuotas.ts";
@@ -137,6 +138,8 @@ describe("magpieQuotasToAccounts", () => {
       "magpie-go:oc-billed",
       "magpie-go:oc-other",
       "claude:second@example.com",
+      "grok:jeffrey.smith@closura.ai",
+      "grok:kameron.smith@closura.ai",
     ]);
     const team = accounts[2]!;
     const billed = accounts[3]!;
@@ -332,6 +335,86 @@ describe("makeMagpieApi", () => {
       const { result, seen } = yield* run("gateway-key", 401);
       expect(seen[0]!.authorization).toBe("Bearer gateway-key");
       expect(result._tag === "Failure" && result.failure.detail).toMatch(/refused the key/);
+    }),
+  );
+
+  it("rereads listed cards, or the driver's provider when none are listed", () => {
+    expect(
+      magpieRefreshTargets(entries.slice(0, 2), [ProviderDriverKind.make("claudeAgent")]),
+    ).toEqual([{ provider: "claude", user: "first@example.com" }]);
+    expect(magpieRefreshTargets([], [ProviderDriverKind.make("codex")])).toEqual([
+      { provider: "codex" },
+    ]);
+    expect(magpieRefreshTargets([], [])).toEqual([]);
+  });
+
+  it.effect("posts the live quota refresh and keeps the last card list", () =>
+    Effect.gen(function* () {
+      const seen: Array<{ url: string; authorization: string | undefined }> = [];
+      const claude = entries[0]!;
+      const codex = entries[1]!;
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          seen.push({ url: request.url, authorization: request.headers.authorization });
+          const body = request.url.includes("/api/usage/quotas/refresh")
+            ? request.url.includes("provider=codex")
+              ? [codex]
+              : [claude, codex]
+            : { object: "list", data: [claude, codex] };
+          return HttpClientResponse.fromWeb(request, Response.json(body));
+        }),
+      );
+      const result = yield* makeMagpieApi.pipe(
+        Effect.flatMap((api) =>
+          api.refreshLive({
+            url: "http://127.0.0.1:3425/v1",
+            managementKey: "gateway-key",
+            drivers: [ProviderDriverKind.make("claudeAgent"), ProviderDriverKind.make("codex")],
+          }),
+        ),
+        Effect.result,
+        Effect.provideService(HttpClient.HttpClient, http),
+      );
+      expect(seen.map((request) => request.url)).toEqual([
+        "http://127.0.0.1:3425/v1/magpie/quotas",
+        "http://127.0.0.1:3425/api/usage/quotas/refresh?provider=claude&user=first%40example.com",
+        "http://127.0.0.1:3425/api/usage/quotas/refresh?provider=codex&user=first%40example.com",
+      ]);
+      expect(seen.every((request) => request.authorization === "Bearer gateway-key")).toBe(true);
+      expect(result._tag === "Success" && result.success.map((account) => account.id)).toEqual([
+        "codex:first@example.com",
+      ]);
+    }),
+  );
+
+  it.effect("rejects a cached quota list from the live refresh", () =>
+    Effect.gen(function* () {
+      const seen: string[] = [];
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          seen.push(request.url);
+          const body = request.url.includes("/api/usage/quotas/refresh")
+            ? { data: entries.slice(0, 1) }
+            : { object: "list", data: entries.slice(0, 1) };
+          return HttpClientResponse.fromWeb(request, Response.json(body));
+        }),
+      );
+      const result = yield* makeMagpieApi.pipe(
+        Effect.flatMap((api) =>
+          api.refreshLive({
+            url: "http://127.0.0.1:3425/v1",
+            managementKey: "",
+            drivers: [ProviderDriverKind.make("claudeAgent")],
+          }),
+        ),
+        Effect.result,
+        Effect.provideService(HttpClient.HttpClient, http),
+      );
+      expect(seen.some((url) => url.includes("/v1/magpie/quotas/refresh"))).toBe(false);
+      expect(seen.some((url) => url.includes("/api/usage/quotas/refresh?provider=claude"))).toBe(
+        true,
+      );
+      expect(result._tag === "Failure" && result.failure.detail).toMatch(/cached quota list/);
     }),
   );
 });

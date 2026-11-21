@@ -688,6 +688,11 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
     workspaceSnapshotsOnDemand: Schema.optional(Schema.Boolean),
     /** As on `subscribeServerConfig`: add /usage-limits to the replied snapshot. */
     usageLimitsCommand: Schema.optional(Schema.Boolean),
+    /**
+     * Usage Limits refresh: reread Magpie quotas live and re-probe exhaustion.
+     * Automatic refreshes omit this and keep the cached gateway read.
+     */
+    liveQuotaRefresh: Schema.optional(Schema.Boolean),
     /** As on `subscribeServerConfig`: a failed cwd scan replies with the machine catalog as a pending snapshot. */
     providerCatalogsOnDemand: Schema.optional(Schema.Boolean),
     /**

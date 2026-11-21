@@ -1,7 +1,6 @@
 /**
- * Magpie gateway quotas: `GET /v1/magpie/quotas` reports every pooled account.
- * Gateways are found from the base URLs enabled instances already use; an
- * origin that does not answer the route is not a gateway and is dropped.
+ * Live reread is `POST /api/usage/quotas/refresh`. An object body is the cached list, not a success.
+ * Gateways come from enabled instances; an origin that does not answer is dropped.
  */
 import * as NodeOS from "node:os";
 
@@ -75,6 +74,22 @@ function driverFor(provider: string): ProviderDriverKind | null {
   }
 }
 
+/** The gateway provider `magpie quota refresh <provider>` rereads for a driver. */
+function magpieProviderForDriver(driver: ProviderDriverKind): string | null {
+  switch (driver) {
+    case "claudeAgent":
+      return "claude";
+    case "codex":
+      return "codex";
+    case "opencode":
+      return "opencode";
+    case "grok":
+      return "grok";
+    default:
+      return null;
+  }
+}
+
 function slug(value: string): string {
   return value
     .toLowerCase()
@@ -95,9 +110,7 @@ function magpieWindow(
   const [span = window.name, ...scopeParts] = window.name.split("·").map((part) => part.trim());
   const scope = scopeParts.join(" · ");
   const match = /^(?:(\d+(?:\.\d+)?)\s+)?(minute|hour|day|week|month)s?$/i.exec(span);
-  const mins = match
-    ? Number(match[1] ?? 1) * MINUTES[match[2]!.toLowerCase()]!
-    : undefined;
+  const mins = match ? Number(match[1] ?? 1) * MINUTES[match[2]!.toLowerCase()]! : undefined;
   const kind: ServerProviderUsageWindow["kind"] =
     mins === undefined
       ? "other"
@@ -206,21 +219,55 @@ export function magpieQuotasToAccounts(
   return accounts;
 }
 
+export interface MagpieQuotaTarget {
+  readonly provider: string;
+  readonly user?: string | undefined;
+}
+
+const QuotaList = Schema.Array(QuotaEntry);
+const decodeQuotaList = Schema.decodeUnknownEffect(QuotaList);
+const CACHED_QUOTA_LIST =
+  "The Magpie gateway returned a cached quota list instead of rereading it.";
+
+/** Cards to reread: known accounts for the drivers, or the driver's own provider when none are listed. */
+export function magpieRefreshTargets(
+  entries: ReadonlyArray<MagpieQuotaEntry>,
+  drivers: ReadonlyArray<ProviderDriverKind>,
+): ReadonlyArray<MagpieQuotaTarget> {
+  const wanted = new Set(drivers);
+  const seen = new Set<string>();
+  const targets: MagpieQuotaTarget[] = [];
+  const add = (provider: string, user?: string) => {
+    const key = `${provider}\n${user ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    targets.push(user ? { provider, user } : { provider });
+  };
+  for (const entry of entries) {
+    const driver = driverFor(entry.provider);
+    if (!driver || (wanted.size > 0 && !wanted.has(driver))) continue;
+    const user = entry.user?.trim();
+    add(entry.provider, user || undefined);
+  }
+  if (targets.length === 0) {
+    for (const driver of drivers) {
+      const provider = magpieProviderForDriver(driver);
+      if (provider) add(provider);
+    }
+  }
+  return targets;
+}
+
 export const makeMagpieApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
-  const readAccounts = Effect.fn("MagpieApi.readAccounts")(function* (config: {
-    readonly url: string;
-    readonly managementKey: string;
-  }): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
-    const origin = gatewayOrigin(config.url);
-    if (!origin) {
-      return yield* new UsageLimitSourceError({ detail: "The Magpie gateway URL is not valid." });
-    }
-    const request = HttpClientRequest.get(`${origin}/v1/magpie/quotas`).pipe(
-      config.managementKey ? HttpClientRequest.bearerToken(config.managementKey) : (r) => r,
-    );
-    // One deadline covers headers and body: a stalled body must not hold the refresh lock.
-    const body = yield* client.execute(request).pipe(
+  const quotaRequest = (request: HttpClientRequest.HttpClientRequest, managementKey: string) =>
+    managementKey ? HttpClientRequest.bearerToken(managementKey)(request) : request;
+  const readJson = <S extends Schema.Top>(
+    request: HttpClientRequest.HttpClientRequest,
+    schema: S,
+    timeout: "5 seconds" | "45 seconds",
+  ) =>
+    client.execute(request).pipe(
       Effect.flatMap((response) =>
         response.status === 401 || response.status === 403
           ? Effect.fail(
@@ -229,25 +276,93 @@ export const makeMagpieApi = Effect.gen(function* () {
               }),
             )
           : HttpClientResponse.filterStatusOk(response).pipe(
-              Effect.flatMap(HttpClientResponse.schemaBodyJson(QuotasResponse)),
-              Effect.mapError(
-                () =>
-                  new UsageLimitSourceError({
-                    detail: "The Magpie gateway did not report quotas.",
-                  }),
+              Effect.flatMap((ok) => HttpClientResponse.schemaBodyJson(schema)(ok)),
+              Effect.mapError((error) =>
+                isUsageLimitSourceError(error)
+                  ? error
+                  : new UsageLimitSourceError({
+                      detail: "The Magpie gateway did not report quotas.",
+                    }),
               ),
             ),
       ),
-      Effect.timeout("5 seconds"),
+      Effect.timeout(timeout),
       Effect.mapError((error) =>
         isUsageLimitSourceError(error)
           ? error
           : new UsageLimitSourceError({ detail: "The Magpie gateway did not answer." }),
       ),
     );
-    return magpieQuotasToAccounts(body.data, DateTime.formatIso(yield* DateTime.now));
+  const readEntries = Effect.fn("MagpieApi.readEntries")(function* (config: {
+    readonly url: string;
+    readonly managementKey: string;
+  }) {
+    const origin = gatewayOrigin(config.url);
+    if (!origin) {
+      return yield* new UsageLimitSourceError({ detail: "The Magpie gateway URL is not valid." });
+    }
+    const body = yield* readJson(
+      quotaRequest(HttpClientRequest.get(`${origin}/v1/magpie/quotas`), config.managementKey),
+      QuotasResponse,
+      "5 seconds",
+    );
+    return body.data;
   });
-  return { readAccounts };
+  const readAccounts = Effect.fn("MagpieApi.readAccounts")(function* (config: {
+    readonly url: string;
+    readonly managementKey: string;
+  }): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
+    const entries = yield* readEntries(config);
+    return magpieQuotasToAccounts(entries, DateTime.formatIso(yield* DateTime.now));
+  });
+  // `magpie quota refresh <provider> [<account>]`: POST /api/usage/quotas/refresh.
+  // POST /v1/magpie/quotas/refresh answers 200 with the cached list and does not
+  // run Claude Code /usage, so an object body is not a successful reread.
+  const refreshLive = Effect.fn("MagpieApi.refreshLive")(function* (config: {
+    readonly url: string;
+    readonly managementKey: string;
+    readonly drivers: ReadonlyArray<ProviderDriverKind>;
+  }): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
+    const origin = gatewayOrigin(config.url);
+    if (!origin) {
+      return yield* new UsageLimitSourceError({ detail: "The Magpie gateway URL is not valid." });
+    }
+    const listed = yield* readEntries(config).pipe(
+      Effect.orElseSucceed((): ReadonlyArray<MagpieQuotaEntry> => []),
+    );
+    const targets = magpieRefreshTargets(listed, config.drivers);
+    if (targets.length === 0) {
+      return yield* new UsageLimitSourceError({
+        detail: "The Magpie gateway has no quota cards to reread.",
+      });
+    }
+    let latest: ReadonlyArray<MagpieQuotaEntry> | null = null;
+    for (const target of targets) {
+      const query = `provider=${encodeURIComponent(target.provider)}${
+        target.user ? `&user=${encodeURIComponent(target.user)}` : ""
+      }`;
+      const request = quotaRequest(
+        HttpClientRequest.post(`${origin}/api/usage/quotas/refresh?${query}`).pipe(
+          HttpClientRequest.bodyJsonUnsafe({}),
+        ),
+        config.managementKey,
+      );
+      const parsed = yield* readJson(request, Schema.Unknown, "45 seconds");
+      if (!Array.isArray(parsed)) {
+        return yield* new UsageLimitSourceError({ detail: CACHED_QUOTA_LIST });
+      }
+      latest = yield* decodeQuotaList(parsed).pipe(
+        Effect.mapError(
+          () => new UsageLimitSourceError({ detail: "The Magpie gateway did not report quotas." }),
+        ),
+      );
+    }
+    if (!latest) {
+      return yield* new UsageLimitSourceError({ detail: CACHED_QUOTA_LIST });
+    }
+    return magpieQuotasToAccounts(latest, DateTime.formatIso(yield* DateTime.now));
+  });
+  return { readAccounts, refreshLive };
 });
 
 /** `http://127.0.0.1:3425/v1` → `http://127.0.0.1:3425`; anything not http(s) is no gateway. */
@@ -325,11 +440,18 @@ function stringField(record: Record<string, unknown>, key: string): string | und
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+export interface MagpieGatewayRoute {
+  readonly instanceId: string;
+  readonly driver: ProviderDriverKind;
+  readonly origin: string;
+}
+
 /**
- * Distinct gateway origins the enabled provider instances send requests to.
- * A file that is missing or unreadable contributes nothing.
+ * Enabled instances and the private gateway each one sends requests to.
+ * A file that is missing or unreadable contributes nothing. One instance keeps
+ * the first private origin it names.
  */
-export const discoverGatewayOrigins = Effect.fn("discoverGatewayOrigins")(function* (
+export const discoverMagpieRoutes = Effect.fn("discoverMagpieRoutes")(function* (
   settings: Pick<ServerSettings, "providerInstances">,
   env: NodeJS.ProcessEnv,
 ) {
@@ -337,8 +459,16 @@ export const discoverGatewayOrigins = Effect.fn("discoverGatewayOrigins")(functi
   const path = yield* Path.Path;
   const home = env.HOME || env.USERPROFILE || NodeOS.homedir();
   const read = (file: string) => fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
-  const urls: string[] = [];
-  for (const instance of Object.values(settings.providerInstances)) {
+  const routes: MagpieGatewayRoute[] = [];
+  const seen = new Set<string>();
+  const consider = (instanceId: string, driver: ProviderDriverKind, url: string) => {
+    if (seen.has(instanceId)) return;
+    const origin = gatewayOrigin(url);
+    if (!origin || !isPrivateOrigin(origin)) return;
+    seen.add(instanceId);
+    routes.push({ instanceId, driver, origin });
+  };
+  for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
     if (instance.enabled === false) continue;
     const config = instanceConfig(instance.config);
     const launchArgs = stringField(config, "launchArgs");
@@ -352,7 +482,7 @@ export const discoverGatewayOrigins = Effect.fn("discoverGatewayOrigins")(functi
         const codexHome =
           stringField(config, "homePath") ?? envValue("CODEX_HOME") ?? path.join(home, ".codex");
         const url = codexBaseUrl(yield* read(path.join(codexHome, "config.toml")), launchArgs);
-        if (url) urls.push(url);
+        if (url) consider(instanceId, instance.driver, url);
         break;
       }
       case "opencode": {
@@ -363,12 +493,16 @@ export const discoverGatewayOrigins = Effect.fn("discoverGatewayOrigins")(functi
           : ["opencode.jsonc", "opencode.json"].map((name) =>
               path.join(configHome, "opencode", name),
             );
-        for (const file of files) urls.push(...openCodeBaseUrls(yield* read(file)));
+        for (const file of files) {
+          for (const url of openCodeBaseUrls(yield* read(file))) {
+            consider(instanceId, instance.driver, url);
+          }
+        }
         break;
       }
       case "claudeAgent": {
         const fromEnv = envValue("ANTHROPIC_BASE_URL");
-        if (fromEnv) urls.push(fromEnv);
+        if (fromEnv) consider(instanceId, instance.driver, fromEnv);
         const files = [settingsArg(launchArgs), stringField(config, "homePath")]
           .filter((file): file is string => Boolean(file))
           .map((file) => (file.endsWith(".json") ? file : path.join(file, "settings.json")));
@@ -376,12 +510,23 @@ export const discoverGatewayOrigins = Effect.fn("discoverGatewayOrigins")(functi
           const parsed: unknown = parseJsonc(yield* read(file));
           const url = (parsed as { env?: { ANTHROPIC_BASE_URL?: unknown } } | null)?.env
             ?.ANTHROPIC_BASE_URL;
-          if (typeof url === "string") urls.push(url);
+          if (typeof url === "string") consider(instanceId, instance.driver, url);
         }
         break;
       }
     }
   }
-  const origins = urls.map(gatewayOrigin).filter((origin): origin is string => !!origin);
-  return [...new Set(origins)].filter(isPrivateOrigin);
+  return routes;
+});
+
+/**
+ * Distinct gateway origins the enabled provider instances send requests to.
+ * A file that is missing or unreadable contributes nothing.
+ */
+export const discoverGatewayOrigins = Effect.fn("discoverGatewayOrigins")(function* (
+  settings: Pick<ServerSettings, "providerInstances">,
+  env: NodeJS.ProcessEnv,
+) {
+  const routes = yield* discoverMagpieRoutes(settings, env);
+  return [...new Set(routes.map((route) => route.origin))];
 });
