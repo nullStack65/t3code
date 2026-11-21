@@ -1440,6 +1440,17 @@ export const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
+  /**
+   * Placement services captured while `Ws.layer` builds. The socket handler runs later, in the
+   * HTTP server context, which does not include services provided only to the route layer.
+   */
+  placementServices: {
+    readonly remoteDelegation: Option.Option<RemoteDelegation.RemoteDelegation["Service"]>;
+    readonly managedPolicy: Option.Option<ManagedPolicy.ManagedPolicy["Service"]>;
+  } = {
+    remoteDelegation: Option.none(),
+    managedPolicy: Option.none(),
+  },
   typingPresence: TypingPresence = idleTypingPresence,
 ) =>
   Layer.effectContext(
@@ -1599,8 +1610,8 @@ export const layerWsRpc = (
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
       const hostResources = yield* HostResources.HostResources;
-      const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
-      const managedPolicy = yield* Effect.serviceOption(ManagedPolicy.ManagedPolicy);
+      const remoteDelegation = placementServices.remoteDelegation;
+      const managedPolicy = placementServices.managedPolicy;
       const placementContext = yield* Effect.context<
         | ProviderRegistry.ProviderRegistry
         | ServerSettings.ServerSettingsService
@@ -3743,6 +3754,10 @@ export const layer = Layer.unwrap(
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
     const typingPresence = yield* makeTypingPresence;
+    // Read once here. A request-time serviceOption sees the HTTP server context, which never
+    // receives RemoteDelegation.layer, so every server would admit None.
+    const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
+    const managedPolicy = yield* Effect.serviceOption(ManagedPolicy.ManagedPolicy);
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3817,6 +3832,7 @@ export const layer = Layer.unwrap(
               serverBrowser,
               reportProfiles,
               readSettingsClient(url.value),
+              { remoteDelegation, managedPolicy },
               typingPresence,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
