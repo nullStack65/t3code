@@ -57,6 +57,9 @@ function threadShellFromLinkedThread(
       forkedFrom: null,
       activeProviderThreadId: null,
       latestRunId: thread.latestRunId,
+      ...(thread.latestRunCompletedAt === undefined
+        ? {}
+        : { latestRunCompletedAt: utcOrNull(thread.latestRunCompletedAt) }),
       activeRunId: active ? thread.latestRunId : null,
       ...(active ? { activityRunStatus: thread.status } : {}),
       status: thread.status,
@@ -70,6 +73,9 @@ function threadShellFromLinkedThread(
       visibleItemCount: thread.itemCount,
       createdAt: utc(thread.createdAt),
       updatedAt: utc(thread.updatedAt),
+      ...(thread.lastVisitedAt === undefined
+        ? {}
+        : { lastVisitedAt: utcOrNull(thread.lastVisitedAt) }),
       archivedAt: null,
       settledOverride: thread.settled ? "settled" : null,
       settledAt: utcOrNull(thread.settledAt),

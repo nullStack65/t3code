@@ -15,7 +15,10 @@ import type { ReactNode } from "react";
 import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useConnectedEnvironmentIds } from "../../state/environments";
-import { useSidebarEnvironmentIdentities } from "../../state/linkedSidebar";
+import {
+  linkedSidebarEnvironmentIds,
+  useSidebarEnvironmentIdentities,
+} from "../../state/linkedSidebar";
 import {
   Menu,
   MenuCheckboxItem,
@@ -124,6 +127,7 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
   isChanged: boolean;
 }) {
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
+  const linkedEnvironmentIds = linkedSidebarEnvironmentIds();
   const inboxOrder = inboxMenuOrder(owner);
   const older = olderSettled();
   const counts = threadListFilterCounts(
@@ -201,7 +205,9 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
             {environments.map((environment) => {
               const checked = shownEnvironmentIds.includes(environment.environmentId);
               const isLast = checked && shownEnvironmentIds.length === 1;
-              const connected = connectedEnvironmentIds.includes(environment.environmentId);
+              const connected =
+                connectedEnvironmentIds.includes(environment.environmentId) ||
+                linkedEnvironmentIds.includes(environment.environmentId);
               const count =
                 counts.environments.get(environment.environmentId) ??
                 EMPTY_THREAD_LIST_FILTER_BUCKETS;
