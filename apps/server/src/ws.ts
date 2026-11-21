@@ -7,6 +7,13 @@ import * as Context from "effect/Context";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import { makeTypingPresence, type TypingPresence } from "./orchestration-v2/TypingPresence.ts";
+
+/** A socket built without the server-lifetime hub, as the websocket tests do. */
+const idleTypingPresence: TypingPresence = {
+  report: () => Effect.void,
+  subscribe: Stream.empty,
+};
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
@@ -1433,6 +1440,7 @@ export const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
+  typingPresence: TypingPresence = idleTypingPresence,
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -2431,6 +2439,18 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribePromptSuggestion]: (input) =>
           providerSessionManager.subscribePromptSuggestion(input.threadId),
+        [ORCHESTRATION_V2_WS_METHODS.reportTyping]: (input) =>
+          serverAuth.messageSenderOf(currentSessionId).pipe(
+            Effect.flatMap((sentBy) =>
+              typingPresence.report({
+                threadId: input.threadId,
+                sessionId: currentSessionId,
+                founder: sentBy.founder,
+                typing: input.typing,
+              }),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.subscribeTyping]: () => typingPresence.subscribe,
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
@@ -3722,6 +3742,7 @@ export const layer = Layer.unwrap(
     const peerForwarding = yield* PeerForwarding.PeerForwarding;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
+    const typingPresence = yield* makeTypingPresence;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3796,6 +3817,7 @@ export const layer = Layer.unwrap(
               serverBrowser,
               reportProfiles,
               readSettingsClient(url.value),
+              typingPresence,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.

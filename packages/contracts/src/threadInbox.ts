@@ -36,10 +36,41 @@ export const ThreadInboxRoutingPatch = Schema.Struct({
   reason: Schema.optionalKey(InboxReason),
 });
 export type ThreadInboxRoutingPatch = typeof ThreadInboxRoutingPatch.Type;
+/**
+ * One founder's answer on a call both founders make. `signed` is set once they
+ * reply; an open ask lists both with none signed.
+ */
+export const FounderSignOff = Schema.Struct({
+  founder: Founder,
+  signed: Schema.Boolean,
+});
+export type FounderSignOff = typeof FounderSignOff.Type;
+
+const jointSignOffEntries = Schema.Array(FounderSignOff).check(
+  Schema.isMinLength(2),
+  Schema.isMaxLength(2),
+  Schema.makeFilter((entries) => {
+    const founders = new Set(entries.map((entry) => entry.founder));
+    return founders.size === Founder.literals.length &&
+      Founder.literals.every((founder) => founders.has(founder))
+      ? true
+      : "A joint sign-off lists Kameron and Jeff once each.";
+  }),
+);
+
 export const ThreadDecisionAsk = Schema.Struct({
   founder: Founder,
   kind: Schema.Literals(["decision", "review", "approval"]),
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(2000)),
+  /**
+   * Set only when both founders must answer. Absent, the ask is the one
+   * `founder`'s alone. A stored ask from before this field decodes without it.
+   */
+  signOff: Schema.optional(
+    jointSignOffEntries.annotate({
+      description: "Both founders' answers, when the call needs each of them.",
+    }),
+  ),
 });
 export type ThreadDecisionAsk = typeof ThreadDecisionAsk.Type;
 export const ThreadDecisionRequest = Schema.Struct({
@@ -50,7 +81,10 @@ export type ThreadDecisionRequest = typeof ThreadDecisionRequest.Type;
 export const ThreadInbox = Schema.Struct({
   ...ThreadInboxRouting.fields,
   reason: Schema.optionalKey(InboxReason),
-  /** Open until the founder writes on the thread after `requestedAt`, or it is resolved or settled. */
+  /**
+   * Open until the asked founder writes after `requestedAt`. A joint sign-off stays open until
+   * each founder has written. Resolving or settling the thread also closes it.
+   */
   decisionRequest: Schema.optionalKey(ThreadDecisionRequest),
   /** Set only on projected shells: the thread waits on an approval or user input. Never stored. */
   pendingHumanRequest: Schema.optionalKey(Schema.Boolean),
@@ -223,18 +257,84 @@ export const agentLaunchInboxError = (input: Parameters<typeof agentLaunchInboxR
 };
 
 /**
+ * Both founders, in pill order, when `signOff` lists each of them once. Anything else is not a
+ * joint call, including a duplicate of one founder.
+ */
+export function jointSignOff(
+  signOff: ReadonlyArray<FounderSignOff> | null | undefined,
+): ReadonlyArray<FounderSignOff> | null {
+  if (signOff == null || signOff.length !== Founder.literals.length) return null;
+  const byFounder = new Map(signOff.map((entry) => [entry.founder, entry]));
+  if (byFounder.size !== Founder.literals.length) return null;
+  const ordered: FounderSignOff[] = [];
+  for (const founder of Founder.literals) {
+    const entry = byFounder.get(founder);
+    if (entry === undefined) return null;
+    ordered.push(entry);
+  }
+  return ordered;
+}
+
+type ReplyClock = string | { readonly epochMilliseconds: number };
+
+const replyMillis = (value: ReplyClock): number =>
+  typeof value === "string" ? Date.parse(value) : value.epochMilliseconds;
+
+/**
+ * A founder's own reply signs only that founder on a joint ask. The ask stays until both have
+ * signed. A message that signs nobody returns the same inbox, so a writer can skip the rewrite.
+ */
+export function inboxAfterFounderReply<Inbox extends ThreadInbox | undefined>(
+  inbox: Inbox,
+  message: {
+    readonly role: string;
+    readonly createdBy?: string | undefined;
+    readonly idleCompaction?: unknown;
+    readonly sentBy?: { readonly founder: Founder | null } | undefined;
+    readonly updatedAt: ReplyClock;
+  },
+): Inbox {
+  if (inbox === undefined) return inbox;
+  const request = inbox.decisionRequest;
+  const ordered = jointSignOff(request?.signOff);
+  if (request === undefined || ordered === null) return inbox;
+  const founder = message.sentBy?.founder;
+  if (
+    message.role !== "user" ||
+    message.createdBy !== "user" ||
+    message.idleCompaction != null ||
+    (founder !== "kameron" && founder !== "jeff") ||
+    replyMillis(message.updatedAt) <= replyMillis(request.requestedAt)
+  ) {
+    return inbox;
+  }
+  const entry = ordered.find((item) => item.founder === founder);
+  if (entry === undefined || entry.signed) return inbox;
+  const next = ordered.map((item) => (item.founder === founder ? { ...item, signed: true } : item));
+  if (next.every((item) => item.signed)) {
+    const { decisionRequest: _closed, ...rest } = inbox;
+    return rest as Inbox;
+  }
+  return { ...inbox, decisionRequest: { ...request, signOff: next } };
+}
+
+/**
  * The inbox clients read. A decision request closes once a person writes on the thread after it
- * was asked; a pending approval or user-input request surfaces to the owner.
+ * was asked. A joint sign-off stays open until each founder has signed. A pending approval or
+ * user-input request surfaces to the owner.
  */
 export function projectThreadInbox(
   inbox: ThreadInbox,
   state: { readonly pendingHumanRequest: boolean; readonly latestHumanMessageAt: string | null },
 ): ThreadInbox {
   const { decisionRequest, pendingHumanRequest: _stored, ...rest } = inbox;
+  const joint = jointSignOff(decisionRequest?.signOff);
   const open =
     decisionRequest !== undefined &&
-    (state.latestHumanMessageAt === null ||
-      Date.parse(state.latestHumanMessageAt) <= Date.parse(decisionRequest.requestedAt));
+    (joint !== null
+      ? joint.some((entry) => !entry.signed)
+      : state.latestHumanMessageAt === null ||
+        Date.parse(state.latestHumanMessageAt) <= Date.parse(decisionRequest.requestedAt));
   return {
     ...rest,
     ...(open ? { decisionRequest } : {}),
@@ -250,7 +350,14 @@ export function projectThreadInbox(
  */
 export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder: Founder) {
   if (!inbox) return "unknown";
-  if (inbox.decisionRequest?.founder === founder) return "action";
+  const joint = jointSignOff(inbox.decisionRequest?.signOff);
+  if (joint !== null) {
+    const mine = joint.find((entry) => entry.founder === founder);
+    // A founder who has already signed is no longer waiting, even if the ask names them.
+    if (mine !== undefined && !mine.signed) return "action";
+  } else if (inbox.decisionRequest?.founder === founder) {
+    return "action";
+  }
   if (inbox.pendingHumanRequest === true && inbox.owner === founder) return "action";
   const assigned = inbox.assignee?.kind === "human" ? inbox.assignee.id : inbox.owner;
   if (inbox.audience === "agent-only" && inbox.assignee?.kind !== "human") return "hidden";

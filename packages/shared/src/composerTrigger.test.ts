@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   detectComposerTrigger,
+  parseNoteCommand,
   parseSideChatCommand,
   serializeComposerFileLink,
 } from "./composerTrigger.ts";
@@ -134,5 +135,19 @@ describe("parseSideChatCommand", () => {
     expect(parseSideChatCommand("/sidebar")).toBeNull();
     expect(parseSideChatCommand("/btwx")).toBeNull();
     expect(parseSideChatCommand("ask /side later")).toBeNull();
+  });
+});
+
+describe("parseNoteCommand", () => {
+  it("reads an optional note after /note", () => {
+    expect(parseNoteCommand("/note")).toEqual({ prompt: "" });
+    expect(parseNoteCommand("  /NOTE  don't wake the bot ")).toEqual({
+      prompt: "don't wake the bot",
+    });
+  });
+
+  it("ignores other words", () => {
+    expect(parseNoteCommand("/notebook")).toBeNull();
+    expect(parseNoteCommand("see /note")).toBeNull();
   });
 });

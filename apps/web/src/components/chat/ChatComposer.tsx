@@ -285,6 +285,7 @@ import {
 import { ComposerControlsBar } from "./ComposerControlsBar";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 import { usePromptSuggestion } from "./usePromptSuggestion";
+import { useSharedThreadTyping } from "./useSharedThreadTyping";
 import { useFreshSessionArmed } from "./freshSessionArms";
 
 function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
@@ -1133,6 +1134,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     threadPullRequests,
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
+    noteAvailable: activeThread?.source.inbox?.audience === "shared",
     freshSessionAvailable: props.onFreshSession !== undefined,
     compactSlashCommandAvailable,
     selectedProvider,
@@ -1933,8 +1935,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         return;
       }
-      if (item.command === "side" || item.command === "btw") {
-        if (props.sideChatDisabledReason) return;
+      if (item.command === "side" || item.command === "btw" || item.command === "note") {
+        if (item.command !== "note" && props.sideChatDisabledReason) return;
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,
@@ -2307,6 +2309,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThread,
     activeThreadRuns,
   );
+  const typingStatus = useSharedThreadTyping(environmentId, activeThread, prompt);
   // After /clear the next message starts a fresh session that cannot see what the suggestion refers to.
   const freshSessionArmed = useFreshSessionArmed(scopedThreadKey(routeThreadRef));
   // Offered only where the default placeholder would show, so it never hides a pending question.
@@ -3540,6 +3543,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 isComposerCollapsedMobile && "hidden",
               )}
             >
+              {typingStatus ? (
+                <p className="pb-1 text-xs text-muted-foreground" data-composer-typing="">
+                  {typingStatus}
+                </p>
+              ) : null}
               {isStashMenuOpen && !composerMenuOpen && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor} canOverflowTop>
                   <ComposerStashMenu

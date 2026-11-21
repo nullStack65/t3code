@@ -1,4 +1,8 @@
-import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import {
+  isClearComposerCommand,
+  parseNoteCommand,
+  parseSideChatCommand,
+} from "@t3tools/shared/composerTrigger";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
 import {
   mergeDirectPreviewAnnotation,
@@ -425,13 +429,14 @@ export function useComposerSend(input: ComposerSendInput) {
       sendCtx && !directAnnotation && !queuedRunEdit.isEditing
         ? parseSideChatCommand(promptAtSend)
         : null;
+    const noteCommand = !directAnnotation ? parseNoteCommand(promptAtSend) : null;
     const answeringQuestion =
       Boolean(activePendingUserInput) && sendCtx?.answeringPendingUserInput !== false;
     const startsSideChat =
       onSideChat !== undefined && sideChatCommand !== null && sideChatDisabledReason === null;
     // An answer responds to the open request rather than starting a turn, so the new-message
     // guards below (loading, busy, provider) must not swallow it.
-    if (answeringQuestion && !startsSideChat && !directAnnotation) {
+    if (answeringQuestion && !startsSideChat && noteCommand === null && !directAnnotation) {
       if (readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) && activeThread) {
         onAdvanceActivePendingUserInput();
       }
@@ -537,6 +542,93 @@ export function useComposerSend(input: ComposerSendInput) {
       // Clear only what was sent; the user may have edited the draft or left meanwhile.
       if (
         started &&
+        currentRouteThreadKeyRef.current === routeThreadKey &&
+        promptRef.current === promptAtSend
+      ) {
+        promptRef.current = "";
+        setComposerDraftPrompt(composerDraftTarget, "");
+        composerRef.current?.resetCursorState();
+      }
+      return;
+    }
+    if (noteCommand) {
+      if (queuedRunEdit.isEditing) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Queued message not updated",
+            description: "A queued message can't be a note. Remove /note to save it.",
+          }),
+        );
+        return;
+      }
+      if (activeThread.source.inbox?.audience !== "shared") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Note not sent",
+            description: "A note is for a thread you share with the other founder.",
+          }),
+        );
+        return;
+      }
+      if (noteCommand.prompt.length === 0) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Note not sent",
+            description: "Write the note after /note.",
+          }),
+        );
+        return;
+      }
+      if (
+        !sendCtx ||
+        sendCtx.images.length > 0 ||
+        sendCtx.files.length > 0 ||
+        filterTerminalContextsWithText(sendCtx.terminalContexts).length > 0 ||
+        sendCtx.previewAnnotations.length > 0 ||
+        sendCtx.reviewComments.length > 0 ||
+        sendCtx.threadContexts.length > 0 ||
+        sendCtx.environmentContexts.length > 0 ||
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.replyTo
+      ) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Notes take text only",
+            description: "Remove the attachments and context, then send it again.",
+          }),
+        );
+        return;
+      }
+      const noted = await startThreadTurn({
+        environmentId,
+        input: {
+          threadId: activeThread.id,
+          message: {
+            messageId: newMessageId(),
+            role: "user",
+            text: noteCommand.prompt,
+            attachments: [],
+            humanNote: true,
+          },
+          runtimeMode: activeThread.runtimeMode,
+          interactionMode: activeThread.interactionMode,
+          dispatchMode: "start",
+        },
+      });
+      if (noted._tag === "Failure") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Note not saved",
+            description: "Try again.",
+          }),
+        );
+        return;
+      }
+      if (
         currentRouteThreadKeyRef.current === routeThreadKey &&
         promptRef.current === promptAtSend
       ) {

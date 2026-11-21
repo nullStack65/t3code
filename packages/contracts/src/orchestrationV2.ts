@@ -1585,6 +1585,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   linkedSender: Schema.optional(OrchestrationV2LinkedSender),
   sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+  /** A human side note. It is stored and shown, and never sent to the provider. */
+  humanNote: Schema.optional(Schema.Literal(true)),
   seenMarker: Schema.optional(ThreadSeenMarkerSummary),
   /**
    * The message is the script a provider-native workflow run executes, not prose. Clients show
@@ -1911,6 +1913,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    humanNote: Schema.optional(Schema.Literal(true)),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
     inputIntent: OrchestrationV2UserMessageInputIntent,
@@ -2437,6 +2440,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Guest messages waiting for the owner to send or dismiss. Absent from older servers. */
   pendingGuestMessageCount: Schema.optional(NonNegativeInt),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
+  /**
+   * Founders named in the latest visible message. Omitted when nobody is named, so a shell
+   * row never carries message text just to badge a mention.
+   */
+  attentionMentions: Schema.optional(Schema.Array(Founder)),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   /** Excludes wakes and agent messages that advance latestUserMessageAt through the user role. */
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2843,6 +2851,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    humanNote: Schema.optional(Schema.Literal(true)),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
     inputIntent: OrchestrationV2UserMessageInputIntent,
@@ -3624,6 +3633,8 @@ export const OrchestrationV2Command = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    /** Record a human side note on a shared thread. It does not start a provider turn. */
+    humanNote: Schema.optional(Schema.Literal(true)),
     seenMarker: Schema.optional(ThreadSeenMarker),
     /** Start a new provider session without the thread's earlier context. Never steers. */
     freshContext: Schema.optional(Schema.Boolean),
@@ -4118,6 +4129,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   subscribeThread: "orchestration.subscribeThread",
   subscribeCommandOutput: "orchestration.subscribeCommandOutput",
   subscribePromptSuggestion: "orchestration.subscribePromptSuggestion",
+  reportTyping: "orchestration.reportTyping",
+  subscribeTyping: "orchestration.subscribeTyping",
 } as const;
 
 export const OrchestrationV2SubscribeCommandOutputInput = Schema.Struct({
@@ -4150,6 +4163,21 @@ export class OrchestrationV2CommandOutputError extends Schema.TaggedError<Orches
 export const OrchestrationV2SubscribePromptSuggestionInput = Schema.Struct({
   threadId: ThreadId,
 });
+
+export const OrchestrationV2ReportTypingInput = Schema.Struct({
+  threadId: ThreadId,
+  typing: Schema.Boolean,
+});
+export type OrchestrationV2ReportTypingInput = typeof OrchestrationV2ReportTypingInput.Type;
+
+/** Who is typing on one thread. An empty list means nobody. */
+export const OrchestrationV2TypingSnapshot = Schema.Struct({
+  threadId: ThreadId,
+  founders: Schema.Array(Founder),
+});
+export type OrchestrationV2TypingSnapshot = typeof OrchestrationV2TypingSnapshot.Type;
+
+export const OrchestrationV2SubscribeTypingInput = Schema.Struct({});
 
 /** Unpersisted predicted next prompt for the run that produced it; null when there is none. */
 export const OrchestrationV2PromptSuggestion = Schema.NullOr(
@@ -4904,6 +4932,14 @@ export const OrchestrationV2RpcSchemas = {
   subscribePromptSuggestion: {
     input: OrchestrationV2SubscribePromptSuggestionInput,
     output: OrchestrationV2PromptSuggestion,
+  },
+  reportTyping: {
+    input: OrchestrationV2ReportTypingInput,
+    output: Schema.Void,
+  },
+  subscribeTyping: {
+    input: OrchestrationV2SubscribeTypingInput,
+    output: OrchestrationV2TypingSnapshot,
   },
 } as const;
 

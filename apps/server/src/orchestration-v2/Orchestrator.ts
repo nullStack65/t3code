@@ -6997,6 +6997,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         : undefined,
     );
+    if (command.humanNote === true) {
+      const noteText = command.text.trim();
+      if (
+        command.createdBy !== "user" ||
+        projection.thread.inbox?.audience !== "shared" ||
+        noteText.length === 0 ||
+        command.attachments.length > 0
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "A note is a text message on a shared thread, and it does not wake the bot.",
+        });
+      }
+    }
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);
       if (
@@ -7256,6 +7271,65 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: thread,
       });
       projection = applyToProjection(projection, event);
+    }
+    if (command.humanNote === true) {
+      const now = yield* DateTime.now;
+      const text = command.text.trim();
+      const message: OrchestrationV2ConversationMessage = {
+        createdBy: command.createdBy,
+        creationSource: command.creationSource,
+        ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
+        id: command.messageId,
+        threadId: command.threadId,
+        runId: null,
+        nodeId: null,
+        role: "user",
+        text,
+        attachments: [],
+        streaming: false,
+        humanNote: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const noteItem: OrchestrationV2TurnItem = {
+        createdBy: command.createdBy,
+        creationSource: command.creationSource,
+        ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
+        id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
+        threadId: command.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* nextTurnItemOrdinal(projection),
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "user_message",
+        messageId: command.messageId,
+        inputIntent: "turn_start",
+        text,
+        attachments: [],
+        humanNote: true,
+      };
+      const emitEvent = emit(events, command);
+      yield* emitEvent({
+        type: "message.updated",
+        threadId: command.threadId,
+        occurredAt: now,
+        payload: message,
+      });
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        occurredAt: now,
+        payload: noteItem,
+      });
+      return;
     }
     const userMessages = projection.messages.filter((message) => message.role === "user");
     // The recent runs of a compacted thread can hold only a `/compact` while an older prompt

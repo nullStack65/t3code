@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "./baseSchemas.ts";
 import { ClientSettingsSchema } from "./settings.ts";
 import {
+  ThreadDecisionAsk,
   makeThreadInbox,
   routeThreadInbox,
   matchesInboxView,
@@ -16,6 +17,7 @@ import {
   agentLaunchInboxError,
   agentInboxRoutingError,
   projectThreadInbox,
+  inboxAfterFounderReply,
   inboxRoutingFor,
   primaryInbox,
   withLegacyPeerInboxReason,
@@ -425,5 +427,99 @@ describe("staysActiveWhileWorking", () => {
     const fyi = routeThreadInbox(actionForKameron, { attentionKind: "FYI", reason: "review" });
     expect(staysActiveWhileWorking(fyi, ["kameron"])).toBe(false);
     expect(staysActiveWhileWorking(makeThreadInbox({ actor: bot }), ["kameron"])).toBe(false);
+  });
+});
+
+describe("joint sign-off", () => {
+  const signOff = [
+    { founder: "jeff" as const, signed: false },
+    { founder: "kameron" as const, signed: false },
+  ];
+  const asked = {
+    ...makeThreadInbox({ actor: bot, routing: inboxRoutingFor("shared") }),
+    decisionRequest: {
+      founder: "kameron" as const,
+      kind: "decision" as const,
+      question: "Ship it?",
+      requestedAt: "2026-11-20T00:00:00.000Z",
+      signOff,
+    },
+  };
+  const reply = (
+    founder: "kameron" | "jeff" | null,
+    updatedAt: string | { epochMilliseconds: number } = "2026-11-20T00:00:01.000Z",
+  ) => ({
+    role: "user",
+    createdBy: "user",
+    sentBy: { founder },
+    updatedAt,
+  });
+
+  it("decodes only a sign-off that lists each founder once", () => {
+    const ask = {
+      founder: "kameron",
+      kind: "decision",
+      question: "Ship it?",
+    } as const;
+    expect(
+      Schema.is(ThreadDecisionAsk)({
+        ...ask,
+        signOff: [
+          { founder: "kameron", signed: false },
+          { founder: "jeff", signed: true },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      Schema.is(ThreadDecisionAsk)({
+        ...ask,
+        signOff: [
+          { founder: "kameron", signed: false },
+          { founder: "kameron", signed: true },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("lets each founder sign only themselves, and closes once both have", () => {
+    const once = inboxAfterFounderReply(asked, reply("kameron"));
+    expect(once).not.toBe(asked);
+    expect(once?.decisionRequest?.signOff).toEqual([
+      { founder: "kameron", signed: true },
+      { founder: "jeff", signed: false },
+    ]);
+    expect(inboxAfterFounderReply(once, reply("kameron", "2026-11-20T00:00:02.000Z"))).toBe(once);
+    expect(inboxAfterFounderReply(asked, reply(null))).toBe(asked);
+    expect(
+      inboxAfterFounderReply(
+        asked,
+        reply("jeff", { epochMilliseconds: Date.parse(asked.decisionRequest.requestedAt) }),
+      ),
+    ).toBe(asked);
+    const both = inboxAfterFounderReply(once, reply("jeff", "2026-11-20T00:00:03.000Z"));
+    expect(both?.decisionRequest).toBeUndefined();
+    const plain = { ...asked, decisionRequest: { ...asked.decisionRequest, signOff: undefined } };
+    const closed = projectThreadInbox(plain, {
+      latestHumanMessageAt: "2026-11-20T00:00:02.000Z",
+      pendingHumanRequest: false,
+    });
+    expect(closed.decisionRequest).toBeUndefined();
+  });
+
+  it("keeps a joint ask open for the founder who has not signed", () => {
+    const signed = inboxAfterFounderReply(asked, reply("kameron"))!;
+    const projected = projectThreadInbox(signed, {
+      latestHumanMessageAt: "2026-11-20T00:00:05.000Z",
+      pendingHumanRequest: false,
+    });
+    expect(projected.decisionRequest?.signOff?.[1]?.signed).toBe(false);
+    expect([founderInboxLane(projected, "kameron"), founderInboxLane(projected, "jeff")]).toEqual([
+      "hidden",
+      "action",
+    ]);
+    expect([founderInboxLane(asked, "kameron"), founderInboxLane(asked, "jeff")]).toEqual([
+      "action",
+      "action",
+    ]);
   });
 });

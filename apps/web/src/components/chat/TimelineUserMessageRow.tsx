@@ -870,6 +870,11 @@ function UserTimelineRow({
           Sent by T3 Code
         </p>
       ) : null}
+      {row.message.humanNote ? (
+        <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-note="">
+          Note
+        </p>
+      ) : null}
       {showSender ? (
         <div aria-hidden>
           {sharedThread && sender.kind === "person" && sender.sentBy?.founder != null ? (

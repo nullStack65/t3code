@@ -1,15 +1,33 @@
-import type { ContextMenuSource, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  founderName,
+  resolveBotAttention,
+  typingLabel,
+  type ContextMenuSource,
+  type EnvironmentId,
+  type ScopedThreadRef,
+  type TypingByThread,
+} from "@t3tools/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
-import { memo, type MouseEvent as ReactMouseEvent, type KeyboardEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent,
+} from "react";
 
 import { cn } from "~/lib/utils";
+import { orchestrationEnvironment } from "~/state/orchestration";
+import { useEnvironmentQuery } from "~/state/query";
 import { contextMenuSourceOf } from "../../contextMenuSource";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { BotAvatar, BOT_ACCENT_CLASSES } from "../bots/BotAvatar";
 import { resolveBotPresence } from "../bots/botPresence";
 import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "../Sidebar.logic";
+import { useClientSettings } from "../../hooks/useSettings";
 
 interface BotRowHandlers {
   readonly onThreadClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
@@ -35,14 +53,26 @@ export function SidebarBotsGroup(
     readonly testId?: string;
   },
 ) {
+  const [typingByEnvironment, setTypingByEnvironment] = useState<
+    Readonly<Record<string, TypingByThread>>
+  >({});
+  const onTyping = useCallback((environmentId: string, next: TypingByThread) => {
+    setTypingByEnvironment((current) =>
+      current[environmentId] === next ? current : { ...current, [environmentId]: next },
+    );
+  }, []);
   if (props.threads.length === 0) return null;
   const label = props.label ?? "Bots";
+  const environmentIds = [...new Set(props.threads.map((thread) => thread.environmentId))];
   return (
     <section
       aria-label={label}
       data-testid={props.testId ?? "sidebar-bots-group"}
       className="mx-0.5 mb-1"
     >
+      {environmentIds.map((environmentId) => (
+        <TypingFeed key={environmentId} environmentId={environmentId} onTyping={onTyping} />
+      ))}
       <div className="flex h-6 items-center gap-2 px-2">
         <span className="shrink-0 text-xs font-medium text-sidebar-foreground/80">{label}</span>
         <span aria-hidden className="h-px flex-1 bg-sidebar-foreground/15" />
@@ -56,6 +86,7 @@ export function SidebarBotsGroup(
               thread={thread}
               threadKey={key}
               isActive={props.activeThreadKey === key}
+              typing={typingByEnvironment[thread.environmentId]}
               onThreadClick={props.onThreadClick}
               onThreadActivate={props.onThreadActivate}
               onContextMenu={props.onContextMenu}
@@ -67,11 +98,30 @@ export function SidebarBotsGroup(
   );
 }
 
+/** One environment's typing stream. A hook cannot loop over a changing set of environments. */
+function TypingFeed(props: {
+  readonly environmentId: EnvironmentId;
+  readonly onTyping: (environmentId: string, next: TypingByThread) => void;
+}) {
+  const { environmentId, onTyping } = props;
+  const { data } = useEnvironmentQuery(
+    orchestrationEnvironment.v2.typing({
+      environmentId,
+      input: {},
+    }),
+  );
+  useEffect(() => {
+    onTyping(environmentId, data ?? {});
+  }, [data, environmentId, onTyping]);
+  return null;
+}
+
 const SidebarBotRow = memo(function SidebarBotRow(
   props: BotRowHandlers & {
     readonly thread: EnvironmentThreadShell;
     readonly threadKey: string;
     readonly isActive: boolean;
+    readonly typing: TypingByThread | undefined;
   },
 ) {
   const { thread, threadKey } = props;
@@ -81,6 +131,17 @@ const SidebarBotRow = memo(function SidebarBotRow(
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const pill = resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } });
+  const viewingFounder = useClientSettings((state) => state.founderInboxOwner);
+  const attention = resolveBotAttention({
+    inbox: thread.source.inbox,
+    viewingFounder,
+    mentioned: thread.source.attentionMentions,
+  });
+  const typingText = props.isActive
+    ? null
+    : typingLabel(
+        (props.typing?.[thread.id] ?? []).filter((founder) => founder !== viewingFounder),
+      );
   const presence = resolveBotPresence(
     pill === null ? null : { ...pill, errorClass: thread.runtime?.lastErrorClass },
     standing.role,
@@ -101,7 +162,9 @@ const SidebarBotRow = memo(function SidebarBotRow(
         data-testid="sidebar-bot-row"
         data-bot-state={presence.avatarState}
         aria-current={props.isActive ? "page" : undefined}
-        aria-label={`${standing.name}${presence.line ? `, ${presence.line}` : ""}${
+        aria-label={`${standing.name}${typingText ? `, ${typingText}` : presence.line ? `, ${presence.line}` : ""}${attentionLabel(
+          attention,
+        )}${
           presence.badge === "needs-you"
             ? ", needs you"
             : presence.badge === "unread"
@@ -141,7 +204,15 @@ const SidebarBotRow = memo(function SidebarBotRow(
         <span className="shrink-0 truncate text-sm font-medium" dir="auto">
           {standing.name}
         </span>
-        {presence.line ? (
+        {typingText ? (
+          <span
+            className="min-w-0 flex-1 truncate text-xs text-sidebar-muted-foreground"
+            data-bot-typing=""
+            dir="auto"
+          >
+            {typingText}
+          </span>
+        ) : presence.line ? (
           <span
             className={cn(
               "min-w-0 flex-1 truncate text-xs",
@@ -158,6 +229,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
         ) : (
           <span className="flex-1" />
         )}
+        <BotAttentionMark attention={attention} accentClass={accent.swatch} />
         {presence.badge ? (
           <span
             aria-hidden
@@ -171,3 +243,66 @@ const SidebarBotRow = memo(function SidebarBotRow(
     </li>
   );
 });
+
+/** What a screen reader adds for the attention mark; the mark itself is hidden. */
+function attentionLabel(attention: ReturnType<typeof resolveBotAttention>): string {
+  if (attention.kind === "fyi") return ", update";
+  if (attention.kind === "badge") return `, ${attention.label}`;
+  if (attention.kind === "sign-off") {
+    return `, ${attention.founders
+      .map((entry) => `${founderName(entry.founder)} ${entry.signed ? "signed" : "waiting"}`)
+      .join(", ")}`;
+  }
+  return "";
+}
+
+/**
+ * The one attention mark on a bot row. FYI is a faint dot; a decision or a
+ * founder mention is a bright pill; a call both founders make lists each one.
+ */
+function BotAttentionMark(props: {
+  readonly attention: ReturnType<typeof resolveBotAttention>;
+  readonly accentClass: string;
+}) {
+  const { attention } = props;
+  if (attention.kind === "quiet") return null;
+  if (attention.kind === "fyi") {
+    return (
+      <span
+        aria-hidden
+        data-bot-attention="fyi"
+        className="size-1.5 shrink-0 rounded-full bg-sidebar-foreground/40"
+      />
+    );
+  }
+  if (attention.kind === "sign-off") {
+    return (
+      <span
+        aria-hidden
+        data-bot-attention="sign-off"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-sidebar-foreground/10 px-1.5 py-0.5 text-2xs font-medium text-sidebar-foreground"
+      >
+        {attention.founders.map((entry, index) => (
+          <span key={entry.founder} className="inline-flex items-center gap-1">
+            {index > 0 ? <span className="text-sidebar-muted-foreground">·</span> : null}
+            <span>
+              {founderName(entry.founder)} {entry.signed ? "✓" : "○"}
+            </span>
+          </span>
+        ))}
+      </span>
+    );
+  }
+  return (
+    <span
+      aria-hidden
+      data-bot-attention="badge"
+      className={cn(
+        "shrink-0 rounded-full px-1.5 py-0.5 text-2xs font-medium text-white",
+        props.accentClass,
+      )}
+    >
+      {attention.label}
+    </span>
+  );
+}
