@@ -331,7 +331,7 @@ check fails or waits for a maintainer's approval, the required checks pass, some
 conflict. On github.com it also wakes the agent, with GitHub's reason, when the merge queue drops
 the pull request without merging it. Threads in a project that watch the same pull request share one check. On GitHub, a check
 first asks whether anything changed and reads the pull request only when it did, which keeps
-watching inside GitHub's rate limit. Comments from your own account do not wake it. Watching ends
+watching inside GitHub's rate limit. Comments from your own account do not wake it. Comments and reviews from coderabbitai do not wake it either, unless the caller passes `ignoreAuthors` as an empty list. Optional `events`, `coalesceWindowSeconds`, and `autoExpireOnClose` on `watch_pull_request` choose which changes wake the thread and whether the watch ends when the pull request closes. `t3_event_subscribe` uses the same filters for a pull request URL or another thread. Watching ends
 when the pull request merges or closes, after 10 wakes in a row that bring only comments, after 8
 failed reads in a row, or when you press Stop on the thread. A rate limit only pauses watching.
 Settling or archiving a thread also ends all its watches. Unsettle the thread before starting a new
