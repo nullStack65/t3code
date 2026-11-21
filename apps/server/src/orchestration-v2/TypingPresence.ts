@@ -15,6 +15,9 @@ import * as Stream from "effect/Stream";
 /**
  * Who is typing, for every socket. The map lives for the server, not for one connection, so
  * Kameron and Jeff see each other. Nothing here is stored.
+ *
+ * Time uses the default Clock reference. These methods must not require Clock: the CLI
+ * runtime does not list it, and an explicit requirement fails the server typecheck.
  */
 export interface TypingPresence {
   readonly report: (input: {
@@ -22,8 +25,8 @@ export interface TypingPresence {
     readonly sessionId: string;
     readonly founder: Founder | null;
     readonly typing: boolean;
-  }) => Effect.Effect<void, never, Clock.Clock>;
-  readonly subscribe: Stream.Stream<OrchestrationV2TypingSnapshot, never, Clock.Clock>;
+  }) => Effect.Effect<void>;
+  readonly subscribe: Stream.Stream<OrchestrationV2TypingSnapshot>;
 }
 
 const emptyRoster: TypingRoster = new Map();
