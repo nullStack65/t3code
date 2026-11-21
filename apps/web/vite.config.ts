@@ -191,6 +191,27 @@ const renderScenariosProject = {
   },
 } satisfies TestProjectInlineConfiguration;
 
+const latencyProject = {
+  ...browserTestProject,
+  test: {
+    ...browserTestProject.test,
+    name: "latency",
+    include: ["test/*.latency.tsx", "src/**/*.latency.{ts,tsx}"],
+    hookTimeout: 60_000,
+    testTimeout: 60_000,
+    browser: {
+      ...browserTestProject.test.browser,
+      instances: [{ browser: "chromium" }],
+      commands: {
+        ...browserTestProject.test.browser.commands,
+        reportLatency: async (_context, line: string) => {
+          process.stdout.write(`${line}\n`);
+        },
+      },
+    },
+  },
+} satisfies TestProjectInlineConfiguration;
+
 function resolveDevProxyTarget(
   backendPort: string | undefined,
   wsUrl: string | undefined,
@@ -455,6 +476,7 @@ export default defineConfig(({ command }) => {
         defineProject(unitTestProject),
         defineProject(browserTestProject),
         defineProject(renderScenariosProject),
+        defineProject(latencyProject),
       ],
     },
   };

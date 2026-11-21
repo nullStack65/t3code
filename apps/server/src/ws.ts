@@ -2,6 +2,7 @@ import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest inside the pure provider mapping.
 import * as NodeCrypto from "node:crypto";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { creditUnassignedSender } from "@t3tools/shared/seenMarker";
 import * as Context from "effect/Context";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -2038,6 +2039,20 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      // A session names a person only when another client assigned it. A person's unassigned
+      // client credits this machine's owner; a bot never does, and a null owner stays unnamed.
+      const messageSender = serverAuth.messageSenderOf(currentSessionId).pipe(
+        Effect.filterOrElse(
+          (sentBy) => sentBy.founder !== null || sentBy.deviceType === "bot",
+          (sentBy) =>
+            serverSettings.getSettings.pipe(
+              Effect.map((settings) => creditUnassignedSender(sentBy, settings.ownerFounder)),
+              // A settings read must not fail the send. Leave the sender unassigned.
+              Effect.orElseSucceed(() => sentBy),
+            ),
+        ),
+      );
+
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -2057,15 +2072,15 @@ export const layerWsRpc = (
               ? { "orchestration_v2.source_thread_id": command.sourceThreadId }
               : {}),
           }).pipe(
-            Effect.andThen(
-              startup
+            Effect.andThen(() => {
+              const dispatched = startup
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
                     : (command.type === "message.dispatch" ||
                       command.type === "queued-run.edit" ||
                       command.type === "runtime-request.respond"
-                        ? serverAuth.messageSenderOf(currentSessionId).pipe(Effect.asSome)
+                        ? messageSender.pipe(Effect.asSome)
                         : Effect.succeed(Option.none<OrchestrationV2MessageSentBy>())
                       ).pipe(
                         Effect.flatMap((sentBy) =>
@@ -2099,8 +2114,23 @@ export const layerWsRpc = (
                       cause,
                     });
                   }),
+                );
+              // A bot reading a thread writes no visit. A sender lookup that fails still records
+              // the visit, matching a client the server cannot name.
+              if (command.type !== "thread.visit") return dispatched;
+              return messageSender.pipe(
+                Effect.map((sentBy) => sentBy.deviceType === "bot"),
+                Effect.orElseSucceed(() => false),
+                Effect.flatMap((bot) =>
+                  bot
+                    ? applicationEvents.latestApplicationSequence.pipe(
+                        Effect.map((sequence) => ({ sequence })),
+                        Effect.orElseSucceed(() => ({ sequence: 0 })),
+                      )
+                    : dispatched,
                 ),
-            ),
+              );
+            }),
           ),
         [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
         [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
@@ -2267,9 +2297,7 @@ export const layerWsRpc = (
                     })
                     .pipe(
                       Effect.andThen(
-                        input.initialMessage === undefined
-                          ? Effect.undefined
-                          : serverAuth.messageSenderOf(currentSessionId),
+                        input.initialMessage === undefined ? Effect.undefined : messageSender,
                       ),
                       Effect.flatMap((sentBy) =>
                         ThreadMessageIntake.launchThread({

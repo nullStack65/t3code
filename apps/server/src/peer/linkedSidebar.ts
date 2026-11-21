@@ -80,6 +80,9 @@ const slimThread = (
   creationSource: thread.creationSource,
   status: thread.status,
   latestRunId: thread.latestRunId,
+  ...(thread.latestRunCompletedAt === undefined
+    ? {}
+    : { latestRunCompletedAt: thread.latestRunCompletedAt }),
   providerInstanceId: thread.providerInstanceId,
   model: thread.model,
   runtimeMode: thread.runtimeMode,
@@ -94,6 +97,7 @@ const slimThread = (
   itemCount: thread.itemCount,
   createdAt: thread.createdAt,
   updatedAt: thread.updatedAt,
+  ...(thread.lastVisitedAt === undefined ? {} : { lastVisitedAt: thread.lastVisitedAt }),
 });
 
 export const collectLinkedSidebar = Effect.fn("linkedSidebar.collect")(function* (input: {

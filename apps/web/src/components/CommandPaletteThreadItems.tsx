@@ -31,6 +31,7 @@ import {
 } from "../state/environments";
 import { useThreadSearch } from "../state/queries";
 import { primaryServerProvidersAtom } from "../state/server";
+import { getClientSettings } from "../hooks/useSettings";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { buildThreadRouteParams } from "../threadRoutes";
@@ -182,6 +183,9 @@ export function useCommandPaletteThreadItems(input: {
             visitedAt: thread.updatedAt,
             opened: true,
             searchQuery: pickedQuery(threadSearchQuery),
+            ...(getClientSettings().founderInboxOwner === undefined
+              ? {}
+              : { founder: getClientSettings().founderInboxOwner }),
           },
         });
       }

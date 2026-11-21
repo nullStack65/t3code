@@ -197,7 +197,7 @@ import {
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { runBotMenuAction } from "./bots/botMenuActions";
-import { sortBotThreads, splitStandingThreads } from "./bots/botPresence";
+import { partitionBotGroups, sortBotThreads, splitStandingThreads } from "./bots/botPresence";
 import { SidebarBotsGroup } from "./sidebar/SidebarBotsGroup";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
@@ -753,8 +753,12 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     : workingShelfEnabled
       ? sortInboxThreadsByReturn(active, inboxObservation.returnedAt)
       : sortThreadsForSidebar(active);
+  const sortedBots = sortBotThreads(bots);
+  const botGroups = partitionBotGroups(sortedBots);
   return {
-    botThreads: sortBotThreads(bots),
+    botThreads: sortedBots,
+    myBotThreads: botGroups.mine,
+    sharedBotThreads: botGroups.shared,
     pinnedThreads:
       optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
         ? sortedPinned
@@ -1402,6 +1406,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const {
     workingShelfEnabled,
     botThreads,
+    myBotThreads,
+    sharedBotThreads,
     pinnedThreads,
     draggableThreadKeys,
     activeReorderableThreadKeys,
@@ -3486,13 +3492,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             </div>
           ) : null}
           {!isSearchingThreads ? (
-            <SidebarBotsGroup
-              threads={botThreads}
-              activeThreadKey={routeRowThreadKey}
-              onThreadClick={handleThreadClick}
-              onThreadActivate={navigateToThread}
-              onContextMenu={handleThreadContextMenu}
-            />
+            <>
+              <SidebarBotsGroup
+                label="My Bots"
+                threads={myBotThreads}
+                activeThreadKey={routeRowThreadKey}
+                onThreadClick={handleThreadClick}
+                onThreadActivate={navigateToThread}
+                onContextMenu={handleThreadContextMenu}
+              />
+              <SidebarBotsGroup
+                label="Shared Bots"
+                testId="sidebar-shared-bots-group"
+                threads={sharedBotThreads}
+                activeThreadKey={routeRowThreadKey}
+                onThreadClick={handleThreadClick}
+                onThreadActivate={navigateToThread}
+                onContextMenu={handleThreadContextMenu}
+              />
+            </>
           ) : null}
           {!isSearchingThreads ? (
             <TooltipProvider

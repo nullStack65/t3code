@@ -1952,6 +1952,12 @@ export function threadShellFromProjection(
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     ...(projection.thread.standing ? { standing: projection.thread.standing } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
+    ...(projection.thread.visitsByFounder === undefined
+      ? {}
+      : { visitsByFounder: projection.thread.visitsByFounder }),
+    ...(projection.thread.seenMessageByFounder === undefined
+      ? {}
+      : { seenMessageByFounder: projection.thread.seenMessageByFounder }),
     opens: projection.thread.opens ?? null,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     lastTitleRegeneration: projection.thread.lastTitleRegeneration ?? null,

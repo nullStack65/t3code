@@ -1,6 +1,6 @@
 import { InlineAudioPreview } from "../files/InlineAudioPreview";
 import { messageSenderLabel, resolveMessageSender } from "@t3tools/client-runtime/message-sender";
-import { MessageSenderLine } from "./MessageSenderLine";
+import { FounderSenderBadge, MessageSenderLine } from "./MessageSenderLine";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import {
   CHAT_USER_MARKDOWN_REMARK_PLUGINS,
@@ -280,7 +280,7 @@ function UserMessageContent({ row }: { row: Extract<TimelineRow, { kind: "messag
   ) : resolveUserMessagePresentation(row.message).attribution === "automation" ? (
     <AutomationMessageRow row={row} />
   ) : (
-    <UserTimelineRow row={row} />
+    <UserTimelineRow row={row} sharedThread={ctx.sharedThread === true} />
   );
 }
 
@@ -433,7 +433,13 @@ function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind:
   );
 }
 
-function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+function UserTimelineRow({
+  row,
+  sharedThread,
+}: {
+  row: Extract<TimelineRow, { kind: "message" }>;
+  sharedThread: boolean;
+}) {
   const ctx = use(TimelineRowCtx);
   const { onImageExpand, onFileOpen } = ctx;
   const coarsePointer = useMediaQuery({ pointer: "coarse" });
@@ -871,7 +877,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       ) : null}
       {showSender ? (
         <div aria-hidden>
-          <MessageSenderLine sender={sender} align="end" />
+          {sharedThread && sender.kind === "person" && sender.sentBy?.founder != null ? (
+            <FounderSenderBadge founder={sender.sentBy.founder} />
+          ) : (
+            <MessageSenderLine sender={sender} align="end" />
+          )}
         </div>
       ) : null}
       {/* The row's heading already names the guest for screen readers. */}

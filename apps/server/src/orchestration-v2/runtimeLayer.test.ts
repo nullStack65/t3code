@@ -12210,10 +12210,14 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         );
         return;
       }
+      // A usage limit no longer snoozes a thread, and it only arms auto-resume. These two hide
+      // the thread with the per-thread snooze, which is the only way left to hide one.
       const snooze = scenario === "wake" || scenario === "cancel-resume-keep-snooze";
       const autoResume = scenario !== "wake";
-      const arm = limitRecoveryCommand(shell, autoResume, DateTime.toEpochMillis(now), snooze);
-      assert(arm?.type === "thread.metadata.update" && arm.limitRecovery != null);
+      const armed = limitRecoveryCommand(shell, true, DateTime.toEpochMillis(now));
+      assert(armed?.type === "thread.metadata.update" && armed.limitRecovery != null);
+      const limitRecovery = { ...armed.limitRecovery, autoResume, snooze };
+      const arm = { ...armed, limitRecovery };
       const automaticArm = {
         commandId: arm.commandId,
         threadId,

@@ -8,9 +8,14 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
-import { makeAntigravityUsageProbe } from "./antigravityUsageLimits.ts";
+import {
+  makeAntigravityUsageProbe,
+  parseAntigravityCliCredential,
+  type AntigravityCliAccess,
+} from "./antigravityUsageLimits.ts";
 
 const summary = {
   groups: [
@@ -66,11 +71,18 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     userInfoAt?: number;
     missingToken?: boolean;
     authMethod?: "oauth-personal" | "oauth-business" | "gemini-api-key";
+    /** Uses this bearer and sends no project id. Skips the OAuth refresh call. */
+    cliAccess?: AntigravityCliAccess | "expired";
+    /** Reads CLI credential files and this secret instead of the real keyring. */
+    discover?: boolean;
+    readStoredSecret?: Effect.Effect<string | null>;
+    directAccess?: string;
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const profileDirectory = yield* fs.makeTempDirectoryScoped();
+  const homeDirectory = yield* fs.makeTempDirectoryScoped();
   yield* fs.makeDirectory(path.join(profileDirectory, "antigravity-acp"));
   const tokenPath = path.join(profileDirectory, "antigravity-acp", "acp_token.json");
   const writeToken = (refreshToken: string) =>
@@ -83,7 +95,15 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
         project_id: "project-id",
       }),
     );
-  if (!options.missingToken) yield* writeToken(options.refreshToken ?? "refresh-a");
+  const suppliedAccess =
+    options.cliAccess && typeof options.cliAccess === "object"
+      ? options.cliAccess.accessToken
+      : undefined;
+  const bearer = suppliedAccess ?? options.directAccess ?? "access-token";
+  const quotaBody = suppliedAccess || options.directAccess ? {} : { project: "project-id" };
+  if (!options.missingToken && !options.discover && options.cliAccess === undefined) {
+    yield* writeToken(options.refreshToken ?? "refresh-a");
+  }
   const requests: Array<{ url: string; body: string }> = [];
   const http = HttpClient.make((request, url, _signal, fiber) =>
     Effect.sync(() => {
@@ -102,7 +122,7 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
           ),
         );
       }
-      expect(request.headers.authorization).toBe("Bearer access-token");
+      expect(request.headers.authorization).toBe(`Bearer ${bearer}`);
       if (request.url.endsWith("/userinfo")) {
         return HttpClientResponse.fromWeb(
           request,
@@ -111,7 +131,7 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
             : Response.json({}, { status: 403 }),
         );
       }
-      expect(JSON.parse(body)).toEqual({ project: "project-id" });
+      expect(JSON.parse(body)).toEqual(quotaBody);
       expect(request.headers["user-agent"]).toMatch(/^antigravity\/hub\/2\.24\.0 /);
       return HttpClientResponse.fromWeb(
         request,
@@ -132,8 +152,14 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
   const usage = yield* makeAntigravityUsageProbe({
     profileDirectory,
     authMethod: options.authMethod ?? "oauth-personal",
-  }).pipe(Effect.provideService(HttpClient.HttpClient, http));
-  return { ...usage, requests, writeToken, tokenPath };
+    ...(options.discover
+      ? { readStoredSecret: options.readStoredSecret ?? Effect.succeed(null) }
+      : { cliAccess: options.cliAccess ?? null }),
+  }).pipe(
+    Effect.provideService(HttpClient.HttpClient, http),
+    Effect.provideService(HostProcess.HomeDirectory, homeDirectory),
+  );
+  return { ...usage, requests, writeToken, tokenPath, profileDirectory, homeDirectory };
 });
 
 describe("Antigravity subscription limits", () => {
@@ -671,6 +697,233 @@ describe("Antigravity subscription limits", () => {
         message: "Sign in with Google to see limits.",
       });
       expect(signedOut.requests).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it("parses the keyring credential agy stores, including a nanosecond expiry", () => {
+    const now = Date.parse("2026-11-20T12:00:00.000Z");
+    expect(
+      parseAntigravityCliCredential(
+        JSON.stringify({
+          token: {
+            access_token: "access",
+            refresh_token: "refresh",
+            expiry: "2026-11-20T19:22:44.180377856Z",
+          },
+        }),
+        now,
+      ),
+    ).toEqual({
+      accessToken: "access",
+      identity: "refresh",
+      expiresAtMs: Date.parse("2026-11-20T19:22:44.180Z"),
+    });
+    expect(parseAntigravityCliCredential(JSON.stringify({ access_token: "flat" }), now)).toEqual({
+      accessToken: "flat",
+      identity: "flat",
+    });
+    expect(
+      parseAntigravityCliCredential(
+        JSON.stringify({ token: { access_token: "old", expiry: "2026-11-20T11:00:00Z" } }),
+        now,
+      ),
+    ).toBe("expired");
+    expect(parseAntigravityCliCredential("{", now)).toBeUndefined();
+    expect(parseAntigravityCliCredential("{}", now)).toBeUndefined();
+  });
+
+  it.effect("uses a saved Antigravity access token without calling the token endpoint", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-20T12:00:00Z")));
+      const { probe, requests } = yield* fixture({
+        missingToken: true,
+        userId: "google-user-9",
+        cliAccess: {
+          accessToken: "cli-access-token",
+          identity: "cli-refresh-token",
+          expiresAtMs: DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-20T13:00:00Z")),
+        },
+      });
+      const limits = yield* probe;
+      expect(limits.unavailable).toBeUndefined();
+      expect(limits.windows.some((window) => window.id === "gemini-5h")).toBe(true);
+      expect(requests.some((request) => request.url.endsWith("/token"))).toBe(false);
+      expect(limits.credentialFingerprint).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(limits)).not.toMatch(/cli-access-token|cli-refresh-token/);
+      yield* probe;
+      expect(requests.filter((request) => request.url.endsWith("/userinfo"))).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("re-reads an access token once its unknown expiry cache elapses", () =>
+    Effect.gen(function* () {
+      const { probe, requests } = yield* fixture({
+        missingToken: true,
+        cliAccess: { accessToken: "cli-access-token", identity: "cli-refresh-token" },
+      });
+      yield* probe;
+      yield* TestClock.adjust("6 minutes");
+      yield* probe;
+      expect(requests.filter((request) => request.url.endsWith("/userinfo"))).toHaveLength(2);
+      expect(requests.some((request) => request.url.endsWith("/token"))).toBe(false);
+      expect(JSON.stringify(yield* probe)).not.toMatch(/cli-access-token|cli-refresh-token/);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("does not send a lapsed Antigravity access token", () =>
+    Effect.gen(function* () {
+      const { probe, requests } = yield* fixture({ missingToken: true, cliAccess: "expired" });
+      const limits = yield* probe;
+      expect(limits.windows).toEqual([]);
+      expect(limits.unavailable).toEqual({
+        reason: "probeFailed",
+        message:
+          "Antigravity's saved access token has lapsed. A running agy session refreshes it; the Antigravity app does not need to be open.",
+      });
+      expect(requests).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("reads the profile OAuth file and does not open the keyring", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-20T12:00:00Z")));
+      const { probe, requests, profileDirectory } = yield* fixture({
+        discover: true,
+        directAccess: "file-access-token",
+        readStoredSecret: Effect.die("keyring should stay unread"),
+      });
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.writeFileString(
+        path.join(profileDirectory, "antigravity-acp", "antigravity-oauth-token"),
+        JSON.stringify({
+          token: {
+            access_token: "file-access-token",
+            refresh_token: "file-refresh-token",
+            expiry: "2026-11-20T19:22:44.180377856Z",
+          },
+        }),
+      );
+      const limits = yield* probe;
+      expect(limits.unavailable).toBeUndefined();
+      expect(requests.some((request) => request.url.endsWith("/token"))).toBe(false);
+      expect(JSON.stringify(limits)).not.toMatch(/file-access-token|file-refresh-token/);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("uses a fresh home credential when the profile credential has lapsed", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-20T12:00:00Z")));
+      const { probe, profileDirectory, homeDirectory } = yield* fixture({
+        discover: true,
+        directAccess: "home-access-token",
+        readStoredSecret: Effect.die("keyring should stay unread"),
+      });
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.writeFileString(
+        path.join(profileDirectory, "antigravity-oauth-token"),
+        JSON.stringify({
+          token: { access_token: "old-access-token", expiry: "2020-01-01T00:00:00Z" },
+        }),
+      );
+      const directory = path.join(homeDirectory, ".gemini", "antigravity-cli");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(directory, "antigravity-oauth-token"),
+        JSON.stringify({
+          access_token: "home-access-token",
+          refresh_token: "home-refresh-token",
+          expiry: "2099-01-01T00:00:00Z",
+        }),
+      );
+      const limits = yield* probe;
+      expect(limits.unavailable).toBeUndefined();
+      expect(JSON.stringify(limits)).not.toMatch(
+        /old-access-token|home-access-token|home-refresh-token/,
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("uses the keyring access token when no credential file exists", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-20T12:00:00Z")));
+      const { probe, requests } = yield* fixture({
+        discover: true,
+        directAccess: "keyring-access-token",
+        readStoredSecret: Effect.succeed(
+          JSON.stringify({
+            token: {
+              access_token: "keyring-access-token",
+              refresh_token: "keyring-refresh-token",
+              expiry: "2026-11-20T19:22:44.180377856Z",
+            },
+          }),
+        ),
+      });
+      const limits = yield* probe;
+      expect(limits.windows.some((window) => window.id === "gemini-weekly")).toBe(true);
+      expect(requests.some((request) => request.url.endsWith("/token"))).toBe(false);
+      expect(JSON.stringify(limits)).not.toMatch(/keyring-access-token|keyring-refresh-token/);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("reports a lapsed keyring token without sending it", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-11-20T12:00:00Z")));
+      const { probe, requests } = yield* fixture({
+        discover: true,
+        readStoredSecret: Effect.succeed(
+          JSON.stringify({
+            token: { access_token: "lapsed-access-token", expiry: "2020-01-01T00:00:00Z" },
+          }),
+        ),
+      });
+      const limits = yield* probe;
+      expect(limits.unavailable?.reason).toBe("probeFailed");
+      expect(requests).toEqual([]);
+      expect(JSON.stringify(limits)).not.toMatch(/lapsed-access-token/);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("asks for model quotas when the summary is only untouched placeholders", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-21T10:16:04Z")));
+      const { probe, requests } = yield* fixture({
+        summary: {
+          groups: [
+            {
+              displayName: "Claude and GPT models",
+              buckets: [
+                {
+                  bucketId: "3p-5h",
+                  window: "5h",
+                  remainingFraction: 1,
+                  resetTime: "2026-10-21T15:16:05Z",
+                },
+                {
+                  bucketId: "3p-weekly",
+                  window: "weekly",
+                  remainingFraction: 1,
+                  resetTime: "2026-10-28T10:16:05Z",
+                },
+              ],
+            },
+          ],
+        },
+        models: {
+          models: {
+            "gemini-a": {
+              modelProvider: "MODEL_PROVIDER_GOOGLE",
+              quotaInfo: { remainingFraction: 0.74, resetTime: "2026-10-21T13:40:58Z" },
+            },
+          },
+        },
+      });
+      const limits = yield* probe;
+      expect(limits.windows.map((window) => window.id)).toEqual(["gemini-quota"]);
+      expect(limits.windows[0]?.usedPercent).toBeCloseTo(26, 5);
+      expect(requests.some((request) => request.url.endsWith(":fetchAvailableModels"))).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 });

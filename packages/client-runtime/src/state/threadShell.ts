@@ -1,5 +1,6 @@
 import type {
   EnvironmentId,
+  Founder,
   OrchestrationV2ShellSnapshot,
   ProjectId,
   ScopedProjectRef,
@@ -256,7 +257,15 @@ export function createEnvironmentThreadShellAtoms(input: {
   readonly hiddenThreadTagsAtom: (
     environmentId: EnvironmentId,
   ) => Atom.Atom<ReadonlyArray<string> | null>;
+  /**
+   * The founder reading this client. Shared threads present that founder's read cursor.
+   * Absent on clients that have no founder, which keep the shared watermark.
+   */
+  readonly viewerFounderAtom?: Atom.Atom<Founder | null>;
 }) {
+  const viewerFounderAtom = input.viewerFounderAtom;
+  const viewerOf = (get: (atom: Atom.Atom<Founder | null>) => Founder | null): Founder | null =>
+    viewerFounderAtom === undefined ? null : get(viewerFounderAtom);
   // Point reads and aggregate lists share values without keeping an atom alive
   // for every listed thread. Replaced source objects can be collected.
   const scopedThreads = new WeakMap<
@@ -267,6 +276,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     environmentId: EnvironmentId,
     thread: OrchestrationV2ThreadShell,
     subagentRequests: ReadonlyMap<ThreadId, PendingSubagentRequest>,
+    viewer: Founder | null,
   ) => {
     let byEnvironment = scopedThreads.get(thread);
     if (byEnvironment === undefined) {
@@ -274,10 +284,10 @@ export function createEnvironmentThreadShellAtoms(input: {
       scopedThreads.set(thread, byEnvironment);
     }
     const request = subagentRequests.get(thread.id) ?? null;
-    const key = request === null ? environmentId : `${environmentId}:${request}`;
+    const key = `${request === null ? environmentId : `${environmentId}:${request}`}:${viewer ?? ""}`;
     let value = byEnvironment.get(key);
     if (value === undefined) {
-      value = presentThreadShell(environmentId, thread, request);
+      value = presentThreadShell(environmentId, thread, request, viewer);
       byEnvironment.set(key, value);
     }
     return value;
@@ -463,6 +473,7 @@ export function createEnvironmentThreadShellAtoms(input: {
             ref.environmentId,
             source,
             get(pendingSubagentRequestsAtom(ref.environmentId)),
+            viewerOf(get),
           );
     }).pipe(Atom.withLabel(`environment-thread-shell:${key}`));
   });
@@ -517,6 +528,7 @@ export function createEnvironmentThreadShellAtoms(input: {
       const seen = new Set<string>([key]);
       const pending = [key];
       const next: EnvironmentThreadShell[] = [];
+      const viewer = viewerOf(get);
       for (const parent of pending) {
         for (const { environmentId, thread } of children.get(parent) ?? []) {
           const childKey = threadKey({ environmentId, threadId: thread.id });
@@ -525,7 +537,12 @@ export function createEnvironmentThreadShellAtoms(input: {
           pending.push(childKey);
           if (subagentRequest(thread) !== null || sideChatRequest(thread) !== null) {
             next.push(
-              scopedThread(environmentId, thread, get(pendingSubagentRequestsAtom(environmentId))),
+              scopedThread(
+                environmentId,
+                thread,
+                get(pendingSubagentRequestsAtom(environmentId)),
+                viewer,
+              ),
             );
           }
         }
@@ -561,8 +578,9 @@ export function createEnvironmentThreadShellAtoms(input: {
         return previous;
       }
       const subagentRequests = get(pendingSubagentRequestsAtom(ref.environmentId));
+      const viewer = viewerOf(get);
       const next = sideChats.map((thread) =>
-        scopedThread(ref.environmentId, thread, subagentRequests),
+        scopedThread(ref.environmentId, thread, subagentRequests, viewer),
       );
       if (
         previous.length === next.length &&
@@ -588,6 +606,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     return Atom.make((get) => {
       const next: EnvironmentThreadShell[] = [];
       const seen = new Set<string>();
+      const viewer = viewerOf(get);
       for (const projectRef of projectRefs) {
         const refs =
           get(environmentThreadRefsByProjectAtom(projectRef.environmentId)).get(
@@ -604,7 +623,7 @@ export function createEnvironmentThreadShellAtoms(input: {
           seen.add(key);
           const thread = threads.get(ref.threadId);
           if (thread !== undefined) {
-            next.push(scopedThread(ref.environmentId, thread, subagentRequests));
+            next.push(scopedThread(ref.environmentId, thread, subagentRequests, viewer));
           }
         }
       }
@@ -632,10 +651,11 @@ export function createEnvironmentThreadShellAtoms(input: {
   let previousThreadShells: ReadonlyArray<EnvironmentThreadShell> = [];
   const threadShellsAtom = Atom.make((get) => {
     const next: EnvironmentThreadShell[] = [];
+    const viewer = viewerOf(get);
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
       for (const thread of get(environmentThreadsAtom(environmentId))) {
-        next.push(scopedThread(environmentId, thread, subagentRequests));
+        next.push(scopedThread(environmentId, thread, subagentRequests, viewer));
       }
     }
     if (arrayElementsEqual(previousThreadShells, next)) {
@@ -747,6 +767,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     const next: EnvironmentThreadShell[] = [];
     const underParent = get(delegatedUnderParentAtom);
     const hidden = get(hiddenThreadKeysAtom);
+    const viewer = viewerOf(get);
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
       for (const thread of get(environmentThreadsAtom(environmentId))) {
@@ -757,7 +778,7 @@ export function createEnvironmentThreadShellAtoms(input: {
         ) {
           continue;
         }
-        next.push(scopedThread(environmentId, thread, subagentRequests));
+        next.push(scopedThread(environmentId, thread, subagentRequests, viewer));
       }
     }
     if (arrayElementsEqual(previousNavigationShells, next)) return previousNavigationShells;

@@ -41,7 +41,8 @@ vi.mock(import("../../state/entities"), () => ({
   useHiddenThreadKeys: (() => new Set()) as never,
   useAnyEnvironmentHiding: (() => false) as never,
 }));
-vi.mock(import("../../state/environments"), () => ({
+vi.mock(import("../../state/environments"), async (original) => ({
+  ...(await original()),
   useEnvironment: (() => null) as never,
   useEnvironmentProviders: (() => new Map()) as never,
 }));
