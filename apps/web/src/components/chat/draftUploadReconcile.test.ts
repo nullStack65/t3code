@@ -117,18 +117,45 @@ const request = {
   multipleModels: false,
 } as const;
 
+// Only one test may own the fake clock. A timed-out test keeps running, and its
+// finally used to uninstall the next test's timers (and its late upload landed
+// in the next test's hoisted doubles).
+let timerScope = 0;
+
+function useScopedFakeTimers() {
+  // setImmediate and performance stay real. The loader and fake-timer clock
+  // both yield through them; faking them before import leaves the import pending
+  // until the 15s test timeout.
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
+}
+
+async function importFresh<T>(load: () => Promise<T>): Promise<T> {
+  const scope = timerScope;
+  const restore = vi.isFakeTimers();
+  if (restore) vi.useRealTimers();
+  vi.resetModules();
+  try {
+    return await load();
+  } finally {
+    if (restore && scope === timerScope) useScopedFakeTimers();
+  }
+}
+
 async function openPage() {
-  return {
+  return importFresh(async () => ({
     store: await import("../../composerDraftStore"),
     placement: await import("./draftPlacement"),
     queue: await import("../../lib/attachmentUploadQueue"),
     registry: (await import("../../rpc/atomRegistry")).appAtomRegistry,
     catalog: (await import("../../connection/catalog")).environmentCatalog,
-  };
+  }));
 }
 type Page = Awaited<ReturnType<typeof openPage>>;
 
 async function withPage(run: (page: Page) => Promise<void>) {
+  const scope = ++timerScope;
   const memory = createMemoryStorage();
   const storage = {
     getItem: (name: string) => memory.getItem(name),
@@ -137,8 +164,7 @@ async function withPage(run: (page: Page) => Promise<void>) {
   };
   vi.stubGlobal("localStorage", storage);
   vi.stubGlobal("window", Object.assign(new EventTarget(), { localStorage: storage }));
-  vi.useFakeTimers();
-  vi.resetModules();
+  useScopedFakeTimers();
   net.origin.answer = "bound";
   net.admissions.length = 0;
   net.cycles.length = 0;
@@ -151,9 +177,11 @@ async function withPage(run: (page: Page) => Promise<void>) {
   try {
     await run(await openPage());
   } finally {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.resetModules();
+    if (scope === timerScope) {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   }
 }
 

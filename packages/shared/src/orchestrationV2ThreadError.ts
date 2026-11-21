@@ -116,12 +116,17 @@ export function usageLimitRunPresentedAsLatest(
   return blocked !== null && runs.some((run) => run.ordinal > blocked.ordinal) ? blocked : null;
 }
 
+/** A digest waiting for the next turn; it never starts one, so the thread is not busy with it. */
+export function isWaitingDigestRun(run: Pick<OrchestrationV2Run, "status" | "delivery">): boolean {
+  return run.status === "queued" && run.delivery?.class === "digest";
+}
+
 export function latestUnheldRun(
   runs: ReadonlyArray<OrchestrationV2Run>,
 ): OrchestrationV2Run | null {
   let latest: OrchestrationV2Run | null = null;
   for (const run of runs) {
-    if (run.status === "queued" && run.queueHeld === true) continue;
+    if (run.status === "queued" && (run.queueHeld === true || isWaitingDigestRun(run))) continue;
     if (outlivedBeforeStart(run, runs)) continue;
     if (latest === null || run.ordinal > latest.ordinal) latest = run;
   }

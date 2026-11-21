@@ -3559,6 +3559,36 @@ const make = Effect.gen(function* () {
       yield* assertTargetWithinLimits(limits, target.thread);
 
       const mode = input.mode ?? "auto";
+      // A message to another thread rides in that thread's next digest unless the sender
+      // names a class. A message to the sender's own thread keeps the mode it asked for.
+      const deliveryClass =
+        input.deliveryClass ??
+        (input.digestCategory !== undefined ||
+        (parent !== undefined && parent.thread.id !== input.threadId)
+          ? "digest"
+          : undefined);
+      if (
+        deliveryClass === undefined &&
+        (input.coalesceKey !== undefined || input.expiresAt !== undefined)
+      ) {
+        return yield* failure("invalid_request", "coalesceKey and expiresAt need a deliveryClass.");
+      }
+      const expiresAt =
+        input.expiresAt === undefined
+          ? undefined
+          : Option.getOrUndefined(DateTime.make(input.expiresAt));
+      if (input.expiresAt !== undefined && expiresAt === undefined) {
+        return yield* failure("invalid_request", "expiresAt must be an ISO date-time.");
+      }
+      const delivery =
+        deliveryClass === undefined
+          ? undefined
+          : {
+              class: deliveryClass,
+              ...(input.coalesceKey === undefined ? {} : { coalesceKey: input.coalesceKey }),
+              ...(expiresAt === undefined ? {} : { expiresAt: DateTime.toUtc(expiresAt) }),
+              ...(input.digestCategory === undefined ? {} : { category: input.digestCategory }),
+            };
       const key = yield* requestKey(input.clientRequestId);
       const messageId = stableOperationMessageId({
         scope,
@@ -3584,6 +3614,7 @@ const make = Effect.gen(function* () {
           attachments: [],
           mode,
           ...(input.freshContext ? { freshContext: true } : {}),
+          ...(delivery === undefined ? {} : { delivery }),
           createdBy: "agent",
           creationSource: "mcp",
         })
@@ -3626,6 +3657,7 @@ const make = Effect.gen(function* () {
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
         status: result.run.status,
         delivery: result.delivery,
+        ...(deliveryClass === undefined ? {} : { deliveryClass }),
       } satisfies OrchestratorMcpThreadSendResult;
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {

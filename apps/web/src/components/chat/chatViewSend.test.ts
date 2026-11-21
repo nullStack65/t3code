@@ -47,33 +47,49 @@ const modelSelection = {
   model: "claude-sonnet-4-6",
 };
 
-// A timed-out test is not cancelled: its import can finish after the next test has
-// stubbed storage. The epoch is the test that owns the globals; a continuation
-// whose epoch lost that race stops instead of resetting the next test's modules.
+// One test owns the fake clock. setImmediate and performance stay real, or the
+// import waits out the 15s timeout. A timed-out test's continuation stops once a
+// newer test owns the globals.
 const storageRuns = new NodeAsyncHooks.AsyncLocalStorage<number>();
-let storageEpoch = 0;
+let timerScope = 0;
 
-class SupersededStorageRun extends Error {}
-
-function assertStorageOwner() {
-  if (storageRuns.getStore() !== storageEpoch) throw new SupersededStorageRun();
+class SupersededStorageRun {
+  readonly _tag = "SupersededStorageRun";
 }
 
-async function loadTab() {
-  return {
+function assertStorageOwner() {
+  if (storageRuns.getStore() !== timerScope) throw new SupersededStorageRun();
+}
+
+function useScopedFakeTimers() {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
+}
+
+async function importFresh<T>(load: () => Promise<T>): Promise<T> {
+  const owner = storageRuns.getStore();
+  if (owner !== undefined && owner !== timerScope) throw new SupersededStorageRun();
+  const restore = vi.isFakeTimers();
+  if (restore) vi.useRealTimers();
+  vi.resetModules();
+  try {
+    const loaded = await load();
+    if (owner !== undefined && owner !== timerScope) throw new SupersededStorageRun();
+    return loaded;
+  } finally {
+    if (restore && owner === timerScope) useScopedFakeTimers();
+  }
+}
+
+async function openTab() {
+  return importFresh(async () => ({
     store: await import("../../composerDraftStore"),
     send: await import("./chatViewSend"),
     logic: await import("./composerSend.logic"),
     view: await import("../ChatView.logic"),
     uploads: await import("../../lib/attachmentUploadQueue"),
-  };
-}
-
-async function openTab() {
-  const epoch = storageRuns.getStore();
-  const tab = await loadTab();
-  if (epoch !== storageEpoch) throw new SupersededStorageRun();
-  return tab;
+  }));
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
@@ -105,20 +121,19 @@ function faultyStorage() {
 }
 
 async function withReloadableStorage(run: () => Promise<void>) {
-  const epoch = ++storageEpoch;
-  return storageRuns.run(epoch, async () => {
+  const scope = ++timerScope;
+  return storageRuns.run(scope, async () => {
     vi.stubGlobal("localStorage", faultyStorage());
     vi.stubGlobal("window", new EventTarget());
     vi.stubGlobal("FileReader", BlobFileReader);
-    vi.useFakeTimers();
-    vi.resetModules();
+    useScopedFakeTimers();
     try {
       await run();
     } catch (error) {
       if (error instanceof SupersededStorageRun) return;
       throw error;
     } finally {
-      if (storageRuns.getStore() === storageEpoch) {
+      if (storageRuns.getStore() === timerScope) {
         gate = null;
         resetStorageFaults();
         vi.useRealTimers();
@@ -133,20 +148,8 @@ async function withReloadableStorage(run: () => Promise<void>) {
 async function reload() {
   assertStorageOwner();
   vi.clearAllTimers();
-  vi.resetModules();
   return openTab();
 }
-
-// Evaluating ChatView and the draft store the first time exceeds the 15s unit
-// timeout on a loaded CI worker, and that abandoned test then races the next one.
-// Pay for the graph while this file loads. Each test still resets and re-imports
-// after it stubs storage; a repeat evaluation stays inside the timeout.
-vi.stubGlobal("localStorage", createMemoryStorage());
-vi.stubGlobal("window", new EventTarget());
-vi.stubGlobal("FileReader", BlobFileReader);
-await loadTab();
-vi.resetModules();
-vi.unstubAllGlobals();
 
 const launchRequest = (tab: Tab, branch: string | null = null) =>
   tab.logic.draftLaunchRequest({

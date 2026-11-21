@@ -152,16 +152,43 @@ const request = {
 } as const;
 const storageFaults = { drops: false };
 
+// Only one test may own the fake clock. A timed-out test keeps running, and its
+// finally used to uninstall the next test's timers (and its late upload landed
+// in the next test's hoisted doubles).
+let timerScope = 0;
+
+function useScopedFakeTimers() {
+  // setImmediate and performance stay real. The loader and fake-timer clock
+  // both yield through them; faking them before import leaves the import pending
+  // until the 15s test timeout.
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
+}
+
+async function importFresh<T>(load: () => Promise<T>): Promise<T> {
+  const scope = timerScope;
+  const restore = vi.isFakeTimers();
+  if (restore) vi.useRealTimers();
+  vi.resetModules();
+  try {
+    return await load();
+  } finally {
+    if (restore && scope === timerScope) useScopedFakeTimers();
+  }
+}
+
 async function openTab() {
-  return {
+  return importFresh(async () => ({
     store: await import("../../composerDraftStore"),
     placement: await import("./draftPlacement"),
     queue: await import("../../lib/attachmentUploadQueue"),
-  };
+  }));
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
 async function withStorage(run: () => Promise<void>) {
+  const scope = ++timerScope;
   const memory = createMemoryStorage();
   const storage = {
     getItem: (name: string) => memory.getItem(name),
@@ -173,8 +200,7 @@ async function withStorage(run: () => Promise<void>) {
   vi.stubGlobal("localStorage", storage);
   // The image readback reads `window.localStorage`, as in a browser.
   vi.stubGlobal("window", Object.assign(new EventTarget(), { localStorage: storage }));
-  vi.useFakeTimers();
-  vi.resetModules();
+  useScopedFakeTimers();
   uploads.to.length = 0;
   uploads.sequence.length = 0;
   originServer.bound.length = 0;
@@ -182,10 +208,12 @@ async function withStorage(run: () => Promise<void>) {
   try {
     await run();
   } finally {
-    storageFaults.drops = false;
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.resetModules();
+    if (scope === timerScope) {
+      storageFaults.drops = false;
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   }
 }
 

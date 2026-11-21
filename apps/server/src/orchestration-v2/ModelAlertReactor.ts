@@ -4,6 +4,7 @@ import {
   isListedThreadLineage,
   MessageId,
   type ModelAlertWatcher,
+  type OrchestrationV2DigestCategory,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
@@ -124,6 +125,11 @@ const Delivery = Schema.Struct({
   attempts: Schema.Int,
   nextAttemptAt: Schema.Number,
   createdAt: Schema.Number,
+  /**
+   * When the digest expires, fixed when the alert is queued. A retry must carry the same time,
+   * or the first send and the retry disagree and the retry is not a replay.
+   */
+  digestExpiresAt: Schema.optional(Schema.Number),
 });
 type Delivery = typeof Delivery.Type;
 
@@ -306,6 +312,7 @@ function enqueueAlert(
       attempts: 0,
       nextAttemptAt: nowMs,
       createdAt: nowMs,
+      digestExpiresAt: nowMs + ALERT_DIGEST_TTL_MS,
     }));
   return {
     outbox: [...pruneOutbox(outbox, nowMs), ...added].slice(-MAX_OUTBOX),
@@ -577,6 +584,8 @@ const BUSY_WATCHER_STATUSES = new Set<string>([
 /** Matches the flush interval, so a held alert is looked at again on the next flush. */
 export const BUSY_WATCHER_RECHECK_MS = 30_000;
 export const BUSY_WATCHER_MAX_HOLD_MS = 10 * 60 * 1000;
+/** How long an undelivered alert stays in the watcher's digest before it is dropped. */
+const ALERT_DIGEST_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * While the watcher is mid-turn, a sent alert only queues behind that turn and is judged stale or
@@ -682,6 +691,7 @@ export function recordUsageLimit(
         attempts: 0,
         nextAttemptAt: notBefore,
         createdAt: nowMs,
+        digestExpiresAt: nowMs + ALERT_DIGEST_TTL_MS,
       },
     ].slice(-MAX_OUTBOX);
   }
@@ -736,6 +746,32 @@ export const watcherAlertMessage = (alert: WatcherAlert) => {
   }
 };
 
+
+/** Alerts ride in the watcher's next digest; a newer alert on the same subject replaces an older one. */
+function alertDelivery(alert: WatcherAlert): {
+  readonly coalesceKey: string;
+  readonly category: OrchestrationV2DigestCategory;
+} {
+  switch (alert.type) {
+    case "peer-link-renewal":
+      return { coalesceKey: `${alert.type}:${alert.linkedEnvironmentId}`, category: "alert" };
+    case "usage-limit-incident":
+      return { coalesceKey: `${alert.type}:${alert.groupKey}`, category: "alert" };
+    case "model-degraded":
+      return { coalesceKey: `${alert.type}:${alert.threadId}`, category: "alert" };
+    case "thread-event":
+      return {
+        coalesceKey: `${alert.type}:${alert.kind}:${alert.threadId}`,
+        category:
+          alert.kind === "lane-ended"
+            ? "lane_result"
+            : alert.kind === "needs-person"
+              ? "decision_needed"
+              : "alert",
+      };
+  }
+}
+
 /**
  * Puts an alert in the watcher thread, here or on the linked machine that owns it. The retry key is
  * one per alert and watcher, so a retry after a lost answer sends once.
@@ -749,11 +785,16 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   alert: WatcherAlert,
   watcher: ModelAlertWatcher,
   here: EnvironmentId,
+  expiresAtMs?: number,
 ) {
   const message = watcherAlertMessage(alert);
   // Run ids can be long; a retry key must stay under the 256 characters the peer accepts.
   const identity = `${alert.id}\n${watcher.environmentId}\n${watcher.threadId}`;
   const key = `${alert.type === "model-degraded" ? "model-alert" : alert.type}:${yield* deps.sha256Hex(identity)}`;
+  const { coalesceKey, category } = alertDelivery(alert);
+  const expiresAt = DateTime.makeUnsafe(
+    expiresAtMs ?? DateTime.toEpochMillis(yield* DateTime.now) + ALERT_DIGEST_TTL_MS,
+  );
   if (watcher.environmentId === here) {
     yield* deps.dispatch({
       type: "message.dispatch",
@@ -763,6 +804,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
       text: message,
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
+      delivery: { class: "digest", coalesceKey, expiresAt, category },
       createdBy: "agent",
       creationSource: "server",
     });
@@ -771,7 +813,16 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   yield* deps.call({
     environmentId: watcher.environmentId,
     tool: "t3_thread_send",
-    arguments: { threadId: watcher.threadId, message, mode: "queue", clientRequestId: key },
+    arguments: {
+      threadId: watcher.threadId,
+      message,
+      mode: "queue",
+      clientRequestId: key,
+      deliveryClass: "digest",
+      coalesceKey,
+      expiresAt: DateTime.formatIso(expiresAt),
+      digestCategory: category,
+    },
     limits: { runtimeMode: "full-access", interactionMode: "default" },
     success: OrchestratorMcpThreadSendResult,
   });
@@ -851,12 +902,18 @@ export const make = Effect.gen(function* () {
     crypto
       .digest(Digest.sha256, new TextEncoder().encode(identity))
       .pipe(Effect.map(Hex.encode), Effect.orDie);
-  const deliverToWatcher = (alert: WatcherAlert, watcher: ModelAlertWatcher, here: EnvironmentId) =>
+  const deliverToWatcher = (
+    alert: WatcherAlert,
+    watcher: ModelAlertWatcher,
+    here: EnvironmentId,
+    expiresAtMs: number,
+  ) =>
     deliverAlertToWatcher(
       { dispatch: engine.dispatch, call: peers.call, sha256Hex },
       alert,
       watcher,
       here,
+      expiresAtMs,
     );
 
   type WatcherView = {
@@ -993,8 +1050,15 @@ export const make = Effect.gen(function* () {
     if (watcher.environmentId === here) {
       const shell = yield* projections.getThreadShell(watcher.threadId);
       if (shell === null) return null;
+      // A queued digest never starts a turn, so the shell hides it and reads idle. It is still a
+      // turn waiting to be judged, and another alert queueing behind it would be judged stale.
+      const digestWaiting =
+        shell.status === "idle" &&
+        (yield* projections.getThreadRecords(watcher.threadId, ["runs"])).runs.some(
+          (run) => run.status === "queued" && run.delivery?.class === "digest",
+        );
       return {
-        status: shell.status as string,
+        status: (digestWaiting ? "queued" : shell.status) as string,
         providerInstanceId: shell.providerInstanceId as string | null,
         usageLimited: shell.lastErrorClass === "usage_limit",
         resetAt: shell.usageLimitResetAt ?? null,
@@ -1088,7 +1152,12 @@ export const make = Effect.gen(function* () {
       holdUntil(view, alert, nowMs) ??
       busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
-    yield* deliverToWatcher(alert, target, here);
+    yield* deliverToWatcher(
+      alert,
+      target,
+      here,
+      entry.digestExpiresAt ?? nowMs + ALERT_DIGEST_TTL_MS,
+    );
     return { _tag: "sent" } satisfies DeliveryResult;
   });
 
@@ -1104,6 +1173,8 @@ export const make = Effect.gen(function* () {
         return yield* readWatcher(watcher, yield* environment.getEnvironmentId);
       }).pipe(Effect.catchCause(() => Effect.succeed(null))),
     );
+    // One at a time: a delivery queues a turn on the watcher, and the next alert in this
+    // flush has to see that turn to hold instead of queueing behind it.
     yield* Effect.forEach(
       due,
       (entry) =>
@@ -1131,7 +1202,7 @@ export const make = Effect.gen(function* () {
                   : afterDeliveryAttempt(current, entry, true, attemptedAt),
           ]);
         }),
-      { concurrency: 4, discard: true },
+      { concurrency: 1, discard: true },
     );
   });
 
