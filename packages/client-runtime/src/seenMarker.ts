@@ -74,10 +74,18 @@ function recordSeenMessage(input: {
   messageId: MessageId;
   messages: ReadonlyArray<SeenMessage>;
   seenAt: string;
+  /** A place already stored for this founder. A dwell behind it does not rewind the marker. */
+  notBeforeMessageId?: MessageId | null;
 }): boolean {
   const key = seenMarkerKey(input.threadKey, input.founder);
   const nextIndex = input.messages.findIndex((message) => message.id === input.messageId);
   if (nextIndex < 0 || input.messages[nextIndex]?.streaming === true) return false;
+  if (input.notBeforeMessageId != null) {
+    const floorIndex = input.messages.findIndex(
+      (message) => message.id === input.notBeforeMessageId,
+    );
+    if (floorIndex >= 0 && nextIndex <= floorIndex) return false;
+  }
   const previous = seenByThreadKey.get(key);
   if (previous) {
     const previousIndex = input.messages.findIndex((message) => message.id === previous.messageId);
@@ -144,18 +152,22 @@ export function createSeenMarkerSession(input: {
   seenAt: () => string;
   timers: SeenTimers;
   dwellMs?: number;
+  /** The stored place. Read on each dwell so a late shell still blocks a rewind. */
+  notBefore?: () => MessageId | null | undefined;
   /** Fired when a human's place moves. Callers persist it. They must not start a turn. */
   onRecorded?: (messageId: MessageId, seenAt: string) => void;
 }): SeenMarkerSession {
   const tracker = createSeenDwellTracker({
     onSeen: (messageId) => {
       const seenAt = input.seenAt();
+      const notBefore = input.notBefore?.() ?? null;
       const recorded = recordSeenMessage({
         threadKey: input.threadKey,
         ...(input.founder !== undefined ? { founder: input.founder } : {}),
         messageId,
         messages: input.getMessages(),
         seenAt,
+        ...(notBefore == null ? {} : { notBeforeMessageId: notBefore }),
       });
       if (recorded) input.onRecorded?.(messageId, seenAt);
     },

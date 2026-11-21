@@ -127,6 +127,33 @@ describe("seen dwell", () => {
   });
 });
 
+describe("stored place", () => {
+  it("does not record a message at or before the stored one", () => {
+    const afterId = MessageId.make("message-after");
+    const recorded: Array<MessageId> = [];
+    const clock = manualTimers();
+    const tracker = createSeenMarkerSession({
+      threadKey: "env:thread",
+      getMessages: () => [...messages, { id: afterId, role: "assistant" }],
+      seenAt: () => seenAt,
+      timers: clock.timers,
+      notBefore: () => laterId,
+      onRecorded: (messageId) => {
+        recorded.push(messageId);
+      },
+    });
+    tracker.update({ active: true, visibleIds: [assistantId] });
+    clock.fireNext();
+    expect(recorded).toEqual([]);
+    expect(buildSeenMarker("env:thread")).toBeUndefined();
+    tracker.update({ active: true, visibleIds: [afterId] });
+    clock.fireNext();
+    expect(recorded).toEqual([afterId]);
+    expect(buildSeenMarker("env:thread")?.lastSeenMessageId).toBe(afterId);
+    tracker.dispose();
+  });
+});
+
 describe("catch-up offer", () => {
   it("offers a marker only when a finished assistant message is still unseen", () => {
     expect(

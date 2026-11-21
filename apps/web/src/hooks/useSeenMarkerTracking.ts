@@ -49,6 +49,8 @@ export function startSeenMarkerSampling(input: {
   getMessages: () => ReadonlyArray<SeenMessage>;
   now?: () => Date;
   timers?: SeenTimers;
+  /** Stored place for this founder. A dwell on an earlier message does not replace it. */
+  notBefore?: () => MessageId | null | undefined;
   onRecorded?: (messageId: MessageId, seenAt: string) => void;
 }) {
   const { window: win, document: doc } = input.host;
@@ -57,6 +59,7 @@ export function startSeenMarkerSampling(input: {
     founder: input.founder,
     getMessages: input.getMessages,
     seenAt: () => (input.now ?? (() => new Date()))().toISOString(),
+    ...(input.notBefore === undefined ? {} : { notBefore: input.notBefore }),
     ...(input.onRecorded === undefined ? {} : { onRecorded: input.onRecorded }),
     timers: input.timers ?? {
       set: (callback, ms) => setTimeout(callback, ms),
@@ -111,6 +114,8 @@ export function useSeenMarkerTracking(input: {
   founder?: Founder | null;
   getScrollNode: () => SeenScrollNode | null | undefined;
   messages: ReadonlyArray<SeenMessage>;
+  /** This founder's stored message. Scrolling back must not replace it. */
+  notBeforeMessageId?: MessageId | null;
   /** Persist the place that was shown. Must not start a model turn. */
   onRecorded?: (messageId: MessageId, seenAt: string) => void;
 }) {
@@ -119,6 +124,8 @@ export function useSeenMarkerTracking(input: {
   const getMessages = useEffectEvent(() => messages);
   const onRecordedRef = useRef(onRecorded);
   onRecordedRef.current = onRecorded;
+  const notBeforeRef = useRef(input.notBeforeMessageId);
+  notBeforeRef.current = input.notBeforeMessageId;
   const samplingRef = useRef<ReturnType<typeof startSeenMarkerSampling> | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window focus, visibility and scroll listeners plus the dwell timer for this thread
@@ -130,6 +137,7 @@ export function useSeenMarkerTracking(input: {
       founder,
       getScrollNode,
       getMessages,
+      notBefore: () => notBeforeRef.current,
       onRecorded: (messageId, seenAt) => onRecordedRef.current?.(messageId, seenAt),
     });
     samplingRef.current = sampling;

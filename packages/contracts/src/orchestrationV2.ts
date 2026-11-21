@@ -620,8 +620,10 @@ export function applyOrchestrationV2ThreadVisit<Thread extends OrchestrationV2Ap
 
 /**
  * The cursors after `founder` reads a shared thread. The first such visit copies the old shared
- * cursor onto the other founder, then moves only the reader. A visit that is not newer returns
- * the existing map, so the caller can skip a write.
+ * cursor onto the other founder, then moves only the reader. A thread nobody has visited marks
+ * both founders read as of this visit, so a later reply is still unread for the founder who was
+ * not here. Leaving that founder unset hides the badge, because a missing stamp is not unread.
+ * A visit that is not newer returns the existing map, so the caller can skip a write.
  */
 export function nextFounderVisits(
   thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
@@ -632,7 +634,7 @@ export function nextFounderVisits(
   const seeded: FounderVisits =
     current ??
     (thread.lastVisitedAt === null
-      ? {}
+      ? { kameron: visitedAt, jeff: visitedAt }
       : { kameron: thread.lastVisitedAt, jeff: thread.lastVisitedAt });
   const previous = seeded[founder];
   if (

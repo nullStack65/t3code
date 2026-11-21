@@ -1656,6 +1656,10 @@ export default function ChatView(props: ChatViewProps) {
     founder: viewerFounder,
     getScrollNode: () => legendListRef.current?.getScrollableNode() ?? null,
     messages: serverProjection?.messages ?? EMPTY_SEEN_MESSAGES,
+    notBeforeMessageId:
+      viewerFounder == null
+        ? null
+        : (activeThreadShell?.source.seenMessageByFounder?.[viewerFounder] ?? null),
     onRecorded: recordSeenPlace,
   });
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);

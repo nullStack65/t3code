@@ -51,14 +51,22 @@ describe("per-founder read cursors", () => {
     expect(seeded.jeff).toBe(later);
   });
 
-  it("starts from an empty map when the shared thread was never visited", () => {
+  it("marks both founders read as of the first visit, so a later reply is unread for the other", () => {
     const seeded = nextFounderVisits(
       { lastVisitedAt: null, visitsByFounder: undefined },
       "kameron",
       later,
     );
     expect(seeded.kameron).toBe(later);
-    expect(seeded.jeff).toBeUndefined();
+    expect(seeded.jeff).toBe(later);
+
+    const jeffReadsLater = nextFounderVisits(
+      { lastVisitedAt: null, visitsByFounder: seeded },
+      "jeff",
+      newest,
+    );
+    expect(jeffReadsLater.kameron).toBe(later);
+    expect(jeffReadsLater.jeff).toBe(newest);
   });
 
   it("rewinds one founder and leaves the other where they were", () => {
