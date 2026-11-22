@@ -2558,6 +2558,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       // A digest never starts a turn, so an expired one is dropped even when it is the only queue.
       const checkedAt = yield* DateTime.now;
+      if (
+        (projection.thread.snoozedUntil != null &&
+          DateTime.isGreaterThan(projection.thread.snoozedUntil, checkedAt)) ||
+        projection.runtimeRequests.some((request) => request.status === "pending")
+      )
+        return;
       const expired = projection.runs.filter(
         (run) => run.status === "queued" && deliveryExpired(run, checkedAt),
       );
@@ -2640,9 +2646,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         options?.latestRunEnded === true && failedRun?.status === "failed"
           ? failedRun.id
           : options?.failedRunId;
-      const failureClass =
+      const failure =
         failedRun && failedRunId !== undefined && failedRun.id === failedRunId
-          ? latestRootProviderFailure(failedRun, projection.turnItems)?.class
+          ? latestRootProviderFailure(failedRun, projection.turnItems)
           : undefined;
       const worktreeMissing =
         endedRunId !== undefined &&
@@ -2667,8 +2673,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         worktreeMissing ||
         instanceDisabledForProject ||
-        (failureClass !== undefined &&
-          failureClass !== "validation_error" &&
+        (failure !== undefined &&
+          failure !== null &&
+          failure.class !== "validation_error" &&
+          (failure.class === "permission_error" ||
+            failure.retryable === false ||
+            failedRun?.restartContinuationOfRunId !== undefined) &&
           failedRun?.providerInstanceId === queuedRun.providerInstanceId)
       ) {
         const now = yield* DateTime.now;
@@ -2685,6 +2695,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             })),
         );
         return;
+      }
+      if (!options?.userStarted && failedRun !== null) {
+        const continuation = Option.getOrUndefined(
+          yield* effectOutbox.get(`effect:restart-continuation:${failedRun.id}`),
+        );
+        if (continuation?.status === "pending" || continuation?.status === "running") return;
       }
       // Move queued ordinals after runs that started while they waited to preserve transcript and checkpoint order.
       // Started runs have prompts; cancelled queued messages do not.
@@ -3418,6 +3434,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         ],
       );
+      return true;
     },
     (effect, threadId, options?) =>
       effect.pipe(
@@ -3521,8 +3538,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     for (const threadId of threadIds) {
       const resumedThread = yield* Effect.gen(function* () {
         if (!(yield* projectionStore.canStartQueuedRun(threadId))) return false;
-        yield* threadDispatch.withLock(threadId, startNextQueuedRun(threadId));
-        return true;
+        const started = yield* threadDispatch.withLock(
+          threadId,
+          startNextQueuedRun(threadId, { latestRunEnded: true }),
+        );
+        return started === true;
       }).pipe(
         Effect.catch((cause) =>
           Effect.logWarning("Failed to resume queued V2 run after recovery", {
@@ -7555,7 +7575,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       loadProjectionForCommand(command, ["turnItems"], {
         turnItemTypes: ["compaction"],
         turnItemRunIds: [run.id],
-      }).pipe(Effect.map(({ turnItems }) => compactionHoldsSteer({ ...projection, turnItems }, run)));
+      }).pipe(
+        Effect.map(({ turnItems }) => compactionHoldsSteer({ ...projection, turnItems }, run)),
+      );
     let deferSteer = false;
     if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
       const targetRunId = dispatchMode.targetRunId;
@@ -7799,7 +7821,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
     // A digest never starts a turn, so on a thread with nothing running it waits for one.
-    const holdDigest = deliveryClass === "digest" && queueBehindRun === undefined && startsOrQueuesRun;
+    const holdDigest =
+      deliveryClass === "digest" && queueBehindRun === undefined && startsOrQueuesRun;
     const shouldQueue = (queueBehindRun !== undefined && startsOrQueuesRun) || holdDigest;
     // An explicit pick queued ahead reaches the thread only when its run starts. A goal or
     // restart command that stops the active run goes first, so nothing queued applies before it.
@@ -7906,25 +7929,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ??
         queueProviderThread ?? {
-        id: idAllocator.derive.providerThread({
+          id: idAllocator.derive.providerThread({
+            driver: queuedAdapter.driver,
+            nativeThreadId: `pending:${runId}`,
+          }),
           driver: queuedAdapter.driver,
-          nativeThreadId: `pending:${runId}`,
-        }),
-        driver: queuedAdapter.driver,
-        providerInstanceId: modelSelection.instanceId,
-        providerSessionId: null,
-        appThreadId: command.threadId,
-        ownerNodeId: null,
-        nativeThreadRef: null,
-        nativeConversationHeadRef: null,
-        status: "not_loaded",
-        firstRunOrdinal: null,
-        lastRunOrdinal: null,
-        handoffIds: [],
-        forkedFrom: null,
-        createdAt: now,
-        updatedAt: now,
-      };
+          providerInstanceId: modelSelection.instanceId,
+          providerSessionId: null,
+          appThreadId: command.threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "not_loaded",
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        };
       const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
       const rootNodeId = idAllocator.derive.rootNode({ runId });
       const checkpointScope =
@@ -9272,7 +9295,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...wakeWorkStartedAt(projection, command),
       ...(command.delivery === undefined ? {} : { delivery: command.delivery }),
-      ...(forkFold === undefined || forkFold.digest.length === 0 ? {} : { digest: forkFold.digest }),
+      ...(forkFold === undefined || forkFold.digest.length === 0
+        ? {}
+        : { digest: forkFold.digest }),
     };
     const attempt: OrchestrationV2RunAttempt = {
       id: attemptId,
@@ -16037,11 +16062,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       command.type === "queue.resume" ||
       command.type === "queued-run.start" ||
+      command.type === "thread.unsnooze" ||
+      command.type === "runtime-request.respond" ||
       (command.type === "thread.runtime-mode.set" && runtimeModeCeiling !== undefined)
     ) {
       yield* mapDispatchError(command)(
         startNextQueuedRun(command.threadId, {
-          userStarted: command.type !== "thread.runtime-mode.set",
+          userStarted: command.type === "queue.resume" || command.type === "queued-run.start",
+          latestRunEnded:
+            command.type === "thread.unsnooze" || command.type === "runtime-request.respond",
           ...(command.type === "queued-run.start" ? { queuedRunId: command.runId } : {}),
         }),
       );

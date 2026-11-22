@@ -15,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import { runModelSignals, workerAlert } from "@t3tools/provider-core/server/subagentProjection";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -45,6 +46,8 @@ import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   judgeThread,
+  keepStrandedQueueReport,
+  type StrandedQueue,
   threadEventAlert,
   launchingThreadId,
   ThreadEventAlert,
@@ -332,6 +335,7 @@ export function recordThreadEvents(
     readonly threadId: string;
     readonly evaluated: ReadonlyArray<ThreadEventKind>;
     readonly findings: ReadonlyArray<ThreadFinding>;
+    readonly strandedQueue?: StrandedQueue | null;
   },
   toAlert: (finding: ThreadFinding) => ThreadEventAlert,
   destinations: ReadonlyArray<Destination>,
@@ -343,20 +347,15 @@ export function recordThreadEvents(
   for (const kind of judged.evaluated) {
     const key = reportedKey(judged.threadId, kind);
     const kindFindings = judged.findings.filter((finding) => finding.kind === kind);
-    if (kindFindings.length === 0) {
-      if (reported[key] !== undefined) {
-        const { [key]: _cleared, ...rest } = reported;
-        reported = rest;
-      }
-      continue;
-    }
     // A kind can hold several findings at once (a question and an inbox flip), so it remembers
     // each signature it reported. One that stops being true is forgotten and can report again.
     const known = (reported[key] ?? "").split("\n").filter((signature) => signature !== "");
-    const delivered: Array<string> = [];
+    const delivered = known.filter(
+      (signature) => kind === "stuck" && keepStrandedQueueReport(signature, judged.strandedQueue),
+    );
     for (const finding of kindFindings) {
       if (known.includes(finding.signature)) {
-        delivered.push(finding.signature);
+        if (!delivered.includes(finding.signature)) delivered.push(finding.signature);
         continue;
       }
       const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
@@ -366,7 +365,7 @@ export function recordThreadEvents(
     }
     // A finding with nowhere to go stays unreported, so a later launcher or webhook still hears it.
     const stored = delivered.join("\n");
-    if (reported[key] !== stored) {
+    if ((reported[key] ?? "") !== stored) {
       const { [key]: _previous, ...rest } = reported;
       reported = stored
         ? {
@@ -746,7 +745,6 @@ export const watcherAlertMessage = (alert: WatcherAlert) => {
   }
 };
 
-
 /** Alerts ride in the watcher's next digest; a newer alert on the same subject replaces an older one. */
 function alertDelivery(alert: WatcherAlert): {
   readonly coalesceKey: string;
@@ -1008,6 +1006,7 @@ export const make = Effect.gen(function* () {
     shell: OrchestrationV2ThreadShell,
     trigger: ThreadEventTrigger,
     remoteTasks?: ReadonlyMap<string, number>,
+    queuedThreads?: ReadonlySet<ThreadId>,
   ) {
     const remoteTaskCount =
       trigger === "request" || trigger === "inbox"
@@ -1039,7 +1038,35 @@ export const make = Effect.gen(function* () {
             )),
           )
         : null;
-    return { remoteTaskCount, childActivityMs };
+    if (trigger !== "sweep" || shell.activeRunId !== null || shell.activityRunStatus != null) {
+      return { remoteTaskCount, childActivityMs };
+    }
+    if (queuedThreads !== undefined && !queuedThreads.has(shell.id)) {
+      return { remoteTaskCount, childActivityMs, strandedQueue: null };
+    }
+    const now = yield* DateTime.now;
+    const { runs } = yield* projections.getThreadRecords(shell.id, ["runs"]);
+    const oldest = runs
+      .filter(
+        (run) =>
+          run.status === "queued" &&
+          run.delivery?.class !== "digest" &&
+          (run.delivery?.expiresAt === undefined ||
+            DateTime.isGreaterThan(run.delivery.expiresAt, now)),
+      )
+      .toSorted(
+        (left, right) =>
+          DateTime.toEpochMillis(left.requestedAt) - DateTime.toEpochMillis(right.requestedAt),
+      )[0];
+    const strandedQueue =
+      oldest === undefined
+        ? null
+        : {
+            runId: oldest.id,
+            requestedAt: oldest.requestedAt,
+            lastCompletedAt: latestExecutedRun(runs)?.completedAt ?? null,
+          };
+    return { remoteTaskCount, childActivityMs, strandedQueue };
   });
 
   /** The watcher thread as one delivery needs it, or null when it cannot be read. */
@@ -1359,22 +1386,23 @@ export const make = Effect.gen(function* () {
     usageLimitReported: boolean,
     /** Open delegated tasks by parent thread, when the caller read them once for many threads. */
     remoteTasks?: ReadonlyMap<string, number>,
+    queuedThreads?: ReadonlySet<ThreadId>,
   ) {
     const current = yield* settings.getSettings;
     const here = yield* environment.getEnvironmentId;
     const watcher = current.modelAlertWatcher;
     // The watcher's own turns would report to itself forever.
     if (watcher?.environmentId === here && watcher.threadId === threadId) return;
-    if (watcher === null && current.modelAlertWebhookUrl.trim() === "") return;
     const shell = yield* projections.getThreadShell(threadId);
     if (shell === null || shell.deletedAt !== null) return;
     const nowMs = yield* Clock.currentTimeMillis;
+    const context = yield* judgeContext(shell, trigger, remoteTasks, queuedThreads);
     const judged = judgeThread({
       shell,
       trigger,
       nowMs,
       stuckMinutes: current.watcherStuckMinutes,
-      ...(yield* judgeContext(shell, trigger, remoteTasks)),
+      ...context,
       usageLimitReported,
     });
     const label = (yield* environment.getDescriptor).label;
@@ -1390,7 +1418,7 @@ export const make = Effect.gen(function* () {
     const enqueued = yield* update((state) => {
       const result = recordThreadEvents(
         state,
-        { threadId, evaluated: judged.evaluated, findings: judged.findings },
+        { threadId, ...judged, ...context },
         (finding) =>
           threadEventAlert({
             environmentId: here,
@@ -1519,6 +1547,7 @@ export const make = Effect.gen(function* () {
       Effect.catchCause((cause) => Effect.logWarning("resume sweep failed", { cause })),
     );
     const index = yield* projections.listActiveShellIndex();
+    const queuedThreads = new Set(yield* projections.getRecoveryThreadIds("queued-runs"));
     // One scan of the delegated tasks for the whole sweep, not one per thread.
     const remoteTasks = new Map<string, number>();
     for (const task of yield* projections.getOpenRemoteDelegatedTasks) {
@@ -1527,7 +1556,7 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       index.filter((entry) => entry.mayBeLive && isListedThreadLineage(entry.lineage)),
       (entry) =>
-        handleThreadEvents(entry.id, "sweep", false, remoteTasks).pipe(
+        handleThreadEvents(entry.id, "sweep", false, remoteTasks, queuedThreads).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("sweeping a thread for a watcher event failed", {
               threadId: entry.id,

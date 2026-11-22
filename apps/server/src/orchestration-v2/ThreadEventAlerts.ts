@@ -64,6 +64,7 @@ export type WatchedShell = Pick<
   | "activeRunId"
   | "latestRunId"
   | "latestRunCompletedAt"
+  | "latestRunStopRequested"
   | "activityRunStatus"
   | "blockedOnThreadWait"
   | "pendingRuntimeRequest"
@@ -138,6 +139,26 @@ export function lastLine(text: string, max = 240): string | null {
 }
 
 const IDLE_STATUSES = new Set<string>(["idle", "completed"]);
+const STRANDED_QUEUE_MS = 15 * 60_000;
+
+export interface StrandedQueue {
+  readonly runId: string;
+  readonly requestedAt: DateTime.Utc;
+  readonly lastCompletedAt?: DateTime.Utc | null;
+}
+
+export const strandedQueueSignature = (queue: StrandedQueue) => `stranded-queue:${queue.runId}`;
+const isStrandedQueueSignature = (signature: string) => signature.startsWith("stranded-queue:");
+
+export function keepStrandedQueueReport(
+  signature: string,
+  queue: StrandedQueue | null | undefined,
+) {
+  return (
+    isStrandedQueueSignature(signature) &&
+    (queue === undefined || (queue !== null && signature === strandedQueueSignature(queue)))
+  );
+}
 
 /**
  * Which of the trigger's kinds are true of the thread right now. `evaluated` lists every kind the
@@ -148,6 +169,7 @@ export function judgeThread(input: {
   readonly trigger: ThreadEventTrigger;
   readonly nowMs: number;
   readonly stuckMinutes: number;
+  readonly strandedQueue?: StrandedQueue | null;
   /** Open delegated tasks on a linked environment, which the shell does not list. */
   readonly remoteTaskCount?: number;
   /** The latest activity among the children this thread waits on. */
@@ -217,6 +239,34 @@ export function judgeThread(input: {
         signature: message.id,
       });
     }
+  }
+
+  const queue = input.strandedQueue;
+  const queueWaitMs =
+    queue == null
+      ? 0
+      : nowMs -
+        Math.max(
+          DateTime.toEpochMillis(queue.requestedAt),
+          timeMs(queue.lastCompletedAt ?? shell.latestRunCompletedAt) ?? 0,
+        );
+  if (
+    evaluated.includes("stuck") &&
+    watched &&
+    queue != null &&
+    !isLive(shell) &&
+    shell.latestRunStopRequested !== true &&
+    shell.pendingRuntimeRequest === null &&
+    shell.inbox?.decisionRequest === undefined &&
+    (timeMs(shell.snoozedUntil) ?? 0) <= nowMs &&
+    shell.limitRecovery?.autoResume !== true &&
+    queueWaitMs > STRANDED_QUEUE_MS
+  ) {
+    findings.push({
+      kind: "stuck",
+      detail: `it has queued work without an active run for ${Math.floor(queueWaitMs / 60_000)} minutes`,
+      signature: strandedQueueSignature(queue),
+    });
   }
 
   if (evaluated.includes("stuck") && watched && input.stuckMinutes > 0) {
@@ -350,6 +400,7 @@ export function threadEventStillHolds(input: {
   readonly alert: ThreadEventAlert;
   readonly shell: WatchedShell;
   readonly stuckMinutes: number;
+  readonly strandedQueue?: StrandedQueue | null;
   readonly remoteTaskCount?: number;
   readonly childActivityMs?: number | null;
 }): boolean {
@@ -361,6 +412,7 @@ export function threadEventStillHolds(input: {
     trigger: REJUDGE_TRIGGER[alert.kind],
     nowMs: firedMs,
     stuckMinutes: input.stuckMinutes,
+    ...(input.strandedQueue === undefined ? {} : { strandedQueue: input.strandedQueue }),
     ...(input.remoteTaskCount === undefined ? {} : { remoteTaskCount: input.remoteTaskCount }),
     ...(input.childActivityMs === undefined ? {} : { childActivityMs: input.childActivityMs }),
   });

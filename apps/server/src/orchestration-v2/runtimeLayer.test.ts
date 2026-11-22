@@ -8166,6 +8166,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
         const threadId = ThreadId.make(`runtime-layer-failed-queue-${failureClass}`);
 
         yield* orchestrator.dispatch({
@@ -8205,17 +8206,13 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         assert.isNotNull(activeRun.rootNodeId);
 
         const promotedRunIds = yield* Queue.unbounded<RunId>();
-        const heldRunIds = yield* Queue.unbounded<RunId>();
         const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
         yield* eventSink.stream({ threadId, afterSequence }).pipe(
           Stream.runForEach((stored) =>
-            stored.event.type !== "run.updated"
-              ? Effect.void
-              : stored.event.payload.status === "starting"
-                ? Queue.offer(promotedRunIds, stored.event.payload.id)
-                : stored.event.payload.queueHeld === true
-                  ? Queue.offer(heldRunIds, stored.event.payload.id)
-                  : Effect.void,
+            stored.event.type === "run.updated" &&
+            (stored.event.payload.status === "starting" || stored.event.payload.queueHeld === true)
+              ? Queue.offer(promotedRunIds, stored.event.payload.id)
+              : Effect.void,
           ),
           Effect.forkScoped,
         );
@@ -8273,15 +8270,9 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
 
         if (failureClass === "provider_error") {
-          assert.equal(yield* Queue.take(heldRunIds), queuedRun.id);
-          const held = yield* orchestrator.getThreadProjection(threadId);
-          assert.equal(held.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
-          yield* orchestrator.dispatch({
-            type: "queue.resume",
-            commandId: CommandId.make(`${threadId}:resume`),
-            threadId,
-          });
           assert.equal(yield* Queue.take(promotedRunIds), queuedRun.id);
+          const promoted = yield* projections.getRun(threadId, queuedRun.id);
+          assert.equal(promoted?.status, "starting");
           return;
         }
         yield* orchestrator.resumeQueuedRuns;
@@ -8294,6 +8285,146 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         assert.equal(shell?.latestRunId, activeRun.id);
         assert.equal(shell?.status, "failed");
         assert.equal(shell?.lastErrorClass, "usage_limit");
+      }),
+  );
+
+  it.effect.each(["cancelled", "failed"] as const)(
+    "recovers a persisted %s run's queued messages in FIFO order without duplicate starts",
+    (status) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const threadId = ThreadId.make(`recover-terminal-queue:${status}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${threadId}:create`),
+          threadId,
+          projectId: ProjectId.make(`${threadId}:project`),
+          title: "Recover terminal queue",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        for (const index of [0, 1, 2]) {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`${threadId}:message:${index}`),
+            threadId,
+            messageId: MessageId.make(`${threadId}:message:${index}`),
+            text: `Message ${index}`,
+            attachments: [],
+            modelSelection,
+            dispatchMode: { type: index === 0 ? "start_immediately" : "queue_after_active" },
+          });
+        }
+        const [active, first, second] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+        assert.isDefined(active);
+        assert.isDefined(first);
+        assert.isDefined(second);
+        const terminalize = Effect.fn("test.terminalize")(function* (run: OrchestrationV2Run) {
+          const now = yield* DateTime.now;
+          yield* eventSink.commitCommand({
+            commandId: CommandId.make(`command:runtime-reconcile:test:${run.id}`),
+            commandType: "provider-runtime.reconcile",
+            threadId,
+            acceptedAt: now,
+            events: [
+              {
+                id: EventId.make(`${run.id}:terminal`),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: { ...run, status, completedAt: now },
+              },
+            ],
+            effects: [],
+          });
+        });
+        yield* terminalize(active);
+        yield* recovery.reconcile("startup");
+        assert.isTrue((yield* (yield* ProjectionReplay.ProjectionReplay).rebuild).valid);
+        const race = Effect.all([orchestrator.resumeQueuedRuns, orchestrator.resumeQueuedRuns], {
+          concurrency: 2,
+        });
+        const now = yield* DateTime.now;
+        const thread = yield* projections.getThread(threadId);
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:snooze`),
+              type: "thread.snoozed",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...thread,
+                snoozedAt: now,
+                snoozedUntil: DateTime.add(now, { minutes: 1 }),
+              },
+            },
+          ],
+        });
+        yield* race;
+        assert.equal((yield* projections.getRun(threadId, first.id))?.status, "queued");
+        yield* TestClock.adjust("1 minute");
+        assert.isNotNull(active.rootNodeId);
+        const request: OrchestrationV2RuntimeRequest = {
+          id: RuntimeRequestId.make(`${threadId}:approval`),
+          nodeId: active.rootNodeId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command",
+          status: "pending",
+          responseCapability: {
+            type: "live",
+            providerSessionId: ProviderSessionId.make(`${threadId}:approval-session`),
+          },
+          createdAt: now,
+          resolvedAt: null,
+        };
+        const publishRequest = Effect.fn("test.publishRequest")(function* (resolved: boolean) {
+          const at = yield* DateTime.now;
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}:approval:${resolved}`),
+                type: "runtime-request.updated",
+                threadId,
+                runId: active.id,
+                occurredAt: at,
+                payload: resolved ? { ...request, status: "resolved", resolvedAt: at } : request,
+              },
+            ],
+          });
+        });
+        yield* publishRequest(false);
+        yield* race;
+        assert.equal((yield* projections.getRun(threadId, first.id))?.status, "queued");
+        yield* publishRequest(true);
+        yield* race;
+        assert.equal((yield* projections.getRun(threadId, first.id))?.status, "starting");
+        assert.equal((yield* projections.getRun(threadId, second.id))?.status, "queued");
+        yield* terminalize(first);
+        yield* race;
+        assert.equal((yield* projections.getRun(threadId, second.id))?.status, "starting");
+        for (const run of [first, second]) {
+          const effects = yield* outbox.listByCommandId(
+            CommandId.make(`command:system:start-queued:${run.id}`),
+          );
+          assert.lengthOf(
+            effects.filter((effect) => effect.request.type === "provider-turn.start"),
+            1,
+          );
+        }
       }),
   );
 

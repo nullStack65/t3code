@@ -235,6 +235,32 @@ it("reports a thread event once per kind and signature until its state changes",
   );
 });
 
+it("deduplicates a stranded queue until the queue advances or drains", () => {
+  let state = EMPTY_MODEL_ALERT_STATE;
+  const step = (runId: string | null, actionable: boolean, nowMs: number) => {
+    const result = recordThreadEvents(
+      state,
+      {
+        threadId: "thread:fleet",
+        evaluated: ["stuck"],
+        findings: runId !== null && actionable ? [finding("stuck", `stranded-queue:${runId}`)] : [],
+        strandedQueue: runId === null ? null : { runId, requestedAt: DateTime.makeUnsafe(0) },
+      },
+      eventAlert,
+      ["watcher"],
+      nowMs,
+    );
+    state = result.state;
+    return result.enqueued;
+  };
+  assert.isTrue(step("queued:1", true, 1));
+  assert.isFalse(step("queued:1", false, 2));
+  assert.isFalse(step("queued:1", true, 3));
+  assert.isTrue(step("queued:2", true, 4));
+  assert.isFalse(step(null, false, 5));
+  assert.isTrue(step("queued:3", true, 6));
+});
+
 it("a thread holding a question and an inbox flip reports each once, not on every trigger", () => {
   const both = [finding("needs-person", "request:1"), finding("needs-person", "inbox:kameron")];
   let state = EMPTY_MODEL_ALERT_STATE;
