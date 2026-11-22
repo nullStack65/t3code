@@ -457,6 +457,32 @@ export function creatorInboxOrigin(
     : { kind: "human", id: sender.founder };
 }
 
+/** Commands the server records a founder for: what they say, answer, or start. */
+const FOUNDER_ATTRIBUTED_COMMANDS: ReadonlySet<string> = new Set([
+  "message.dispatch",
+  "queued-run.edit",
+  "runtime-request.respond",
+  "thread.create",
+]);
+
+/**
+ * Whether `requireFounderIdentity` refuses this command: a person's session that no pairing code
+ * or approved device enrolled as a founder may not send, answer or start work. Bots act as
+ * themselves, and other commands are unaffected.
+ */
+export function refusesUnenrolledSender(
+  requireFounderIdentity: boolean,
+  commandType: string,
+  sender: { readonly founder: Founder | null; readonly deviceType: string },
+): boolean {
+  return (
+    requireFounderIdentity &&
+    FOUNDER_ATTRIBUTED_COMMANDS.has(commandType) &&
+    sender.deviceType !== "bot" &&
+    sender.founder === null
+  );
+}
+
 /** All deliberately includes every thread, including unclassified history. */
 export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: InboxView) {
   if (view === "all") return true;

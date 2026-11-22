@@ -11,6 +11,7 @@ import {
   parseMcpApprovalCode,
   type ServerAuthBootstrapMethod,
   connectDeviceVerificationCode,
+  type Founder,
 } from "@t3tools/contracts";
 import {
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
@@ -39,6 +40,8 @@ export interface BootstrapGrant {
   readonly subject: string;
   readonly label?: string;
   readonly proofKeyThumbprint?: string;
+  /** The founder whose client this code enrolls. */
+  readonly founder?: Founder;
   readonly expiresAt: DateTime.DateTime;
 }
 
@@ -257,6 +260,8 @@ export class PairingGrantStore extends Context.Service<
       readonly mcpApproval?: AuthMcpClientAccess;
       /** Spendable only after someone trusts `proofKeyThumbprint` as a T3 Connect device. */
       readonly requiresConnectApproval?: boolean;
+      /** Sessions this code starts belong to this founder. */
+      readonly founder?: Founder;
     }) => Effect.Effect<IssuedBootstrapCredential, BootstrapCredentialInternalError>;
     /** A device's open or denied request, reused so retries keep one request and one code. */
     readonly findPendingConnect: (
@@ -330,6 +335,7 @@ const toPairingLink = (row: AuthPairingLinks.AuthPairingLinkRecord): AuthPairing
   scopes: row.scopes,
   subject: row.subject,
   ...(row.label ? { label: row.label } : {}),
+  ...(row.founder === null ? {} : { founder: row.founder }),
   createdAt: row.createdAt,
   expiresAt: row.expiresAt,
   ...(row.requiresConnectApproval === 1 && row.proofKeyThumbprint
@@ -495,6 +501,7 @@ const make = Effect.gen(function* () {
         label: input?.label ?? null,
         proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
         ...(input?.requiresConnectApproval ? { requiresConnectApproval: true } : {}),
+        ...(input?.founder === undefined ? {} : { founder: input.founder }),
         createdAt: now,
         expiresAt: expiresAt,
       })
@@ -516,6 +523,7 @@ const make = Effect.gen(function* () {
         scopes: input?.scopes ?? AuthStandardClientScopes,
         subject,
         ...(input?.label ? { label: input.label } : {}),
+        ...(input?.founder === undefined ? {} : { founder: input.founder }),
         createdAt: now,
         expiresAt,
         ...(input?.requiresConnectApproval && input.proofKeyThumbprint
@@ -674,6 +682,7 @@ const make = Effect.gen(function* () {
           ...(consumed.value.proofKeyThumbprint
             ? { proofKeyThumbprint: consumed.value.proofKeyThumbprint }
             : {}),
+          ...(consumed.value.founder === null ? {} : { founder: consumed.value.founder }),
           expiresAt: consumed.value.expiresAt,
         } satisfies BootstrapGrant;
       }

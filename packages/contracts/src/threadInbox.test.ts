@@ -11,6 +11,7 @@ import {
   effectiveInboxFilter,
   inboxOriginFor,
   creatorInboxOrigin,
+  refusesUnenrolledSender,
   founderInboxLane,
   staysActiveWhileWorking,
   compositeThreadKey,
@@ -133,6 +134,28 @@ describe("shared fleet organizational inbox", () => {
     expect(creatorInboxOrigin(undefined, phone)).toBeUndefined();
     // A bot's claim is left to agent routing.
     expect(creatorInboxOrigin(bot, { founder: "kameron", deviceType: "bot" })).toEqual(bot);
+  });
+  it("refuses an unenrolled person's founder actions only when identity is required", () => {
+    const phone = { founder: null, deviceType: "mobile" } as const;
+    const unknown = { founder: null, deviceType: "unknown" } as const;
+    const attributed = [
+      "message.dispatch",
+      "queued-run.edit",
+      "runtime-request.respond",
+      "thread.create",
+    ];
+    for (const command of attributed) {
+      expect(refusesUnenrolledSender(true, command, phone)).toBe(true);
+      // A sender the server could not read is refused, not waved through.
+      expect(refusesUnenrolledSender(true, command, unknown)).toBe(true);
+      expect(refusesUnenrolledSender(true, command, { ...phone, founder: "jeff" })).toBe(false);
+      expect(refusesUnenrolledSender(true, command, { founder: null, deviceType: "bot" })).toBe(
+        false,
+      );
+      expect(refusesUnenrolledSender(false, command, phone)).toBe(false);
+    }
+    expect(refusesUnenrolledSender(true, "thread.visit", phone)).toBe(false);
+    expect(refusesUnenrolledSender(true, "thread.archive", phone)).toBe(false);
   });
   it("files agent launches in Agents unless the agent picks an inbox with a reason", () => {
     // A launch from a thread in Kameron's inbox no longer copies that routing.

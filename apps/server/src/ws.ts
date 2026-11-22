@@ -116,6 +116,7 @@ import {
   WsRpcGroup,
   type InboxActor,
   creatorInboxOrigin,
+  refusesUnenrolledSender,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -2061,6 +2062,20 @@ export const layerWsRpc = (
           Effect.map((sender) => creatorInboxOrigin(claimed, sender)),
           Effect.orElseSucceed(() => claimed),
         );
+      // Checked before anything is queued. A settings or sender read that fails refuses too.
+      const refusesUnenrolled = (commandType: string) =>
+        serverSettings.getSettings.pipe(
+          Effect.flatMap((settings) =>
+            settings.requireFounderIdentity
+              ? messageSender.pipe(
+                  Effect.map((sender) => refusesUnenrolledSender(true, commandType, sender)),
+                )
+              : Effect.succeed(false),
+          ),
+          Effect.orElseSucceed(() => true),
+        );
+      const UNENROLLED_SENDER_MESSAGE =
+        "This client is not enrolled as a founder. Pair it with a founder's pairing code, or have another client assign it in Settings → Connections.";
       const fileUnderCreator = (
         command: OrchestrationV2Command,
       ): Effect.Effect<OrchestrationV2Command> => {
@@ -2092,7 +2107,18 @@ export const layerWsRpc = (
               ? { "orchestration_v2.source_thread_id": command.sourceThreadId }
               : {}),
           }).pipe(
-            Effect.andThen(() => {
+            Effect.andThen(() => refusesUnenrolled(command.type)),
+            Effect.flatMap((refused) => {
+              if (refused) {
+                return Effect.fail(
+                  new OrchestrationV2DispatchCommandError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    message: UNENROLLED_SENDER_MESSAGE,
+                    detail: UNENROLLED_SENDER_MESSAGE,
+                  }),
+                );
+              }
               const dispatched = startup
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
@@ -2311,6 +2337,18 @@ export const layerWsRpc = (
             "orchestration_v2.command_id": input.commandId,
             "orchestration_v2.project_id": input.projectId,
           }).pipe(
+            Effect.andThen(refusesUnenrolled("thread.create")),
+            Effect.flatMap((refused) =>
+              refused
+                ? Effect.fail(
+                    new OrchestrationV2ThreadLaunchError({
+                      commandId: input.commandId,
+                      projectId: input.projectId,
+                      message: UNENROLLED_SENDER_MESSAGE,
+                    }),
+                  )
+                : Effect.void,
+            ),
             Effect.andThen(
               startup
                 .enqueueCommand(

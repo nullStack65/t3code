@@ -63,6 +63,16 @@ approved and appear in that list for you to review. A device that has not
 connected since you updated T3 Code asks for approval like a new one. Older apps
 cannot show the code, so update them before you turn approval on.
 
+### Say who uses each device
+
+Messages and approvals name the founder whose device sent them. Pick the founder
+when you create a pairing code in **Settings → Sharing & access**, or set it on a
+connected client in the same list, from a different client. A T3 Connect device
+keeps its founder until it is revoked. With **Require enrolled founders** on, a
+client with no founder can read but cannot send messages, answer approvals, or
+start threads. Turn it on only after every device you use, including the desktop
+app, has a founder.
+
 ### Scripts and agents
 
 `t3 up` asks nothing when you name a choice: `--connect`, `--lan`, or their

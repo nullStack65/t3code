@@ -2,6 +2,7 @@ import { deriveProviderInstanceConfigMap } from "./provider/ProviderInstanceRegi
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthAccessWriteScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
   globalIdleCompaction,
@@ -266,6 +267,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
       // An ordinary settings write, not an access change.
       assert.deepEqual(requiredScopesForServerSettingsPatch({ ownerFounder: "jeff" }), [
         AuthSettingsWriteScope,
+      ]);
+      // Requiring enrolled founders decides who may act, so it is an access change.
+      assert.deepEqual(requiredScopesForServerSettingsPatch({ requireFounderIdentity: true }), [
+        AuthAccessWriteScope,
       ]);
 
       yield* service.updateSettings({ ownerFounder: "kameron" });

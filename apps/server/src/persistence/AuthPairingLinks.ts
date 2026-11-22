@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
-import { AuthClientMetadata, AuthEnvironmentScopes } from "@t3tools/contracts";
+import { AuthClientMetadata, AuthEnvironmentScopes, Founder } from "@t3tools/contracts";
 
 import {
   type AuthPairingLinkRepositoryError,
@@ -40,6 +40,8 @@ export const AuthPairingLinkRecord = Schema.Struct({
   requiresConnectApproval: SqliteFlag,
   connectApproved: SqliteFlag,
   requestedClient: Schema.NullOr(Schema.fromJsonString(AuthClientMetadata)),
+  /** The founder whose client this code enrolls. */
+  founder: Schema.NullOr(Founder),
 });
 export type AuthPairingLinkRecord = typeof AuthPairingLinkRecord.Type;
 
@@ -52,6 +54,7 @@ export const CreateAuthPairingLinkInput = Schema.Struct({
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
   requiresConnectApproval: Schema.optionalKey(Schema.Boolean),
+  founder: Schema.optionalKey(Founder),
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
 });
@@ -126,6 +129,7 @@ const AuthPairingLinkRawDbRow = Schema.Struct({
   requiresConnectApproval: Schema.Unknown,
   connectApproved: Schema.Unknown,
   requestedClient: Schema.Unknown,
+  founder: Schema.Unknown,
 });
 
 const decodeAuthPairingLinkDbRow = Schema.decodeUnknownEffect(AuthPairingLinkRecord);
@@ -197,6 +201,7 @@ export const make = Effect.gen(function* () {
           label,
           proof_key_thumbprint,
           requires_connect_approval,
+          founder,
           created_at,
           expires_at,
           consumed_at,
@@ -211,6 +216,7 @@ export const make = Effect.gen(function* () {
           ${input.label},
           ${input.proofKeyThumbprint},
           ${input.requiresConnectApproval ? 1 : 0},
+          ${input.founder ?? null},
           ${input.createdAt},
           ${input.expiresAt},
           NULL,
@@ -281,7 +287,8 @@ export const make = Effect.gen(function* () {
             SELECT 1 FROM auth_connect_devices
             WHERE auth_connect_devices.proof_key_thumbprint = auth_pairing_links.proof_key_thumbprint
           ) AS "connectApproved",
-          requested_client_json AS "requestedClient"
+          requested_client_json AS "requestedClient",
+          founder AS "founder"
       `,
   });
 
@@ -307,7 +314,8 @@ export const make = Effect.gen(function* () {
             SELECT 1 FROM auth_connect_devices
             WHERE auth_connect_devices.proof_key_thumbprint = auth_pairing_links.proof_key_thumbprint
           ) AS "connectApproved",
-          requested_client_json AS "requestedClient"
+          requested_client_json AS "requestedClient",
+          founder AS "founder"
         FROM auth_pairing_links
         WHERE revoked_at IS NULL
           AND consumed_at IS NULL
@@ -354,7 +362,8 @@ export const make = Effect.gen(function* () {
             SELECT 1 FROM auth_connect_devices
             WHERE auth_connect_devices.proof_key_thumbprint = auth_pairing_links.proof_key_thumbprint
           ) AS "connectApproved",
-          requested_client_json AS "requestedClient"
+          requested_client_json AS "requestedClient",
+          founder AS "founder"
         FROM auth_pairing_links
         WHERE credential = ${credential}
       `,
@@ -378,7 +387,8 @@ export const make = Effect.gen(function* () {
         SELECT 1 FROM auth_connect_devices
         WHERE auth_connect_devices.proof_key_thumbprint = auth_pairing_links.proof_key_thumbprint
       ) AS "connectApproved",
-      requested_client_json AS "requestedClient"
+      requested_client_json AS "requestedClient",
+      founder AS "founder"
     FROM auth_pairing_links
   `;
 
