@@ -55,10 +55,13 @@ export function matchesThreadListFilter(
   attribution?: ThreadAttribution,
   viewingFounder?: Founder,
 ) {
+  if (viewingFounder === undefined) {
+    return matchesWorkThreadListFilter(thread, filter, attribution);
+  }
   const inbox = standingInbox(thread);
   if (inbox === null) return matchesWorkThreadListFilter(thread, filter, attribution);
   return (
-    (inbox === "shared" || viewingFounder === undefined || inbox === viewingFounder) &&
+    (inbox === "shared" || inbox === viewingFounder) &&
     filter.inboxes.includes(inbox) &&
     !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&
     (attribution === undefined || !filter.hiddenAttributions.includes(attribution))

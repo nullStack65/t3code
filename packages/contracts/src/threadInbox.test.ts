@@ -29,6 +29,7 @@ import {
 } from "./threadInbox.ts";
 const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
 const encode = Schema.encodeSync(ClientSettingsSchema);
+const isDecisionAsk = Schema.is(ThreadDecisionAsk);
 const kameron = { kind: "human", id: "kameron" } as const;
 const jeff = { kind: "human", id: "jeff" } as const;
 const bot = { kind: "agent", id: "lead" } as const;

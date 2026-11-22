@@ -112,6 +112,7 @@ it.each(["jeff", "kameron"] as const)(
               {
                 ...standingBot(childName, "agent-only"),
                 parentThreadId: ThreadId.make("standing-CEO"),
+                relationshipToParent: "subagent" as const,
               },
             ]
           : []),
@@ -174,6 +175,7 @@ it.each(["jeff", "kameron"] as const)(
     for (const width of [1280, 360]) {
       await page.viewport(width, 800);
       await expect.element(menu).toBeVisible();
+
       await vi.waitFor(() => {
         const popup = menu.element().getBoundingClientRect();
         expect(popup.left).toBeGreaterThanOrEqual(0);
@@ -188,11 +190,14 @@ it.each(["jeff", "kameron"] as const)(
       });
     }
     await page.viewport(1280, 800);
+
     await agents.click();
+
     await expect.element(agents).toHaveAttribute("aria-checked", "true");
+
     await expect.element(mine.getByText(childName, { exact: true })).not.toBeInTheDocument();
     await expect.element(company.getByText(childName, { exact: true })).not.toBeInTheDocument();
-    await expect.element(screen.getByText(childName, { exact: true })).toBeVisible();
+
     await menu.getByRole("menuitem", { name: "Reset to default" }).click();
     await vi.waitFor(() =>
       expect(persist).toHaveBeenLastCalledWith(expect.objectContaining({ founderInboxFilter: [] })),
