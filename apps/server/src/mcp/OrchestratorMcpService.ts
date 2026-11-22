@@ -1,3 +1,9 @@
+import { BACKGROUND_WAIT_STALE_MINUTES } from "@t3tools/contracts";
+import {
+  staleTimeoutMs,
+  waitActivityMs,
+  waitIntentionallyHeld,
+} from "../orchestration-v2/waitStaleness.ts";
 import {
   CommandId,
   EnvironmentId,
@@ -2876,6 +2882,14 @@ const make = Effect.gen(function* () {
           // delegations deliver through the blocking tool call until `awaitTask`
           // gives up the wait (timeout, cancelled call) and upgrades the wake.
           completionWake: input.mode === "wait" ? "settled_only" : "always",
+          ...(input.mode === "wait"
+            ? {
+                staleTimeoutMs: staleTimeoutMs(
+                  input.staleTimeoutMinutes,
+                  BACKGROUND_WAIT_STALE_MINUTES,
+                ),
+              }
+            : {}),
         })
         .pipe(
           Effect.mapError((error) =>
@@ -3721,7 +3735,29 @@ const make = Effect.gen(function* () {
         : [];
       const wakesCaller =
         ownedTask && !childRequests.some((request) => request.status === "pending");
+      const progressShell =
+        result.timedOut && input.untilDelegatedWorkSettled === true
+          ? yield* threadManagement
+              .getThreadShell(input.threadId)
+              .pipe(Effect.orElseSucceed(() => null))
+          : null;
+      const progress =
+        progressShell === null
+          ? {}
+          : {
+              progressAtMs: Math.max(
+                waitActivityMs(progressShell),
+                yield* threadManagement
+                  .getWaitActivityMs(progressShell.id, progressShell.latestRunId)
+                  .pipe(Effect.orElseSucceed(() => 0)),
+              ),
+              intentionallyHeld: waitIntentionallyHeld(
+                progressShell,
+                yield* Clock.currentTimeMillis,
+              ),
+            };
       return {
+        ...progress,
         threadId: input.threadId,
         runId: result.run?.id ?? null,
         status,

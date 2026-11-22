@@ -1,5 +1,6 @@
 import {
   CommandId,
+  PR_WATCH_STALE_MINUTES,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type PullRequestUnavailableError,
@@ -12,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { staleTimeoutMs } from "../orchestration-v2/waitStaleness.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestService from "./PullRequestService.ts";
@@ -69,6 +71,7 @@ export class PullRequestWatchService extends Context.Service<
       readonly threadId: ThreadId;
       readonly target: PullRequestTarget;
       readonly watching: boolean;
+      readonly staleTimeoutMinutes?: number | undefined;
     }) => Effect.Effect<
       ResolvedTarget & { readonly watching: boolean; readonly wasWatching: boolean },
       | PullRequestWatchFailedError
@@ -104,6 +107,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly target: PullRequestTarget;
     readonly watching: boolean;
+    readonly staleTimeoutMinutes?: number | undefined;
   }) {
     const { watching } = input;
     const thread = yield* requireThread(input.threadId);
@@ -157,7 +161,12 @@ const make = Effect.gen(function* () {
         repository: target.repository,
         number: target.number,
         watching,
-        ...(watching ? { link: { url: target.url, source: "agent" as const } } : {}),
+        ...(watching
+          ? {
+              link: { url: target.url, source: "agent" as const },
+              staleTimeoutMs: staleTimeoutMs(input.staleTimeoutMinutes, PR_WATCH_STALE_MINUTES),
+            }
+          : {}),
       })
       .pipe(
         Effect.catchCause((cause) =>

@@ -1104,11 +1104,15 @@ export const make = Effect.gen(function* () {
             )),
           )
         : null;
+    const hasStalenessWait =
+      trigger === "sweep" &&
+      shell.activeRunId !== null &&
+      ((yield* projections.getThread(shell.id)).stalenessWaits?.length ?? 0) > 0;
     if (trigger !== "sweep" || shell.activeRunId !== null || shell.activityRunStatus != null) {
-      return { remoteTaskCount, childActivityMs };
+      return { remoteTaskCount, childActivityMs, hasStalenessWait };
     }
     if (queuedThreads !== undefined && !queuedThreads.has(shell.id)) {
-      return { remoteTaskCount, childActivityMs, strandedQueue: null };
+      return { remoteTaskCount, childActivityMs, hasStalenessWait, strandedQueue: null };
     }
     const now = yield* DateTime.now;
     const { runs } = yield* projections.getThreadRecords(shell.id, ["runs"]);
@@ -1138,7 +1142,7 @@ export const make = Effect.gen(function* () {
               (shell.lastErrorClass === "usage_limit" &&
                 latestRun?.providerInstanceId === oldest.providerInstanceId),
           };
-    return { remoteTaskCount, childActivityMs, strandedQueue };
+    return { remoteTaskCount, childActivityMs, hasStalenessWait, strandedQueue };
   });
 
   /** The watcher thread as one delivery needs it, or null when it cannot be read. */
@@ -1621,6 +1625,24 @@ export const make = Effect.gen(function* () {
   const sweep: ModelAlertReactor["Service"]["sweep"] = Effect.gen(function* () {
     yield* sweepResumes.pipe(
       Effect.catchCause((cause) => Effect.logWarning("resume sweep failed", { cause })),
+    );
+    const now = yield* Clock.currentTimeMillis;
+    yield* Effect.forEach(
+      yield* projections.listStalenessWaitThreads,
+      (threadId) =>
+        engine
+          .dispatch({
+            type: "thread.wait-staleness.update",
+            commandId: CommandId.make(`server:wait-staleness:${threadId}:${now}`),
+            threadId,
+            operation: { type: "sweep" },
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("wait staleness sweep failed", { threadId, cause }),
+            ),
+          ),
+      { discard: true },
     );
     const index = yield* projections.listActiveShellIndex();
     const queuedThreads = new Set(yield* projections.getRecoveryThreadIds("queued-runs"));

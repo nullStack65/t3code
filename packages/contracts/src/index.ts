@@ -47,6 +47,7 @@ export * from "./peerLink.ts";
 export * from "./linkedSidebar.ts";
 export * from "./threadMetadataMcp.ts";
 export * from "./threadPullRequest.ts";
+export * from "./waitStaleness.ts";
 export * from "./threadSearch.ts";
 export * from "./threadTags.ts";
 export * from "./threadStanding.ts";

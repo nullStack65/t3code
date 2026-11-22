@@ -615,6 +615,11 @@ export interface ProjectionStoreV2Shape {
   readonly countThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly countActiveRunThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
   /** Every active thread, in shell order. */
+  readonly listStalenessWaitThreads: Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  readonly getWaitActivityMs: (
+    threadId: ThreadId,
+    runId: RunId | null,
+  ) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly listActiveShellIndex: () => Effect.Effect<
     ReadonlyArray<ActiveShellIndexEntry>,
     ProjectionStoreV2Error
@@ -9234,6 +9239,29 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return rows[0]?.count ?? 0;
     }, Effect.mapError(shellSnapshotReadError));
 
+    const listStalenessWaitThreads = sql<{ readonly thread_id: string }>`
+      SELECT thread_id FROM orchestration_v2_projection_threads
+      WHERE deleted_at IS NULL AND json_extract(payload_json, '$.archivedAt') IS NULL
+        AND json_array_length(payload_json, '$.stalenessWaits') > 0
+    `.pipe(
+      Effect.map((rows) => rows.map(({ thread_id }) => ThreadId.make(thread_id))),
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getWaitActivityMs = Effect.fn("ProjectionStore.getWaitActivityMs")(
+      function* (threadId: ThreadId, runId: RunId | null) {
+        if (runId === null) return 0;
+        const rows = yield* sql<{ readonly activity: string | null }>`
+        SELECT max(updated_at) AS activity FROM orchestration_v2_projection_turn_items
+        WHERE thread_id = ${threadId} AND run_id = ${runId}
+          AND type NOT IN ('user_message', 'link_request')
+      `;
+        const activity = rows[0]?.activity;
+        return activity == null ? 0 : Date.parse(activity);
+      },
+      (effect, threadId) => effect.pipe(Effect.mapError(controlReadError(threadId))),
+    );
+
     const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(function* () {
       const rows = yield* sql<{
         readonly thread_id: string;
@@ -9618,6 +9646,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       countThreads: readOnReader(countThreads),
       countActiveRunThreads: readOnReader(countActiveRunThreads),
       listActiveShellIndex: readOnReader(listActiveShellIndex),
+      listStalenessWaitThreads: NodeSqliteClient.readOnly(listStalenessWaitThreads),
+      getWaitActivityMs: readOnReader(getWaitActivityMs),
       listActiveThreads: readOnReader(listActiveThreads),
       readShellSnapshot: readOnReader(readShellSnapshot),
       listOlderSettledThreads: readOnReader(listOlderSettledThreads),

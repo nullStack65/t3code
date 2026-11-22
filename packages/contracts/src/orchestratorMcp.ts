@@ -1,3 +1,4 @@
+import { StaleTimeoutMinutes } from "./waitStaleness.ts";
 import * as Effect from "effect/Effect";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
 import * as Schema from "effect/Schema";
@@ -201,6 +202,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   timeoutMs: Schema.optional(Schema.Finite).annotate({
     description: "Mode 'wait' only. At most 45 s. A timeout does not cancel the child.",
   }),
+  staleTimeoutMinutes: StaleTimeoutMinutes,
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   runtimeMode: Schema.optional(
     OrchestratorMcpRuntimeMode.annotate({
@@ -632,6 +634,8 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
+  progressAtMs: Schema.optional(Schema.Finite),
+  intentionallyHeld: Schema.optional(Schema.Boolean),
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,

@@ -1,9 +1,10 @@
-import type {
-  OrchestrationV2Notification,
-  PullRequestCheck,
-  PullRequestComment,
-  PullRequestDetail,
-  ThreadPullRequestWatch,
+import {
+  PR_WATCH_STALE_MINUTES,
+  type OrchestrationV2Notification,
+  type PullRequestCheck,
+  type PullRequestComment,
+  type PullRequestDetail,
+  type ThreadPullRequestWatch,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
@@ -37,6 +38,41 @@ const isFailedCheck = (check: PullRequestCheck) =>
 const workflowRunOf = (url: string | null) => url?.match(/^.*\/actions\/runs\/\d+/)?.[0] ?? null;
 const approvalKey = (check: PullRequestCheck) => workflowRunOf(check.url) ?? check.name;
 
+const stalenessOf = (watch: ThreadPullRequestWatch) =>
+  watch.staleness ?? {
+    staleTimeoutMs: PR_WATCH_STALE_MINUTES * 60_000,
+    lastProgressAt: watch.startedAt,
+  };
+
+export function stalePullRequestWatch(
+  watch: ThreadPullRequestWatch,
+  url: string,
+  number: number,
+  now: number,
+  hostObservation: "current" | "unavailable",
+): { readonly next: ThreadPullRequestWatch; readonly wake: PullRequestWatchWake } | undefined {
+  const staleness = stalenessOf(watch);
+  const idleMs = now - Date.parse(staleness.lastProgressAt);
+  if (staleness.alerted || idleMs < staleness.staleTimeoutMs) return;
+  const idleMinutes = Math.floor(idleMs / 60_000);
+  const counts: Record<string, number> = {};
+  for (const entry of staleness.checks ?? []) {
+    const status = entry.slice(entry.lastIndexOf("\t") + 1);
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return {
+    next: { ...watch, staleness: { ...staleness, alerted: true } },
+    wake: {
+      text: `${JSON.stringify({ type: "pull_request_watch_stale_timeout", url, idleMinutes, headSha: watch.headSha, checks: staleness.checks === undefined ? null : counts, reviewDecision: staleness.reviewDecision ?? null, hostObservation })}\n\nT3 Code still watches this PR. Check why progress stopped (for example, queued checks or a review hold). A new progress event re-arms the timeout.`,
+      notification: {
+        source: { kind: "monitor" },
+        outcome: "updated",
+        summary: `#${number}: no observed progress for ${idleMinutes} minutes`,
+      },
+    },
+  };
+}
+
 export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,
   detail: Pick<
@@ -52,6 +88,7 @@ export function evaluatePullRequestWatch(
   >,
   remarks: ReadonlyArray<PullRequestComment> | null,
   now: number,
+  reviewDecision?: NonNullable<ThreadPullRequestWatch["staleness"]>["reviewDecision"],
 ): PullRequestWatchReport {
   const changes: Array<PullRequestWatchChange> = [];
   // A read without a head says nothing about pushes, so it keeps the last known one.
@@ -232,10 +269,38 @@ export function evaluatePullRequestWatch(
   const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
+  const previous = stalenessOf(watch);
+  const checkState =
+    unread || (checks.length === 0 && !headMoved && previous.checks?.length)
+      ? previous.checks
+      : checks
+          .map(({ name, status, pendingPhase }) => `${name}\t${pendingPhase ?? status}`)
+          .toSorted();
+  const progressed =
+    headMoved ||
+    (previous.checks !== undefined &&
+      checkState !== undefined &&
+      previous.checks.join("\n") !== checkState.join("\n")) ||
+    (reviewDecision !== undefined &&
+      previous.reviewDecision !== undefined &&
+      reviewDecision !== previous.reviewDecision) ||
+    changes.some((change) => change.kind !== "no-checks");
+  const staleness = {
+    ...(progressed
+      ? {
+          staleTimeoutMs: previous.staleTimeoutMs,
+          lastProgressAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+        }
+      : previous),
+    ...(checkState === undefined ? {} : { checks: checkState }),
+    ...(reviewDecision === undefined ? {} : { reviewDecision }),
+  };
+
   return {
     changes,
     next: {
       startedAt: watch.startedAt,
+      staleness,
       headSha,
       failedChecks,
       passed,

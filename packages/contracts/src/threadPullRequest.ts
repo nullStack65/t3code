@@ -82,6 +82,15 @@ export type ThreadPullRequestKey = typeof ThreadPullRequestKey.Type;
 
 export const ThreadPullRequestWatch = Schema.Struct({
   startedAt: IsoDateTime,
+  staleness: Schema.optional(
+    Schema.Struct({
+      staleTimeoutMs: PositiveInt,
+      lastProgressAt: IsoDateTime,
+      checks: Schema.optional(Schema.Array(Schema.String)),
+      reviewDecision: Schema.optional(Schema.NullOr(PullRequestReviewDecision)),
+      alerted: Schema.optional(Schema.Literal(true)),
+    }),
+  ),
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   failedChecks: Schema.Array(TrimmedNonEmptyString),
   passed: Schema.Boolean,

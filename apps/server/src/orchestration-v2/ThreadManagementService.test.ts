@@ -701,6 +701,7 @@ it.effect.each([
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
+              dispatch: () => Effect.succeed({ sequence: 0, storedEvents: [] }),
               getThreadRecords: () =>
                 Effect.succeed({
                   thread: {

@@ -1,3 +1,4 @@
+import { waitActivityMs, waitIntentionallyHeld } from "./waitStaleness.ts";
 import type {
   OrchestrationV2ThreadLinkMetadata,
   GuestShareId,
@@ -34,12 +35,13 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  PR_WATCH_STALE_MINUTES,
   type GuestMessageId,
   isCompactionCommandMessage,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   MessageId,
-  type NodeId,
+  NodeId,
   type ModelSelection,
   OrchestrationV2Command,
   type OrchestrationV2InternalCommand,
@@ -48,6 +50,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
+  ThreadStalenessWait,
   type OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -533,6 +536,10 @@ export interface OrchestratorV2Shape {
     Effect.Effect<OrchestrationV2ThreadShellSnapshot, OrchestratorV2Error>,
     OrchestratorV2Error
   >;
+  readonly getWaitActivityMs: (
+    threadId: ThreadId,
+    runId: RunId | null,
+  ) => Effect.Effect<number, OrchestratorV2Error>;
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, OrchestratorV2Error>;
@@ -660,6 +667,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
     case "thread.pull-request.watch":
+    case "thread.wait-staleness.update":
     case "thread.pull-request-watch.sync":
     case "thread.pull-request-watch.checks-reopen":
     case "thread.pull-request.sync":
@@ -1220,6 +1228,20 @@ function pullRequestSnapshotEndsWatch(
   );
 }
 
+const WaitStaleDiagnostic = Schema.Struct({
+  type: Schema.Literal("wait_stale_timeout"),
+  waits: Schema.Array(
+    Schema.Struct({
+      taskId: Schema.String,
+      kind: ThreadStalenessWait.fields.kind,
+      state: Schema.String,
+      childLink: Schema.optional(Schema.String),
+      idleMinutes: Schema.Int,
+    }),
+  ),
+});
+const encodeWaitStaleDiagnostic = Schema.encodeEffect(Schema.fromJsonString(WaitStaleDiagnostic));
+
 type MonitorPullRequestStamp = NonNullable<
   Extract<OrchestrationV2Notification["source"], { readonly kind: "monitor" }>["pullRequest"]
 >;
@@ -1240,6 +1262,11 @@ function isStalePullRequestWatchStamp(
       candidate.source !== "stack-dismissed" && threadPullRequestKeysEqual(candidate, stamp),
   );
   if (link === undefined) return true;
+  if (
+    stamp.staleProgressAt !== undefined &&
+    link.watch?.staleness?.lastProgressAt !== stamp.staleProgressAt
+  )
+    return true;
   if (stamp.watchEnded === true) {
     // The final notice outlives its watch, but a replacement watch supersedes it.
     const latestWatch = link.watch ?? link.endedWatch;
@@ -1266,6 +1293,43 @@ function isStalePullRequestWatchStamp(
     (stamp.headSha !== null && link.watch.headSha !== stamp.headSha) ||
     pullRequestSnapshotEndsWatch(link.snapshot, link.watch.startedAt)
   );
+}
+
+function isStaleBackgroundWaitWake(
+  projection: OrchestrationV2ThreadProjection,
+  run: OrchestrationV2Run,
+): boolean {
+  const source = projection.messages.find((message) => message.id === run.userMessageId)
+    ?.notification?.source;
+  if (source?.kind !== "monitor" || source.staleWaits === undefined) return false;
+  if (projection.thread.settledAt !== null || projection.thread.settledOverride === "settled")
+    return true;
+  return source.staleWaits.every((stamp) => {
+    const wait = projection.thread.stalenessWaits?.find(
+      (wait) => wait.kind === stamp.kind && wait.taskId === stamp.taskId,
+    );
+    if (wait?.lastProgressAtMs !== stamp.lastProgressAtMs || wait.remoteHeld === true) return true;
+    if (wait.kind === "background") {
+      return !projection.providerThreads
+        .find((provider) => provider.id === projection.thread.activeProviderThreadId)
+        ?.pendingBackgroundTasks?.some(
+          (task) =>
+            task.taskId === wait.taskId &&
+            task.awaited === true &&
+            (task.progressAtMs ?? 0) <= wait.lastProgressAtMs,
+        );
+    }
+    const task = projection.subagents.find((task) => task.id === wait.taskId);
+    return (
+      task === undefined ||
+      task.result !== null ||
+      task.completionDelivery?.state === "disposed" ||
+      task.status === "completed" ||
+      task.status === "failed" ||
+      task.status === "cancelled" ||
+      task.status === "interrupted"
+    );
+  });
 }
 
 function isStalePullRequestWatchWake(
@@ -2635,7 +2699,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             );
       while (
         storedQueuedRun !== undefined &&
-        isStalePullRequestWatchWake(projection, storedQueuedRun)
+        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
+          isStaleBackgroundWaitWake(projection, storedQueuedRun))
       ) {
         yield* writeSystemEvents(
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
@@ -4175,6 +4240,229 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  const updateWaitStaleness = Effect.fn("Orchestrator.updateWaitStaleness")(function* (
+    command: Extract<OrchestrationV2InternalCommand, { type: "thread.wait-staleness.update" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const { operation, threadId } = command;
+    const thread = yield* projectionStore.getThread(threadId).pipe(mapDispatchError(command));
+    if (thread.deletedAt !== null) return;
+    const waits = thread.stalenessWaits ?? [];
+    let next = waits;
+    const stale: Array<{
+      taskId: string;
+      kind: ThreadStalenessWait["kind"];
+      state: string;
+      childLink?: string;
+      idleMinutes: number;
+      lastProgressAtMs: number;
+    }> = [];
+    switch (operation.type) {
+      case "register": {
+        const added = [...new Set(operation.taskIds)].filter(
+          (taskId) => !waits.some((wait) => wait.kind === operation.kind && wait.taskId === taskId),
+        );
+        if (added.length > 0) {
+          next = [
+            ...waits,
+            ...added.map((taskId) => ({
+              kind: operation.kind,
+              taskId,
+              staleTimeoutMs: operation.staleTimeoutMs,
+              lastProgressAtMs: nowMs,
+            })),
+          ];
+        }
+        break;
+      }
+      case "clear":
+        next = waits.filter(
+          (wait) => wait.kind !== operation.kind || !operation.taskIds.includes(wait.taskId),
+        );
+        break;
+      case "remote-progress":
+        next = waits.map((wait) => {
+          const lastProgressAtMs = Math.min(operation.progressAtMs, nowMs);
+          if (wait.kind !== "delegate" || wait.taskId !== operation.taskId) return wait;
+          if (lastProgressAtMs <= wait.lastProgressAtMs) {
+            return operation.held === wait.remoteHeld || operation.held === undefined
+              ? wait
+              : { ...wait, remoteHeld: operation.held };
+          }
+          const { alerted: _, ...rearmed } = wait;
+          return {
+            ...rearmed,
+            lastProgressAtMs,
+            ...(operation.held === undefined ? {} : { remoteHeld: operation.held }),
+          };
+        });
+        break;
+      case "sweep": {
+        if (waits.length === 0) return;
+        const shell = yield* projectionStore
+          .getThreadShell(threadId)
+          .pipe(mapDispatchError(command));
+        if (
+          shell === null ||
+          shell.archivedAt !== null ||
+          shell.settledAt !== null ||
+          shell.settledOverride === "settled"
+        ) {
+          next = [];
+          break;
+        }
+        const tasks = yield* projectionStore
+          .getThreadRecords(threadId, ["subagents", "providerThreads"], {
+            subagentIds: waits.flatMap((wait) =>
+              wait.kind === "delegate" ? [NodeId.make(wait.taskId)] : [],
+            ),
+          })
+          .pipe(mapDispatchError(command));
+        const parentHeld = waitIntentionallyHeld(shell, nowMs);
+        const retained: ThreadStalenessWait[] = [];
+        for (const wait of waits) {
+          let progressAtMs = wait.lastProgressAtMs;
+          let state = "pending";
+          let childLink: string | undefined;
+          let held = parentHeld;
+          if (wait.kind === "background") {
+            const task = tasks.providerThreads
+              .find((provider) => provider.id === thread.activeProviderThreadId)
+              ?.pendingBackgroundTasks?.find(
+                (task) => task.taskId === wait.taskId && task.awaited === true,
+              );
+            if (task === undefined) {
+              // The provider's roster event and the MCP registration can commit in either order.
+              if (nowMs < wait.lastProgressAtMs + 60_000) retained.push(wait);
+              continue;
+            }
+            state = task.kind;
+            const item =
+              task.itemId === undefined
+                ? null
+                : yield* projectionStore
+                    .getTurnItem({
+                      threadId: task.sourceThreadId ?? threadId,
+                      itemId: task.itemId,
+                    })
+                    .pipe(mapDispatchError(command));
+            progressAtMs = Math.max(
+              progressAtMs,
+              task.progressAtMs ?? 0,
+              item === null ? 0 : DateTime.toEpochMillis(item.updatedAt),
+            );
+          } else {
+            const task = tasks.subagents.find(
+              (task) => task.id === wait.taskId && task.origin === "app_owned",
+            );
+            if (
+              task === undefined ||
+              task.result !== null ||
+              task.completionDelivery?.state === "disposed" ||
+              task.status === "completed" ||
+              task.status === "failed" ||
+              task.status === "interrupted" ||
+              task.status === "cancelled"
+            )
+              continue;
+            state = task.status;
+            if (task.remoteChild !== undefined) {
+              childLink = formatThreadLink(task.remoteChild, task.remoteChild.title);
+              held ||= wait.remoteHeld === true;
+            } else if (task.childThreadId !== null) {
+              const child = yield* projectionStore
+                .getThreadShell(task.childThreadId)
+                .pipe(mapDispatchError(command));
+              if (
+                child === null ||
+                child.deletedAt !== null ||
+                child.archivedAt !== null ||
+                child.settledOverride === "settled"
+              )
+                continue;
+              childLink = formatThreadLink(
+                { environmentId: null, threadId: child.id },
+                child.title,
+              );
+              state = child.status;
+              held ||= waitIntentionallyHeld(child, nowMs);
+              const itemActivity = yield* projectionStore
+                .getWaitActivityMs(child.id, child.latestRunId)
+                .pipe(mapDispatchError(command));
+              progressAtMs = Math.max(progressAtMs, waitActivityMs(child), itemActivity);
+            }
+          }
+          const rearmed = progressAtMs > wait.lastProgressAtMs;
+          const { alerted: _, ...registration } = wait;
+          const current = rearmed ? { ...registration, lastProgressAtMs: progressAtMs } : wait;
+          const idleMs = nowMs - current.lastProgressAtMs;
+          if (!held && !current.alerted && idleMs >= current.staleTimeoutMs) {
+            retained.push({ ...current, alerted: true });
+            stale.push({
+              taskId: wait.taskId,
+              kind: wait.kind,
+              state,
+              idleMinutes: Math.floor(idleMs / 60_000),
+              lastProgressAtMs: current.lastProgressAtMs,
+              ...(childLink === undefined ? {} : { childLink }),
+            });
+          } else {
+            retained.push(current);
+          }
+        }
+        next = retained;
+        break;
+      }
+    }
+    if (next.length === waits.length && next.every((wait, index) => wait === waits[index])) return;
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.metadata-updated",
+      occurredAt: now,
+      threadId,
+      providerInstanceId: thread.providerInstanceId,
+      payload: { ...thread, stalenessWaits: next },
+    });
+    if (stale.length === 0) return;
+    const diagnostic = yield* encodeWaitStaleDiagnostic({
+      type: "wait_stale_timeout",
+      waits: stale.map(({ lastProgressAtMs: _, ...diagnostic }) => diagnostic),
+    }).pipe(Effect.orDie);
+    const text = `${diagnostic}\n\nCheck why this work is quiet. T3 Code keeps its normal completion wake armed and reports staleness again only after progress.`;
+    yield* dispatchMessage(
+      {
+        type: "message.dispatch",
+        commandId: command.commandId,
+        threadId,
+        messageId: MessageId.make(`message:${command.commandId}`),
+        text,
+        attachments: [],
+        notification: {
+          source: {
+            kind: "monitor",
+            staleWaits: stale.map(({ kind, taskId, lastProgressAtMs }) => ({
+              kind,
+              taskId,
+              lastProgressAtMs,
+            })),
+          },
+          outcome: "updated",
+          summary: `No progress on ${stale.length === 1 ? "one wait" : `${stale.length} waits`}`,
+        },
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      },
+      events,
+      effects,
+    );
+  });
+
   // Recheck under the lock after reading the host. Record the watch first so wake events carry it.
   const dispatchPullRequestWatchSync = Effect.fn("orchestrationV2.dispatch.pullRequestWatchSync")(
     function* (
@@ -4244,6 +4532,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         watchStartedAt: entry.startedAt,
         headSha: entry.includesRemarks === true ? null : (entry.watch?.headSha ?? null),
         ...(entry.watch === null ? { watchEnded: true } : {}),
+        ...(entry.staleProgressAt === undefined ? {} : { staleProgressAt: entry.staleProgressAt }),
         ...(entries.length > 1 && sections?.[index] !== undefined
           ? { section: sections[index] }
           : {}),
@@ -5350,6 +5639,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ? undefined
                 : (existing.watch ?? {
                     startedAt,
+                    staleness: {
+                      staleTimeoutMs: command.staleTimeoutMs ?? PR_WATCH_STALE_MINUTES * 60_000,
+                      lastProgressAt: startedAt,
+                    },
                     headSha: null,
                     failedChecks: [],
                     passed: false,
@@ -9836,6 +10129,40 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
   });
 
+  const recordDelegateDeadline = Effect.fn("Orchestrator.recordDelegateDeadline")(function* (
+    command: Extract<
+      OrchestrationV2ServerCommand,
+      { type: "delegated_task.request" | "delegated_task.remote.request" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    parent: OrchestrationV2ThreadProjection["thread"],
+    taskId: NodeId,
+    now: DateTime.Utc,
+  ) {
+    if (command.staleTimeoutMs === undefined) return;
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.metadata-updated",
+      threadId: parent.id,
+      providerInstanceId: parent.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        ...parent,
+        stalenessWaits: [
+          ...(parent.stalenessWaits ?? []),
+          {
+            kind: "delegate",
+            taskId,
+            staleTimeoutMs: command.staleTimeoutMs,
+            lastProgressAtMs: DateTime.toEpochMillis(now),
+          },
+        ],
+      },
+    });
+  });
+
   const dispatchDelegatedTaskRequest = Effect.fn("orchestrationV2.dispatch.delegatedTaskRequest")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
@@ -9994,6 +10321,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         result: null,
       };
       const emitEvent = emit(events, command);
+      yield* recordDelegateDeadline(command, events, parentProjection.thread, taskNodeId, now);
 
       yield* emitEvent({
         type: "thread.created",
@@ -10366,6 +10694,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
     };
     const emitEvent = emit(events, command);
+    yield* recordDelegateDeadline(command, events, parentProjection.thread, taskNodeId, now);
     yield* emitEvent({
       ...common,
       type: "node.updated",
@@ -15575,6 +15904,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.pull-request-watch.checks-reopen":
         yield* dispatchThreadMutation(command, events, effects);
         break;
+      case "thread.wait-staleness.update":
+        yield* updateWaitStaleness(command, events, effects);
+        break;
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);
         break;
@@ -15999,6 +16331,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.visit" ||
           // A read can answer a watch again before a push's reopen lands; nothing is left to clear.
           command.type === "thread.pull-request-watch.checks-reopen" ||
+          command.type === "thread.wait-staleness.update" ||
           command.type === "thread.interrupt.unresponsive" ||
           command.type === "thread.stop" ||
           command.type === "subagent.stop" ||
@@ -16068,6 +16401,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       ),
     );
+
+    if (
+      plan.events.length === 0 &&
+      command.type === "thread.wait-staleness.update" &&
+      command.operation.type === "sweep"
+    ) {
+      // The periodic sweep has no caller to replay a no-op receipt for.
+      const sequence = yield* eventSink
+        .latestSequence({ threadId: command.threadId })
+        .pipe(mapDispatchError(command));
+      return { sequence, storedEvents: [] };
+    }
 
     if (plan.events.length === 0 && plan.effects.length === 0 && cancelledTask === undefined) {
       // A settle that ended nothing still records its receipt: a replayed Stop
@@ -16971,6 +17316,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           Effect.mapError(shellProjectionError),
           Effect.map(Effect.mapError(shellProjectionError)),
         );
+    }),
+    getWaitActivityMs: Effect.fn("OrchestratorV2.getWaitActivityMs")(function (threadId, runId) {
+      return projectionStore
+        .getWaitActivityMs(threadId, runId)
+        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
     }),
     getThreadShell: Effect.fn("OrchestratorV2.getThreadShell")(function (threadId) {
       return projectionStore

@@ -179,6 +179,7 @@ const handlers = {
           threadId: caller.thread.threadId,
           taskIds: input.taskIds,
           awaited: input.waiting ?? true,
+          staleTimeoutMinutes: input.staleTimeoutMinutes,
         })
         .pipe(
           Effect.mapError(

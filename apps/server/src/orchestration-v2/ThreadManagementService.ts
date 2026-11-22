@@ -1,3 +1,6 @@
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import { BACKGROUND_WAIT_STALE_MINUTES } from "@t3tools/contracts";
+import { staleTimeoutMs } from "./waitStaleness.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -491,6 +494,7 @@ export interface ThreadManagementServiceShape {
     Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>,
     Orchestrator.OrchestratorV2Error
   >;
+  readonly getWaitActivityMs: Orchestrator.OrchestratorV2["Service"]["getWaitActivityMs"];
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
   readonly listAppOwnedChildThreadIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
   readonly getThreadLinkMetadata: Orchestrator.OrchestratorV2["Service"]["getThreadLinkMetadata"];
@@ -568,6 +572,7 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly taskIds: ReadonlyArray<string>;
     readonly awaited: boolean;
+    readonly staleTimeoutMinutes?: number | undefined;
   }) => Effect.Effect<
     { readonly matched: ReadonlyArray<string>; readonly unmatched: ReadonlyArray<string> },
     ThreadManagementBackgroundWaitError
@@ -1761,6 +1766,26 @@ const make = Effect.gen(function* () {
         reason: "unmatched",
       });
     }
+    const taskIds = input.awaited ? matched : input.taskIds;
+    const uuid = SecureRandom.uuidV4Unsafe();
+    yield* orchestrator
+      .dispatch({
+        type: "thread.wait-staleness.update",
+        commandId: CommandId.make(`server:background-wait:${uuid}`),
+        threadId: input.threadId,
+        operation: input.awaited
+          ? {
+              type: "register",
+              kind: "background",
+              taskIds,
+              staleTimeoutMs: staleTimeoutMs(
+                input.staleTimeoutMinutes,
+                BACKGROUND_WAIT_STALE_MINUTES,
+              ),
+            }
+          : { type: "clear", kind: "background", taskIds },
+      })
+      .pipe(Effect.mapError(unavailable));
     const matchedIds = new Set(matched);
     return { matched, unmatched: input.taskIds.filter((taskId) => !matchedIds.has(taskId)) };
   });
@@ -1910,6 +1935,7 @@ const make = Effect.gen(function* () {
     listActiveShellIndex: orchestrator.listActiveShellIndex,
     listOlderSettledThreads: orchestrator.listOlderSettledThreads,
     readShellSnapshot: orchestrator.readShellSnapshot,
+    getWaitActivityMs: orchestrator.getWaitActivityMs,
     getThreadShell: orchestrator.getThreadShell,
     listAppOwnedChildThreadIds: Effect.fn("ThreadManagementService.listAppOwnedChildThreadIds")(
       function (threadId) {

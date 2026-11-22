@@ -1,3 +1,5 @@
+import { BACKGROUND_WAIT_STALE_MINUTES } from "@t3tools/contracts";
+import { staleTimeoutMs } from "../orchestration-v2/waitStaleness.ts";
 import {
   CommandId,
   DEFAULT_AUTOMATIC_PLACEMENT_HOSTS,
@@ -1031,6 +1033,14 @@ const make = Effect.gen(function* () {
           modelSelection: launched.modelSelection,
           remoteChild,
           completionWake: input.mode === "wait" ? "settled_only" : "always",
+          ...(input.mode === "wait"
+            ? {
+                staleTimeoutMs: staleTimeoutMs(
+                  input.staleTimeoutMinutes,
+                  BACKGROUND_WAIT_STALE_MINUTES,
+                ),
+              }
+            : {}),
         })
         .pipe(
           // The cause goes to the log; the caller learns only that recording failed.
@@ -1471,7 +1481,26 @@ const make = Effect.gen(function* () {
       .pipe(Effect.raceFirst(endedHere));
     // The next look reads the result and stops it there.
     if ("endedHere" in waited) return false;
-    if (waited.timedOut) return false;
+    if (waited.timedOut) {
+      if (waited.progressAtMs !== undefined) {
+        yield* threads
+          .dispatch({
+            type: "thread.wait-staleness.update",
+            commandId: CommandId.make(
+              `server:remote-wait-progress:${taskId}:${waited.progressAtMs}:${waited.intentionallyHeld}:${sequence}`,
+            ),
+            threadId: parentThreadId,
+            operation: {
+              type: "remote-progress",
+              taskId,
+              progressAtMs: waited.progressAtMs,
+              ...(waited.intentionallyHeld === undefined ? {} : { held: waited.intentionallyHeld }),
+            },
+          })
+          .pipe(Effect.ignoreCause({ log: true }));
+      }
+      return false;
+    }
     // A task recorded without its run waits on the thread's latest; a
     // thread there with none has nothing left to wait for.
     if (waited.runId === null) {

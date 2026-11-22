@@ -13,8 +13,10 @@ import {
 
 // These cases read the head once or at one moment, so the no-checks notice never comes due.
 const evaluatePullRequestWatch = (
-  ...args: Parameters<typeof evaluate> extends [...infer Head, number] ? Head : never
-) => evaluate(...args, 0);
+  watch: Parameters<typeof evaluate>[0],
+  detail: Parameters<typeof evaluate>[1],
+  remarks: Parameters<typeof evaluate>[2],
+) => evaluate(watch, detail, remarks, 0);
 
 const STARTED = "2026-10-02T12:00:00.000Z";
 
@@ -81,6 +83,26 @@ const remark = (
 const noRemarks: ReadonlyArray<PullRequestComment> = [];
 
 describe("evaluatePullRequestWatch", () => {
+  it("resets staleness only on observed progress, then rearms after a check transition", () => {
+    const start = Date.parse(STARTED);
+    const initial = evaluate(watch(), detail(), [], start + 60_000).next;
+    assert.equal(initial.staleness?.lastProgressAt, STARTED);
+    const unchanged = evaluate(
+      initial,
+      detail({ checks: [...detail().checks].reverse() }),
+      [],
+      start + 120_000,
+    ).next;
+    assert.deepEqual(unchanged.staleness, initial.staleness);
+    const progressed = evaluate(
+      unchanged,
+      detail({ checks: [check("lint", "success"), check("test", "success")] }),
+      [],
+      start + 180_000,
+    ).next;
+    assert.equal(progressed.staleness?.lastProgressAt, "2026-10-02T12:03:00.000Z");
+  });
+
   it.each(["pending", "success"] as const)(
     "reports a required rebase once with %s CI",
     (status) => {

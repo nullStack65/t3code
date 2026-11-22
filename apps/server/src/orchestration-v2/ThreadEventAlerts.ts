@@ -176,6 +176,7 @@ export function judgeThread(input: {
   readonly remoteTaskCount?: number;
   /** The latest activity among the children this thread waits on. */
   readonly childActivityMs?: number | null;
+  readonly hasStalenessWait?: boolean;
   /** A model alert for the run already reported a usage limit, so a failure adds nothing. */
   readonly usageLimitReported?: boolean;
 }): { readonly evaluated: ReadonlyArray<ThreadEventKind>; readonly findings: ThreadFinding[] } {
@@ -295,6 +296,7 @@ export function judgeThread(input: {
       quiet &&
       shell.activeRunId !== null &&
       shell.blockedOnThreadWait !== true &&
+      input.hasStalenessWait !== true &&
       shell.pendingRuntimeRequest === null
     ) {
       findings.push({
@@ -406,6 +408,7 @@ export function threadEventStillHolds(input: {
   readonly strandedQueue?: StrandedQueue | null;
   readonly remoteTaskCount?: number;
   readonly childActivityMs?: number | null;
+  readonly hasStalenessWait?: boolean;
 }): boolean {
   const { alert } = input;
   const firedMs = Date.parse(alert.occurredAt);
@@ -416,6 +419,7 @@ export function threadEventStillHolds(input: {
     nowMs: firedMs,
     stuckMinutes: input.stuckMinutes,
     ...(input.strandedQueue === undefined ? {} : { strandedQueue: input.strandedQueue }),
+    ...(input.hasStalenessWait === undefined ? {} : { hasStalenessWait: input.hasStalenessWait }),
     ...(input.remoteTaskCount === undefined ? {} : { remoteTaskCount: input.remoteTaskCount }),
     ...(input.childActivityMs === undefined ? {} : { childActivityMs: input.childActivityMs }),
   });
