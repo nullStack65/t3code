@@ -120,6 +120,8 @@ it.layer(layerTest)("human notes", (it) => {
       const note = projection.turnItems.find((item) => item.type === "user_message");
       assert.equal(note?.type === "user_message" ? note.humanNote : undefined, true);
       assert.equal(note?.status, "completed");
+      const human = yield* orchestrator.getThreadSnapshot(threadId);
+      assert.include(JSON.stringify(human), "please look @Jeff");
       assert.deepEqual(yield* projections.getTurnStartHistory(threadId), []);
       const shell = yield* projections.getThreadShell(threadId);
       assert.equal(shell?.settledOverride, null);
@@ -148,6 +150,101 @@ it.layer(layerTest)("human notes", (it) => {
       assert.equal((yield* projections.getThreadProjection(threadId)).runs.length, 0);
       assert.deepEqual(yield* projections.getTurnStartHistory(threadId), []);
     }),
+  );
+
+  it.effect(
+    "promotes one stored note after rejection and deduplicates concurrent submissions",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread:promote-note");
+        const noteId = MessageId.make("note:source");
+        const text = "synthetic promotion text";
+        yield* createThread(threadId);
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          threadId,
+          commandId: CommandId.make("share:promote"),
+          inboxRouting: {
+            owner: null,
+            assignee: null,
+            audience: "shared",
+            attentionKind: "FYI",
+            reason: "conversation",
+          },
+        });
+        const send = (id: string, creationSource: "web" | "mobile" = "mobile") => ({
+          type: "message.dispatch" as const,
+          threadId,
+          commandId: CommandId.make(`dispatch:${id}`),
+          messageId: MessageId.make(id),
+          text: "",
+          attachments: [],
+          dispatchMode: { type: "promote_human_note" as const, noteId },
+          createdBy: "user" as const,
+          creationSource,
+          sentBy: sentBy("jeff"),
+        });
+        yield* orchestrator.dispatch({
+          ...send("record", "web"),
+          messageId: noteId,
+          text,
+          humanNote: true,
+          sentBy: sentBy("kameron"),
+          dispatchMode: { type: "queue_after_active" },
+        });
+        assert.deepEqual(yield* projections.getTurnStartHistory(threadId), []);
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive:note"),
+          threadId,
+        });
+        const refused = yield* orchestrator.dispatch(send("rejected")).pipe(Effect.flip);
+        assert.equal(refused._tag, "OrchestratorDispatchError");
+        yield* orchestrator.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("unarchive:note"),
+          threadId,
+        });
+        yield* Effect.all(
+          [orchestrator.dispatch(send("retry-1")), orchestrator.dispatch(send("retry-2"))],
+          { concurrency: 2 },
+        );
+        yield* orchestrator.dispatch(send("repeat", "web"));
+        const snapshot = yield* projections.getThreadProjection(threadId);
+        assert.equal(snapshot.runs.length, 1);
+        assert.equal(snapshot.messages.length, 2);
+        const note = snapshot.messages.find((message) => message.id === noteId);
+        assert.equal(note?.text, text);
+        assert.equal(note?.sentBy?.founder, "kameron");
+        const promoted = snapshot.messages.find((message) => message.id !== noteId);
+        assert.equal(promoted?.text, text);
+        assert.equal(promoted?.humanNote, undefined);
+        assert.equal(promoted?.sentBy?.founder, "jeff");
+        assert.equal(promoted?.creationSource, "mobile");
+        const history = yield* projections.getTurnStartHistory(threadId);
+        assert.deepEqual(
+          history.flatMap((item) => (item.type === "user_message" ? [item.text] : [])),
+          [text],
+        );
+        const noteRow = (yield* orchestrator.getThreadSnapshot(
+          threadId,
+        )).projection.visibleTurnItems.find(
+          ({ item }) => item.type === "user_message" && item.messageId === noteId,
+        );
+        assert.equal(
+          noteRow?.item.type === "user_message" ? noteRow.item.humanNotePromoted : undefined,
+          true,
+        );
+        const ordinary = {
+          ...send("ordinary", "web"),
+          text,
+          dispatchMode: { type: "queue_after_active" as const },
+        };
+        yield* orchestrator.dispatch(ordinary);
+        assert.equal((yield* projections.getThreadProjection(threadId)).messages.length, 3);
+      }),
   );
 
   it.effect("rejects a note off a shared thread without waking it", () =>

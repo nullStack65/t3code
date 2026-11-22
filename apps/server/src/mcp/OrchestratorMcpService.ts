@@ -1071,6 +1071,7 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
     case "notification":
       return [item.summary, item.detail].filter((part) => part !== undefined).join("\n");
     case "user_message":
+      return item.humanNote ? null : item.text;
     case "assistant_message":
     case "reasoning":
       return item.text;

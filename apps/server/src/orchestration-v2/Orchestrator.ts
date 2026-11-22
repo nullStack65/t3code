@@ -15589,6 +15589,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "message.dispatch": {
         const thread = yield* refuseNativeSubagentMessage(command);
+        if (command.dispatchMode.type === "promote_human_note") {
+          const note = yield* projectionStore
+            .getTurnItem({
+              threadId: command.threadId,
+              itemId: idAllocator.derive.userTurnItem({ messageId: command.dispatchMode.noteId }),
+            })
+            .pipe(mapDispatchError(command));
+          if (
+            command.createdBy !== "user" ||
+            note?.type !== "user_message" ||
+            !note.humanNote ||
+            note.messageId === command.messageId ||
+            thread.archivedAt !== null ||
+            thread.deletedAt !== null
+          ) {
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Only a person can promote a note from this active thread.",
+            });
+          }
+          if (note.humanNotePromoted) break;
+          yield* mapDispatchError(command)(
+            startNextQueuedRun(command.threadId, { latestRunEnded: true }),
+          );
+          cancelUnsettledEffects = yield* dispatchMessage(
+            {
+              type: "message.dispatch",
+              commandId: command.commandId,
+              threadId: command.threadId,
+              messageId: command.messageId,
+              createdBy: command.createdBy,
+              creationSource: command.creationSource,
+              ...(command.sentBy === undefined ? {} : { sentBy: command.sentBy }),
+              text: note.text,
+              attachments: [],
+              dispatchMode: { type: "queue_after_active" },
+            },
+            events,
+            effects,
+          );
+          const now = yield* DateTime.now;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "turn-item.updated",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: { ...note, humanNotePromoted: true, updatedAt: now },
+          });
+          break;
+        }
         const guestSend =
           command.guestMessageId === undefined
             ? undefined
@@ -15935,6 +15988,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (planned) =>
           planned.events.length > 0 ||
           isUnobservedAcknowledgement(command) ||
+          (command.type === "message.dispatch" &&
+            command.dispatchMode.type === "promote_human_note") ||
           command.type === "thread.background-work.settle" ||
           // A stale visit changes no read state.
           command.type === "thread.visit" ||

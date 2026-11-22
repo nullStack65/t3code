@@ -90,8 +90,8 @@ export function foldThreadFeedActivity(
         return [{ createdAt: entry.createdAt, runId: entry.message.runId, message: entry.message }];
       }
       if (entry.type !== "activity-group") return [];
-      return entry.activities.map(({ projectedItem }) => ({
-        createdAt: entry.createdAt,
+      return entry.activities.map(({ createdAt, projectedItem }) => ({
+        createdAt,
         runId: projectedItem.item.runId,
         item: projectedItem.item,
       }));
@@ -132,6 +132,9 @@ export function foldThreadFeedActivity(
         : [],
     );
     const messages = group.rows.flatMap((row) => (row.type === "message" ? [row.message] : []));
+    const settledTaskIds = group.rows.flatMap((row) =>
+      row.type === "work-toggle" || row.type === "run-fold" ? (row.settledTaskIds ?? []) : [],
+    );
     const attentionIds = new Set(
       items.filter(activityItemNeedsAttention).map(({ id }) => String(id)),
     );
@@ -150,7 +153,7 @@ export function foldThreadFeedActivity(
       type: "activity-fold",
       id: group.id,
       createdAt: group.rows[0]!.createdAt,
-      summary: summarizeChatActivity(group.rows.length, messages, items),
+      summary: summarizeChatActivity(group.rows.length, messages, items, settledTaskIds),
       attention,
       expanded,
     });

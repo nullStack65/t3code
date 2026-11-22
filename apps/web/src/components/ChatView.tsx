@@ -2027,7 +2027,7 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
-  const promoteNoteStable = useStableCallback(async (text: string) => {
+  const promoteNoteStable = useStableCallback(async (noteId: MessageId) => {
     if (!isServerThread || activeThreadId === null) {
       throw new Error("This thread is unavailable.");
     }
@@ -2035,10 +2035,10 @@ export default function ChatView(props: ChatViewProps) {
       environmentId,
       input: {
         threadId: activeThreadId,
-        message: { messageId: newMessageId(), role: "user", text, attachments: [] },
+        promoteNoteId: noteId,
+        message: { messageId: newMessageId(), role: "user", text: "", attachments: [] },
         runtimeMode,
         interactionMode: serverThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
-        dispatchMode: "queue",
       },
     });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);

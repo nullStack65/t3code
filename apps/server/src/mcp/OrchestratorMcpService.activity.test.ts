@@ -1,5 +1,7 @@
 import {
   EnvironmentId,
+  MessageId,
+  type OrchestrationV2ProjectedTurnItem,
   NodeId,
   type OrchestratorMcpThreadReadResult,
   type OrchestrationV2ThreadProjection,
@@ -297,6 +299,93 @@ it("readThread preserves caller access errors and prefers activity-run status ov
       .pipe(Effect.flip);
     expect(missingCaller.code).toBe("orchestration_error");
     expect(missingCaller.message).toContain(`Unable to read thread ${parentThreadId}:`);
+  }).pipe(Effect.provide(layer), Effect.runPromise);
+});
+
+it("readThread hides private notes in both views and targeted reads", async () => {
+  const itemId = TurnItemId.make("private-note");
+  const messageId = MessageId.make("note-message");
+  const noteText = "synthetic private note";
+  const thread = baseThread({
+    threadId: parentThreadId,
+    title: "Parent",
+    instanceId: parentInstanceId,
+    model: "gpt-5.4",
+  });
+  const projection = {
+    thread,
+    runs: [],
+    messages: [],
+    providerTurns: [],
+    runtimeRequests: [],
+    contextTransfers: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const note = {
+    position: 0,
+    visibility: "local",
+    sourceThreadId: parentThreadId,
+    sourceItemId: itemId,
+    item: {
+      type: "user_message",
+      status: "completed",
+      runId: null,
+      title: null,
+      messageId,
+      text: noteText,
+      humanNote: true,
+      updatedAt: now,
+    },
+  } as OrchestrationV2ProjectedTurnItem;
+  const ordinary = {
+    ...note,
+    position: 1,
+    sourceItemId: TurnItemId.make("ordinary-message"),
+    item: { ...note.item, humanNote: undefined, text: "ordinary message" },
+  } as OrchestrationV2ProjectedTurnItem;
+  const layer = layerOrchestratorService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getTimelinePage: (_threadId, { itemId }) =>
+            Effect.succeed({
+              items: itemId ? [note] : [note, ordinary],
+              totalItems: 2,
+              hasMore: false,
+              hasEarlier: false,
+            }),
+          getThreadRecords: () => Effect.succeed(projection),
+          getProjectThreadRecords: () => Effect.succeed(projection),
+          getThreadShell: () => Effect.succeed(thread as unknown as OrchestrationV2ThreadShell),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+  await Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    for (const view of ["messages", "activity"] as const) {
+      const page = yield* service.readThread(makeScope(), { threadId: parentThreadId, view });
+      expect(page.items.map(({ text }) => text)).toEqual([null, "ordinary message"]);
+      const item = yield* service.readThread(makeScope(), {
+        threadId: parentThreadId,
+        view,
+        itemId,
+        textOffset: 2,
+      });
+      expect(item.items[0]).toMatchObject({
+        text: null,
+        textTruncated: false,
+        nextTextOffset: null,
+      });
+      expect(JSON.stringify(item)).not.toContain(noteText);
+    }
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
 

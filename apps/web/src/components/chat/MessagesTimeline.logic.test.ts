@@ -5400,6 +5400,37 @@ describe("collapsing non-human activity", () => {
     const reply = messageRow("reply", 2, { role: "assistant", runId: botRun });
     if (relay.kind !== "message" || reply.kind !== "message") throw new Error("Expected messages");
     const decision = { ...reply, kind: "message" } as const;
+    const unrelatedRun = RunId.make("unrelated");
+    const unrelatedRelay = messageRow("other-relay", 0, {
+      createdBy: "agent",
+      runId: unrelatedRun,
+    });
+    const unrelatedReply = messageRow("other-reply", 1, { role: "assistant", runId: unrelatedRun });
+    if (unrelatedRelay.kind !== "message" || unrelatedReply.kind !== "message") {
+      throw new Error("Expected messages");
+    }
+    const request = {
+      kind: "event" as const,
+      id: "request",
+      createdAt: time(0),
+      projectedItem: {
+        item: {
+          type: "dynamic_tool",
+          status: "completed",
+          toolName: "t3_thread_update",
+          input: { action: "request_decision" },
+          runId: botRun,
+          startedAt: DateTime.makeUnsafe(time(0)),
+        },
+      } as OrchestrationV2ProjectedTurnItem,
+    };
+    const withInterruption = [relay, unrelatedRelay, request, unrelatedReply, decision];
+    const classified = timelineActivityContext(withInterruption, [], false, time(1));
+    expect([...classified.attentionByRun.keys()]).toEqual([botRun]);
+    expect(
+      collapseTimelineActivity(withInterruption, new Set(), classified).map(({ id }) => id),
+    ).toContain("reply");
+    expect(classified.decisionRuns.has(unrelatedRun)).toBe(false);
     const entries = [relay, decision];
     const failed = timelineActivityContext(entries, [{ id: botRun, status: "failed" }], false);
     expect(collapseTimelineActivity(entries, new Set(), failed)[0]).toMatchObject({

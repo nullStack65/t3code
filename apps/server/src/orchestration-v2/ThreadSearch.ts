@@ -82,6 +82,7 @@ const SearchRequest = Schema.Struct({
   excludedThreadIds: TokenList,
   /** Only messages from this sender, or null for anyone's. */
   sender: Schema.NullOr(OrchestrationSearchSenderFilter),
+  includeHumanNotes: Schema.Boolean,
 });
 const SearchRow = Schema.Struct({
   messageRowid: Schema.Number,
@@ -167,7 +168,10 @@ function buildMessageSearch(
   query: string,
   hasIndex: boolean,
   bySender: boolean,
-): Omit<typeof SearchRequest.Type, "projectId" | "excludedThreadIds" | "sender"> | null {
+): Omit<
+  typeof SearchRequest.Type,
+  "projectId" | "excludedThreadIds" | "sender" | "includeHumanNotes"
+> | null {
   const { long, short } = messageSearchTokens(query);
   // With a sender and no words, every one of that sender's newest messages is a hit.
   if (long.length === 0 && short.length === 0 && bySender) {
@@ -266,6 +270,7 @@ export const messageHitsQuery = (
     projectId,
     excludedThreadIds,
     sender,
+    includeHumanNotes,
   }: typeof SearchRequest.Encoded,
 ) => sql`
     WITH eligible AS MATERIALIZED (
@@ -328,6 +333,7 @@ export const messageHitsQuery = (
       -- neither find nor a jump can reach them.
       AND messages.message_id NOT LIKE 'async-answer:%'
       AND ${messageSenderCondition(sql, sender)}
+      AND (${includeHumanNotes} OR json_extract(messages.payload_json, '$.humanNote') IS NOT 1)
       -- Nor can they reach a rolled-back turn, or a message of a stopped turn
       -- that no shown item carries, such as a queued prompt that never ran.
       AND NOT EXISTS (
@@ -554,6 +560,7 @@ export const make = Effect.gen(function* () {
       readonly excludedThreadIds?: ReadonlySet<ThreadId>;
       /** Off for an agent's search, which has no use for the user's picks. */
       readonly picks?: boolean;
+      readonly includeHumanNotes?: boolean;
     },
   ) {
     // One message per thread: the best word match, then what the user wrote,
@@ -590,6 +597,7 @@ export const make = Effect.gen(function* () {
               projectId: input.projectId,
               excludedThreadIds: [...(input.excludedThreadIds ?? [])],
               sender: input.sender ?? null,
+              includeHumanNotes: input.includeHumanNotes ?? true,
             });
       }),
     );
@@ -712,6 +720,7 @@ export const make = Effect.gen(function* () {
       projectId: input.projectId ?? null,
       excludedThreadIds: shown,
       picks: false,
+      includeHumanNotes: false,
       ...(input.sender === undefined ? {} : { sender: input.sender }),
     });
     const messageHits = matches

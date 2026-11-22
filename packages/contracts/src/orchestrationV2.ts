@@ -1914,6 +1914,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     humanNote: Schema.optional(Schema.Literal(true)),
+    humanNotePromoted: Schema.optional(Schema.Literal(true)),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
     inputIntent: OrchestrationV2UserMessageInputIntent,
@@ -2852,6 +2853,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     humanNote: Schema.optional(Schema.Literal(true)),
+    humanNotePromoted: Schema.optional(Schema.Literal(true)),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
     inputIntent: OrchestrationV2UserMessageInputIntent,
@@ -3671,6 +3673,7 @@ export const OrchestrationV2Command = Schema.Union([
       Schema.Struct({ type: Schema.Literal("restart_active"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("queue_after_active") }),
       Schema.Struct({ type: Schema.Literal("start_immediately") }),
+      Schema.Struct({ type: Schema.Literal("promote_human_note"), noteId: MessageId }),
     ]),
   }),
   Schema.Struct({

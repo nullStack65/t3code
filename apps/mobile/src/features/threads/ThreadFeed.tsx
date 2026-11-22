@@ -1,4 +1,5 @@
 import {
+  type MessageSender,
   messageSenderDetail,
   messageSenderLabel,
   resolveMessageSender,
@@ -232,6 +233,7 @@ import {
   isSecretRequestActivityGroup,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
+  type ThreadFeedMessage,
   messageFoldRunId,
 } from "../../lib/threadActivity";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
@@ -385,7 +387,7 @@ export interface ThreadFeedProps {
   readonly onIsAtEndChange?: (isAtEnd: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
-  readonly onPromoteNote?: ((text: string) => Promise<void>) | undefined;
+  readonly onPromoteNote?: ((noteId: MessageId) => Promise<void>) | undefined;
   readonly decisionRequestedAt?: string | undefined;
 }
 
@@ -1782,19 +1784,31 @@ function RunFoldButton({
   );
 }
 
+function ThreadPersonHeading({ sender }: { readonly sender: MessageSender }) {
+  if (sender.kind !== "person") return null;
+  const detail = messageSenderDetail(sender);
+  return (
+    <Text className="mb-1 pr-1 text-2xs text-foreground-muted opacity-80" numberOfLines={1}>
+      <Text className="font-t3-medium">{messageSenderLabel(sender)}</Text>
+      {detail === null ? "" : ` · ${detail}`}
+    </Text>
+  );
+}
+
 function ThreadHumanNote({
-  text,
+  message,
   onPromote,
 }: {
-  readonly text: string;
-  readonly onPromote?: ((text: string) => Promise<void>) | undefined;
+  readonly message: ThreadFeedMessage;
+  readonly onPromote?: ThreadFeedProps["onPromoteNote"];
 }) {
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+  const promoted = message.humanNotePromoted || status === "sent";
   return (
     <View className="max-w-[85%] self-end rounded-[20px] border border-warning-border bg-warning px-3.5 py-2.5">
       <View className="flex-row flex-wrap items-center gap-x-3">
         <Text className="font-t3-medium text-xs text-warning-foreground">Model-hidden note</Text>
-        {onPromote && status !== "sent" ? (
+        {onPromote && !promoted && message.visibility !== "inherited" ? (
           <Pressable
             accessibilityRole="button"
             accessibilityState={{ disabled: status === "sending", busy: status === "sending" }}
@@ -1802,7 +1816,7 @@ function ThreadHumanNote({
             onPress={async () => {
               setStatus("sending");
               try {
-                await onPromote(text);
+                await onPromote(message.id);
                 setStatus("sent");
               } catch {
                 setStatus("failed");
@@ -1817,11 +1831,15 @@ function ThreadHumanNote({
         ) : null}
       </View>
       <Text selectable className="font-sans text-sm text-foreground">
-        {text}
+        {message.text}
       </Text>
-      {status === "sent" || status === "failed" ? (
+      {promoted || status === "failed" ? (
         <Text accessibilityLiveRegion="polite" className="pt-1 text-xs text-foreground-muted">
-          {status === "sent" ? "Queued for agent" : "Could not promote the note"}
+          {message.humanNotePromoted
+            ? "Promoted to agent"
+            : promoted
+              ? "Queued for agent"
+              : "Could not promote the note"}
         </Text>
       ) : null}
     </View>
@@ -2128,7 +2146,12 @@ function renderFeedEntry(
       !message.streaming;
 
     if (isUser && message.humanNote) {
-      return <ThreadHumanNote text={message.text} onPromote={props.onPromoteNote} />;
+      return (
+        <View className="items-end">
+          <ThreadPersonHeading sender={resolveMessageSender(message)} />
+          <ThreadHumanNote message={message} onPromote={props.onPromoteNote} />
+        </View>
+      );
     }
 
     if (isUser && props.workflowOpening?.messageId === message.id) {
@@ -2252,12 +2275,9 @@ function renderFeedEntry(
           {presentation.guestName !== undefined ? (
             <GuestMessageName name={presentation.guestName} />
           ) : null}
-          {sender.kind === "person" && !props.userMessageGrouping.groupedWithPrevious ? (
-            <Text className="mb-1 pr-1 text-2xs text-foreground-muted opacity-80" numberOfLines={1}>
-              <Text className="font-t3-medium">{messageSenderLabel(sender)}</Text>
-              {messageSenderDetail(sender) === null ? "" : ` · ${messageSenderDetail(sender)}`}
-            </Text>
-          ) : null}
+          {props.userMessageGrouping.groupedWithPrevious ? null : (
+            <ThreadPersonHeading sender={sender} />
+          )}
           {mediaAttachments.length + pendingMedia.length > 0 ? (
             <View
               className={hasBubble ? "mb-2" : undefined}

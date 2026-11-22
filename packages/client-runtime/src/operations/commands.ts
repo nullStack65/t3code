@@ -191,6 +191,7 @@ interface StartThreadBootstrap {
 
 export interface StartThreadTurnInput extends ThreadCommandInput {
   readonly manualContinuationOfRunId?: RunId;
+  readonly promoteNoteId?: MessageId;
   readonly message: {
     readonly messageId: MessageId;
     readonly role: "user";
@@ -784,6 +785,22 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   input: StartThreadTurnInput,
 ) {
   const commandId = yield* allocateCommandId(input);
+  if (input.promoteNoteId !== undefined) {
+    return yield* dispatchMessage(
+      {
+        type: "message.dispatch",
+        commandId,
+        createdBy: "user",
+        creationSource: input.creationSource ?? "web",
+        threadId: input.threadId,
+        messageId: input.message.messageId,
+        text: "",
+        attachments: [],
+        dispatchMode: { type: "promote_human_note", noteId: input.promoteNoteId },
+      },
+      input.resendAfterSocketLoss ?? true,
+    );
+  }
   const attachments = yield* persistAttachments(
     input.threadId,
     input.message.messageId,

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import {
   mentionedFounders,
   type OrchestrationV2RunStatus,
@@ -16,7 +17,9 @@ export interface ChatActivityEntry {
   readonly item?: OrchestrationV2TurnItem | undefined;
 }
 
-export function isDecisionRequestItem(item: OrchestrationV2TurnItem | undefined): boolean {
+function isDecisionRequestItem(
+  item: OrchestrationV2TurnItem | undefined,
+): item is Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> {
   return (
     item?.type === "dynamic_tool" &&
     item.status === "completed" &&
@@ -59,7 +62,7 @@ export function chatActivityContext(
     else attentionByRun.set(runId, new Set([id]));
   };
   let firstReplyAfterDecision: RunId | undefined;
-  let pendingDecisionRun: RunId | undefined;
+  let pendingDecision: { runId: RunId; startedAt: string } | undefined;
   for (const { createdAt, runId, message, item } of entries) {
     if (!runId) continue;
     if (message?.role === "user" && !message.humanNote) {
@@ -77,14 +80,21 @@ export function chatActivityContext(
     if (item && activityItemNeedsAttention(item)) addAttention(runId, item.id);
     if (isDecisionRequestItem(item)) {
       decisionRuns.add(runId);
-      if (decisionRequestedAt && createdAt <= decisionRequestedAt) pendingDecisionRun = runId;
+      const startedAt = item.startedAt === null ? createdAt : DateTime.formatIso(item.startedAt);
+      if (
+        decisionRequestedAt &&
+        startedAt <= decisionRequestedAt &&
+        (pendingDecision === undefined || startedAt >= pendingDecision.startedAt)
+      ) {
+        pendingDecision = { runId, startedAt };
+      }
     }
     if (decisionRequestedAt && message?.role === "assistant" && createdAt >= decisionRequestedAt) {
       firstReplyAfterDecision ??= runId;
     }
   }
   if (decisionRequestedAt) {
-    const runId = firstReplyAfterDecision ?? pendingDecisionRun;
+    const runId = pendingDecision?.runId ?? firstReplyAfterDecision;
     if (runId) {
       decisionRuns.add(runId);
       addAttention(runId, decisionRequestedAt);
@@ -124,14 +134,26 @@ export function isChatActivityMessage(
   }
 }
 
+export function settledChatActivityTaskIds(item: OrchestrationV2TurnItem): readonly string[] {
+  if (item.type === "subagent" && item.status === "completed") return [item.subagentId];
+  if (
+    item.type === "notification" &&
+    item.source.kind === "delegated_task" &&
+    item.outcome === "completed"
+  )
+    return item.source.taskIds;
+  return [];
+}
+
 export function summarizeChatActivity(
   rowCount: number,
   messages: Iterable<ActivityMessage>,
   items: Iterable<OrchestrationV2TurnItem>,
+  representedSettlements: Iterable<string> = [],
 ): string {
   const counts = new Map<string, number>();
   const pullRequests = new Set<string>();
-  const settledTasks = new Set<string>();
+  const settledTasks = new Set(representedSettlements);
   const count = (word: string) => counts.set(word, (counts.get(word) ?? 0) + 1);
   for (const message of messages) {
     const sender = resolveMessageSender(message);
@@ -145,12 +167,9 @@ export function summarizeChatActivity(
     }
   }
   for (const item of items) {
-    if (item.type === "subagent" && item.status === "completed") settledTasks.add(item.subagentId);
+    for (const id of settledChatActivityTaskIds(item)) settledTasks.add(id);
     if (item.type !== "notification") continue;
     if (item.source.kind !== "system") count("agent update");
-    if (item.source.kind === "delegated_task" && item.outcome === "completed") {
-      for (const id of item.source.taskIds) settledTasks.add(id);
-    }
     if (item.source.kind === "monitor") {
       for (const pr of [item.source.pullRequest, ...(item.source.otherPullRequests ?? [])]) {
         if (pr) pullRequests.add(`${pr.host}/${pr.repository.toLowerCase()}#${pr.number}`);

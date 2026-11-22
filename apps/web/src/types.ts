@@ -90,6 +90,7 @@ export interface ChatMessage {
   readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
   /** A side note between founders. The bot never sees it. */
   readonly humanNote?: true;
+  readonly humanNotePromoted?: true;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;

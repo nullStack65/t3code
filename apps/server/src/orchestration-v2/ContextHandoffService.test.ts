@@ -25,6 +25,7 @@ function importedItem(
   input:
     | {
         readonly role: "user";
+        readonly humanNote?: true;
         readonly id: string;
         readonly text: string;
         readonly ordinal: number;
@@ -62,6 +63,7 @@ function importedItem(
         creationSource: "server",
         type: "user_message",
         inputIntent: "turn_start",
+        ...(input.humanNote ? { humanNote: true } : {}),
         attachments: [],
       }
     : {
@@ -83,6 +85,13 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
         items: [
           importedItem({ role: "user", id: "one", text: "What did we decide?", ordinal: 1 }),
           importedItem({
+            role: "user",
+            id: "private",
+            text: "synthetic private note",
+            ordinal: 2,
+            humanNote: true,
+          }),
+          importedItem({
             role: "assistant",
             id: "two",
             text: "We decided to keep the migration lightweight.",
@@ -96,6 +105,23 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
       assert.deepStrictEqual(handoff.fromProviderThreadIds, []);
       assert.include(handoff.summaryText, "What did we decide?");
       assert.include(handoff.summaryText, "keep the migration lightweight");
+      assert.notInclude(JSON.stringify(handoff), "synthetic private note");
+      assert.lengthOf(handoff.history?.messages ?? [], 2);
+      const digest = ContextHandoffService.makeSideChatContext({
+        parentThreadId: ThreadId.make("thread:parent"),
+        digest: [
+          importedItem({
+            role: "user",
+            id: "private",
+            text: "synthetic private note",
+            ordinal: 1,
+            humanNote: true,
+          }),
+          importedItem({ role: "user", id: "ordinary", text: "ordinary prompt", ordinal: 2 }),
+        ],
+      });
+      assert.notInclude(digest, "synthetic private note");
+      assert.include(digest, "ordinary prompt");
     }),
   );
 

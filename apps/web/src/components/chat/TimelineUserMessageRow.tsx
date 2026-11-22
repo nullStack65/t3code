@@ -289,9 +289,10 @@ function UserMessageContent({ row }: { row: Extract<TimelineRow, { kind: "messag
   );
 }
 
-function HumanNoteActions({ text }: { text: string }) {
+function HumanNoteActions({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const { onPromoteNote } = use(TimelineRowCtx);
   const [status, setStatus] = useState<"idle" | "sending" | "sent">("idle");
+  const promoted = row.message.humanNotePromoted || status === "sent";
   return (
     <div
       className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1"
@@ -301,14 +302,14 @@ function HumanNoteActions({ text }: { text: string }) {
         <EyeOffIcon aria-hidden />
         Model-hidden note
       </Badge>
-      {onPromoteNote && status !== "sent" ? (
+      {onPromoteNote && !promoted && row.projectedItem?.visibility !== "inherited" ? (
         <InlineButton
           type="button"
           disabled={status === "sending"}
           onClick={async () => {
             setStatus("sending");
             try {
-              await onPromoteNote(text);
+              await onPromoteNote(row.message.id);
               setStatus("sent");
               toastManager.add({ type: "success", title: "Note queued for the agent" });
             } catch {
@@ -320,9 +321,9 @@ function HumanNoteActions({ text }: { text: string }) {
           {status === "sending" ? "Sending…" : "Promote to agent"}
         </InlineButton>
       ) : null}
-      {status === "sent" ? (
+      {promoted ? (
         <span role="status" className="text-xs text-muted-foreground">
-          Queued for agent
+          {row.message.humanNotePromoted ? "Promoted to agent" : "Queued for agent"}
         </span>
       ) : null}
     </div>
@@ -961,7 +962,7 @@ function UserTimelineRow({
         )}
         data-user-message-bubble=""
       >
-        {row.message.humanNote ? <HumanNoteActions text={row.message.text} /> : null}
+        {row.message.humanNote ? <HumanNoteActions row={row} /> : null}
         {/* Outside the fold so a collapsed message still has a heading to navigate to. */}
         {mediaAboveText ? null : (
           <MessageAuthorHeading>

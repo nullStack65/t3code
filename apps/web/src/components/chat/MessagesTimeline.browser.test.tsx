@@ -256,8 +256,14 @@ it("keeps a model-hidden note visible and only promotes it after an explicit cli
   await vi.waitFor(() => expect(screen.button("Promote to agent")).toBeEnabled());
   await click(screen.button("Promote to agent"));
   await vi.waitFor(() => expect(screen.text()).toContain("Queued for agent"));
-  expect(promote.mock.calls).toEqual([[note], [note]]);
+  expect(promote.mock.calls).toEqual([[MessageId.make("note")], [MessageId.make("note")]]);
   expect(screen.text()).toContain("Model-hidden note");
+  await using remounted = await renderTimeline(
+    [message(note, { humanNote: true, humanNotePromoted: true }, "note")],
+    { onPromoteNote: promote },
+  );
+  expect(remounted.text()).toContain("Promoted to agent");
+  expect(remounted.buttons("Promote to agent")).toHaveLength(0);
 });
 
 const TASK_ID = ScheduledTaskId.make("task-1");

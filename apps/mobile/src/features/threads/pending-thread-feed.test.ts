@@ -5,8 +5,11 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  RunId,
+  type OrchestrationV2ProjectedTurnItem,
   ThreadId,
 } from "@t3tools/contracts";
+import type { ThreadFeedEntry } from "../../lib/threadActivity";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import {
   appendAcceptedThreadMessages,
@@ -52,6 +55,71 @@ describe("pending timeline messages", () => {
         revealedMessageId: first.id,
       }).map((row) => row.type),
     ).toEqual(["activity-fold", "message", "message", "activity-fold"]);
+  });
+
+  it("reveals the decision run after an intervening agent reply", () => {
+    const makeMessage = (
+      id: string,
+      runId: RunId,
+      role: "user" | "assistant",
+      createdAt: string,
+    ) => {
+      const row = appendPendingThreadMessages([], [], [pending(id)])[0];
+      if (row?.type !== "message") throw new Error("Expected message");
+      return {
+        ...row,
+        createdAt,
+        message: { ...row.message, role, runId, createdBy: "agent" as const },
+      };
+    };
+    const origin = RunId.make("origin");
+    const unrelated = RunId.make("unrelated");
+    const requestedAt = "2026-09-06T10:00:01.000Z";
+    const request = {
+      type: "activity-group",
+      id: "decision-request",
+      createdAt: requestedAt,
+      runId: origin,
+      activities: [
+        {
+          createdAt: requestedAt,
+          projectedItem: {
+            item: {
+              runId: origin,
+              type: "dynamic_tool",
+              status: "completed",
+              toolName: "t3_thread_update",
+              input: { action: "request_decision" },
+              startedAt: null,
+            },
+          } as OrchestrationV2ProjectedTurnItem,
+        },
+      ],
+    } as unknown as ThreadFeedEntry;
+    const rows = [
+      makeMessage("other-input", unrelated, "user", "2026-09-06T10:00:00.000Z"),
+      makeMessage("unrelated-reply", unrelated, "assistant", "2026-09-06T10:00:02.000Z"),
+      {
+        ...makeMessage("founder-turn", origin, "user", requestedAt),
+        message: {
+          ...makeMessage("founder-turn", origin, "user", requestedAt).message,
+          runId: null,
+          createdBy: "user" as const,
+        },
+      },
+      makeMessage("origin-input", origin, "user", "2026-09-06T10:00:00.000Z"),
+      request,
+      makeMessage("founder-decision", origin, "assistant", "2026-09-06T10:00:03.000Z"),
+    ];
+    const folded = foldThreadFeedActivity(rows, rows, {
+      open: {},
+      dismissed: new Map(),
+      revealedMessageId: null,
+      latestRun: null,
+      decisionRequestedAt: requestedAt,
+    });
+    expect(folded.map(({ id }) => id)).toContain("decision-request");
+    expect(folded.map(({ id }) => id)).toContain("founder-decision");
   });
 
   it("keeps unchanged row identities while text streams and updates adjacent grouping", () => {
