@@ -2,7 +2,6 @@ import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest inside the pure provider mapping.
 import * as NodeCrypto from "node:crypto";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { creditUnassignedSender } from "@t3tools/shared/seenMarker";
 import * as Context from "effect/Context";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -115,6 +114,8 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  type InboxActor,
+  creatorInboxOrigin,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -2050,19 +2051,27 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
-      // A session names a person only when another client assigned it. A person's unassigned
-      // client credits this machine's owner; a bot never does, and a null owner stays unnamed.
-      const messageSender = serverAuth.messageSenderOf(currentSessionId).pipe(
-        Effect.filterOrElse(
-          (sentBy) => sentBy.founder !== null || sentBy.deviceType === "bot",
-          (sentBy) =>
-            serverSettings.getSettings.pipe(
-              Effect.map((settings) => creditUnassignedSender(sentBy, settings.ownerFounder)),
-              // A settings read must not fail the send. Leave the sender unassigned.
-              Effect.orElseSucceed(() => sentBy),
-            ),
-        ),
-      );
+      // A session names a founder only when another client assigned it. An unassigned session
+      // stays unnamed: guessing this machine's owner can credit the wrong founder.
+      const messageSender = serverAuth.messageSenderOf(currentSessionId);
+
+      // A person's new thread files under their session's founder; a failed read keeps the claim.
+      const creatorOrigin = (claimed: InboxActor | undefined) =>
+        messageSender.pipe(
+          Effect.map((sender) => creatorInboxOrigin(claimed, sender)),
+          Effect.orElseSucceed(() => claimed),
+        );
+      const fileUnderCreator = (
+        command: OrchestrationV2Command,
+      ): Effect.Effect<OrchestrationV2Command> => {
+        if (command.type !== "thread.create") return Effect.succeed(command);
+        const { inboxOrigin: claimed, ...rest } = command;
+        return creatorOrigin(claimed).pipe(
+          Effect.map((inboxOrigin) =>
+            inboxOrigin === undefined ? rest : { ...rest, inboxOrigin },
+          ),
+        );
+      };
 
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
@@ -2095,8 +2104,13 @@ export const layerWsRpc = (
                         : Effect.succeed(Option.none<OrchestrationV2MessageSentBy>())
                       ).pipe(
                         Effect.flatMap((sentBy) =>
+                          fileUnderCreator(command).pipe(
+                            Effect.map((filed) => ({ filed, sentBy })),
+                          ),
+                        ),
+                        Effect.flatMap(({ filed, sentBy }) =>
                           ThreadMessageIntake.dispatchCommand(
-                            ThreadManagementService.withCreationProvenance(command, {
+                            ThreadManagementService.withCreationProvenance(filed, {
                               createdBy: "user",
                               creationSource:
                                 "creationSource" in command ? command.creationSource : "web",
@@ -2308,14 +2322,15 @@ export const layerWsRpc = (
                     })
                     .pipe(
                       Effect.andThen(
-                        input.initialMessage === undefined ? Effect.undefined : messageSender,
+                        Effect.all([
+                          input.initialMessage === undefined ? Effect.undefined : messageSender,
+                          creatorOrigin(input.inboxOrigin),
+                        ]),
                       ),
-                      Effect.flatMap((sentBy) =>
+                      Effect.flatMap(([sentBy, inboxOrigin]) =>
                         ThreadMessageIntake.launchThread({
                           commandId: input.commandId,
-                          ...(input.inboxOrigin === undefined
-                            ? {}
-                            : { inboxOrigin: input.inboxOrigin }),
+                          ...(inboxOrigin === undefined ? {} : { inboxOrigin }),
                           ...(input.inboxRouting === undefined
                             ? {}
                             : { inboxRouting: input.inboxRouting }),

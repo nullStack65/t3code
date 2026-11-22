@@ -10,6 +10,7 @@ import {
   matchesInboxFilter,
   effectiveInboxFilter,
   inboxOriginFor,
+  creatorInboxOrigin,
   founderInboxLane,
   staysActiveWhileWorking,
   compositeThreadKey,
@@ -119,6 +120,19 @@ describe("shared fleet organizational inbox", () => {
       true,
       false,
     ]);
+  });
+  it("files a person's new thread under their session's founder, never a guessed one", () => {
+    const phone = { founder: null, deviceType: "mobile" } as const;
+    const jeffPhone = { ...phone, founder: "jeff" } as const;
+    // A session assigned in Connections files as its founder, whatever the client claims.
+    expect(creatorInboxOrigin(undefined, jeffPhone)).toEqual(jeff);
+    expect(creatorInboxOrigin(kameron, jeffPhone)).toEqual(jeff);
+    expect(creatorInboxOrigin(bot, jeffPhone)).toEqual(jeff);
+    // An unassigned session keeps the client's choice and is not filed under a guessed owner.
+    expect(creatorInboxOrigin(kameron, phone)).toEqual(kameron);
+    expect(creatorInboxOrigin(undefined, phone)).toBeUndefined();
+    // A bot's claim is left to agent routing.
+    expect(creatorInboxOrigin(bot, { founder: "kameron", deviceType: "bot" })).toEqual(bot);
   });
   it("files agent launches in Agents unless the agent picks an inbox with a reason", () => {
     // A launch from a thread in Kameron's inbox no longer copies that routing.
@@ -291,6 +305,32 @@ describe("shared fleet organizational inbox", () => {
         }),
       ),
     ).toEqual(["action", "hidden"]);
+    // A standing desk filed to Kameron is FYI until a decision or a runtime request is open.
+    const desk = makeThreadInbox({
+      actor: bot,
+      routing: { ...inboxRoutingFor("kameron"), reason: "conversation" },
+    });
+    const deskNow = (inbox: typeof desk, pendingHumanRequest = false, standing = true) =>
+      projectThreadInbox(inbox, { latestHumanMessageAt: null, pendingHumanRequest, standing });
+    expect([deskNow(desk).attentionKind, ...lanes(deskNow(desk))]).toEqual([
+      "FYI",
+      "FYI",
+      "hidden",
+    ]);
+    expect(matchesInboxView(deskNow(desk), "kameron")).toBe(true);
+    expect(staysActiveWhileWorking(deskNow(desk), ["kameron"])).toBe(false);
+    expect(deskNow(desk, false, false).attentionKind).toBe("action");
+    expect([deskNow(desk, true).attentionKind, ...lanes(deskNow(desk, true))]).toEqual([
+      "action",
+      "action",
+      "hidden",
+    ]);
+    const deskAsk = { ...desk, decisionRequest: asked.decisionRequest };
+    expect([deskNow(deskAsk).attentionKind, ...lanes(deskNow(deskAsk))]).toEqual([
+      "action",
+      "action",
+      "hidden",
+    ]);
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });

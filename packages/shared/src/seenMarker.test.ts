@@ -1,11 +1,7 @@
 import { MessageId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 
-import {
-  creditUnassignedSender,
-  formatSeenMarkerForProvider,
-  formatSharedSenderForProvider,
-} from "./seenMarker.ts";
+import { formatSeenMarkerForProvider, formatSharedSenderForProvider } from "./seenMarker.ts";
 
 const seenAt = "2026-11-20T03:00:00.000Z";
 describe("formatSeenMarkerForProvider", () => {
@@ -55,20 +51,6 @@ describe("formatSharedSenderForProvider", () => {
     );
     expect(formatSharedSenderForProvider("Ship the fix", null)).toBe("Ship the fix");
     expect(formatSharedSenderForProvider("/compact", "jeff")).toBe("/compact");
-  });
-});
-
-describe("creditUnassignedSender", () => {
-  const desktop = { founder: null, deviceType: "desktop", sessionId: "s" } as const;
-
-  it("credits a person's unassigned client to the machine owner", () => {
-    expect(creditUnassignedSender(desktop, "kameron")).toEqual({ ...desktop, founder: "kameron" });
-  });
-
-  it("keeps an assigned founder, a bot, and a machine with no owner", () => {
-    expect(creditUnassignedSender({ ...desktop, founder: "jeff" }, "kameron").founder).toBe("jeff");
-    expect(creditUnassignedSender({ ...desktop, deviceType: "bot" }, "kameron").founder).toBeNull();
-    expect(creditUnassignedSender(desktop, null)).toEqual(desktop);
   });
 });
 
