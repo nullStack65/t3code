@@ -179,7 +179,7 @@ let occurrence = 0;
 const eventAlert = (finding: ThreadFinding): ThreadEventAlert => ({
   type: "thread-event",
   kind: finding.kind,
-  id: `env:thread:fleet:${finding.kind}:${finding.signature}:${(occurrence += 1)}`,
+  id: `env:thread:fleet:${finding.kind}:${finding.signature}:${DateTime.formatIso(DateTime.makeUnsafe(occurrence))}`,
   environmentId: "env",
   environmentLabel: "primary-r720",
   threadId: "thread:fleet",
@@ -190,7 +190,7 @@ const eventAlert = (finding: ThreadFinding): ThreadEventAlert => ({
   lastAssistantLine: "A background watch will wake this thread.",
   lastError: null,
   openPullRequests: [],
-  occurredAt: "2026-11-19T03:00:00.000Z",
+  occurredAt: DateTime.formatIso(DateTime.makeUnsafe(occurrence++)),
 });
 
 const finding = (kind: ThreadEventKind, signature: string): ThreadFinding => ({
@@ -256,9 +256,18 @@ it("deduplicates a stranded queue until the queue advances or drains", () => {
   assert.isTrue(step("queued:1", true, 1));
   assert.isFalse(step("queued:1", false, 2));
   assert.isFalse(step("queued:1", true, 3));
-  assert.isTrue(step("queued:2", true, 4));
-  assert.isFalse(step(null, false, 5));
-  assert.isTrue(step("queued:3", true, 6));
+  const [undelivered] = state.outbox;
+  assert.isDefined(undelivered);
+  state = afterDrop(state, undelivered, 4);
+  assert.isTrue(step("queued:1", true, 5));
+  const [delivered] = state.outbox;
+  assert.isDefined(delivered);
+  state = afterDeliveryAttempt(state, delivered, true, 6);
+  assert.isFalse(step("queued:1", false, 7));
+  assert.isFalse(step("queued:1", true, 8));
+  assert.isTrue(step("queued:2", true, 9));
+  assert.isFalse(step(null, false, 10));
+  assert.isTrue(step("queued:3", true, 11));
 });
 
 it("a thread holding a question and an inbox flip reports each once, not on every trigger", () => {

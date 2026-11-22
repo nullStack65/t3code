@@ -244,6 +244,13 @@ it("stuck: a stranded queue reports strictly after 15 minutes with a stable inci
   assert.equal(first.kind, "stuck");
   assert.equal(sweep(NOW + 60_000).findings[0]?.signature, first.signature);
   assert.notEqual(sweep(NOW + 60_000, "queued:2").findings[0]?.signature, first.signature);
+  assert.deepEqual(
+    judge(shell, "sweep", {
+      nowMs: NOW + 1,
+      strandedQueue: { ...strandedQueue, queueHeld: true },
+    } as never).findings,
+    [],
+  );
   for (const gate of [
     { snoozedUntil: at(-2) },
     { latestRunStopRequested: true },

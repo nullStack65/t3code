@@ -45,6 +45,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
+  isStrandedQueueSignature,
   judgeThread,
   keepStrandedQueueReport,
   type StrandedQueue,
@@ -324,6 +325,51 @@ function enqueueAlert(
 }
 
 const reportedKey = (threadId: string, kind: ThreadEventKind) => `${threadId}\n${kind}`;
+const deliveredQueuePrefix = "delivered:";
+const queueReportSignature = (signature: string) =>
+  signature.startsWith(deliveredQueuePrefix)
+    ? signature.slice(deliveredQueuePrefix.length)
+    : signature;
+
+function strandedAlertSignature(alert: WatcherAlert): string | undefined {
+  if (alert.type !== "thread-event" || alert.kind !== "stuck") return undefined;
+  const prefix = `${alert.environmentId}:${alert.threadId}:${alert.kind}:`;
+  const suffix = `:${alert.occurredAt}`;
+  if (!alert.id.startsWith(prefix) || !alert.id.endsWith(suffix)) return undefined;
+  const signature = alert.id.slice(prefix.length, -suffix.length);
+  return isStrandedQueueSignature(signature) ? signature : undefined;
+}
+
+function setReported(
+  reported: ModelAlertState["reported"],
+  key: string,
+  signatures: ReadonlyArray<string>,
+): ModelAlertState["reported"] {
+  const { [key]: _previous, ...rest } = reported;
+  return signatures.length === 0
+    ? rest
+    : {
+        ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
+        [key]: signatures.join("\n"),
+      };
+}
+
+function recordStrandedDelivery(
+  reported: ModelAlertState["reported"],
+  entry: Delivery,
+  delivered: boolean,
+) {
+  if (entry.alert.type !== "thread-event") return reported;
+  const signature = strandedAlertSignature(entry.alert);
+  if (signature === undefined) return reported;
+  const key = reportedKey(entry.alert.threadId, "stuck");
+  const known = (reported[key] ?? "").split("\n").filter(Boolean);
+  if (!delivered && !known.includes(signature)) return reported;
+  const next = known.filter((candidate) => candidate !== signature);
+  const sent = `${deliveredQueuePrefix}${signature}`;
+  if (delivered && !next.includes(sent)) next.push(sent);
+  return setReported(reported, key, next);
+}
 
 /**
  * Records what a trigger found true of a thread. A kind reports once per signature: it stays quiet
@@ -351,9 +397,28 @@ export function recordThreadEvents(
     // each signature it reported. One that stops being true is forgotten and can report again.
     const known = (reported[key] ?? "").split("\n").filter((signature) => signature !== "");
     const delivered = known.filter(
-      (signature) => kind === "stuck" && keepStrandedQueueReport(signature, judged.strandedQueue),
+      (signature) =>
+        kind === "stuck" &&
+        keepStrandedQueueReport(queueReportSignature(signature), judged.strandedQueue),
     );
     for (const finding of kindFindings) {
+      if (kind === "stuck" && isStrandedQueueSignature(finding.signature)) {
+        if (
+          delivered.some((signature) => queueReportSignature(signature) === finding.signature) ||
+          outbox.some(
+            (entry) =>
+              entry.alert.type === "thread-event" &&
+              entry.alert.threadId === judged.threadId &&
+              nowMs - entry.createdAt < OUTBOX_TTL_MS &&
+              strandedAlertSignature(entry.alert) === finding.signature,
+          )
+        )
+          continue;
+        const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
+        outbox = queued.outbox;
+        enqueued ||= queued.enqueued;
+        continue;
+      }
       if (known.includes(finding.signature)) {
         if (!delivered.includes(finding.signature)) delivered.push(finding.signature);
         continue;
@@ -366,13 +431,7 @@ export function recordThreadEvents(
     // A finding with nowhere to go stays unreported, so a later launcher or webhook still hears it.
     const stored = delivered.join("\n");
     if ((reported[key] ?? "") !== stored) {
-      const { [key]: _previous, ...rest } = reported;
-      reported = stored
-        ? {
-            ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
-            [key]: stored,
-          }
-        : rest;
+      reported = setReported(reported, key, delivered);
     }
   }
   if (reported === state.reported && outbox === state.outbox) return { state, enqueued };
@@ -486,7 +545,9 @@ export function afterDeliveryAttempt(
   return {
     ...state,
     incidentSentAt,
-    reported: delivered ? markLinkDelivered(state.reported, entry) : state.reported,
+    reported: delivered
+      ? recordStrandedDelivery(markLinkDelivered(state.reported, entry), entry, true)
+      : state.reported,
     outbox: pruneOutbox(state.outbox, nowMs).flatMap((candidate) => {
       if (!sameDelivery(candidate, entry)) return [candidate];
       if (delivered) {
@@ -535,6 +596,11 @@ export const afterDrop = (
   nowMs: number,
 ): ModelAlertState => ({
   ...state,
+  reported: state.outbox.some(
+    (candidate) => candidate.alert.id === entry.alert.id && !sameDelivery(candidate, entry),
+  )
+    ? state.reported
+    : recordStrandedDelivery(state.reported, entry, false),
   outbox: state.outbox.flatMap((candidate) => {
     if (!sameDelivery(candidate, entry)) return [candidate];
     if (
@@ -1046,7 +1112,7 @@ export const make = Effect.gen(function* () {
     }
     const now = yield* DateTime.now;
     const { runs } = yield* projections.getThreadRecords(shell.id, ["runs"]);
-    const oldest = runs
+    const queued = runs
       .filter(
         (run) =>
           run.status === "queued" &&
@@ -1057,14 +1123,20 @@ export const make = Effect.gen(function* () {
       .toSorted(
         (left, right) =>
           DateTime.toEpochMillis(left.requestedAt) - DateTime.toEpochMillis(right.requestedAt),
-      )[0];
+      );
+    const latestRun = latestExecutedRun(runs);
+    const oldest = queued.find((run) => run.queueHeld !== true) ?? queued[0];
     const strandedQueue =
       oldest === undefined
         ? null
         : {
             runId: oldest.id,
             requestedAt: oldest.requestedAt,
-            lastCompletedAt: latestExecutedRun(runs)?.completedAt ?? null,
+            lastCompletedAt: latestRun?.completedAt ?? null,
+            queueHeld:
+              oldest.queueHeld === true ||
+              (shell.lastErrorClass === "usage_limit" &&
+                latestRun?.providerInstanceId === oldest.providerInstanceId),
           };
     return { remoteTaskCount, childActivityMs, strandedQueue };
   });
@@ -1158,7 +1230,11 @@ export const make = Effect.gen(function* () {
     }
     if (entry.destination === "webhook") {
       const url = current.modelAlertWebhookUrl.trim();
-      if (url === "") return { _tag: "sent" } satisfies DeliveryResult;
+      if (url === "") {
+        return {
+          _tag: strandedAlertSignature(alert) === undefined ? "sent" : "dropped",
+        } satisfies DeliveryResult;
+      }
       // A webhook URL can embed a credential, so its failure names only the host.
       const host = URL.canParse(url) ? new URL(url).host : "an unparsable URL";
       yield* http

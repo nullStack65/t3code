@@ -106,6 +106,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as FiberMap from "effect/FiberMap";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -2532,6 +2533,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return true;
   });
 
+  const snoozedQueueWakes = yield* FiberMap.make<ThreadId>();
+  const wakeSnoozedQueue = Effect.fn("Orchestrator.wakeSnoozedQueue")(function* (
+    threadId: ThreadId,
+    deadline: DateTime.Utc,
+    replace = false,
+  ): Effect.fn.Return<void> {
+    yield* FiberMap.run(snoozedQueueWakes, threadId, { onlyIfMissing: !replace })(
+      Effect.gen(function* () {
+        let wakeAt: DateTime.Utc | null = deadline;
+        while (wakeAt !== null) {
+          const now = yield* DateTime.now;
+          yield* Effect.sleep(
+            Math.max(0, DateTime.toEpochMillis(wakeAt) - DateTime.toEpochMillis(now)),
+          );
+          wakeAt = yield* threadDispatch.withLock(
+            threadId,
+            Effect.gen(function* () {
+              const thread = yield* findThread(threadId);
+              if (thread === null || thread.archivedAt !== null || thread.deletedAt !== null)
+                return null;
+              const checkedAt = yield* DateTime.now;
+              if (
+                thread.snoozedUntil != null &&
+                DateTime.isGreaterThan(thread.snoozedUntil, checkedAt)
+              ) {
+                return thread.snoozedUntil;
+              }
+              yield* startNextQueuedRun(threadId, { latestRunEnded: true });
+              return null;
+            }),
+          );
+        }
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to promote a queue at snooze expiry", { threadId, cause }),
+        ),
+      ),
+    );
+  });
+
   const startNextQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(
     function* (
       threadId: ThreadId,
@@ -2558,12 +2599,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       // A digest never starts a turn, so an expired one is dropped even when it is the only queue.
       const checkedAt = yield* DateTime.now;
-      if (
-        (projection.thread.snoozedUntil != null &&
-          DateTime.isGreaterThan(projection.thread.snoozedUntil, checkedAt)) ||
-        projection.runtimeRequests.some((request) => request.status === "pending")
-      )
+      const snoozedUntil = projection.thread.snoozedUntil;
+      if (snoozedUntil != null && DateTime.isGreaterThan(snoozedUntil, checkedAt)) {
+        if (
+          projection.runs.some(
+            (run) =>
+              run.status === "queued" &&
+              run.queueHeld !== true &&
+              run.delivery?.class !== "digest" &&
+              !deliveryExpired(run, checkedAt),
+          )
+        ) {
+          yield* wakeSnoozedQueue(threadId, snoozedUntil);
+        }
         return;
+      }
+      if (projection.runtimeRequests.some((request) => request.status === "pending")) return;
       const expired = projection.runs.filter(
         (run) => run.status === "queued" && deliveryExpired(run, checkedAt),
       );
@@ -2667,9 +2718,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? settings.providerInstances[queuedRun.providerInstanceId]
         : undefined;
       const instanceDisabledForProject =
-        projectOverride !== undefined
-          ? !projectOverride
-          : machineInstance !== undefined && !resolveProviderInstanceEnabled(machineInstance);
+        machineInstance === undefined ||
+        !(projectOverride ?? resolveProviderInstanceEnabled(machineInstance));
       if (
         worktreeMissing ||
         instanceDisabledForProject ||
@@ -16058,6 +16108,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         receiptThreadId: committed.receipt.threadId,
         commandThreadId: commandThreadId(command),
       });
+    }
+    if (
+      command.type === "thread.snooze" ||
+      (command.type === "thread.metadata.update" && command.limitRecovery?.snooze === true)
+    ) {
+      yield* mapDispatchError(command)(
+        Effect.gen(function* () {
+          const thread = yield* findThread(command.threadId);
+          if (
+            thread?.snoozedUntil != null &&
+            (yield* projectionStore.canStartQueuedRun(command.threadId))
+          ) {
+            yield* wakeSnoozedQueue(command.threadId, thread.snoozedUntil, true);
+          }
+        }),
+      );
     }
     if (
       command.type === "queue.resume" ||

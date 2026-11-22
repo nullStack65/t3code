@@ -344,6 +344,13 @@ const layerProjectionReplayTest = ProjectionReplay.layer.pipe(
   ),
 );
 
+const testProviderInstances = {
+  [modelSelection.instanceId]: { driver: "codex", config: {} },
+  [alternateInstanceId]: { driver: "codex", config: {} },
+  [claudeInstanceId]: { driver: "claudeAgent", config: {} },
+  [antigravityInstanceId]: { driver: "antigravity", config: {} },
+};
+
 const layerTest = Layer.mergeAll(
   RuntimeLayer.layer,
   layerProjectionReplayTest,
@@ -358,7 +365,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(ServerSettings.layerTest({ providerInstances: testProviderInstances })),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -372,7 +379,7 @@ const layerLegacyImportTest = Layer.merge(RuntimeLayer.layer, layerProjectionRep
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(ServerSettings.layerTest({ providerInstances: testProviderInstances })),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -502,7 +509,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
   Layer.provide(layerCheckpointStoreTest),
   // Exposed so tests can reach the attachments directory that resource cleanup removes from.
   Layer.provideMerge(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(ServerSettings.layerTest({ providerInstances: testProviderInstances })),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provideMerge(layerPlatformTest),
@@ -1383,7 +1390,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(ServerSettings.layerTest({ providerInstances: testProviderInstances })),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerPlatformTest),
@@ -8375,7 +8382,6 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
         yield* race;
         assert.equal((yield* projections.getRun(threadId, first.id))?.status, "queued");
-        yield* TestClock.adjust("1 minute");
         assert.isNotNull(active.rootNodeId);
         const request: OrchestrationV2RuntimeRequest = {
           id: RuntimeRequestId.make(`${threadId}:approval`),
@@ -8410,7 +8416,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         yield* race;
         assert.equal((yield* projections.getRun(threadId, first.id))?.status, "queued");
         yield* publishRequest(true);
-        yield* race;
+        yield* TestClock.adjust("1 minute");
         assert.equal((yield* projections.getRun(threadId, first.id))?.status, "starting");
         assert.equal((yield* projections.getRun(threadId, second.id))?.status, "queued");
         yield* terminalize(first);
@@ -10997,7 +11003,7 @@ it.layer(layerTest)("snooze queued runs", (it) => {
         }
         const beforeRecovery = yield* orchestrator.getThreadProjection(threadId);
         yield* eventSink.commitCommand({
-          commandId: CommandId.make(`recovery:${threadId}`),
+          commandId: CommandId.make(`command:runtime-reconcile:${threadId}`),
           threadId,
           commandType: "provider-runtime.reconcile",
           acceptedAt: now,
@@ -11010,7 +11016,7 @@ it.layer(layerTest)("snooze queued runs", (it) => {
             payload:
               run.status === "queued"
                 ? // A usage limit stops the queue from starting without marking it held.
-                  kind === "limited-user"
+                  kind === "limited-user" || kind === "notification"
                   ? run
                   : { ...run, queueHeld: true }
                 : {
@@ -11024,7 +11030,9 @@ it.layer(layerTest)("snooze queued runs", (it) => {
         const beforeSnooze = yield* orchestrator.getThreadProjection(threadId);
         assert.isTrue(
           beforeSnooze.runs.some(
-            (run) => run.status === "queued" && (kind === "limited-user" || run.queueHeld),
+            (run) =>
+              run.status === "queued" &&
+              (kind === "limited-user" || kind === "notification" || run.queueHeld),
           ),
         );
         const snooze = orchestrator.dispatch({
@@ -11043,6 +11051,25 @@ it.layer(layerTest)("snooze queued runs", (it) => {
           const snoozed = yield* orchestrator.getThreadProjection(threadId);
           assert.equal(DateTime.formatIso(snoozed.thread.snoozedUntil!), snoozedUntil);
           assert.deepEqual(snoozed.runs, beforeSnooze.runs);
+          if (kind === "notification") {
+            yield* orchestrator.dispatch({
+              type: "thread.snooze",
+              commandId: CommandId.make(`shorten-snooze:${threadId}`),
+              threadId,
+              snoozedUntil: DateTime.formatIso(DateTime.add(now, { minutes: 1 })),
+            });
+            yield* TestClock.adjust("59 seconds");
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runs[1]?.status,
+              "queued",
+            );
+            yield* TestClock.adjust("1 second");
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runs[1]?.status,
+              "starting",
+            );
+            return;
+          }
           yield* orchestrator.dispatch({
             type: "thread.unsnooze",
             commandId: CommandId.make(`unsnooze:${threadId}`),
@@ -12872,11 +12899,9 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(
+  Layer.provideMerge(
     ServerSettings.layerTest({
-      providerInstances: {
-        [alternateInstanceId]: { driver: "codex", enabled: true },
-      },
+      providerInstances: testProviderInstances,
       projectSettingsOverrides: {
         [queueResumeDisabledInstanceProjectId]: {
           providerInstances: { [alternateInstanceId]: { enabled: false } },
@@ -12894,13 +12919,13 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
 it.layer(layerQueueResumeDisabledInstanceTest)(
   "queue.resume on a project-disabled instance",
   (it) => {
-    it.effect(
-      "holds a queued run instead of starting it on an instance the project turned off",
-      () =>
+    it.effect.each(["disabled", "removed"] as const)(
+      "holds queued runs when their provider instance is %s",
+      (availability) =>
         Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const events = yield* EventSink.EventSinkV2;
-          const threadId = ThreadId.make("queue-resume-disabled-instance-thread");
+          const threadId = ThreadId.make(`queue-resume-${availability}-instance-thread`);
           const queuedModelSelection = {
             instanceId: alternateInstanceId,
             model: "gpt-5.5",
@@ -12912,7 +12937,10 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
             creationSource: "web",
             commandId: CommandId.make(`${threadId}:create`),
             threadId,
-            projectId: queueResumeDisabledInstanceProjectId,
+            projectId:
+              availability === "disabled"
+                ? queueResumeDisabledInstanceProjectId
+                : ProjectId.make("project:queue-resume-removed-instance"),
             title: "Queue resume disabled instance",
             modelSelection,
             runtimeMode: "full-access",
@@ -12931,22 +12959,32 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
             attachments: [],
             dispatchMode: { type: "defer_start" },
           });
-          yield* orchestrator.dispatch({
-            type: "message.dispatch",
-            createdBy: "user",
-            creationSource: "web",
-            commandId: CommandId.make(`${threadId}:message:queued`),
-            threadId,
-            messageId: MessageId.make(`${threadId}:message:queued`),
-            text: "Queued",
-            attachments: [],
-            modelSelection: queuedModelSelection,
-            dispatchMode: { type: "queue_after_active" },
-          });
+          for (const index of [1, 2]) {
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`${threadId}:message:queued:${index}`),
+              threadId,
+              messageId: MessageId.make(`${threadId}:message:queued:${index}`),
+              text: "Queued",
+              attachments: [],
+              modelSelection: queuedModelSelection,
+              dispatchMode: { type: "queue_after_active" },
+            });
+          }
 
           const before = yield* orchestrator.getThreadProjection(threadId);
           const activeRun = before.runs.find((run) => run.status !== "queued")!;
-          const queuedRun = before.runs.find((run) => run.status === "queued")!;
+          const queuedRuns = before.runs.filter((run) => run.status === "queued");
+          assert.lengthOf(queuedRuns, 2);
+          if (availability === "removed") {
+            const settings = yield* ServerSettings.ServerSettingsService;
+            yield* settings.updateProviderInstance({
+              operation: "remove",
+              instanceId: alternateInstanceId,
+            });
+          }
           const now = yield* DateTime.now;
           yield* events.write({
             events: [
@@ -12968,15 +13006,11 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
           });
 
           const resumed = yield* orchestrator.getThreadProjection(threadId);
-          const resumedQueuedRun = resumed.runs.find((run) => run.id === queuedRun.id);
-          assert.equal(
-            resumedQueuedRun?.status,
-            "queued",
-            "a disabled instance must not start the queued run",
-          );
-          assert.isTrue(
-            resumedQueuedRun?.queueHeld,
-            "a refused resume re-holds the queue instead of leaving it looking resumable",
+          assert.deepEqual(
+            resumed.runs
+              .filter((run) => run.id !== activeRun.id)
+              .map((run) => [run.id, run.status, run.queueHeld]),
+            queuedRuns.map((run) => [run.id, "queued" as const, true]),
           );
         }),
     );

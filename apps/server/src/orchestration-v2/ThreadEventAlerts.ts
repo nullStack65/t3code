@@ -145,10 +145,12 @@ export interface StrandedQueue {
   readonly runId: string;
   readonly requestedAt: DateTime.Utc;
   readonly lastCompletedAt?: DateTime.Utc | null;
+  readonly queueHeld?: boolean;
 }
 
 export const strandedQueueSignature = (queue: StrandedQueue) => `stranded-queue:${queue.runId}`;
-const isStrandedQueueSignature = (signature: string) => signature.startsWith("stranded-queue:");
+export const isStrandedQueueSignature = (signature: string) =>
+  signature.startsWith("stranded-queue:");
 
 export function keepStrandedQueueReport(
   signature: string,
@@ -254,6 +256,7 @@ export function judgeThread(input: {
     evaluated.includes("stuck") &&
     watched &&
     queue != null &&
+    queue.queueHeld !== true &&
     !isLive(shell) &&
     shell.latestRunStopRequested !== true &&
     shell.pendingRuntimeRequest === null &&
