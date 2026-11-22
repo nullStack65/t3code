@@ -5415,7 +5415,16 @@ describe("collapsing non-human activity", () => {
   });
 
   it("counts unique PR identities and completed children from receipts", () => {
-    const pr = { host: "github.com", repository: "org/repo", number: 4 };
+    const pr = {
+      host: "github.com",
+      repository: "org/repo",
+      number: 4,
+      watchStartedAt: time(3),
+      headSha: null,
+    };
+    const itemId = TurnItemId.make("wake");
+    const threadId = ThreadId.make("thread");
+    const timestamp = DateTime.makeUnsafe(time(4));
     const notification = {
       ...workRow("wake", 4),
       groupedEntries: [
@@ -5425,15 +5434,35 @@ describe("collapsing non-human activity", () => {
           label: "PR update",
           tone: "info",
           projectedItem: {
+            position: 4,
+            visibility: "local",
+            sourceThreadId: threadId,
+            sourceItemId: itemId,
             item: {
+              id: itemId,
+              threadId,
+              runId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 4,
+              title: null,
+              status: "completed",
+              startedAt: timestamp,
+              completedAt: timestamp,
+              updatedAt: timestamp,
               type: "notification",
+              outcome: "updated",
+              summary: "PR update",
               source: {
                 kind: "monitor",
                 pullRequest: pr,
                 otherPullRequests: [pr, { ...pr, number: 5 }],
               },
             },
-          } as OrchestrationV2ProjectedTurnItem,
+          },
         },
       ],
     } satisfies Extract<MessagesTimelineRow, { kind: "work" }>;
