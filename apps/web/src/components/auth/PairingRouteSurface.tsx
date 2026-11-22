@@ -11,6 +11,7 @@ import {
 } from "../../environments/primary";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import { Button } from "../ui/button";
+import { WorkOsSignIn } from "./WorkOsSignIn";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -88,6 +89,12 @@ export function PairingRouteSurface({
         title="Pair with this environment"
         description={describeAuthGate(auth.bootstrapMethods)}
       />
+
+      {auth.workOsGoogleSignIn && (
+        <div className="mt-6">
+          <WorkOsSignIn />
+        </div>
+      )}
 
       <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
         <div className="space-y-2">

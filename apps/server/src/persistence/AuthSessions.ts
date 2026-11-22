@@ -15,6 +15,7 @@ import {
   ServerAuthSessionMethod,
 } from "@t3tools/contracts";
 
+import { WORKOS_SUBJECT_PREFIX } from "../auth/WorkOsConfig.ts";
 import {
   type AuthSessionRepositoryError,
   PersistenceDecodeError,
@@ -56,7 +57,7 @@ export const CreateAuthSessionInput = Schema.Struct({
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
   proofKeyThumbprint: Schema.optionalKey(Schema.String),
-  /** The founder the session's pairing code enrolled. */
+  /** The founder the session's pairing code or verified sign-in enrolled. */
   founder: Schema.optionalKey(Founder),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
@@ -384,6 +385,7 @@ export const make = Effect.gen(function* () {
           AND revoked_at IS NULL
           AND expires_at > ${now}
           AND client_device_type IS NOT 'bot'
+          AND subject NOT GLOB ${WORKOS_SUBJECT_PREFIX + "*"}
         RETURNING session_id AS "sessionId"
       `,
   });

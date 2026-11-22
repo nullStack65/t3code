@@ -193,6 +193,42 @@ describe("DesktopLocalEnvironmentAuth", () => {
       },
     ]),
   } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
+
+  it.effect("uses the WorkOS session only after the browser handoff completes", () =>
+    Effect.gen(function* () {
+      const authorizationUrl = "https://t3.example.test/api/auth/workos/start?desktop=handoff";
+      const opened = yield* Ref.make<unknown>(null);
+      const layerHttpClient = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          const path = new URL(request.url).pathname;
+          if (path === "/oauth/token") return Effect.succeed(tokenResponse(request));
+          const response = path.endsWith("/start")
+            ? Response.json({ id: "handoff", authorizationUrl })
+            : path.endsWith("/finish")
+              ? Response.json({ token: "verified-session", expiresAt: 120_000 })
+              : new Response(null, { status: 204 });
+          return Effect.succeed(HttpClientResponse.fromWeb(request, response));
+        }),
+      );
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth.pipe(
+        Effect.provide(
+          DesktopLocalEnvironmentAuth.layer.pipe(
+            Layer.provide(Layer.mergeAll(layerPool, layerHttpClient, NodeCrypto.layerMac)),
+          ),
+        ),
+      );
+      const open = (url: unknown) => Ref.set(opened, url).pipe(Effect.as(true));
+      yield* auth.workOsAction("start", open);
+      assert.strictEqual(yield* Ref.get(opened), authorizationUrl);
+      assert.strictEqual(yield* auth.getRendererBearerToken, "desktop-bearer-token");
+      yield* auth.workOsAction("finish", open);
+      assert.strictEqual(yield* auth.getRendererBearerToken, "verified-session");
+      yield* auth.workOsAction("logout", open);
+      assert.strictEqual(yield* auth.getRendererBearerToken, "desktop-bearer-token");
+    }),
+  );
+
   const makeExchange = (failures: number, failure: () => Response) =>
     Effect.gen(function* () {
       const requestCount = yield* Ref.make(0);

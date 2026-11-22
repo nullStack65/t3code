@@ -205,7 +205,18 @@ export const getLocalEnvironmentBearerToken = DesktopIpc.makeIpcMethod({
   result: Schema.String,
   handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBearerToken")(function* () {
     const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
-    return yield* localAuth.getBearerToken;
+    return yield* localAuth.getRendererBearerToken;
+  }),
+});
+
+export const workOsSignIn = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.WORKOS_SIGN_IN_CHANNEL,
+  payload: Schema.Literals(["start", "finish", "logout"]),
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.workOsSignIn")(function* (action) {
+    const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+    const shell = yield* ElectronShell.ElectronShell;
+    yield* localAuth.workOsAction(action, shell.openExternal);
   }),
 });
 
