@@ -3,6 +3,7 @@ import {
   isHiddenFromFounder,
   type OrchestrationV2ProviderFailureClass,
 } from "@t3tools/contracts";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { BotAvatarState } from "./BotAvatar";
@@ -64,14 +65,16 @@ export function sortBotThreads<
  * Splits standing bots out of the sidebar's thread list. Bots go to their own group whatever
  * their pin, settle or snooze state; everything else continues to the ordinary sections.
  */
-export function splitStandingThreads<T extends { readonly standing: unknown }>(
-  threads: readonly T[],
-): { readonly bots: T[]; readonly rest: T[] } {
+export function splitStandingThreads<
+  T extends Pick<EnvironmentThreadShell, "standing" | "lineage">,
+>(threads: readonly T[]): { readonly bots: T[]; readonly rest: T[] } {
   const bots: T[] = [];
   const rest: T[] = [];
   for (const thread of threads) {
+    const isChild =
+      thread.lineage.parentThreadId !== null || thread.lineage.relationshipToParent === "subagent";
     // A founder is a human, not a bot: founder-to-founder threads stay out of the Bots shelf.
-    const isBot = thread.standing != null && !isFounderStanding(thread.standing);
+    const isBot = thread.standing != null && !isFounderStanding(thread.standing) && !isChild;
     (isBot ? bots : rest).push(thread);
   }
   return { bots, rest };

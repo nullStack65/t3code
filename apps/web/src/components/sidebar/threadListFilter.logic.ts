@@ -1,6 +1,7 @@
 import {
   matchesListedInboxes,
   standingBotBypassesListFilters,
+  matchesThreadListFilter as matchesWorkThreadListFilter,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
 import {
@@ -23,7 +24,6 @@ import {
 import type { ThreadAttribution } from "@t3tools/contracts/settings";
 
 export {
-  matchesThreadListFilter,
   threadListFilterOf,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
@@ -42,6 +42,27 @@ interface FilterableThread {
     readonly inbox?: ThreadInbox | null | undefined;
     readonly createdBy?: string | undefined;
   };
+}
+
+function standingInbox(thread: FilterableThread): Founder | "shared" | null {
+  const audience = thread.standing == null ? undefined : thread.source.inbox?.audience;
+  return audience === "jeff" || audience === "kameron" || audience === "shared" ? audience : null;
+}
+
+export function matchesThreadListFilter(
+  thread: FilterableThread,
+  filter: ThreadListFilter,
+  attribution?: ThreadAttribution,
+  viewingFounder?: Founder,
+) {
+  const inbox = standingInbox(thread);
+  if (inbox === null) return matchesWorkThreadListFilter(thread, filter, attribution);
+  return (
+    (inbox === "shared" || viewingFounder === undefined || inbox === viewingFounder) &&
+    filter.inboxes.includes(inbox) &&
+    !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&
+    (attribution === undefined || !filter.hiddenAttributions.includes(attribution))
+  );
 }
 
 const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -184,10 +205,10 @@ export const SIDEBAR_FILTER_POPUP_CLASS = "w-[40rem] max-w-[calc(100vw-1rem)]";
 /** Labels stay one full line beside the four count columns. */
 export const SIDEBAR_FILTER_OPTION_LABEL_CLASS = "min-w-[16rem] shrink-0 whitespace-nowrap";
 
-/** The chosen founder's inbox first, then Agents, so the common pair sits together. */
+/** The default pair comes first for a founder. */
 export const inboxMenuOrder = (owner: Founder | undefined): ReadonlyArray<InboxChoice> => {
   const first = owner ?? Founder.literals[0];
-  return [first, "agents", ...Founder.literals.filter((founder) => founder !== first), "shared"];
+  return [first, "shared", "agents", ...Founder.literals.filter((founder) => founder !== first)];
 };
 
 /**
@@ -299,7 +320,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
     if (isHiddenFromFounder(thread.source.inbox, filter.viewingFounder)) continue;
     tally({
       environmentId: thread.environmentId,
-      inbox: primaryInbox(thread.source.inbox),
+      inbox: standingInbox(thread) ?? primaryInbox(thread.source.inbox),
       agentCreated: thread.source.createdBy === "agent",
       attribution: attributionOf(thread),
       bucket: threadListFilterBucket(thread, viewingFounder),

@@ -1215,6 +1215,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const threads = useSidebarThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const threadListFilter = useClientSettings(threadListFilterOf);
+  const viewingFounder = useClientSettings((settings) => settings.founderInboxOwner);
   const founderByEnvironmentId = useClientSettings((settings) => settings.founderByEnvironmentId);
   const machineOwners = resolveMachineOwners(serverConfigs, founderByEnvironmentId);
   const threadAttributions = resolveThreadAttributions(threads, machineOwners);
@@ -1238,7 +1239,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // Another founder's private threads stay out of search too (see `isHiddenFromFounder`).
   const inboxThreads = listFilterApplies
     ? threads.filter((thread) =>
-        matchesThreadListFilter(thread, threadListFilter, attributionOf(thread)),
+        matchesThreadListFilter(thread, threadListFilter, attributionOf(thread), viewingFounder),
       )
     : threads.filter(
         (thread) => !isHiddenFromFounder(thread.source.inbox, threadListFilter.viewingFounder),

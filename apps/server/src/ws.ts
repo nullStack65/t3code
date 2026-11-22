@@ -35,6 +35,7 @@ import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import {
   AcpRegistryOperationError,
   CommandId,
+  type InboxActor,
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
@@ -2148,8 +2149,27 @@ export const layerWsRpc = (
                               }),
                             }),
                           ),
-                        ),
-                      )
+                        )
+                      : (command.type === "message.dispatch" ||
+                        command.type === "queued-run.edit" ||
+                        command.type === "runtime-request.respond"
+                          ? messageSender.pipe(Effect.asSome)
+                          : Effect.succeed(Option.none<OrchestrationV2MessageSentBy>())
+                        ).pipe(
+                          Effect.flatMap((sentBy) =>
+                            ThreadMessageIntake.dispatchCommand(
+                              ThreadManagementService.withCreationProvenance(command, {
+                                createdBy: "user",
+                                creationSource:
+                                  "creationSource" in command ? command.creationSource : "web",
+                                ...Option.match(sentBy, {
+                                  onNone: () => ({}),
+                                  onSome: (value) => ({ sentBy: value }),
+                                }),
+                              }),
+                            ),
+                          ),
+                        )
                   ).pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
