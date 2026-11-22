@@ -35,6 +35,7 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  BACKGROUND_WAIT_STALE_MINUTES,
   PR_WATCH_STALE_MINUTES,
   type GuestMessageId,
   isCompactionCommandMessage,
@@ -4265,17 +4266,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const added = [...new Set(operation.taskIds)].filter(
           (taskId) => !waits.some((wait) => wait.kind === operation.kind && wait.taskId === taskId),
         );
-        if (added.length > 0) {
-          next = [
-            ...waits,
-            ...added.map((taskId) => ({
-              kind: operation.kind,
-              taskId,
-              staleTimeoutMs: operation.staleTimeoutMs,
-              lastProgressAtMs: nowMs,
-            })),
-          ];
-        }
+        next = [
+          ...waits.map((wait) =>
+            wait.kind === operation.kind &&
+            operation.taskIds.includes(wait.taskId) &&
+            wait.staleTimeoutMs !== operation.staleTimeoutMs
+              ? { ...wait, staleTimeoutMs: operation.staleTimeoutMs }
+              : wait,
+          ),
+          ...added.map((taskId) => ({
+            kind: operation.kind,
+            taskId,
+            staleTimeoutMs: operation.staleTimeoutMs,
+            lastProgressAtMs: nowMs,
+          })),
+        ];
         break;
       }
       case "clear":
@@ -4301,7 +4306,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         break;
       case "sweep": {
-        if (waits.length === 0) return;
         const shell = yield* projectionStore
           .getThreadShell(threadId)
           .pipe(mapDispatchError(command));
@@ -4322,18 +4326,36 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           })
           .pipe(mapDispatchError(command));
         const parentHeld = waitIntentionallyHeld(shell, nowMs);
+        const provider = tasks.providerThreads.find(
+          (provider) => provider.id === thread.activeProviderThreadId,
+        );
+        const roster = provider?.pendingBackgroundTasks ?? [];
+        const registrations = [...waits];
+        for (const task of roster) {
+          if (
+            task.kind !== "monitor" ||
+            task.awaited !== true ||
+            waits.some((wait) => wait.kind === "background" && wait.taskId === task.taskId)
+          )
+            continue;
+          registrations.push({
+            kind: "background",
+            taskId: task.taskId,
+            staleTimeoutMs: BACKGROUND_WAIT_STALE_MINUTES * 60_000,
+            lastProgressAtMs:
+              task.progressAtMs ?? DateTime.toEpochMillis(provider?.updatedAt ?? now),
+          });
+        }
         const retained: ThreadStalenessWait[] = [];
-        for (const wait of waits) {
+        for (const wait of registrations) {
           let progressAtMs = wait.lastProgressAtMs;
           let state = "pending";
           let childLink: string | undefined;
           let held = parentHeld;
           if (wait.kind === "background") {
-            const task = tasks.providerThreads
-              .find((provider) => provider.id === thread.activeProviderThreadId)
-              ?.pendingBackgroundTasks?.find(
-                (task) => task.taskId === wait.taskId && task.awaited === true,
-              );
+            const task = roster.find(
+              (task) => task.taskId === wait.taskId && task.awaited === true,
+            );
             if (task === undefined) {
               // The provider's roster event and the MCP registration can commit in either order.
               if (nowMs < wait.lastProgressAtMs + 60_000) retained.push(wait);

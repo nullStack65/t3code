@@ -6936,13 +6936,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId: string,
             task: OrchestrationV2PendingBackgroundTask,
           ) {
+            const now = yield* Clock.currentTimeMillis;
             const startedMonitor = yield* Ref.modify(
               pendingBackgroundTasksByNativeThread,
               (current) => {
                 const roster = new Map(rosterForNativeThread(current, nativeThreadId));
                 const startedMonitor =
                   task.kind === "monitor" && roster.get(task.taskId)?.kind !== "monitor";
-                roster.set(task.taskId, task);
+                roster.set(task.taskId, startedMonitor ? { ...task, progressAtMs: now } : task);
                 return [startedMonitor, new Map(current).set(nativeThreadId, roster)] as const;
               },
             );

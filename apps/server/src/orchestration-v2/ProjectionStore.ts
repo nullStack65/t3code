@@ -9240,9 +9240,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     }, Effect.mapError(shellSnapshotReadError));
 
     const listStalenessWaitThreads = sql<{ readonly thread_id: string }>`
-      SELECT thread_id FROM orchestration_v2_projection_threads
-      WHERE deleted_at IS NULL AND json_extract(payload_json, '$.archivedAt') IS NULL
-        AND json_array_length(payload_json, '$.stalenessWaits') > 0
+      SELECT t.thread_id FROM orchestration_v2_projection_threads t
+      WHERE t.deleted_at IS NULL AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+        AND (
+          json_array_length(t.payload_json, '$.stalenessWaits') > 0
+          OR (
+            json_extract(t.payload_json, '$.settledAt') IS NULL
+            AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
+            AND EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_provider_threads p,
+                json_each(p.payload_json, '$.pendingBackgroundTasks') task
+              WHERE p.provider_thread_id = t.active_provider_thread_id
+                AND json_extract(task.value, '$.kind') = 'monitor'
+                AND json_extract(task.value, '$.awaited') = 1
+            )
+          )
+        )
     `.pipe(
       Effect.map((rows) => rows.map(({ thread_id }) => ThreadId.make(thread_id))),
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),

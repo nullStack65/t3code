@@ -414,12 +414,12 @@ export function threadEventStillHolds(input: {
   const firedMs = Date.parse(alert.occurredAt);
   if (!Number.isFinite(firedMs)) return true;
   const { findings } = judgeThread({
+    ...(input.hasStalenessWait === undefined ? {} : { hasStalenessWait: input.hasStalenessWait }),
     shell: input.shell,
     trigger: REJUDGE_TRIGGER[alert.kind],
     nowMs: firedMs,
     stuckMinutes: input.stuckMinutes,
     ...(input.strandedQueue === undefined ? {} : { strandedQueue: input.strandedQueue }),
-    ...(input.hasStalenessWait === undefined ? {} : { hasStalenessWait: input.hasStalenessWait }),
     ...(input.remoteTaskCount === undefined ? {} : { remoteTaskCount: input.remoteTaskCount }),
     ...(input.childActivityMs === undefined ? {} : { childActivityMs: input.childActivityMs }),
   });

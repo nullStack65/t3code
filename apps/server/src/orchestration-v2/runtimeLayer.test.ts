@@ -4739,95 +4739,102 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("uses native task progress and clears the deadline when background work ends", () =>
-    Effect.gen(function* () {
-      const engine = yield* Orchestrator.OrchestratorV2;
-      const sink = yield* EventSink.EventSinkV2;
-      const { threadId } = yield* createWatchedThread("background-stale");
-      yield* engine.dispatch({
-        type: "message.dispatch",
-        createdBy: "agent",
-        creationSource: "mcp",
-        commandId: CommandId.make(`${threadId}:start`),
-        threadId,
-        messageId: MessageId.make(`${threadId}:start`),
-        text: "Run background checks.",
-        attachments: [],
-        dispatchMode: { type: "start_immediately" },
-      });
-      const provider = (yield* engine.getThreadRecords(threadId, ["providerThreads"]))
-        .providerThreads[0]!;
-      const roster = Effect.fnUntraced(function* (suffix: string, active: boolean) {
-        const now = yield* DateTime.now;
-        yield* sink.write({
-          events: [
-            {
-              id: EventId.make(`${threadId}:${suffix}`),
-              type: "provider-thread.updated",
-              threadId,
-              driver: provider.driver,
-              providerInstanceId: provider.providerInstanceId,
-              occurredAt: now,
-              payload: {
-                ...provider,
-                updatedAt: now,
-                pendingBackgroundTasks: active
-                  ? [
-                      {
-                        taskId: "tests",
-                        kind: "monitor",
-                        awaited: true,
-                        progressAtMs: DateTime.toEpochMillis(now),
-                      },
-                    ]
-                  : [],
-              },
-            },
-          ],
-          effects: [],
-        });
-      });
-      yield* roster("pending", true);
-      yield* engine.dispatch({
-        type: "thread.wait-staleness.update",
-        threadId,
-        commandId: CommandId.make(`${threadId}:register`),
-        operation: {
-          type: "register",
-          kind: "background",
-          taskIds: ["tests"],
-          staleTimeoutMs: 5 * 60_000,
-        },
-      });
-      const sweep = (suffix: string) =>
-        engine.dispatch({
-          type: "thread.wait-staleness.update",
+  it.effect.each([5, undefined])(
+    "uses native task progress and clears the deadline when background work ends (%s minutes)",
+    (customMinutes) =>
+      Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const { threadId } = yield* createWatchedThread(`background-stale-${customMinutes}`);
+        yield* engine.dispatch({
+          type: "message.dispatch",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make(`${threadId}:start`),
           threadId,
-          commandId: CommandId.make(`${threadId}:${suffix}`),
-          operation: { type: "sweep" },
+          messageId: MessageId.make(`${threadId}:start`),
+          text: "Run background checks.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
         });
-      const notices = engine
-        .getThreadRecords(threadId, ["messages"])
-        .pipe(
-          Effect.map(({ messages }) =>
-            messages.filter((message) => message.text.includes('"type":"wait_stale_timeout"')),
-          ),
-        );
-      yield* TestClock.adjust("4 minutes");
-      yield* roster("progress", true);
-      yield* TestClock.adjust("1 minute");
-      yield* sweep("early");
-      assert.lengthOf(yield* notices, 0);
-      yield* TestClock.adjust("4 minutes");
-      yield* sweep("due");
-      assert.include((yield* notices)[0]?.text, '"taskId":"tests","kind":"background"');
-      assert.include((yield* notices)[0]?.text, '"idleMinutes":5');
-      yield* roster("completed", false);
-      yield* TestClock.adjust("1 hour");
-      yield* sweep("ended");
-      assert.lengthOf(yield* notices, 1);
-      assert.deepEqual((yield* engine.getThreadRecords(threadId, [])).thread.stalenessWaits, []);
-    }),
+        const provider = (yield* engine.getThreadRecords(threadId, ["providerThreads"]))
+          .providerThreads[0]!;
+        const roster = Effect.fnUntraced(function* (suffix: string, active: boolean) {
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}:${suffix}`),
+                type: "provider-thread.updated",
+                threadId,
+                driver: provider.driver,
+                providerInstanceId: provider.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...provider,
+                  updatedAt: now,
+                  pendingBackgroundTasks: active
+                    ? [
+                        {
+                          taskId: "tests",
+                          kind: "monitor",
+                          awaited: true,
+                          progressAtMs: DateTime.toEpochMillis(now),
+                        },
+                      ]
+                    : [],
+                },
+              },
+            ],
+            effects: [],
+          });
+        });
+        yield* roster("pending", true);
+        if (customMinutes !== undefined) {
+          yield* engine.dispatch({
+            type: "thread.wait-staleness.update",
+            threadId,
+            commandId: CommandId.make(`${threadId}:register`),
+            operation: {
+              type: "register",
+              kind: "background",
+              taskIds: ["tests"],
+              staleTimeoutMs: customMinutes * 60_000,
+            },
+          });
+        }
+        const minutes = customMinutes ?? 45;
+        assert.include(yield* projection.listStalenessWaitThreads, threadId);
+        const sweep = (suffix: string) =>
+          engine.dispatch({
+            type: "thread.wait-staleness.update",
+            threadId,
+            commandId: CommandId.make(`${threadId}:${suffix}`),
+            operation: { type: "sweep" },
+          });
+        const notices = engine
+          .getThreadRecords(threadId, ["messages"])
+          .pipe(
+            Effect.map(({ messages }) =>
+              messages.filter((message) => message.text.includes('"type":"wait_stale_timeout"')),
+            ),
+          );
+        yield* TestClock.adjust(`${minutes - 1} minutes`);
+        yield* roster("progress", true);
+        yield* TestClock.adjust("1 minute");
+        yield* sweep("early");
+        assert.lengthOf(yield* notices, 0);
+        yield* TestClock.adjust(`${minutes - 1} minutes`);
+        yield* sweep("due");
+        assert.include((yield* notices)[0]?.text, '"taskId":"tests","kind":"background"');
+        assert.include((yield* notices)[0]?.text, `"idleMinutes":${minutes}`);
+        yield* roster("completed", false);
+        yield* TestClock.adjust("1 hour");
+        yield* sweep("ended");
+        assert.lengthOf(yield* notices, 1);
+        assert.deepEqual((yield* engine.getThreadRecords(threadId, [])).thread.stalenessWaits, []);
+      }),
   );
 
   it.effect(

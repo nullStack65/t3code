@@ -1,4 +1,3 @@
-import { StaleTimeoutMinutes } from "./waitStaleness.ts";
 import * as Effect from "effect/Effect";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
 import * as Schema from "effect/Schema";
@@ -38,6 +37,7 @@ import {
 import { secretRequestPageUrl } from "./secretRequest.ts";
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { LastThreadTitleRegeneration, ThreadTitleRegeneration } from "./threadTitle.ts";
+import { StaleTimeoutMinutes } from "./waitStaleness.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,

@@ -24,6 +24,7 @@ export function waitIntentionallyHeld(shell: OrchestrationV2ThreadShell, now: nu
     shell.inbox?.decisionRequest !== undefined ||
     shell.latestRunStopRequested === true ||
     (shell.snoozedUntil != null && DateTime.toEpochMillis(shell.snoozedUntil) > now) ||
+    shell.limitRecovery?.autoResume === true ||
     (shell.limitRecovery != null && Date.parse(shell.limitRecovery.resetAt) > now)
   );
 }

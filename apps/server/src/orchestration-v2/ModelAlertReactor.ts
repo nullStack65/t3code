@@ -1057,6 +1057,7 @@ export const make = Effect.gen(function* () {
       const shell = yield* projections.getThreadShell(ThreadId.make(alert.threadId));
       if (shell === null) return null;
       const holds = threadEventStillHolds({
+        hasStalenessWait: yield* hasActiveStalenessWait(shell, REJUDGE_TRIGGER[alert.kind]),
         alert,
         shell,
         stuckMinutes: (yield* settings.getSettings).watcherStuckMinutes,
@@ -1068,6 +1069,17 @@ export const make = Effect.gen(function* () {
   });
 
   /** What the shell does not carry: open delegated tasks elsewhere, and children's last activity. */
+  const hasActiveStalenessWait = Effect.fnUntraced(function* (
+    shell: OrchestrationV2ThreadShell,
+    trigger: ThreadEventTrigger,
+  ) {
+    return (
+      trigger === "sweep" &&
+      shell.activeRunId !== null &&
+      ((yield* projections.getThread(shell.id)).stalenessWaits?.length ?? 0) > 0
+    );
+  });
+
   const judgeContext = Effect.fnUntraced(function* (
     shell: OrchestrationV2ThreadShell,
     trigger: ThreadEventTrigger,
@@ -1104,15 +1116,11 @@ export const make = Effect.gen(function* () {
             )),
           )
         : null;
-    const hasStalenessWait =
-      trigger === "sweep" &&
-      shell.activeRunId !== null &&
-      ((yield* projections.getThread(shell.id)).stalenessWaits?.length ?? 0) > 0;
     if (trigger !== "sweep" || shell.activeRunId !== null || shell.activityRunStatus != null) {
-      return { remoteTaskCount, childActivityMs, hasStalenessWait };
+      return { remoteTaskCount, childActivityMs };
     }
     if (queuedThreads !== undefined && !queuedThreads.has(shell.id)) {
-      return { remoteTaskCount, childActivityMs, hasStalenessWait, strandedQueue: null };
+      return { remoteTaskCount, childActivityMs, strandedQueue: null };
     }
     const now = yield* DateTime.now;
     const { runs } = yield* projections.getThreadRecords(shell.id, ["runs"]);
@@ -1142,7 +1150,7 @@ export const make = Effect.gen(function* () {
               (shell.lastErrorClass === "usage_limit" &&
                 latestRun?.providerInstanceId === oldest.providerInstanceId),
           };
-    return { remoteTaskCount, childActivityMs, hasStalenessWait, strandedQueue };
+    return { remoteTaskCount, childActivityMs, strandedQueue };
   });
 
   /** The watcher thread as one delivery needs it, or null when it cannot be read. */
@@ -1478,6 +1486,7 @@ export const make = Effect.gen(function* () {
     const nowMs = yield* Clock.currentTimeMillis;
     const context = yield* judgeContext(shell, trigger, remoteTasks, queuedThreads);
     const judged = judgeThread({
+      hasStalenessWait: yield* hasActiveStalenessWait(shell, trigger),
       shell,
       trigger,
       nowMs,
