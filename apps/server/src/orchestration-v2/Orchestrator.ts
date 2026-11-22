@@ -2727,7 +2727,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           failure !== null &&
           failure.class !== "validation_error" &&
           (failure.class === "permission_error" ||
-            failure.retryable === false ||
+            failure.retryable !== true ||
             failedRun?.restartContinuationOfRunId !== undefined) &&
           failedRun?.providerInstanceId === queuedRun.providerInstanceId)
       ) {

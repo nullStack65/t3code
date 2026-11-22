@@ -8256,7 +8256,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                   class: failureClass,
                   message: "Provider failed.",
                   code: "provider_failed",
-                  retryable: null,
+                  retryable: failureClass === "provider_error" ? true : null,
                   ...(failureClass === "usage_limit"
                     ? { resetAt: DateTime.formatIso(DateTime.add(now, { hours: 1 })) }
                     : {}),

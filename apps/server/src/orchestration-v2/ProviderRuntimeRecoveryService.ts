@@ -590,7 +590,7 @@ export const make = Effect.gen(function* () {
           runs.push(run);
           continue;
         }
-        if (!hadActiveRun) continue;
+        if (!hadActiveRun && run.delegatedTaskId === undefined) continue;
         if (run.queueHeld === true && retryableRuns.length === 0) continue;
         events.push({
           id: yield* allocateEventId(),
