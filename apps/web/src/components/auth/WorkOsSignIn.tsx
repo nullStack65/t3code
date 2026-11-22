@@ -34,9 +34,8 @@ export function WorkOsSignIn({ signedIn = false }: { signedIn?: boolean }) {
       else window.location.assign(signedIn ? "/pair" : "/");
     } catch (error) {
       setError(error instanceof Error ? error.message : "Google sign-in could not be completed.");
-    } finally {
-      setBusy(false);
     }
+    setBusy(false);
   };
 
   return (
