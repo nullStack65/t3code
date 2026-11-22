@@ -37,15 +37,18 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import {
+  currentSession,
   EnvironmentRpcUnavailableError,
   getInitialServerConfig,
   isRpcClientError,
   request,
+  requestInSession,
 } from "../rpc/client.ts";
 
 interface CommandMetadata {
@@ -317,12 +320,28 @@ const MAX_LOST_TRANSPORT_RESENDS = 2;
 // alone would leave the send pending forever.
 const MESSAGE_DISPATCH_TIMEOUT = "60 seconds";
 
+export class HumanNoteUnavailableError extends Schema.TaggedError<HumanNoteUnavailableError>()(
+  "HumanNoteUnavailableError",
+  { message: Schema.String },
+) {}
+
 const dispatchMessage = Effect.fn("EnvironmentCommands.dispatchMessage")(function* (
   command: Extract<OrchestrationV2Command, { type: "message.dispatch" }>,
   resendAfterSocketLoss: boolean,
 ) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-  const attempt = dispatch(command).pipe(
+  const attempt = Effect.gen(function* () {
+    if (command.humanNote !== true) return yield* dispatch(command);
+    const session = yield* currentSession();
+    const config = yield* session.initialConfig;
+    if (config.environment.capabilities.humanNote !== true) {
+      return yield* new HumanNoteUnavailableError({
+        message: "This server does not support private notes. Update the server to use /note.",
+      });
+    }
+    // Check each attempt against the same session that will receive the note.
+    return yield* requestInSession(session, ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
+  }).pipe(
     Effect.timeoutOrElse({
       duration: MESSAGE_DISPATCH_TIMEOUT,
       orElse: () =>
@@ -783,6 +802,16 @@ export const setThreadInteractionMode = Effect.fn("EnvironmentCommands.setThread
 export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(function* (
   input: StartThreadTurnInput,
 ) {
+  const bootstrap = input.bootstrap?.createThread;
+  const prepareWorktree = input.bootstrap?.prepareWorktree;
+  if (
+    input.message.humanNote === true &&
+    (bootstrap !== undefined || prepareWorktree !== undefined)
+  ) {
+    return yield* new HumanNoteUnavailableError({
+      message: "Send a private note from an existing shared thread.",
+    });
+  }
   const commandId = yield* allocateCommandId(input);
   const attachments = yield* persistAttachments(
     input.threadId,
@@ -794,8 +823,6 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     input.message.attachments,
     attachments,
   );
-  const bootstrap = input.bootstrap?.createThread;
-  const prepareWorktree = input.bootstrap?.prepareWorktree;
   if (bootstrap !== undefined || prepareWorktree !== undefined) {
     const existingProjection =
       bootstrap === undefined ? yield* getProjection(input.threadId) : null;

@@ -147,6 +147,30 @@ export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>)
     () => Effect.void,
   );
 
+/** Apply the caller check before local execution or forwarding loses the child identity. */
+export const withoutSubagents = <P, A, E, R>(
+  declaration: Declaration<(params: P) => Effect.Effect<A, E, R>>,
+  matches: (params: P) => boolean = () => true,
+) => {
+  const check = Effect.fn("McpToolAccess.withoutSubagents")(function* (params: P) {
+    const scope = yield* McpInvocationContext.McpInvocationContext;
+    if (scope.thread?.subagent === true && matches(params)) {
+      return yield* new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message: "Child threads must bring questions to their parent thread.",
+      });
+    }
+  });
+  const handle = checkedHandler(declaration) as (params: P) => Effect.Effect<A, E, R>;
+  const remote = remoteCheckOf(declaration) as RemoteCheck<P> | undefined;
+  return declare(
+    (params: P) => check(params).pipe(Effect.andThen(handle(params))),
+    remote === undefined
+      ? undefined
+      : (params: P) => check(params).pipe(Effect.andThen(remote(params))),
+  );
+};
+
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))), undefined);
 
@@ -424,10 +448,11 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
     const tool = toolkit.tools[name];
     if (tool === undefined) continue;
     const remote = remoteCheckOf(declaration);
+    const enabledWhen = Context.getOrUndefined(tool.annotations, McpSchema.EnabledWhen);
     if (
       remote === undefined &&
-      Context.getOrUndefined(tool.annotations, McpSchema.EnabledWhen) !==
-        McpInvocationContext.hiddenFromOutsideClients
+      enabledWhen !== McpInvocationContext.hiddenFromOutsideClients &&
+      enabledWhen !== McpInvocationContext.hiddenFromOutsideClientsAndSubagents
     )
       return yield* Effect.die(
         `${name} acts as its calling thread, so outside clients must not be offered it.`,

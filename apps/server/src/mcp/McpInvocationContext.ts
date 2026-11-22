@@ -98,6 +98,9 @@ const runtimeModeRank: Record<RuntimeMode, number> = {
 };
 const interactionModeRank: Record<ProviderInteractionMode, number> = { plan: 0, default: 1 };
 
+export const hiddenFromOutsideClientsAndSubagents = (): boolean =>
+  hiddenFromOutsideClients() && hiddenFromSubagents();
+
 /**
  * The modes a client caller's writes are capped at: what it was approved
  * with, narrowed by what it asked for on this request. A read-only client
