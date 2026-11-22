@@ -33,6 +33,7 @@ import {
   collapseTimelineActivity,
   activityUpdateSummary,
   activityPillIdForEntry,
+  timelineActivityContext,
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   deriveMessagesTimelineRowsWithState,
@@ -5252,7 +5253,7 @@ describe("collapsing non-human activity", () => {
       ...extra,
     },
   });
-  const workRow = (id: string, second: number): MessagesTimelineRow => ({
+  const workRow = (id: string, second: number): Extract<MessagesTimelineRow, { kind: "work" }> => ({
     kind: "work",
     id,
     createdAt: time(second),
@@ -5325,7 +5326,128 @@ describe("collapsing non-human activity", () => {
         messageRow("b", 1, { createdBy: "system" }),
         messageRow("c", 2, { scheduledTaskId: ScheduledTaskId.make("task-1") }),
       ]),
-    ).toBe("1 agent update and 1 system notice and 1 automation");
+    ).toBe("1 agent update · 1 system notice · 1 automation");
+  });
+
+  it("keeps direct replies, notes, sent messages and founder mentions outside bot runs", () => {
+    const botRun = RunId.make("bot-run");
+    const conversation = [
+      messageRow("prompt", 0, { runId }),
+      messageRow("direct-reply", 1, { runId, role: "assistant" }),
+      messageRow("relay", 2, { runId: botRun, createdBy: "agent" }),
+      messageRow("bot-reply", 3, { runId: botRun, role: "assistant" }),
+      messageRow("note", 4, { humanNote: true, createdBy: "agent" }),
+      messageRow("wake", 5, { runId: botRun, createdBy: "agent" }),
+      { kind: "sent-message", id: "sent", createdAt: time(6), text: "For the founder" } as const,
+      messageRow("mention", 7, { runId: botRun, role: "assistant", text: "@Jeff please review" }),
+      messageRow("next-prompt", 8, person("jeff")),
+    ];
+    const entries = conversation.flatMap((row): TimelineEntry[] =>
+      row.kind === "message" ? [{ ...row, kind: "message" }] : [],
+    );
+    const context = timelineActivityContext(entries, [], false);
+    expect(collapseTimelineActivity(conversation, new Set(), context).map(({ id }) => id)).toEqual([
+      "prompt",
+      "direct-reply",
+      "activity:direct-reply",
+      "note",
+      "activity:note",
+      "sent",
+      "mention",
+      "next-prompt",
+    ]);
+    expect(activityPillIdForEntry(conversation, "note", context)).toBeUndefined();
+  });
+
+  it("opens for newly failed child runs and pending approvals, including grouped items", () => {
+    const event = (
+      id: string,
+      item: Partial<OrchestrationV2TurnItem>,
+    ): Extract<MessagesTimelineRow, { kind: "event" }> => ({
+      kind: "event",
+      id,
+      createdAt: time(4),
+      projectedItem: { item } as OrchestrationV2ProjectedTurnItem,
+    });
+    const child = event("child", { type: "subagent", status: "failed" });
+    const approval = event("approval", { type: "approval_request", status: "pending" });
+    const group = {
+      ...child,
+      subagents: [
+        event("sibling", { type: "subagent", status: "completed" }).projectedItem,
+        child.projectedItem,
+      ],
+    };
+    const folded = collapseTimelineActivity([rows[2]!, group], new Set());
+    const pill = folded[0]!;
+    expect(pill).toMatchObject({ id: "activity:agent-1", expanded: true });
+    if (pill.kind !== "activity" || pill.attention === null)
+      throw new Error("Expected attention pill");
+    const dismissed = new Map([[pill.id, pill.attention]]);
+    expect(
+      collapseTimelineActivity([rows[2]!, group], new Set(), undefined, dismissed),
+    ).toHaveLength(1);
+    expect(
+      collapseTimelineActivity([rows[2]!, group, approval], new Set(), undefined, dismissed).map(
+        ({ id }) => id,
+      ),
+    ).toEqual([pill.id, "agent-1", "child", "approval"]);
+  });
+
+  it("reveals a failed bot run and keeps the reply that raises a founder decision visible", () => {
+    const botRun = RunId.make("bot-decision");
+    const relay = messageRow("relay", 0, { createdBy: "agent", runId: botRun });
+    const reply = messageRow("reply", 2, { role: "assistant", runId: botRun });
+    if (relay.kind !== "message" || reply.kind !== "message") throw new Error("Expected messages");
+    const decision = { ...reply, kind: "message" } as const;
+    const entries = [relay, decision];
+    const failed = timelineActivityContext(entries, [{ id: botRun, status: "failed" }], false);
+    expect(collapseTimelineActivity(entries, new Set(), failed)[0]).toMatchObject({
+      expanded: true,
+    });
+
+    const pending = timelineActivityContext(entries, [], false, time(1));
+    expect(collapseTimelineActivity(entries, new Set(), pending).map(({ id }) => id)).toEqual([
+      "activity:relay",
+      "relay",
+      "reply",
+    ]);
+  });
+
+  it("counts unique PR identities and completed children from receipts", () => {
+    const pr = { host: "github.com", repository: "org/repo", number: 4 };
+    const notification = {
+      ...workRow("wake", 4),
+      groupedEntries: [
+        {
+          id: "wake",
+          createdAt: time(4),
+          label: "PR update",
+          tone: "info",
+          projectedItem: {
+            item: {
+              type: "notification",
+              source: {
+                kind: "monitor",
+                pullRequest: pr,
+                otherPullRequests: [pr, { ...pr, number: 5 }],
+              },
+            },
+          } as OrchestrationV2ProjectedTurnItem,
+        },
+      ],
+    } satisfies Extract<MessagesTimelineRow, { kind: "work" }>;
+    const child = {
+      kind: "event",
+      id: "child",
+      createdAt: time(5),
+      projectedItem: {
+        item: { type: "subagent", status: "completed", subagentId: "child" },
+      },
+    } as MessagesTimelineRow;
+    expect(activityUpdateSummary([rows[2]!, notification, child])).toBe(
+      "2 agent updates · 2 PRs · 1 settled",
+    );
   });
 
   it("keeps a plan, a render and viewed images on screen", () => {

@@ -12,6 +12,7 @@ import {
   appendAcceptedThreadMessages,
   appendPendingThreadMessages,
   createThreadFeedGrouping,
+  foldThreadFeedActivity,
   isCompactionCommandFeedEntry,
   selectPendingAcknowledgedMessages,
 } from "./pending-thread-feed";
@@ -27,6 +28,32 @@ const pending = (id: string): QueuedThreadMessage => ({
 });
 
 describe("pending timeline messages", () => {
+  it("reveals a message jump inside chatter and never hides a note", () => {
+    const [first, second, third] = appendPendingThreadMessages(
+      [],
+      [],
+      [pending("before"), pending("note"), pending("after")],
+    );
+    if (first?.type !== "message" || second?.type !== "message" || third?.type !== "message") {
+      throw new Error("Expected message rows");
+    }
+    const rows = [
+      { ...first, message: { ...first.message, createdBy: "agent" as const } },
+      { ...second, message: { ...second.message, humanNote: true as const } },
+      { ...third, message: { ...third.message, createdBy: "agent" as const } },
+    ];
+    const options = { open: {}, dismissed: new Map(), latestRun: null };
+    const folded = foldThreadFeedActivity(rows, rows, { ...options, revealedMessageId: null });
+    expect(folded.map((row) => row.type)).toEqual(["activity-fold", "message", "activity-fold"]);
+    expect(folded[1]).toBe(rows[1]);
+    expect(
+      foldThreadFeedActivity(rows, rows, {
+        ...options,
+        revealedMessageId: first.id,
+      }).map((row) => row.type),
+    ).toEqual(["activity-fold", "message", "message", "activity-fold"]);
+  });
+
   it("keeps unchanged row identities while text streams and updates adjacent grouping", () => {
     const group = createThreadFeedGrouping();
     const [first, second, third] = appendPendingThreadMessages(

@@ -225,6 +225,41 @@ function setup({ scheduledTasks = [] as ReadonlyArray<{ id: string; title: strin
   environmentQuery.data = { tasks: scheduledTasks };
 }
 
+it("keeps a model-hidden note visible and only promotes it after an explicit click", async () => {
+  setup();
+  const promote = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce(undefined);
+  const note = "Keep this between founders for now.";
+  await using screen = await renderTimeline(
+    [
+      message("relay before", { createdBy: "agent" }, "relay-before"),
+      message(note, { humanNote: true }, "note"),
+      message("relay after", { createdBy: "agent" }, "relay-after"),
+    ],
+    { onPromoteNote: promote },
+  );
+
+  expect(screen.text()).toContain("Model-hidden note");
+  expect(screen.text()).toContain(note);
+  const folds = screen.buttons("1 agent update");
+  expect(folds).toHaveLength(2);
+  expect(folds[0]?.getAttribute("aria-expanded")).toBe("false");
+  await click(folds[0]!);
+  expect(folds[0]?.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.text()).toContain("relay before");
+  expect(screen.text()).toContain(note);
+  expect(promote).not.toHaveBeenCalled();
+
+  await click(screen.button("Promote to agent"));
+  await vi.waitFor(() => expect(screen.button("Promote to agent")).toBeEnabled());
+  await click(screen.button("Promote to agent"));
+  await vi.waitFor(() => expect(screen.text()).toContain("Queued for agent"));
+  expect(promote.mock.calls).toEqual([[note], [note]]);
+  expect(screen.text()).toContain("Model-hidden note");
+});
+
 const TASK_ID = ScheduledTaskId.make("task-1");
 const AUTOMATION_PROMPT = "Triage the inbox\n\nLabel every new issue and close duplicates.";
 
@@ -1430,7 +1465,7 @@ describe("MessagesTimeline agent messages", () => {
           "message-linked",
         ),
       ],
-      { onOpenThread },
+      { onOpenThread, collapseActivity: false },
     );
     const row = screen.button(/^Agent/);
     expect(row.textContent).toContain("Review finished");

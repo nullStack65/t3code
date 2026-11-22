@@ -148,6 +148,7 @@ export interface ThreadFeedMessage {
   /** The signed-in client a person sent it from, stamped by the server. */
   readonly sentBy?: import("@t3tools/contracts").OrchestrationV2MessageSentBy;
   readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
+  readonly humanNote?: true;
   readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
   readonly sourceThreadId: ThreadId;
   readonly createdAt: string;
@@ -2503,6 +2504,7 @@ export function buildThreadFeed(
                 ...(item.linkedSender ? { linkedSender: item.linkedSender } : {}),
                 ...(item.sentBy ? { sentBy: item.sentBy } : {}),
                 ...(item.idleCompaction ? { idleCompaction: item.idleCompaction } : {}),
+                ...(item.humanNote ? { humanNote: true as const } : {}),
               }
             : {}),
           visibility: row.visibility,
