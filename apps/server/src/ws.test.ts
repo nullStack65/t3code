@@ -9,6 +9,7 @@ import { assert, it } from "@effect/vitest";
 import {
   AuthAccessReadScope,
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
   CommandId,
@@ -3020,4 +3021,100 @@ it.live(
       assert.equal(admitted.environmentId, EnvironmentId.make("environment-box"));
       assert.equal(admitted.resumed, false);
     }).pipe(Effect.scoped),
+);
+
+it.live("every WebSocket connection updates providers through the server's one runner", () =>
+  Effect.gen(function* () {
+    const updates: Array<string> = [];
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ProviderMaintenanceRunner.ProviderMaintenanceRunner)({
+        updateProvider: (target) =>
+          Effect.sync(() => {
+            updates.push(typeof target === "string" ? target : target.provider);
+            return { providers: [] };
+          }),
+      }),
+      Layer.mock(ServerBrowser.ServerBrowser)({
+        profileReporter: Effect.succeed(() => Effect.void),
+      }),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+        authenticateWebSocketUpgrade: () =>
+          Effect.succeed({
+            sessionId: AuthSessionId.make("shared-runner"),
+            subject: "browser",
+            method: "browser-session-cookie",
+            scopes: [AuthProvidersManageScope],
+          }),
+      }),
+      Layer.mock(SessionStore.SessionStore)({
+        cookieName: "shared-runner",
+        legacyCookieName: undefined,
+        markConnected: () => Effect.void,
+        markDisconnected: () => Effect.void,
+        awaitInvalidation: () => Effect.never,
+      }),
+      Layer.mock(AnalyticsService.AnalyticsService)({
+        recordOwners: () => Effect.void,
+        record: () => Effect.void,
+      }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: process.cwd(),
+      }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(VcsProcess.VcsProcess)({
+        run: (input) =>
+          Effect.fail(
+            new VcsProcessSpawnError({
+              operation: input.operation,
+              command: input.command,
+              cwd: input.cwd,
+              cause: "No VCS commands in the shared-runner fixture",
+            }),
+          ),
+      }),
+      ProviderInstallationGate.layer,
+      FetchHttpClient.layer,
+    );
+    const context = yield* Layer.build(
+      HttpRouter.serve(Ws.layer, { disableListenLog: true }).pipe(
+        Layer.provideMerge(
+          NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),
+        ),
+        Layer.provide(services),
+        Layer.provide(layerConfigSources),
+      ),
+    );
+    const server = Context.get(context, HttpServer.HttpServer);
+    const url = `${HttpServer.formatAddress(server.address).replace(/^http/, "ws")}/ws?${ORCHESTRATION_PROTOCOL_QUERY_PARAM}=${ORCHESTRATION_PROTOCOL_VERSION}`;
+    const updateFromNewConnection = (provider: string) =>
+      Effect.gen(function* () {
+        const client = yield* RpcClient.make(WsRpcGroup);
+        return yield* client[WS_METHODS.serverUpdateProvider]({
+          provider: ProviderDriverKind.make(provider),
+        });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          RpcClient.layerProtocolSocket().pipe(
+            Layer.provide(
+              Socket.layerWebSocket(url, { openTimeout: "10 seconds" }).pipe(
+                Layer.provide(NodeSocket.layerWebSocketConstructor),
+              ),
+            ),
+            Layer.provide(RpcSerialization.layerJson),
+          ),
+        ),
+      );
+    yield* updateFromNewConnection("codex");
+    yield* updateFromNewConnection("claudeAgent");
+    // A runner built per connection would hold its own "already running" set and package locks.
+    assert.deepEqual(updates, ["codex", "claudeAgent"]);
+  }).pipe(Effect.scoped),
 );
