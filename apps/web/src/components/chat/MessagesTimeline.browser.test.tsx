@@ -558,7 +558,7 @@ describe("MessagesTimeline messages", () => {
 
   it("keeps the first and last message headings reachable from either end", async () => {
     setup();
-    const props = baseProps();
+    const props = { ...baseProps(), collapseActivity: false };
     // Folded messages at both ends: their headings must not live inside the fold.
     const entries = Array.from({ length: 120 }, (_, index) =>
       index === 0
