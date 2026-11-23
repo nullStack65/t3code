@@ -2078,38 +2078,6 @@ export const layerWsRpc = (
         );
       const UNENROLLED_SENDER_MESSAGE =
         "This client is not enrolled as a founder. Pair it with a founder's pairing code, or have another client assign it in Settings → Connections.";
-      const authorizeUserInput = Effect.fn("ws.authorizeUserInput")(function* (
-        command: OrchestrationV2Command,
-      ) {
-        if (
-          command.type !== "runtime-request.respond" &&
-          command.type !== "thread.user-input.dismiss"
-        )
-          return;
-
-        const reject = (message: string) =>
-          new OrchestrationV2DispatchCommandError({
-            commandId: command.commandId,
-            commandType: command.type,
-            message,
-            detail: message,
-          });
-        const sender = yield* sessions
-          .senderOf(currentSessionId)
-          .pipe(Effect.mapError(() => reject("Could not verify the responding session.")));
-        if (Option.isNone(sender)) return yield* reject("Could not verify the responding session.");
-        if (sender.value.deviceType !== "bot") return;
-
-        if (command.type === "runtime-request.respond") {
-          const { runtimeRequests } = yield* orchestrationEngine
-            .getThreadRecords(command.threadId, ["runtimeRequests"])
-            .pipe(Effect.mapError(() => reject("Could not verify the runtime request.")));
-          const request = runtimeRequests.find(({ id }) => id === command.requestId);
-          if (request === undefined) return yield* reject("The runtime request was not found.");
-          if (request.kind !== "user_input") return;
-        }
-        return yield* reject("This user-input card needs a human answer.");
-      });
       const fileUnderCreator = (
         command: OrchestrationV2Command,
       ): Effect.Effect<OrchestrationV2Command> => {
@@ -2142,7 +2110,6 @@ export const layerWsRpc = (
               : {}),
           }).pipe(
             Effect.andThen(() => refusesUnenrolled(command.type)),
-            Effect.tap((refused) => (refused ? Effect.void : authorizeUserInput(command))),
             Effect.flatMap((refused) => {
               if (refused) {
                 return Effect.fail(
