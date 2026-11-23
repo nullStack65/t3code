@@ -78,6 +78,7 @@ import {
   ProviderInstanceId,
   ProviderInteractionMode,
   isRuntimeModeAbove,
+  isUnconfiguredDefaultInstanceEnabled,
   resolveProviderInstanceEnabled,
   resolveProjectProviderInstanceEnabled,
   type ProviderSessionId,
@@ -2718,8 +2719,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? settings.providerInstances[queuedRun.providerInstanceId]
         : undefined;
       const instanceDisabledForProject =
-        machineInstance === undefined ||
-        !(projectOverride ?? resolveProviderInstanceEnabled(machineInstance));
+        machineInstance === undefined
+          ? projectOverride === false ||
+            !isUnconfiguredDefaultInstanceEnabled(queuedRun.providerInstanceId)
+          : !(projectOverride ?? resolveProviderInstanceEnabled(machineInstance));
       if (
         worktreeMissing ||
         instanceDisabledForProject ||
@@ -7978,7 +7981,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ??
-        queueProviderThread ?? {
+        (freshContext ? undefined : queueProviderThread) ?? {
           id: idAllocator.derive.providerThread({
             driver: queuedAdapter.driver,
             nativeThreadId: `pending:${runId}`,

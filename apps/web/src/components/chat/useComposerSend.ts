@@ -55,6 +55,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { type SetStateAction, useLayoutEffect, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import * as Schema from "effect/Schema";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -170,6 +171,7 @@ import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
+const isHumanNoteUnavailableError = Schema.is(HumanNoteUnavailableError);
 
 function readEnvironmentPresentation(environmentId: EnvironmentId) {
   return appAtomRegistry.get(environmentPresentations.presentationsAtom).get(environmentId);
@@ -627,7 +629,7 @@ export function useComposerSend(input: ComposerSendInput) {
           stackedThreadToast({
             type: "warning",
             title: "Note not saved",
-            description: error instanceof HumanNoteUnavailableError ? error.message : "Try again.",
+            description: isHumanNoteUnavailableError(error) ? error.message : "Try again.",
           }),
         );
         return;

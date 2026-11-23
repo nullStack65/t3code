@@ -33,7 +33,7 @@ const SEAT_ORDER = Object.keys(REPORTS_TO);
 /** Founders are humans: Kameron and Jeff are never listed as bots. */
 const FOUNDER_NAMES = new Set(["kameron", "kameron smith", "jeff", "jeffrey", "jeffrey smith"]);
 
-export function botSeat(name: string | null | undefined): string {
+function botSeat(name: string | null | undefined): string {
   const key = (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
   return ALIASES[key] ?? key;
 }
