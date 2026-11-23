@@ -9,6 +9,12 @@ import { TrimmedNonEmptyString } from "./baseSchemas.ts";
  * watch list, standing is what the thread is.
  */
 
+/**
+ * Exact standing role the sidebar System shelf matches.
+ * Nothing assigns this role, so a live Daemon thread stays where it is.
+ */
+export const SYS_DAEMON_STANDING_ROLE = "sys:daemon";
+
 /** Built-in avatars clients ship. Unknown ids from a newer peer fall back to the first one. */
 export const THREAD_STANDING_AVATAR_IDS = [
   "bolt",

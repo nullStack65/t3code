@@ -38,6 +38,8 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  freshSessionThreadKeys,
+  placeSystemScheduledThreads,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -46,7 +48,14 @@ import {
 } from "@t3tools/client-runtime/state/thread-sort";
 import { resolveProjectExpanded } from "../uiStateStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  RunId,
+  SYS_DAEMON_STANDING_ROLE,
+  ThreadId,
+} from "@t3tools/contracts";
 
 import {
   DEFAULT_INTERACTION_MODE,
@@ -1737,5 +1746,67 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1, 3)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(false, 0, 0)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 2, 2)).toBe(true);
+  });
+});
+
+describe("placeSystemScheduledThreads", () => {
+  const chatId = ThreadId.make("chat");
+  const scheduledId = ThreadId.make("scheduled");
+  const failedScheduledId = ThreadId.make("scheduled-failed");
+  const daemonId = ThreadId.make("sys-daemon");
+  const liveDaemonId = ThreadId.make("live-daemon");
+  const keyOf = (id: ThreadId) => scopedThreadKey(scopeThreadRef(localEnvironmentId, id));
+  const threads = [
+    { id: chatId, title: "Ordinary chat", standingRole: null, failed: false },
+    { id: scheduledId, title: "Nightly digest", standingRole: null, failed: false },
+    { id: failedScheduledId, title: "Failed digest", standingRole: null, failed: true },
+    {
+      id: daemonId,
+      title: "Headless daemon",
+      standingRole: SYS_DAEMON_STANDING_ROLE,
+      failed: false,
+    },
+    { id: liveDaemonId, title: "Daemon", standingRole: "Keeps watches", failed: false },
+  ];
+  const scheduledThreadKeys = freshSessionThreadKeys([
+    {
+      environmentId: localEnvironmentId,
+      tasks: [
+        { threadId: scheduledId, threadMode: "fresh_session" as const },
+        { threadId: failedScheduledId, threadMode: "fresh_session" as const },
+        { threadId: chatId, threadMode: "continue" as const },
+        { threadId: null, threadMode: "new_thread" as const },
+        { threadId: liveDaemonId },
+      ],
+    },
+  ]);
+  const place = (revealed: boolean) =>
+    placeSystemScheduledThreads({
+      threads,
+      revealed,
+      scheduledThreadKeys,
+      keyOf: (thread) => keyOf(thread.id),
+      standingRoleOf: (thread) => thread.standingRole,
+    });
+
+  it("keeps the section absent until one toggle, then hides it again", () => {
+    expect(SYS_DAEMON_STANDING_ROLE).toBe("sys:daemon");
+    expect([...scheduledThreadKeys]).toEqual([keyOf(scheduledId), keyOf(failedScheduledId)]);
+
+    const hidden = place(false);
+    expect(hidden.section).toBeNull();
+    expect(hidden.rest.map((thread) => thread.id)).toEqual([chatId, liveDaemonId]);
+
+    const revealed = place(true);
+    expect(revealed.section?.map((thread) => thread.id)).toEqual([
+      scheduledId,
+      failedScheduledId,
+      daemonId,
+    ]);
+    expect(revealed.section?.some((thread) => thread.id === chatId)).toBe(false);
+    expect(revealed.section?.some((thread) => thread.id === liveDaemonId)).toBe(false);
+    expect(revealed.section?.some((thread) => thread.failed)).toBe(true);
+
+    expect(place(false).section).toBeNull();
   });
 });
