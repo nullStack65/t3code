@@ -1786,6 +1786,9 @@ export type OrchestrationV2UserMessageInputIntent =
 /** Notices without a level predate it and are warnings. */
 const OrchestrationV2SystemNoticeLevel = Schema.Literals(["info", "warning", "error"]);
 
+/** A notice about an MCP server that a sign-in from the thread would fix. */
+const OrchestrationV2McpSignIn = Schema.Struct({ server: Schema.String });
+
 /** A same-harness model or effort change that took effect with this message. */
 export const OrchestrationV2ModelSwitch = Schema.Struct({
   from: ModelSelection,
@@ -2040,6 +2043,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     /** A provider safeguard moved the turn to this model. */
     fallbackModel: Schema.optional(Schema.String),
+    mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2972,6 +2976,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     /** A provider safeguard moved the turn to this model. */
     fallbackModel: Schema.optional(Schema.String),
+    mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

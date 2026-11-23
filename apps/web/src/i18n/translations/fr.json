@@ -70,5 +70,11 @@
   "7e4d81ca21a72019": "Confirmation avant de désépingler",
   "1d5052cbe70d0b28": "Confirmation de l'archivage",
   "d5dd27a4eb853248": "Confirmation de la suppression",
-  "86b43caa9ff41ea2": "Raccourci Quitter"
+  "86b43caa9ff41ea2": "Raccourci Quitter",
+  "0fd6b38d7839f885": "Connecté à {server}",
+  "54789628a737f557": "Se connecter à {server}",
+  "8aecbd38f1facf71": "Autorisez l’accès dans votre navigateur. Il ouvre ensuite une page qui peut ne pas se charger : copiez l’adresse de cette page et collez-la ici.",
+  "2281dc87b05d4a4c": "Démarrage de la connexion…",
+  "880d3e6e7ff86899": "Adresse de la page ouverte par votre navigateur",
+  "e52585cdfcf317cf": "Terminer la connexion"
 }

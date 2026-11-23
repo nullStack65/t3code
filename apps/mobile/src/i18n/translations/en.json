@@ -30,5 +30,14 @@
   "79b768229c9ef672": "Maintenance",
   "54b188d65247e42f": "Labs",
   "f41ea186c275b56e": "About",
-  "2a546119bf3879ee": "Archive"
+  "2a546119bf3879ee": "Archive",
+  "15f32e12fd49533f": "The sign-in couldn't continue. Try again.",
+  "54789628a737f557": "Sign in to {server}",
+  "f8fde2e549c61546": "Address of the page your browser opened",
+  "d9f6244b252d11f6": "Finish sign-in",
+  "8aecbd38f1facf71": "Approve access in your browser. It then opens a page that may not load: copy that page's address and paste it here.",
+  "6e5bcc452add4f9b": "Opens the sign-in. Long press to copy.",
+  "83be7aade7ff6360": "Signed in",
+  "ec21b232e0eacd4a": "Sign in",
+  "38574c0d1e49b278": "{preview}, signed in"
 }

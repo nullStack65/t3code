@@ -30,5 +30,14 @@
   "79b768229c9ef672": "Manutenção",
   "54b188d65247e42f": "Labs",
   "f41ea186c275b56e": "Sobre",
-  "2a546119bf3879ee": "Arquivados"
+  "2a546119bf3879ee": "Arquivados",
+  "15f32e12fd49533f": "Não foi possível continuar o login. Tente novamente.",
+  "54789628a737f557": "Entrar em {server}",
+  "f8fde2e549c61546": "Endereço da página que o navegador abriu",
+  "d9f6244b252d11f6": "Concluir login",
+  "8aecbd38f1facf71": "Aprove o acesso no navegador. Depois ele abre uma página que pode não carregar: copie o endereço dessa página e cole aqui.",
+  "6e5bcc452add4f9b": "Abre o login. Mantenha pressionado para copiar.",
+  "83be7aade7ff6360": "Conectado",
+  "ec21b232e0eacd4a": "Entrar",
+  "38574c0d1e49b278": "{preview}, conectado"
 }
