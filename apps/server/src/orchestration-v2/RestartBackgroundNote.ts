@@ -185,6 +185,24 @@ export function neverStarted(
   return run.startedAt === null && run.restartContinuationOfRunId === undefined;
 }
 
+/** The run that lost a provider thread's background work when its process ended. */
+export function latestStartedRun<Run extends OrchestrationV2Run>(
+  runs: ReadonlyArray<Run>,
+  providerThreadId: OrchestrationV2ProviderThread["id"],
+): Run | undefined {
+  return runs.reduce<Run | undefined>(
+    (latest, run) =>
+      run.providerThreadId === providerThreadId &&
+      run.status !== "queued" &&
+      run.status !== "rolled_back" &&
+      !neverStarted(run) &&
+      (latest === undefined || runRanAfter(run, latest))
+        ? run
+        : latest,
+    undefined,
+  );
+}
+
 /** Restart-cancelled unstarted runs supersede nothing; user-stopped unstarted runs do. */
 export function cancelledBeforeStart(
   run: Pick<OrchestrationV2Run, "status" | "startedAt" | "restartContinuationOfRunId">,

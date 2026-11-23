@@ -65,6 +65,11 @@ import {
 } from "@t3tools/provider-core/server/subagentProjection";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  cancelledRosterTaskWork,
+  latestStartedRun,
+  mergeRestartCancelledBackgroundWork,
+} from "./RestartBackgroundNote.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -967,7 +972,10 @@ export const layerWithOptions = (
       }: ReleasedProviderThread) {
         if (taskIds.size === 0) return;
         for (let attempt = 0; attempt < 3; attempt++) {
-          const projection = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"]);
+          const projection = yield* projectionStore.getThreadRecords(threadId, [
+            "providerThreads",
+            "runs",
+          ]);
           const providerThread = projection.providerThreads.find(
             (candidate) => candidate.id === providerThreadId,
           );
@@ -975,6 +983,19 @@ export const layerWithOptions = (
           const remaining = tasks.filter((task) => !taskIds.has(task.taskId));
           if (providerThread === undefined || remaining.length === tasks.length) return;
           const now = yield* DateTime.now;
+          // Record the lost work as restart recovery does, so a child that was waiting on it
+          // settles as interrupted rather than completed.
+          const lost =
+            providerThread.ownerNodeId === null
+              ? tasks
+                  .filter((task) => taskIds.has(task.taskId))
+                  .filter(
+                    (task) => task.parentTaskId === undefined || !taskIds.has(task.parentTaskId),
+                  )
+                  .map(cancelledRosterTaskWork)
+              : [];
+          const noteRun =
+            lost.length === 0 ? undefined : latestStartedRun(projection.runs, providerThreadId);
           const { committed } = yield* eventSink.writeIfProviderThreadUnchanged({
             expected: providerThread,
             events: [
@@ -991,6 +1012,25 @@ export const layerWithOptions = (
                   updatedAt: now,
                 },
               },
+              ...(noteRun === undefined
+                ? []
+                : [
+                    {
+                      id: yield* idAllocator.allocate.event({ threadId, providerSessionId }),
+                      type: "run.background-work-cancelled" as const,
+                      threadId,
+                      runId: noteRun.id,
+                      providerInstanceId: noteRun.providerInstanceId,
+                      occurredAt: now,
+                      payload: {
+                        runId: noteRun.id,
+                        restartCancelledBackgroundWork: mergeRestartCancelledBackgroundWork(
+                          noteRun.restartCancelledBackgroundWork ?? [],
+                          lost,
+                        ),
+                      },
+                    },
+                  ]),
             ],
           });
           if (committed) return;

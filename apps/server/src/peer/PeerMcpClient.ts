@@ -7,6 +7,7 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -21,6 +22,12 @@ import * as PeerLinks from "./PeerLinks.ts";
 
 /** The only MCP protocol version a T3 Code `/mcp` registers. */
 const PROTOCOL_VERSION = "2025-06-18";
+
+/**
+ * A forwarded call's ceiling once the session is open. Waits there stop at 45 s, so only a
+ * half-open peer runs this long; without it, a cancel or status read on that link never returns.
+ */
+const FORWARDED_CALL_TIMEOUT = Duration.minutes(2);
 
 /** A title can be any length; the header carrying it stays well under HTTP header limits. */
 const SENDER_TITLE_MAX_LENGTH = 200;
@@ -162,7 +169,7 @@ const make = Effect.gen(function* () {
       );
       return sessionId;
     },
-    // Only the handshake is bounded: a forwarded tool call may wait for minutes.
+    // The handshake is bounded tightly; a forwarded tool call may legitimately wait longer.
     (effect, url) => Effect.timeout(effect, PeerLinks.probeTimeout(url)),
   );
 
@@ -300,6 +307,7 @@ const make = Effect.gen(function* () {
     },
     (effect, input) =>
       effect.pipe(
+        Effect.timeout(FORWARDED_CALL_TIMEOUT),
         Effect.tapError((error) =>
           links.recordOutcome(input.environmentId, { error: error.message }),
         ),
