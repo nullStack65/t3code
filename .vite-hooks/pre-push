@@ -1,0 +1,55 @@
+# Runs CI's fast checks (`vp run check:changed`) on what this push changes, so a
+# format, lint, knip, typecheck or nearby-test failure stops here instead of
+# costing an ARC run. `pnpm install` wires this hook through `vp config`.
+#
+# Skip once: `git push --no-verify` (or VP_GIT_HOOKS=0 git push).
+# Choose the comparison base: T3_PRE_PUSH_BASE=<ref> git push.
+#
+# The Vite+ dispatcher runs this file with `sh -e`, so keep it POSIX sh.
+
+zero=0000000000000000000000000000000000000000
+remote="${1:-origin}"
+head_sha=$(git rev-parse HEAD)
+check=""
+# Only branch updates are checked; tags and deletions are not.
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$local_sha" = "$head_sha" ]; then
+    check=1
+  else
+    echo "pre-push: $remote_ref is not being pushed from the checked-out commit; not checked locally (CI still runs)."
+  fi
+done
+[ -n "$check" ] || exit 0
+
+# check:changed needs the Node version in package.json `engines` (it runs .ts
+# directly). An older Node is a setup gap, not a code failure: say so and let
+# CI do the checking rather than blocking every push from that machine.
+want=$(sed -n 's/^ *"node": *"\([0-9]*\)\..*/\1/p' package.json | head -n 1)
+have=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+if [ -n "$want" ] && [ "$have" -lt "$want" ]; then
+  echo "pre-push: WARNING skipped checks: Node $have is older than engines Node $want. Run \`vp env use\` or install Node $want."
+  exit 0
+fi
+
+# Compare against the release or main line of the push remote that this branch
+# is closest to (fewest commits ahead), the same base its pull request will use.
+base="${T3_PRE_PUSH_BASE:-}"
+if [ -z "$base" ]; then
+  best=""
+  for ref in $(git for-each-ref --format='%(refname)' \
+    "refs/remotes/$remote/release/" "refs/remotes/$remote/main"); do
+    ahead=$(git rev-list --count "$ref..HEAD" 2>/dev/null) || continue
+    if [ -z "$best" ] || [ "$ahead" -lt "$best" ]; then
+      best=$ahead
+      base=$ref
+    fi
+  done
+fi
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "pre-push: note: uncommitted changes are included in the check."
+fi
+# With no base found, check:changed falls back to the nearest remote main.
+echo "pre-push: vp run check:changed ${base:-<nearest remote main>}"
+vp run check:changed ${base:+"$base"}
