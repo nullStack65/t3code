@@ -610,7 +610,7 @@ export const PullRequestsToolkitRegistrationLive = McpServer.toolkit(PullRequest
   Layer.provide(PullRequestsToolkitHandlersLive),
 );
 
-export const ThreadRoutingToolkitRegistrationLive = McpServer.toolkit(ThreadRoutingToolkit).pipe(
+const ThreadRoutingToolkitRegistrationLive = McpServer.toolkit(ThreadRoutingToolkit).pipe(
   Layer.provide(ThreadRoutingToolkitHandlersLive),
 );
 
