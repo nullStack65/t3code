@@ -13,7 +13,9 @@ on:
     # A founder's edit reruns the full job. An edit by anyone else (for example
     # CodeRabbit rewriting the description) starts a run whose job is skipped;
     # the concurrency group below keeps it from cancelling the real run.
-    types: [opened, synchronize, reopened, edited]
+    # Draft pull requests skip the three ARC workers, so parked drafts use no
+    # ARC time. `ready_for_review` starts the full run when a draft is marked ready.
+    types: [opened, synchronize, reopened, edited, ready_for_review]
     branches: [feat/assemblyai-current, release/native-0.1.10]
   workflow_dispatch:
 
@@ -43,6 +45,7 @@ jobs:
         github.repository == 'nullStack65/t3code' &&
         (
           (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
@@ -196,6 +199,7 @@ jobs:
         github.repository == 'nullStack65/t3code' &&
         (
           (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
@@ -273,6 +277,7 @@ jobs:
         github.repository == 'nullStack65/t3code' &&
         (
           (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
@@ -453,13 +458,25 @@ jobs:
   # the previous in-progress run on every new push, so that would mark the
   # required check green for a run whose tests never ran. `!cancelled()` still
   # runs when a worker failed or was skipped.
+  #
+  # On a draft pull request the workers are skipped and this job fails at its
+  # first step, so the required check stays red until the full run passes. It
+  # reads only the event payload there, so it uses a free hosted runner (this
+  # repository is public) and never wakes an ARC runner for a parked draft.
   voice-and-inbox:
     name: Voice + founder inbox (Linux ARC)
     needs: [voice-and-inbox-core, voice-and-inbox-web, voice-and-inbox-mobile]
     if: ${{ !cancelled() }}
-    runs-on: t3code-ci-arc
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'ubuntu-latest' || 't3code-ci-arc' }}
     timeout-minutes: 5
     steps:
+      - name: Hold drafts until ready for review
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
+        shell: bash
+        run: |
+          echo "::error::Draft pull request: the ARC workers run when it is marked ready for review."
+          exit 1
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
