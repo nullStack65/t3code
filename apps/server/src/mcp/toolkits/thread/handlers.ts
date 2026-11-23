@@ -286,26 +286,10 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return { requestId, questions: item.questions };
       }),
     ),
-    writesThread((input) =>
-      Effect.gen(function* () {
-        const requestId = yield* required(input.requestId, "requestId");
-        const answers = yield* required(input.answers, "answers");
-        const { threads, projection } = yield* readQuestion({
-          threadId: input.threadId,
-          requestId,
-        });
-        const result = yield* threads
-          .dispatch({
-            type: "runtime-request.respond",
-            threadId: projection.thread.id,
-            commandId: yield* newCommandId(),
-            requestId,
-            answers,
-            // An agent's answer is an agent's message, never a person's.
-            createdBy: "agent",
-          })
-          .pipe(Effect.mapError(dispatchFailure));
-        return { sequence: result.sequence };
+    McpToolAccess.refuses(
+      new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message: "This user-input card needs a human answer. Ask a person to answer it in T3 Code.",
       }),
     ),
   ),

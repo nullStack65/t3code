@@ -30,6 +30,8 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
+  type OrchestrationV2ServerCommand,
   SourceControlRepositoryError,
   WS_METHODS,
   WsRpcGroup,
@@ -1910,6 +1912,132 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
       snapshot?.skills?.map((skill) => skill.name),
       ["finalize"],
       "the thread's removed worktree should list the project's skills",
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+  ),
+);
+
+it.effect("only a human client can answer a user-input card over authenticated RPC", () =>
+  Effect.gen(function* () {
+    const botSession = AuthSessionId.make("question-bot");
+    const humanSession = AuthSessionId.make("question-ui");
+    const threadId = ThreadId.make("question-thread");
+    const questionId = RuntimeRequestId.make("question-card");
+    const approvalId = RuntimeRequestId.make("permission-card");
+    const dispatched: OrchestrationV2ServerCommand[] = [];
+    let enqueued = 0;
+    const sender = (id: AuthSessionId) => ({
+      label: null,
+      founder: null,
+      deviceType: id === botSession ? ("bot" as const) : ("desktop" as const),
+    });
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(SessionStore.SessionStore)({
+        cookieName: "question-test",
+        legacyCookieName: undefined,
+        senderOf: (id) => Effect.succeedSome(sender(id)),
+      }),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+        messageSenderOf: (sessionId) =>
+          Effect.succeed({ ...sender(sessionId), sessionId, device: "" }),
+      }),
+      Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+        enqueueCommand: (effect) =>
+          Effect.sync(() => {
+            enqueued++;
+          }).pipe(Effect.andThen(effect)),
+      }),
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        getThreadRecords: () =>
+          Effect.succeed({
+            runtimeRequests: [
+              { id: questionId, kind: "user_input" },
+              { id: approvalId, kind: "permission" },
+            ],
+          } as never),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        dispatch: (command) =>
+          Effect.sync(() => {
+            dispatched.push(command);
+            return { sequence: dispatched.length, storedEvents: [], replayed: true };
+          }),
+      }),
+    );
+    const browser = yield* ServerBrowser.ServerBrowser;
+    const connect = (sessionId: AuthSessionId) =>
+      RpcTest.makeClient(WsRpcGroup).pipe(
+        Effect.provide(
+          layerWsRpc(
+            {
+              sessionId,
+              subject: sessionId === botSession ? "cli-issued-session" : "desktop-bootstrap",
+              method: "bearer-access-token",
+              scopes: [AuthOrchestrationOperateScope],
+            },
+            {},
+            browser,
+            () => Effect.void,
+            { secretReferences: true },
+          ).pipe(
+            Layer.provide(services),
+            Layer.merge(RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+          ),
+        ),
+      );
+    const bot = yield* connect(botSession);
+    const human = yield* connect(humanSession);
+    const command = {
+      type: "runtime-request.respond" as const,
+      threadId,
+      requestId: questionId,
+      commandId: CommandId.make("synthetic-question-response"),
+      answers: { color: "green" },
+      createdBy: "user" as const,
+    };
+    const refused = yield* bot[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](command).pipe(
+      Effect.flip,
+    );
+    assert.include(refused.message, "needs a human answer");
+    const dismiss = yield* bot[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+      type: "thread.user-input.dismiss",
+      threadId,
+      requestId: questionId,
+      commandId: CommandId.make("synthetic-question-dismiss"),
+    }).pipe(Effect.flip);
+    assert.include(dismiss.message, "needs a human answer");
+    assert.equal(enqueued, 0);
+    assert.isEmpty(dispatched);
+
+    const accepted = yield* human[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](command);
+    assert.equal(accepted.sequence, 1);
+    const approved = yield* bot[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+      type: "runtime-request.respond",
+      threadId,
+      requestId: approvalId,
+      commandId: CommandId.make("synthetic-permission-response"),
+      decision: "accept",
+    });
+    assert.equal(approved.sequence, 2);
+    assert.deepEqual(
+      dispatched.map((received) => ("sentBy" in received ? received.sentBy?.sessionId : null)),
+      [humanSession, botSession],
     );
   }).pipe(
     Effect.provide(

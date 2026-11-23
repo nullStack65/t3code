@@ -133,7 +133,7 @@ const question = Schema.Struct({
 const PendingRequestTool = Tool.make("t3_pending_request", {
   ...commandTool,
   description:
-    "User questions only (default: this thread). List IDs, read by `requestId`, respond with `answers`. No permission approvals.",
+    "User questions only (default: this thread). List IDs or read by `requestId`. A person answers these cards in T3 Code.",
   parameters: Schema.Struct({
     action: Schema.Literals(["list", "read", "respond"]),
     environmentId: OrchestratorMcpEnvironmentTarget,

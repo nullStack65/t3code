@@ -9,6 +9,7 @@ import {
   CommandId,
   EnvironmentId,
   NodeId,
+  makeThreadInbox,
   OrchestratorMcpThreadReadResult,
   ProjectId,
   ProviderDriverKind,
@@ -153,21 +154,21 @@ it.effect("an answered question reports already answered instead of not found", 
   const projection = McpToolAccessTestkit.idleThreadProjection(shell);
   return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    const respond = (id: string) =>
+    const read = (id: string) =>
       server
         .callTool({
           name: "t3_pending_request",
-          arguments: { action: "respond", requestId: id, answers: { size: "large" } },
+          arguments: { action: "read", requestId: id },
         })
         .pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-    expect(declaredFailure(yield* respond(requestId))).toMatchObject({
+    expect(declaredFailure(yield* read(requestId))).toMatchObject({
       code: "invalid_request",
       message: "The user-input request was already answered.",
     });
-    expect(declaredFailure(yield* respond("missing-question"))).toMatchObject({
+    expect(declaredFailure(yield* read("missing-question"))).toMatchObject({
       code: "invalid_request",
       message: "The pending user-input request was not found.",
     });
@@ -226,79 +227,102 @@ it.effect("an answered question reports already answered instead of not found", 
   );
 });
 
-it.effect("a pending question read keeps option previews", () => {
-  const shell = McpToolAccessTestkit.liveThreadShell(threadId);
-  const requestId = RuntimeRequestId.make("previewed-question");
-  const projection = McpToolAccessTestkit.idleThreadProjection(shell);
-  const questions = [
-    {
-      id: "post",
-      header: "Review",
-      question: "Post it?",
-      options: [{ label: "Post", description: "Publish the draft", preview: "Full proposed text" }],
-    },
-  ];
-  return Effect.gen(function* () {
-    const server = yield* McpServer.McpServer;
-    const result = yield* server
-      .callTool({ name: "t3_pending_request", arguments: { action: "read", requestId } })
-      .pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
-        Effect.provideService(McpSchema.McpServerClient, client),
-      );
-    expect(result.structuredContent).toEqual({ requestId, questions });
-  }).pipe(
-    Effect.provide(
-      layerThreadToolkit.pipe(
-        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(NodeCrypto.layer),
-        Layer.provide(
-          Layer.mock(ThreadManagement.ThreadManagementService)({
-            getThreadShell: () => Effect.succeed(shell),
-            getProjectThreadRecords: () =>
-              Effect.succeed({
-                ...projection,
-                runtimeRequests: [
-                  {
-                    id: requestId,
-                    nodeId: NodeId.make("root"),
-                    providerTurnId: null,
-                    nativeRequestRef: null,
-                    kind: "user_input",
-                    status: "pending",
-                    responseCapability: { type: "message" },
-                    createdAt: shell.createdAt,
-                    resolvedAt: null,
-                  },
-                ],
-                turnItems: [
-                  {
-                    id: TurnItemId.make("previewed-question-item"),
-                    threadId,
-                    runId: null,
-                    nodeId: null,
-                    providerThreadId: null,
-                    providerTurnId: null,
-                    nativeItemRef: null,
-                    parentItemId: null,
-                    ordinal: 0,
-                    status: "running",
-                    title: null,
-                    startedAt: shell.createdAt,
-                    completedAt: null,
-                    updatedAt: shell.updatedAt,
-                    type: "user_input_request",
-                    requestId,
-                    questions,
-                  },
-                ],
-              }),
-          }),
+it.effect.each(["shared", "agent-only"] as const)(
+  "a question in a %s thread stays visible after an agent is denied",
+  (audience) => {
+    const shell = {
+      ...McpToolAccessTestkit.liveThreadShell(threadId),
+      inbox: makeThreadInbox({ actor: { kind: "agent", id: "test-agent" }, routing: { audience } }),
+    };
+    const requestId = RuntimeRequestId.make("previewed-question");
+    const projection = McpToolAccessTestkit.idleThreadProjection(shell);
+    const questions = [
+      {
+        id: "post",
+        header: "Review",
+        question: "Post it?",
+        options: [
+          { label: "Post", description: "Publish the draft", preview: "Full proposed text" },
+        ],
+      },
+    ];
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (args: Record<string, unknown>) =>
+        server
+          .callTool({ name: "t3_pending_request", arguments: args })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      const respond = { action: "respond", requestId, answers: { post: "Post" } };
+      for (const target of [{}, { environmentId: "linked-test-environment" }]) {
+        expect(declaredFailure(yield* call({ ...respond, ...target }))).toMatchObject({
+          code: "capability_denied",
+          message: expect.stringContaining("needs a human answer"),
+        });
+      }
+      expect((yield* call({ action: "list" })).structuredContent).toEqual({
+        requestIds: [requestId],
+      });
+      expect((yield* call({ action: "read", requestId })).structuredContent).toEqual({
+        requestId,
+        questions,
+      });
+    }).pipe(
+      Effect.provide(
+        layerThreadToolkit.pipe(
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              dispatch: () => Effect.die("An agent's answer must never dispatch or emit events"),
+              getThreadShell: () => Effect.succeed(shell),
+              getProjectThreadRecords: () =>
+                Effect.succeed({
+                  ...projection,
+                  runtimeRequests: [
+                    {
+                      id: requestId,
+                      nodeId: NodeId.make("root"),
+                      providerTurnId: null,
+                      nativeRequestRef: null,
+                      kind: "user_input",
+                      status: "pending",
+                      responseCapability: { type: "message" },
+                      createdAt: shell.createdAt,
+                      resolvedAt: null,
+                    },
+                  ],
+                  turnItems: [
+                    {
+                      id: TurnItemId.make("previewed-question-item"),
+                      threadId,
+                      runId: null,
+                      nodeId: null,
+                      providerThreadId: null,
+                      providerTurnId: null,
+                      nativeItemRef: null,
+                      parentItemId: null,
+                      ordinal: 0,
+                      status: "running",
+                      title: null,
+                      startedAt: shell.createdAt,
+                      completedAt: null,
+                      updatedAt: shell.updatedAt,
+                      type: "user_input_request",
+                      requestId,
+                      questions,
+                    },
+                  ],
+                }),
+            }),
+          ),
         ),
       ),
-    ),
-  );
-});
+    );
+  },
+);
 
 it("bounds public command rejections and redacts internal dispatch causes", () => {
   const command = { commandId: CommandId.make("mcp-core-command"), commandType: "thread.settle" };
