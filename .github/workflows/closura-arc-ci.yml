@@ -185,6 +185,13 @@ jobs:
         shell: bash
         run: vp run --filter t3 build:bundle
 
+      # The fleet rollout ships the single executable, not the bundle. Its import guard
+      # rejects a file-backed package loaded with import(), so a head that passes the
+      # bundle build alone still fails the fleet build and never deploys.
+      - name: Build native T3 single executable
+        shell: bash
+        run: node apps/server/scripts/cli.ts build-exe
+
       - name: Verify compiled server output
         shell: bash
         run: |
