@@ -178,8 +178,9 @@ const make = Effect.gen(function* () {
         const message = projection.messages.find(
           (candidate) => candidate.id === messageId && !candidate.streaming,
         );
+        // A private note never reaches the title model.
         context =
-          message === undefined
+          message === undefined || message.humanNote === true
             ? { message: "", attachments: [] }
             : {
                 message: isAttachmentOnlyBootstrapPrompt(message.text) ? "" : message.text,

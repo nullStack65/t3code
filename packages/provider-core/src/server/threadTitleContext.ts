@@ -6,6 +6,8 @@ export type ThreadTitleMessage = {
   readonly role: "user" | "assistant" | "system" | "reasoning";
   readonly text: string;
   readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /** A person's private note. The model sees it only after it is promoted as its own message. */
+  readonly humanNote?: true | undefined;
 };
 
 const MAX_CONTEXT = 8_000;
@@ -34,6 +36,7 @@ export function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMess
     if (
       message.role === "system" ||
       message.role === "reasoning" ||
+      message.humanNote === true ||
       (!message.text.trim() && !message.attachments?.length)
     )
       return [];

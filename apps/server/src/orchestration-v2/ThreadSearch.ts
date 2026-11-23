@@ -333,7 +333,7 @@ export const messageHitsQuery = (
       -- neither find nor a jump can reach them.
       AND messages.message_id NOT LIKE 'async-answer:%'
       AND ${messageSenderCondition(sql, sender)}
-      AND (${includeHumanNotes} OR json_extract(messages.payload_json, '$.humanNote') IS NOT 1)
+      AND (${includeHumanNotes ? 1 : 0} OR json_extract(messages.payload_json, '$.humanNote') IS NOT 1)
       -- Nor can they reach a rolled-back turn, or a message of a stopped turn
       -- that no shown item carries, such as a queued prompt that never ran.
       AND NOT EXISTS (
