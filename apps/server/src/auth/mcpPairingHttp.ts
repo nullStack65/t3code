@@ -39,7 +39,7 @@ export interface McpPairingUrls {
   readonly registration_endpoint: string;
 }
 
-export function mcpPairingUrls(origin: string): McpPairingUrls {
+function mcpPairingUrls(origin: string): McpPairingUrls {
   return {
     issuer: origin,
     resource: `${origin}/mcp`,
@@ -49,7 +49,7 @@ export function mcpPairingUrls(origin: string): McpPairingUrls {
   };
 }
 
-export function protectedResourceMetadata(urls: McpPairingUrls): AuthMcpProtectedResourceMetadata {
+function protectedResourceMetadata(urls: McpPairingUrls): AuthMcpProtectedResourceMetadata {
   return {
     resource: urls.resource,
     authorization_servers: [urls.issuer],
@@ -59,9 +59,7 @@ export function protectedResourceMetadata(urls: McpPairingUrls): AuthMcpProtecte
   };
 }
 
-export function authorizationServerMetadata(
-  urls: McpPairingUrls,
-): AuthMcpAuthorizationServerMetadata {
+function authorizationServerMetadata(urls: McpPairingUrls): AuthMcpAuthorizationServerMetadata {
   return {
     issuer: urls.issuer,
     authorization_endpoint: urls.authorization_endpoint,
@@ -76,7 +74,7 @@ export function authorizationServerMetadata(
   };
 }
 
-export function authorizeResult(urls: McpPairingUrls): AuthMcpAuthorizeResult {
+function authorizeResult(urls: McpPairingUrls): AuthMcpAuthorizeResult {
   return {
     pairing: "code",
     token_endpoint: urls.token_endpoint,
@@ -85,7 +83,7 @@ export function authorizeResult(urls: McpPairingUrls): AuthMcpAuthorizeResult {
   };
 }
 
-export function registerMcpClient(
+function registerMcpClient(
   registration: AuthMcpClientRegistration,
 ): AuthMcpRegisteredClient | undefined {
   const softwareId = registration.software_id?.trim();

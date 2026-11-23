@@ -136,7 +136,7 @@ export const MCP_PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resourc
 export const MCP_PROTECTED_RESOURCE_MCP_PATH = "/.well-known/oauth-protected-resource/mcp";
 
 /** Scopes advertised for Connect pairing. Every `mcpClientScopes` result is a subset. */
-export const MCP_PAIRING_SCOPES = AuthStandardClientScopes;
+export const MCP_PAIRING_SCOPES = [...AuthStandardClientScopes] as const;
 
 export function mcpClientScopes(access: AuthMcpClientAccess): ReadonlyArray<AuthEnvironmentScope> {
   switch (access) {
