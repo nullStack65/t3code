@@ -725,6 +725,7 @@ it.effect.each([
                 ? ([1, 1, 1].map((attemptCount) => ({ attemptCount })) as never)
                 : [],
             ),
+          cancelUnsettled: () => Effect.succeed([]),
           reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
         }),
       ),
@@ -736,6 +737,11 @@ it.effect.each([
       yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
     assert.equal(summary.terminalizedRuns, terminalized ? 1 : 0);
     const command = committedInput;
+    if (scenario === "queued") {
+      assert.isNull(command);
+      assert.isEmpty(written);
+      return;
+    }
     assert.isNotNull(command);
     if (command === null) return;
     const runEvent = command.events.find((event) => event.type === "run.updated");

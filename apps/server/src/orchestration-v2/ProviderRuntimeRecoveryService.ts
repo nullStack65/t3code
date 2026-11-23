@@ -278,6 +278,7 @@ export const make = Effect.gen(function* () {
     ) {
       const now = yield* DateTime.now;
       const projection = yield* rewindUnacceptedRuns(stored);
+      const hadActiveRun = nonterminalRuns(stored).length > 0;
       let runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -589,6 +590,7 @@ export const make = Effect.gen(function* () {
           runs.push(run);
           continue;
         }
+        if (!hadActiveRun && run.delegatedTaskId === undefined) continue;
         if (run.queueHeld === true && retryableRuns.length === 0) continue;
         events.push({
           id: yield* allocateEventId(),

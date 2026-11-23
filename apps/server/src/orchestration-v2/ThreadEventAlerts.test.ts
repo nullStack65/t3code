@@ -232,6 +232,44 @@ it("stuck: a thread waiting on background work that no longer exists", () => {
   assert.deepEqual(tracked.findings, []);
 });
 
+it("stuck: a stranded queue reports strictly after 15 minutes with a stable incident signature", () => {
+  const shell = shellWith({ latestRunCompletedAt: at(15) });
+  const strandedQueue = { runId: "queued:1", requestedAt: at(30) };
+  const sweep = (nowMs: number, runId = strandedQueue.runId, thread = shell) =>
+    judge(thread, "sweep", { nowMs, strandedQueue: { ...strandedQueue, runId } } as never);
+  assert.deepEqual(sweep(NOW - 1).findings, []);
+  assert.deepEqual(sweep(NOW).findings, []);
+  const [first] = sweep(NOW + 1).findings;
+  assert.isDefined(first);
+  assert.equal(first.kind, "stuck");
+  assert.equal(sweep(NOW + 60_000).findings[0]?.signature, first.signature);
+  assert.notEqual(sweep(NOW + 60_000, "queued:2").findings[0]?.signature, first.signature);
+  assert.deepEqual(
+    judge(shell, "sweep", {
+      nowMs: NOW + 1,
+      strandedQueue: { ...strandedQueue, queueHeld: true },
+    } as never).findings,
+    [],
+  );
+  for (const gate of [
+    { snoozedUntil: at(-2) },
+    { latestRunStopRequested: true },
+    { pendingRuntimeRequest: { id: "request:1", kind: "approval" } },
+  ]) {
+    assert.deepEqual(
+      sweep(
+        NOW + 1,
+        strandedQueue.runId,
+        shellWith({
+          latestRunCompletedAt: at(15),
+          ...gate,
+        } as never),
+      ).findings,
+      [],
+    );
+  }
+});
+
 it("needs-person: an agent lane raising a question or flipping to a founder", () => {
   const question = judge(
     shellWith({
