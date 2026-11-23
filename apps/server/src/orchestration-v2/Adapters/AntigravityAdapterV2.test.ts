@@ -1028,12 +1028,19 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
   let terminate: AntigravityAdapterV2RuntimeInput["onTermination"];
   const usage = { sessionUpdate: "usage_update", used: 9000, size: 1048576 } as const;
   const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+  const firstOffer = yield* Deferred.make<void>();
   const instanceId = ProviderInstanceId.make("antigravity-wake-test");
   const threadId = ThreadId.make("thread-antigravity-wake");
   const adapter = yield* makeAntigravityAdapterV2({
     instanceId,
     selfInvocation: yield* resolveSelfInvocation(),
-    continuationRequests: { offer: (request) => Effect.sync(() => void offers.push(request)) },
+    continuationRequests: {
+      offer: (request) =>
+        Effect.sync(() => void offers.push(request)).pipe(
+          Effect.andThen(Deferred.succeed(firstOffer, undefined)),
+          Effect.asVoid,
+        ),
+    },
     makeRuntime: (input) => {
       terminate = input.onTermination;
       return makeAntigravityAcpRuntime({
@@ -1183,6 +1190,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     command,
     usage,
     offers,
+    firstOffer: Deferred.await(firstOffer),
     send,
     startTurn,
     until,
@@ -1211,6 +1219,44 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
 });
 
 describe("AntigravityAdapterV2 work after the prompt ends", () => {
+  it.effect("wakes for a late workspace edit only on the bound ACP session", () =>
+    Effect.gen(function* () {
+      const { startTurn, throughTerminal, requestPermission, firstOffer, offers } =
+        yield* openSessionWithRunningCommand({ IsDaemon: true, WaitMsBeforeAsync: 500 });
+      yield* startTurn(1, false);
+      yield* throughTerminal;
+
+      const edit = (sessionId: string) =>
+        requestPermission(
+          {
+            sessionId,
+            toolCall: {
+              toolCallId: "edit-1",
+              kind: "edit",
+              title: "Edit workspace file",
+              locations: [{ path: `${process.cwd()}/example.ts` }],
+            },
+            options: [
+              { optionId: "allow", kind: "allow_once", name: "Allow" },
+              { optionId: "deny", kind: "reject_once", name: "Deny" },
+            ],
+          },
+          { requestId: `request-${sessionId}`, method: "session/request_permission" },
+        );
+
+      assert.deepEqual(yield* edit("unbound-session"), { outcome: { outcome: "cancelled" } });
+      assert.lengthOf(offers, 0);
+      const pendingEdit = yield* edit("mock-session-1").pipe(Effect.forkScoped());
+      yield* firstOffer;
+      assert.lengthOf(offers, 1);
+      yield* offers[0]!.dispatchIfCurrent!(Effect.void);
+      yield* startTurn(2, true);
+      assert.deepEqual(yield* Fiber.join(pendingEdit), {
+        outcome: { outcome: "selected", optionId: "allow" },
+      });
+    }).pipe(Effect.provide(layerSession)),
+  );
+
   // agy sets `IsDaemon` on a command it does not wait for. When it exits, the agent replies
   // with no prompt open.
   it.effect("continues in one run when a finished daemon wakes the agent", () =>

@@ -5511,10 +5511,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               generation,
               Effect.gen(function* () {
                 if (yield* Ref.get(stoppedRunQuarantine)) return false;
+                // The dispatcher can attach the next turn before its offer returns.
+                const attached = turnAttached;
                 if ((yield* Ref.get(activeTurn)) !== null) return null;
                 const sessionId = yield* Ref.get(activeSessionId);
                 if (sessionId !== null) yield* offerContinuationRun(sessionId);
-                return turnAttached;
+                return attached;
               }),
             );
             if (Option.isNone(waiting)) return yield* Effect.never;
