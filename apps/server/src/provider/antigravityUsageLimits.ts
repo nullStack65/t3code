@@ -1,3 +1,5 @@
+import * as NodeModule from "node:module";
+
 import type { AntigravitySettings, ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
@@ -195,13 +197,17 @@ export function parseAntigravityCliCredential(
   };
 }
 
+// A single-executable server cannot import() a file-backed package; createRequire resolves it beside the
+// executable, as the other native externals do.
+const requireForKeyring = NodeModule.createRequire(import.meta.url);
+
 // The stored value is the OAuth token. Keep it out of span attributes.
 const readDefaultStoredSecret = Effect.fnUntraced(function* (
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
 ) {
   const fromModule = yield* Effect.tryPromise({
     try: async () => {
-      const keyring = (await import("@napi-rs/keyring")) as {
+      const keyring = requireForKeyring("@napi-rs/keyring") as {
         readonly AsyncEntry?: new (
           service: string,
           account: string,
