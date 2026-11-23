@@ -216,6 +216,9 @@ import {
 import { CollapsedComposerStopAction, ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerFooterPrimaryActions } from "./ComposerFooterControls";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
+import { questionReplyInsertion } from "../../questionReply";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { environmentThreadDetails } from "../../state/threads";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { buildPullRequestReferenceContext } from "../pullRequest/pullRequestDetail.logic";
 import { getComposerPromptInjectionState, getComposerReasoningStep } from "./composerProviderState";
@@ -3340,6 +3343,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onRemoveFile={removeComposerFileFromDraft}
       />
     ) : null;
+  const replyToQuestion = (question: string) => {
+    const threadId = activeThreadId ?? routeThreadRef.threadId;
+    const detail = appAtomRegistry.get(
+      environmentThreadDetails.threadAtom({ environmentId, threadId }),
+    );
+    const snapshot = readComposerSnapshotStable();
+    const fragment = questionReplyInsertion({
+      question,
+      answer: snapshot.value,
+      cursor: snapshot.expandedCursor,
+      messages: detail?.projection.messages ?? [],
+      environmentId,
+      threadId,
+    });
+    if (!fragment) return;
+    const inserted = insertComposerTextStable(fragment, "cursor");
+    if (inserted && isComposerCollapsedMobile) expandMobileComposerStable();
+  };
+  const replyToQuestionStable = useStableCallback(replyToQuestion);
   const composerAttachButton = showComposerAttachAction ? (
     <ComposerAttachButton
       addComposerAttachments={addComposerAttachments}
@@ -3421,6 +3443,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onToggleOption={onSelectActivePendingUserInputOption}
                     onAdvance={onAdvanceActivePendingUserInput}
                     onDismiss={onDismissActivePendingUserInput}
+                    onReplyToQuestion={replyToQuestionStable}
                   />
                 ) : null}
               </ComposerBanner.Root>

@@ -1,6 +1,8 @@
 import { type RuntimeRequestId, type ScopedThreadRef } from "@t3tools/contracts";
+import { ReplyIcon } from "lucide-react";
 import { markdownProseDirection, textDirection } from "~/textDirection";
 import { memo, use, useEffect, useEffectEvent, useRef, useState } from "react";
+import { REPLY_TO_QUESTION_LABEL, showReplyToQuestion } from "../../questionReply";
 import { BackgroundThreadContext } from "./backgroundThread";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { type PendingUserInput } from "../../session-logic";
@@ -25,6 +27,7 @@ interface PendingUserInputPanelProps {
   onToggleOption: (questionId: string, optionValue: string) => void;
   onAdvance: () => void;
   onDismiss: (requestId: RuntimeRequestId) => void;
+  onReplyToQuestion?: (question: string) => void;
 }
 
 export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserInputPanel({
@@ -38,6 +41,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   onToggleOption,
   onAdvance,
   onDismiss,
+  onReplyToQuestion,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
@@ -56,6 +60,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       onToggleOption={onToggleOption}
       onAdvance={onAdvance}
       onDismiss={onDismiss}
+      onReplyToQuestion={onReplyToQuestion}
     />
   );
 });
@@ -71,6 +76,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   onToggleOption,
   onAdvance,
   onDismiss,
+  onReplyToQuestion,
 }: {
   prompt: PendingUserInput;
   cwd: string | undefined;
@@ -82,6 +88,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   onToggleOption: (questionId: string, optionValue: string) => void;
   onAdvance: () => void;
   onDismiss: (requestId: RuntimeRequestId) => void;
+  onReplyToQuestion?: ((question: string) => void) | undefined;
 }) {
   // Message-mode requests remain answerable after their provider turn ends.
   const canRespond = prompt.responseCapability !== "not_resumable";
@@ -235,6 +242,29 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             </ComposerBanner.Count>
           ) : null}
           <ComposerBanner.ToggleIcon expanded={!isCollapsed} />
+          {showReplyToQuestion(activeQuestion) ? (
+            <ComposerBanner.Dismiss
+              render={<span role="button" tabIndex={responseDisabled ? -1 : 0} />}
+              aria-label={REPLY_TO_QUESTION_LABEL}
+              title={REPLY_TO_QUESTION_LABEL}
+              disabled={responseDisabled}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (responseDisabled) return;
+                onReplyToQuestion?.(activeQuestion.question);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                if (responseDisabled) return;
+                onReplyToQuestion?.(activeQuestion.question);
+              }}
+            >
+              <ReplyIcon className="size-3.5" />
+            </ComposerBanner.Dismiss>
+          ) : null}
           {prompt.dismissible ? (
             <ComposerBanner.Dismiss
               render={<span role="button" tabIndex={0} />}

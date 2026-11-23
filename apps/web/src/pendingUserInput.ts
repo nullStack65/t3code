@@ -5,6 +5,7 @@ import type {
   ThreadContextRecord,
   UserInputQuestion,
 } from "@t3tools/contracts";
+import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import {
   projectComposerContextForProvider,
   replaceComposerContextReferences,
@@ -54,15 +55,18 @@ export function projectPendingUserInputAnswer(
   answer: unknown,
   records: ReadonlyArray<AnswerContextRecord>,
 ) {
-  if (typeof answer !== "string" || records.length === 0) return answer;
+  if (typeof answer !== "string") return answer;
+  if (records.length === 0) return expandAssistantCitationsForProvider(answer);
   const recordsById = new Map(records.map((record) => [record.contextId, record]));
-  return replaceComposerContextReferences(answer, (reference) => {
-    const record = recordsById.get(reference.contextId);
-    if (record?.kind !== reference.kind) return reference.source;
-    return record.kind === "thread"
-      ? formatThreadLink(record, reference.label)
-      : projectComposerContextForProvider({ text: reference.source, records: [record] });
-  });
+  return expandAssistantCitationsForProvider(
+    replaceComposerContextReferences(answer, (reference) => {
+      const record = recordsById.get(reference.contextId);
+      if (record?.kind !== reference.kind) return reference.source;
+      return record.kind === "thread"
+        ? formatThreadLink(record, reference.label)
+        : projectComposerContextForProvider({ text: reference.source, records: [record] });
+    }),
+  );
 }
 
 // Question drafts retain deleted chip records for undo; only transfer referenced records.
