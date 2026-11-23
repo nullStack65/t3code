@@ -253,7 +253,7 @@ const ThreadListTool = Tool.make("t3_thread_list", {
 
 const ThreadReadTool = Tool.make("t3_thread_read", {
   description:
-    "Read latest first: `messages` (default) or `activity` (all). Older: `beforePosition=earlierPosition`. From start: `afterPosition=-1`, then `nextPosition`. Resume text: `itemId`, `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. Cite its exact `link`.",
+    "Newest first: `messages` (default) or `activity` (all). Older: `beforePosition=earlierPosition`. From start: `afterPosition=-1`, then `nextPosition`. Resume text: `itemId`, `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. Reply with `link` verbatim.",
   parameters: OrchestratorMcpThreadReadInput,
   success: OrchestratorMcpThreadReadResult,
   failure: OrchestratorMcpFailure,
