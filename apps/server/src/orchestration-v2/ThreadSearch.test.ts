@@ -138,7 +138,10 @@ const message = (
     readonly createdBy?: "user" | "agent" | "system";
     readonly runId?: RunId;
     readonly extra?: Partial<
-      Pick<ConversationMessage, "sentBy" | "senderThreadId" | "linkedSender" | "creationSource">
+      Pick<
+        ConversationMessage,
+        "sentBy" | "senderThreadId" | "linkedSender" | "creationSource" | "humanNote"
+      >
     >;
   } = {},
 ): OrchestrationV2DomainEvent => ({
@@ -298,7 +301,7 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       for (const match of ['"needle"', null]) {
         const plan = yield* sql<{
           readonly detail: string;
-        }>`EXPLAIN QUERY PLAN ${ThreadSearch.messageHitsQuery(sql, { match, substrings: "[]", shortSpellings: "[]", projectId: null, excludedThreadIds: "[]", sender: null })}`;
+        }>`EXPLAIN QUERY PLAN ${ThreadSearch.messageHitsQuery(sql, { match, substrings: "[]", shortSpellings: "[]", projectId: null, excludedThreadIds: "[]", sender: null, includeHumanNotes: true })}`;
         assert.isFalse(
           plan.some((row) => row.detail.includes("TEMP B-TREE")),
           plan.map((row) => row.detail).join("\n"),
@@ -1315,6 +1318,9 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
           thread(messageOnly, project),
           // The oldest message, so a cut taken before titles drop would lose it.
           message(messageOnly, "petrel-old", "user", "a petrel note", { minute: 1 }),
+          message(messageOnly, "private-note", "user", "synthetic private albatross", {
+            extra: { humanNote: true },
+          }),
           ...Array.from({ length: 50 }, (_, index) => {
             const id = ThreadId.make(`thread:petrel-${index}`);
             return [
@@ -1326,6 +1332,8 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         projections.apply,
         { discard: true },
       );
+      assert.lengthOf((yield* search.search({ query: "albatross" })).matches, 1);
+      assert.deepEqual((yield* search.searchThreads({ query: "albatross" })).matches, []);
       const { matches } = yield* search.searchThreads({ query: "petrel", limit: 5 });
       assert.include(
         matches.map((match) => match.threadId),

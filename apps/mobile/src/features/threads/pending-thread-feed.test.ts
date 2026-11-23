@@ -5,13 +5,17 @@ import {
   EnvironmentId,
   MessageId,
   ProjectId,
+  RunId,
+  type OrchestrationV2ProjectedTurnItem,
   ThreadId,
 } from "@t3tools/contracts";
+import type { ThreadFeedEntry } from "../../lib/threadActivity";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import {
   appendAcceptedThreadMessages,
   appendPendingThreadMessages,
   createThreadFeedGrouping,
+  foldThreadFeedActivity,
   isCompactionCommandFeedEntry,
   selectPendingAcknowledgedMessages,
 } from "./pending-thread-feed";
@@ -27,6 +31,97 @@ const pending = (id: string): QueuedThreadMessage => ({
 });
 
 describe("pending timeline messages", () => {
+  it("reveals a message jump inside chatter and never hides a note", () => {
+    const [first, second, third] = appendPendingThreadMessages(
+      [],
+      [],
+      [pending("before"), pending("note"), pending("after")],
+    );
+    if (first?.type !== "message" || second?.type !== "message" || third?.type !== "message") {
+      throw new Error("Expected message rows");
+    }
+    const rows = [
+      { ...first, message: { ...first.message, createdBy: "agent" as const } },
+      { ...second, message: { ...second.message, humanNote: true as const } },
+      { ...third, message: { ...third.message, createdBy: "agent" as const } },
+    ];
+    const options = { open: {}, dismissed: new Map(), latestRun: null };
+    const folded = foldThreadFeedActivity(rows, rows, { ...options, revealedMessageId: null });
+    expect(folded.map((row) => row.type)).toEqual(["activity-fold", "message", "activity-fold"]);
+    expect(folded[1]).toBe(rows[1]);
+    expect(
+      foldThreadFeedActivity(rows, rows, {
+        ...options,
+        revealedMessageId: first.id,
+      }).map((row) => row.type),
+    ).toEqual(["activity-fold", "message", "message", "activity-fold"]);
+  });
+
+  it("reveals the decision run after an intervening agent reply", () => {
+    const makeMessage = (
+      id: string,
+      runId: RunId,
+      role: "user" | "assistant",
+      createdAt: string,
+    ) => {
+      const row = appendPendingThreadMessages([], [], [pending(id)])[0];
+      if (row?.type !== "message") throw new Error("Expected message");
+      return {
+        ...row,
+        createdAt,
+        message: { ...row.message, role, runId, createdBy: "agent" as const },
+      };
+    };
+    const origin = RunId.make("origin");
+    const unrelated = RunId.make("unrelated");
+    const requestedAt = "2026-09-06T10:00:01.000Z";
+    const request = {
+      type: "activity-group",
+      id: "decision-request",
+      createdAt: requestedAt,
+      runId: origin,
+      activities: [
+        {
+          createdAt: requestedAt,
+          projectedItem: {
+            item: {
+              runId: origin,
+              type: "dynamic_tool",
+              status: "completed",
+              toolName: "t3_thread_update",
+              input: { action: "request_decision" },
+              startedAt: null,
+            },
+          } as OrchestrationV2ProjectedTurnItem,
+        },
+      ],
+    } as unknown as ThreadFeedEntry;
+    const rows = [
+      makeMessage("other-input", unrelated, "user", "2026-09-06T10:00:00.000Z"),
+      makeMessage("unrelated-reply", unrelated, "assistant", "2026-09-06T10:00:02.000Z"),
+      {
+        ...makeMessage("founder-turn", origin, "user", requestedAt),
+        message: {
+          ...makeMessage("founder-turn", origin, "user", requestedAt).message,
+          runId: null,
+          createdBy: "user" as const,
+        },
+      },
+      makeMessage("origin-input", origin, "user", "2026-09-06T10:00:00.000Z"),
+      request,
+      makeMessage("founder-decision", origin, "assistant", "2026-09-06T10:00:03.000Z"),
+    ];
+    const folded = foldThreadFeedActivity(rows, rows, {
+      open: {},
+      dismissed: new Map(),
+      revealedMessageId: null,
+      latestRun: null,
+      decisionRequestedAt: requestedAt,
+    });
+    expect(folded.map(({ id }) => id)).toContain("decision-request");
+    expect(folded.map(({ id }) => id)).toContain("founder-decision");
+  });
+
   it("keeps unchanged row identities while text streams and updates adjacent grouping", () => {
     const group = createThreadFeedGrouping();
     const [first, second, third] = appendPendingThreadMessages(

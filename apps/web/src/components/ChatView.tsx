@@ -1872,8 +1872,6 @@ export default function ChatView(props: ChatViewProps) {
       selectThreadPanelOpen(state.threadPanelVisibilityByThreadKey, activeThreadRef, "inline"),
   );
   const isStandingBot = activeStanding !== null;
-  // A coordinator thread buries the founder under agent relays, so those collapse
-  // until he asks for everything. Remembered per thread; ordinary threads stay flat.
   const [activityCollapsedThreads, setActivityCollapsedThreads] = useLocalStorage(
     "t3code:activity-collapsed-threads",
     null,
@@ -2029,6 +2027,22 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
+  const promoteNoteStable = useStableCallback(async (noteId: MessageId) => {
+    if (!isServerThread || activeThreadId === null) {
+      throw new Error("This thread is unavailable.");
+    }
+    const result = await startThreadTurn({
+      environmentId,
+      input: {
+        threadId: activeThreadId,
+        promoteNoteId: noteId,
+        message: { messageId: newMessageId(), role: "user", text: "", attachments: [] },
+        runtimeMode,
+        interactionMode: serverThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
+      },
+    });
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+  });
   const onCatchUp = useStableCallback(async (marker: ThreadSeenMarker) => {
     if (!isServerThread || activeThreadId === null) return false;
     const result = await startThreadTurn({
@@ -3519,7 +3533,7 @@ export default function ChatView(props: ChatViewProps) {
               standing={activeStanding}
               botAvatarState={activeBotAvatarState}
               activityCollapsed={
-                isStandingBot && activeThreadKey !== null
+                isServerThread && activeThreadKey !== null
                   ? { on: activityCollapsed, onToggle: toggleActivityCollapsed }
                   : null
               }
@@ -3580,7 +3594,11 @@ export default function ChatView(props: ChatViewProps) {
                   entriesInput={timelineEntriesInput}
                   draftEntries={isServerThread ? null : draftTimelineEntries}
                   activeThreadKey={activeThreadKey}
-                  collapseActivity={isStandingBot && activityCollapsed}
+                  collapseActivity={activityCollapsed}
+                  includeOtherActivity={isStandingBot}
+                  decisionRequestedAt={
+                    activeThreadShell?.source.inbox?.decisionRequest?.requestedAt
+                  }
                   sharedThread={activeThreadShell?.source.inbox?.audience === "shared"}
                   syncing={threadSyncPhase !== null}
                   detailLoading={threadDetailLoading}
@@ -3648,6 +3666,7 @@ export default function ChatView(props: ChatViewProps) {
                   onRevertToTurnCount={onRevertTimelineTurnStable}
                   onUseArtifactTemplate={insertArtifactTemplateStable}
                   onSendAppMessage={sendAppMessageStable}
+                  onPromoteNote={isServerThread && canOperateThread ? promoteNoteStable : undefined}
                   isRevertingCheckpoint={isRevertingCheckpoint}
                   onImageExpand={onExpandTimelineImageStable}
                   onFileOpen={openFileAttachmentStable}

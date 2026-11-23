@@ -137,6 +137,9 @@ export function historicalMessage(
   let text: string;
   switch (item.type) {
     case "user_message":
+      if (item.humanNote) return null;
+      text = item.text;
+      break;
     case "assistant_message":
       text = item.text;
       break;

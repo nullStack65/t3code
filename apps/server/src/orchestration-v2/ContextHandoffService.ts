@@ -209,7 +209,7 @@ export const readForkHistoryItems = Effect.fn(
 function summarizeDeltaItem(item: OrchestrationV2TurnItem): string | null {
   switch (item.type) {
     case "user_message":
-      return `- User: ${compactText(item.text)}`;
+      return item.humanNote ? null : `- User: ${compactText(item.text)}`;
     case "assistant_message":
       return `- Assistant: ${compactText(item.text)}`;
     case "command_execution":
@@ -290,7 +290,7 @@ function makeLegacyImportSummary(items: ReadonlyArray<OrchestrationV2TurnItem>):
   const sections = items.flatMap((item) => {
     switch (item.type) {
       case "user_message":
-        return [{ label: "User", body: item.text }];
+        return item.humanNote ? [] : [{ label: "User", body: item.text }];
       case "assistant_message":
         return [{ label: "Assistant", body: item.text }];
       default:

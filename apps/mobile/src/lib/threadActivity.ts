@@ -59,6 +59,7 @@ import type {
   ScheduledTaskId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { settledChatActivityTaskIds } from "@t3tools/client-runtime/chat-activity";
 import { idleCompactionOf, isCompactionCommandMessage, RunId, ThreadId } from "@t3tools/contracts";
 import {
   classifyToolActivity,
@@ -148,6 +149,8 @@ export interface ThreadFeedMessage {
   /** The signed-in client a person sent it from, stamped by the server. */
   readonly sentBy?: import("@t3tools/contracts").OrchestrationV2MessageSentBy;
   readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
+  readonly humanNote?: true;
+  readonly humanNotePromoted?: true;
   readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
   readonly sourceThreadId: ThreadId;
   readonly createdAt: string;
@@ -227,6 +230,7 @@ type ThreadFeedEntryContent =
       readonly createdAt: string;
       readonly runId: RunId | null;
       readonly groupId: string;
+      readonly settledTaskIds?: ReadonlyArray<string>;
       readonly hiddenCount: number;
       readonly expanded: boolean;
       readonly summary: string;
@@ -249,6 +253,7 @@ type ThreadFeedEntryContent =
     }
   | {
       readonly type: "run-fold";
+      readonly settledTaskIds?: ReadonlyArray<string>;
       readonly deferredWorkItemIds?: ReadonlyArray<string>;
       readonly id: string;
       readonly createdAt: string;
@@ -1040,7 +1045,11 @@ function threadFeedActivityIsVisible(
   );
 }
 
+const settledTaskIdsInActivity = (activities: ReadonlyArray<ThreadFeedActivity>) =>
+  activities.flatMap(({ projectedItem }) => settledChatActivityTaskIds(projectedItem.item));
+
 interface ThreadFeedRunFold {
+  readonly settledTaskIds?: ReadonlyArray<string>;
   readonly deferredWorkItemIds?: ReadonlyArray<string>;
   readonly runId: RunId;
   readonly createdAt: string;
@@ -1335,7 +1344,13 @@ function deriveThreadFeedRunFolds(
             )
           : [],
       );
+      const settledTaskIds = segment.entries.flatMap((entry) =>
+        entry.type === "activity-group" && hiddenEntryIds.has(entry.id)
+          ? settledTaskIdsInActivity(entry.activities)
+          : [],
+      );
       foldsByAnchorId.set(firstHiddenEntry.id, {
+        ...(settledTaskIds.length > 0 ? { settledTaskIds } : {}),
         ...(deferredWorkItemIds.length > 0 ? { deferredWorkItemIds } : {}),
         runId: segment.runId,
         createdAt: firstHiddenEntry.createdAt,
@@ -1355,7 +1370,9 @@ function deriveThreadFeedRunFolds(
       activity.projectedItem.item.deferredWork ? [String(activity.projectedItem.sourceItemId)] : [],
     );
     if (deferredWorkItemIds.length === 0) continue;
+    const settledTaskIds = settledTaskIdsInActivity(entry.activities);
     foldsByAnchorId.set(entry.id, {
+      ...(settledTaskIds.length > 0 ? { settledTaskIds } : {}),
       runId: RunId.make(`deferred-work:${entry.id}`),
       createdAt: entry.createdAt,
       hiddenEntryIds: new Set([entry.id]),
@@ -1750,11 +1767,13 @@ export function deriveThreadFeedPresentation(
         row.createdAt !== fold.createdAt ||
         row.label !== fold.label ||
         row.expanded !== expanded ||
+        row.settledTaskIds?.join("|") !== fold.settledTaskIds?.join("|") ||
         row.deferredWorkItemIds?.join("|") !== fold.deferredWorkItemIds?.join("|")
       ) {
         row = {
           type: "run-fold",
           id: `run-fold:${fold.runId}`,
+          ...(fold.settledTaskIds ? { settledTaskIds: fold.settledTaskIds } : {}),
           ...(fold.deferredWorkItemIds ? { deferredWorkItemIds: fold.deferredWorkItemIds } : {}),
           createdAt: fold.createdAt,
           runId: fold.runId,
@@ -2172,8 +2191,10 @@ function appendToolGroupRows(
   const summaryToolIcon = live
     ? resolveWorkEntryToolPresentation(latestActivity.workEntry)?.icon
     : undefined;
+  const settledTaskIds = settledTaskIdsInActivity(activities);
   result.push({
     type: "work-toggle",
+    ...(settledTaskIds.length > 0 ? { settledTaskIds } : {}),
     id,
     createdAt: sourceGroup.createdAt,
     runId: sourceGroup.runId,
@@ -2503,6 +2524,8 @@ export function buildThreadFeed(
                 ...(item.linkedSender ? { linkedSender: item.linkedSender } : {}),
                 ...(item.sentBy ? { sentBy: item.sentBy } : {}),
                 ...(item.idleCompaction ? { idleCompaction: item.idleCompaction } : {}),
+                ...(item.humanNote ? { humanNote: true as const } : {}),
+                ...(item.humanNotePromoted ? { humanNotePromoted: true as const } : {}),
               }
             : {}),
           visibility: row.visibility,

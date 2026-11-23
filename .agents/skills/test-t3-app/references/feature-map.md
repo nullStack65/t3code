@@ -80,6 +80,8 @@ Code: apps/web/src/components/chat/MessagesTimeline.tsx
 
 - **timeline.user-message** — your messages, with sender line and "Copy message".
 - **timeline.assistant-reply** — agent replies with markdown, code blocks, math, Mermaid, file and thread links.
+- **timeline.agent-activity** — collapsed agent updates. Open the strip to read the original messages and work.
+- **timeline.human-note** — model-hidden note with "Promote to agent" to send its text in a separate turn.
 - **timeline.work-group** — collapsed tool calls and commands; "Show more" / "Show less".
 - **timeline.approval** — "Command approval", "File change approval", "File read approval", "Permission request": "Approve", "Decline", "Always allow this session", "More approval options".
 - **timeline.user-input** — agent questions: "Type your answer", "Previous question" / "Next question", "Submit answer" (one question) or "Submit answers".
