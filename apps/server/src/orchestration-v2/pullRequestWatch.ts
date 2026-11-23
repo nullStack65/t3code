@@ -38,7 +38,7 @@ const isFailedCheck = (check: PullRequestCheck) =>
 const workflowRunOf = (url: string | null) => url?.match(/^.*\/actions\/runs\/\d+/)?.[0] ?? null;
 const approvalKey = (check: PullRequestCheck) => workflowRunOf(check.url) ?? check.name;
 
-const stalenessOf = (watch: ThreadPullRequestWatch) =>
+export const pullRequestWatchStaleness = (watch: ThreadPullRequestWatch) =>
   watch.staleness ?? {
     staleTimeoutMs: PR_WATCH_STALE_MINUTES * 60_000,
     lastProgressAt: watch.startedAt,
@@ -51,7 +51,7 @@ export function stalePullRequestWatch(
   now: number,
   hostObservation: "current" | "unavailable",
 ): { readonly next: ThreadPullRequestWatch; readonly wake: PullRequestWatchWake } | undefined {
-  const staleness = stalenessOf(watch);
+  const staleness = pullRequestWatchStaleness(watch);
   const idleMs = now - Date.parse(staleness.lastProgressAt);
   if (staleness.alerted || idleMs < staleness.staleTimeoutMs) return;
   const idleMinutes = Math.floor(idleMs / 60_000);
@@ -269,7 +269,7 @@ export function evaluatePullRequestWatch(
   const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
-  const previous = stalenessOf(watch);
+  const previous = pullRequestWatchStaleness(watch);
   const checkState =
     unread || (checks.length === 0 && !headMoved && previous.checks?.length)
       ? previous.checks

@@ -1110,6 +1110,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   /** Set from the run that produced `result`; informs the parent and takes no action. */
   workerAlert: Schema.optional(OrchestrationV2WorkerAlert),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  waitedBeforeRecovery: Schema.optional(Schema.Literal(true)),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   // The run whose unfinished task was cancelled, committed with its Stop.
   cancelledRunId: Schema.optional(RunId),
@@ -3901,11 +3902,14 @@ const OrchestrationV2InternalCommand = Schema.Union([
         kind: ThreadStalenessWait.fields.kind,
         taskIds: Schema.Array(Schema.String),
         staleTimeoutMs: PositiveInt,
+        providerThreadId: Schema.optional(ProviderThreadId),
+        onlyIfMissing: Schema.optional(Schema.Literal(true)),
       }),
       Schema.Struct({
         type: Schema.Literal("clear"),
         kind: ThreadStalenessWait.fields.kind,
         taskIds: Schema.Array(Schema.String),
+        registeredBy: Schema.optional(CommandId),
       }),
       Schema.Struct({
         type: Schema.Literal("remote-progress"),

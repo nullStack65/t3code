@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { CommandId, ProviderThreadId } from "./baseSchemas.ts";
 
 export const StaleTimeoutMinutes = Schema.optional(Schema.Finite).annotate({
   description: "Idle timeout in minutes. Clamped to 5–1440 minutes.",
@@ -13,6 +14,9 @@ export const ThreadStalenessWait = Schema.Struct({
   taskId: Schema.String,
   staleTimeoutMs: Schema.Int,
   lastProgressAtMs: Schema.Finite,
+  providerThreadId: Schema.optional(ProviderThreadId),
+  backgroundObserved: Schema.optional(Schema.Literal(true)),
+  registeredBy: Schema.optional(CommandId),
   remoteHeld: Schema.optional(Schema.Boolean),
   alerted: Schema.optional(Schema.Literal(true)),
 });

@@ -1,3 +1,15 @@
+import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
+import { makeThreadInbox } from "@t3tools/contracts";
+import * as HttpClient from "effect/http/HttpClient";
+import * as ModelAlertReactor from "./ModelAlertReactor.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as McpToolAccessTestkit from "../mcp/McpToolAccess.testkit.ts";
+import * as PullRequestsHandlers from "../mcp/toolkits/pullRequests/handlers.ts";
+import { PullRequestsToolkit } from "../mcp/toolkits/pullRequests/tools.ts";
+import * as PullRequestWatchService from "../pullRequest/PullRequestWatchService.ts";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
@@ -4739,6 +4751,554 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  const makeDeadlineSweep = ModelAlertReactor.make.pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        layerServerConfig,
+        ServerSettings.layerTest(),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("deadline-test")),
+        }),
+        Layer.mock(PeerMcpClient.PeerMcpClient)({}),
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("unexpected webhook")),
+        ),
+      ).pipe(Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer))),
+    ),
+  );
+
+  const startDeadlineParent = Effect.fnUntraced(function* (name: string) {
+    const engine = yield* Orchestrator.OrchestratorV2;
+    const { threadId, key, watch } = yield* createWatchedThread(name);
+    yield* engine.dispatch({
+      type: "message.dispatch",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: CommandId.make(`${threadId}:start`),
+      threadId,
+      messageId: MessageId.make(`${threadId}:start`),
+      text: "Wait for work.",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+    });
+    const {
+      runs: [run],
+      providerThreads: [provider],
+    } = yield* engine.getThreadRecords(threadId, ["runs", "providerThreads"]);
+    assert.isDefined(run);
+    assert.isDefined(provider);
+    return { threadId, key, watch, run, provider };
+  });
+
+  it.effect(
+    "delivers a deadline notice to a permanently active parent through the real sweep",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const { threadId, run } = yield* startDeadlineParent("hung-deadline");
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:running`),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+          ],
+        });
+        yield* engine.dispatch({
+          type: "delegated_task.remote.request",
+          commandId: CommandId.make(`${threadId}:delegate`),
+          parentThreadId: threadId,
+          parentRunId: run.id,
+          parentNodeId: run.rootNodeId!,
+          task: "Work in the linked environment.",
+          driver: ProviderDriverKind.make("remote"),
+          modelSelection,
+          completionWake: "settled_only",
+          staleTimeoutMs: 5 * 60_000,
+          remoteChild: {
+            environmentId: EnvironmentId.make("child-env"),
+            threadId: ThreadId.make("child-thread"),
+            label: "Child",
+          },
+        });
+        const reactor = yield* makeDeadlineSweep;
+        yield* TestClock.adjust("5 minutes");
+        const afterSequence = yield* engine.getThreadEventSequence(threadId);
+        yield* reactor.sweep;
+        const read = yield* engine.getThreadRecords(threadId, ["runs", "turnItems", "messages"]);
+        assert.deepEqual(
+          read.runs.map(({ id, status }) => [id, status]),
+          [[run.id, "running"]],
+        );
+        const notices = read.turnItems.filter(
+          (item) => item.type === "system_notice" && item.message.includes("wait_stale_timeout"),
+        );
+        assert.lengthOf(notices, 1);
+        const timeline = yield* engine.getTimelinePage(threadId, { view: "activity", limit: 20 });
+        assert.isTrue(timeline.items.some(({ item }) => item.id === notices[0]?.id));
+        const delivered = yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" &&
+              stored.event.payload.id === notices[0]?.id,
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        assert.lengthOf(delivered, 1);
+        assert.lengthOf(read.messages, 1);
+        yield* TestClock.adjust("1 hour");
+        yield* reactor.sweep;
+        assert.lengthOf(
+          (yield* engine.getThreadRecords(threadId, ["turnItems"])).turnItems.filter(
+            (item) => item.type === "system_notice" && item.message.includes("wait_stale_timeout"),
+          ),
+          1,
+        );
+      }),
+  );
+
+  it.effect.each(["claudeAgent", "opencode"] as const)(
+    "discovers legacy ordinary %s background work and preserves a delayed explicit deadline across replay",
+    (driver) =>
+      Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const replay = yield* ProjectionReplay.ProjectionReplay;
+        const { threadId, provider } = yield* startDeadlineParent(`legacy-${driver}`);
+        const now = yield* DateTime.now;
+        const roster = (suffix: string, tasks: typeof provider.pendingBackgroundTasks) =>
+          sink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}:${suffix}`),
+                type: "provider-thread.updated",
+                threadId,
+                driver: ProviderDriverKind.make(driver),
+                providerInstanceId: provider.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...provider,
+                  driver: ProviderDriverKind.make(driver),
+                  ...(tasks === undefined ? {} : { pendingBackgroundTasks: tasks }),
+                },
+              },
+            ],
+          });
+        const legacy = { taskId: "legacy", kind: "command", awaited: true } as const;
+        yield* roster("legacy", [legacy]);
+        assert.include(yield* projection.listStalenessWaitThreads, threadId);
+        const sweep = yield* makeDeadlineSweep;
+        yield* sweep.sweep;
+        const prepare = {
+          type: "thread.wait-staleness.update",
+          threadId,
+          commandId: CommandId.make(`${threadId}:prepare`),
+          operation: {
+            type: "register",
+            kind: "background",
+            taskIds: ["delayed"],
+            staleTimeoutMs: 5 * 60_000,
+          },
+        } as const;
+        // The same command can be replayed after the provider call did not return to MCP.
+        yield* engine.dispatch(prepare);
+        assert.isTrue((yield* replay.rebuild).valid);
+        yield* engine.dispatch(prepare);
+        yield* TestClock.adjust("2 minutes");
+        yield* sweep.sweep;
+        yield* roster("delayed", [legacy, { taskId: "delayed", kind: "command", awaited: true }]);
+        yield* TestClock.adjust("3 minutes");
+        yield* sweep.sweep;
+        const read = yield* engine.getThreadRecords(threadId, ["turnItems"]);
+        assert.deepEqual(
+          read.thread.stalenessWaits?.map(({ taskId, staleTimeoutMs, alerted }) => [
+            taskId,
+            staleTimeoutMs,
+            alerted,
+          ]),
+          [
+            ["legacy", 45 * 60_000, undefined],
+            ["delayed", 5 * 60_000, true],
+          ],
+        );
+        assert.include(
+          read.turnItems
+            .flatMap((item) => (item.type === "system_notice" ? [item.message] : []))
+            .join(" "),
+          '"taskId":"delayed"',
+        );
+        yield* roster("cancelled", []);
+        yield* TestClock.adjust("1 minute");
+        yield* sweep.sweep;
+        assert.deepEqual((yield* engine.getThreadRecords(threadId, [])).thread.stalenessWaits, []);
+      }),
+  );
+
+  it.effect("rebuilds a queued group from the children still stale at delivery", () =>
+    Effect.gen(function* () {
+      const engine = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const { threadId, run } = yield* startDeadlineParent("queued-stale-group");
+      for (const name of ["done", "held", "progress", "quiet"]) {
+        const child = yield* createWatchedThread(`queued-child-${name}`);
+        yield* engine.dispatch({
+          type: "delegated_task.remote.request",
+          commandId: CommandId.make(`${threadId}:${name}`),
+          parentThreadId: threadId,
+          parentRunId: run.id,
+          parentNodeId: run.rootNodeId!,
+          task: name,
+          driver: ProviderDriverKind.make("remote"),
+          modelSelection,
+          completionWake: "settled_only",
+          staleTimeoutMs: 5 * 60_000,
+          remoteChild: {
+            environmentId: EnvironmentId.make("child-env"),
+            threadId: child.threadId,
+            label: name,
+          },
+        });
+      }
+      const { thread, subagents } = yield* engine.getThreadRecords(threadId, ["subagents"]);
+      const waits = thread.stalenessWaits!;
+      yield* TestClock.adjust("5 minutes");
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:marks`),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            providerInstanceId: thread.providerInstanceId,
+            payload: {
+              ...thread,
+              stalenessWaits: waits.map((wait) => ({ ...wait, alerted: true })),
+            },
+          },
+          ...subagents.map((task): OrchestrationV2DomainEvent => ({
+            id: EventId.make(`${task.id}:local`),
+            type: "subagent.updated",
+            threadId,
+            runId: run.id,
+            nodeId: task.id,
+            providerInstanceId: task.providerInstanceId,
+            driver: task.driver,
+            occurredAt: now,
+            payload:
+              task.prompt === "done"
+                ? { ...task, result: "done", status: "completed" }
+                : { ...task, remoteChild: undefined, childThreadId: task.remoteChild!.threadId },
+          })),
+        ],
+      });
+      const messageId = MessageId.make(`${threadId}:queued`);
+      yield* engine.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "server",
+        commandId: CommandId.make(`${threadId}:queued`),
+        threadId,
+        messageId,
+        text: "Original grouped notice: done, held, progress, quiet",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        notification: {
+          source: {
+            kind: "monitor",
+            staleWaits: waits.map(({ taskId, kind, lastProgressAtMs }) => ({
+              taskId,
+              kind,
+              lastProgressAtMs,
+            })),
+          },
+          outcome: "updated",
+          summary: "No progress on 4 waits",
+        },
+      });
+      const childId = (name: string) =>
+        subagents.find((task) => task.prompt === name)!.remoteChild!.threadId;
+      yield* engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make(`${threadId}:snooze`),
+        threadId: childId("held"),
+        snoozedUntil: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+      });
+      yield* engine.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:child-progress`),
+        threadId: childId("progress"),
+        messageId: MessageId.make(`${threadId}:child-progress`),
+        text: "Child resumes work.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      });
+      const afterSequence = yield* engine.getThreadEventSequence(threadId);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:end`),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: { ...run, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          ({ event }) =>
+            event.type === "run.updated" &&
+            event.payload.userMessageId === messageId &&
+            event.payload.status === "starting",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+      const { messages } = yield* engine.getThreadRecords(threadId, ["messages"]);
+      const delivered = messages.find((message) => message.id === messageId);
+      assert.equal(delivered?.notification?.summary, "No progress on one wait");
+      assert.include(delivered?.text, subagents.find((task) => task.prompt === "quiet")!.id);
+      for (const task of subagents.filter((task) => task.prompt !== "quiet"))
+        assert.notInclude(delivered?.text, task.id);
+    }),
+  );
+
+  it.effect.each([false, true])(
+    "updates an existing PR watch timeout through MCP (legacy=%s)",
+    (legacy) =>
+      Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const { threadId, key, watch } = yield* createWatchedThread(`repeat-watch-${legacy}`);
+        const { staleness: _, ...oldWatch } = watch;
+        const baseline = {
+          ...oldWatch,
+          headSha: "head-offline",
+          failedChecks: ["test"],
+          remarkIds: ["remark-offline"],
+        };
+        const staleness = {
+          staleTimeoutMs: 17 * 60_000,
+          lastProgressAt: watch.startedAt,
+          alerted: true as const,
+        };
+        yield* engine.dispatch({
+          type: "thread.pull-request-watch.sync",
+          commandId: CommandId.make(`${threadId}:baseline`),
+          threadId,
+          ...key,
+          startedAt: watch.startedAt,
+          watch: legacy ? baseline : { ...baseline, staleness },
+        });
+        const read = engine
+          .getThreadShell(threadId)
+          .pipe(Effect.map((shell) => shell?.pullRequests?.[0]?.watch));
+        const dependencies = Layer.mergeAll(
+          Layer.succeed(Orchestrator.OrchestratorV2, engine),
+          Layer.mock(ProjectService.ProjectService)({ getShell: () => Effect.succeedNone }),
+          Layer.mock(PullRequestService.PullRequestService)({}),
+          Layer.mock(PullRequestReviewGuideService.PullRequestReviewGuideService)({}),
+          McpToolAccessTestkit.liveThreadsLayer,
+          NodeCrypto.layer,
+        );
+        const watchDependencies = PullRequestWatchService.layer.pipe(
+          Layer.provideMerge(dependencies),
+        );
+        const toolkit = yield* PullRequestsToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(PullRequestsHandlers.layer).pipe(
+              Layer.provide(watchDependencies),
+            ),
+          ),
+        );
+        const call = (minutes?: number) =>
+          toolkit
+            .handle("watch_pull_request", {
+              threadId,
+              url: `https://github.com/${key.repository}/pull/${key.number}`,
+              ...(minutes === undefined ? {} : { staleTimeoutMinutes: minutes }),
+            })
+            .pipe(
+              Stream.unwrap,
+              Stream.runCollect,
+              Effect.provideService(McpInvocationContext.McpInvocationContext, {
+                environmentId: EnvironmentId.make("repeat-watch"),
+                requestNamespace: "repeat-watch",
+                capabilities: new Set<McpInvocationContext.McpCapability>(["pull-requests"]),
+                issuedAt: 0,
+                thread: {
+                  threadId,
+                  providerSessionId: "test",
+                  providerInstanceId: modelSelection.instanceId,
+                },
+                client: undefined,
+              }),
+              Effect.provide(watchDependencies),
+            );
+        yield* call(8);
+        const expected = {
+          ...baseline,
+          staleness: {
+            lastProgressAt: watch.startedAt,
+            staleTimeoutMs: 8 * 60_000,
+            ...(legacy ? {} : { alerted: true as const }),
+          },
+        };
+        assert.deepEqual(yield* read, expected);
+        yield* call();
+        assert.deepEqual(yield* read, expected);
+      }),
+  );
+
+  it.effect.each(["snooze", "decision"] as const)(
+    "continues PR tracking during %s and sends other due notices before a slow probe",
+    (hold) =>
+      Effect.gen(function* () {
+        const engine = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const delayed = yield* createWatchedThread(`slow-${hold}`);
+        const quiet = yield* createWatchedThread(`held-${hold}`);
+        const fast = yield* createWatchedThread(`fast-${hold}`);
+        for (const { threadId, key, watch } of [delayed, quiet, fast]) {
+          // Use independent host groups with recognizable, negative-free fixtures.
+          yield* engine.dispatch({
+            type: "thread.pull-request.watch",
+            commandId: CommandId.make(`${threadId}:unwatch`),
+            threadId,
+            ...key,
+            watching: false,
+          });
+          const number = threadId === delayed.threadId ? 21 : threadId === quiet.threadId ? 22 : 23;
+          yield* engine.dispatch({
+            type: "thread.pull-request.watch",
+            commandId: CommandId.make(`${threadId}:rewatch`),
+            threadId,
+            ...key,
+            number,
+            watching: true,
+            link: { url: `https://github.com/${key.repository}/pull/${number}`, source: "agent" },
+            staleTimeoutMs: 5 * 60_000,
+          });
+          yield* engine.dispatch({
+            type: "thread.pull-request-watch.sync",
+            commandId: CommandId.make(`${threadId}:baseline`),
+            threadId,
+            ...key,
+            number,
+            startedAt: watch.startedAt,
+            watch: {
+              ...watch,
+              awaitingBaseline: "checks",
+              failedChecks: ["lint"],
+              headSha: "abc1234def",
+              staleness: { staleTimeoutMs: 5 * 60_000, lastProgressAt: watch.startedAt },
+            },
+          });
+        }
+        yield* TestClock.adjust("5 minutes");
+        const entered = yield* Deferred.make<void>();
+        const releaseHeldRead = yield* Deferred.make<void>();
+        const releaseSlow = yield* Deferred.make<void>();
+        const host = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(PullRequestService.PullRequestService)({
+            watchFingerprint: (input) =>
+              (input.number === 21 ? Deferred.await(releaseSlow) : Effect.void).pipe(
+                Effect.as(null),
+              ),
+            detail: (input) =>
+              (input.number === 22
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseHeldRead)),
+                  )
+                : Effect.void
+              ).pipe(
+                Effect.as(
+                  watchedPullRequestDetail({
+                    projectId: input.projectId,
+                    number: input.number,
+                    at: quiet.watch.startedAt,
+                  }),
+                ),
+              ),
+            activity: () =>
+              Effect.succeed({
+                comments: [],
+                commentCount: 0,
+                commentsTruncated: false,
+                reviewThreads: [],
+                commits: [],
+              }),
+          }),
+        );
+        const reactor = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+        const pass = yield* reactor.sweep.pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        const now = yield* DateTime.now;
+        if (hold === "snooze") {
+          yield* engine.dispatch({
+            type: "thread.snooze",
+            commandId: CommandId.make(`${quiet.threadId}:hold`),
+            threadId: quiet.threadId,
+            snoozedUntil: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+          });
+        } else {
+          const { thread } = yield* engine.getThreadRecords(quiet.threadId, []);
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`${quiet.threadId}:hold`),
+                type: "thread.metadata-updated",
+                threadId: quiet.threadId,
+                providerInstanceId: thread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...thread,
+                  inbox: {
+                    ...(thread.inbox ?? makeThreadInbox({ actor: null })),
+                    decisionRequest: {
+                      founder: "kameron",
+                      kind: "decision",
+                      question: "Waiting for a decision",
+                      requestedAt: DateTime.formatIso(now),
+                    },
+                  },
+                },
+              },
+            ],
+          });
+        }
+        yield* Deferred.succeed(releaseHeldRead, undefined);
+        yield* TestClock.adjust("1 second");
+        const seenBeforeSlow = (yield* engine.getThreadRecords(fast.threadId, ["messages"]))
+          .messages;
+        yield* Deferred.succeed(releaseSlow, undefined);
+        yield* Fiber.join(pass);
+        const seen = yield* engine.getThreadRecords(quiet.threadId, ["messages"]);
+        assert.lengthOf(seen.messages, 0);
+        const tracked = seen.thread.pullRequests?.find((link) => link.number === 22)?.watch
+          ?.staleness;
+        assert.isDefined(tracked?.checks);
+        assert.isUndefined(tracked?.alerted);
+        assert.include(seenBeforeSlow[0]?.text, "pull_request_watch_stale_timeout");
+      }),
+  );
+
   it.effect.each([5, undefined])(
     "uses native task progress and clears the deadline when background work ends (%s minutes)",
     (customMinutes) =>
@@ -4813,10 +5373,15 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             operation: { type: "sweep" },
           });
         const notices = engine
-          .getThreadRecords(threadId, ["messages"])
+          .getThreadRecords(threadId, ["messages", "turnItems"])
           .pipe(
-            Effect.map(({ messages }) =>
-              messages.filter((message) => message.text.includes('"type":"wait_stale_timeout"')),
+            Effect.map(({ messages, turnItems }) =>
+              [
+                ...messages,
+                ...turnItems.flatMap((item) =>
+                  item.type === "system_notice" ? [{ text: item.message }] : [],
+                ),
+              ].filter((message) => message.text.includes('"type":"wait_stale_timeout"')),
             ),
           );
         yield* TestClock.adjust(`${minutes - 1} minutes`);
@@ -4836,14 +5401,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       }),
   );
 
-  it.effect(
-    "retains an awaited child deadline across replay and alerts once per quiet period",
-    () =>
+  it.effect.each([false, true])(
+    "retains an awaited child deadline across replay and alerts once per quiet period (legacy=%s)",
+    (legacy) =>
       Effect.gen(function* () {
         const engine = yield* Orchestrator.OrchestratorV2;
         const projection = yield* ProjectionStore.ProjectionStoreV2;
         const maintenance = yield* ProjectionReplay.ProjectionReplay;
-        const { threadId } = yield* createWatchedThread("delegate-stale");
+        const { threadId } = yield* createWatchedThread(`delegate-stale-${legacy}`);
         yield* engine.dispatch({
           type: "message.dispatch",
           createdBy: "agent",
@@ -4866,7 +5431,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           driver: ProviderDriverKind.make("remote"),
           modelSelection,
           completionWake: "settled_only",
-          staleTimeoutMs: 45 * 60_000,
+          ...(legacy ? {} : { staleTimeoutMs: 45 * 60_000 }),
           remoteChild: {
             environmentId: EnvironmentId.make("remote-env"),
             threadId: ThreadId.make("remote-thread"),
@@ -4883,10 +5448,15 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             operation: { type: "sweep" },
           });
         const notices = engine
-          .getThreadRecords(threadId, ["messages"])
+          .getThreadRecords(threadId, ["messages", "turnItems"])
           .pipe(
-            Effect.map(({ messages }) =>
-              messages.filter((message) => message.text.includes('"type":"wait_stale_timeout"')),
+            Effect.map(({ messages, turnItems }) =>
+              [
+                ...messages,
+                ...turnItems.flatMap((item) =>
+                  item.type === "system_notice" ? [{ text: item.message }] : [],
+                ),
+              ].filter((message) => message.text.includes('"type":"wait_stale_timeout"')),
             ),
           );
         yield* TestClock.adjust("44 minutes");

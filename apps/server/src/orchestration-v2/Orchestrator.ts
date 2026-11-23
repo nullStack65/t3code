@@ -98,7 +98,11 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { modelSwitchSince } from "./modelSwitch.ts";
 import { isPlaceholderThreadTitle } from "./placeholderThreadTitle.ts";
-import { combinePullRequestWatchWakes, type PullRequestWatchWake } from "./pullRequestWatch.ts";
+import {
+  combinePullRequestWatchWakes,
+  pullRequestWatchStaleness,
+  type PullRequestWatchWake,
+} from "./pullRequestWatch.ts";
 import { recordThreadOpen } from "@t3tools/shared/paletteSearch";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
@@ -929,9 +933,20 @@ function syncedPullRequestWatch(
   if (command.watch === null) return undefined;
   // A push cleared the answer while this read was in flight, so its answer is the old head's.
   if (command.checksPendingBefore === undefined || existing?.checksPending !== undefined) {
-    return command.watch;
+    return withCurrentWatchTimeout(existing, command.watch);
   }
-  return withoutChecksAnswer(command.watch);
+  return withoutChecksAnswer(withCurrentWatchTimeout(existing, command.watch));
+}
+
+function withCurrentWatchTimeout(
+  existing: ThreadPullRequestWatch | undefined,
+  incoming: ThreadPullRequestWatch,
+) {
+  if (incoming.staleness === undefined || existing?.staleness === undefined) return incoming;
+  return {
+    ...incoming,
+    staleness: { ...incoming.staleness, staleTimeoutMs: existing.staleness.staleTimeoutMs },
+  };
 }
 
 const withoutChecksAnswer = ({
@@ -1257,6 +1272,7 @@ function monitorPullRequestStamps(
 function isStalePullRequestWatchStamp(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
   stamp: MonitorPullRequestStamp,
+  held = false,
 ): boolean {
   const link = threadPullRequestsOf(projection.thread).find(
     (candidate) =>
@@ -1265,7 +1281,7 @@ function isStalePullRequestWatchStamp(
   if (link === undefined) return true;
   if (
     stamp.staleProgressAt !== undefined &&
-    link.watch?.staleness?.lastProgressAt !== stamp.staleProgressAt
+    (held || link.watch?.staleness?.lastProgressAt !== stamp.staleProgressAt)
   )
     return true;
   if (stamp.watchEnded === true) {
@@ -1296,52 +1312,59 @@ function isStalePullRequestWatchStamp(
   );
 }
 
-function isStaleBackgroundWaitWake(
-  projection: OrchestrationV2ThreadProjection,
-  run: OrchestrationV2Run,
-): boolean {
-  const source = projection.messages.find((message) => message.id === run.userMessageId)
-    ?.notification?.source;
-  if (source?.kind !== "monitor" || source.staleWaits === undefined) return false;
-  if (projection.thread.settledAt !== null || projection.thread.settledOverride === "settled")
-    return true;
-  return source.staleWaits.every((stamp) => {
-    const wait = projection.thread.stalenessWaits?.find(
-      (wait) => wait.kind === stamp.kind && wait.taskId === stamp.taskId,
-    );
-    if (wait?.lastProgressAtMs !== stamp.lastProgressAtMs || wait.remoteHeld === true) return true;
-    if (wait.kind === "background") {
-      return !projection.providerThreads
-        .find((provider) => provider.id === projection.thread.activeProviderThreadId)
-        ?.pendingBackgroundTasks?.some(
-          (task) =>
-            task.taskId === wait.taskId &&
-            task.awaited === true &&
-            (task.progressAtMs ?? 0) <= wait.lastProgressAtMs,
-        );
-    }
-    const task = projection.subagents.find((task) => task.id === wait.taskId);
-    return (
-      task === undefined ||
-      task.result !== null ||
-      task.completionDelivery?.state === "disposed" ||
-      task.status === "completed" ||
-      task.status === "failed" ||
-      task.status === "cancelled" ||
-      task.status === "interrupted"
-    );
-  });
+type StaleWait = {
+  taskId: string;
+  kind: ThreadStalenessWait["kind"];
+  state: string;
+  childLink?: string;
+  idleMinutes: number;
+  lastProgressAtMs: number;
+};
+
+const waitStaleNotice = Effect.fn("Orchestrator.waitStaleNotice")(function* (
+  stale: ReadonlyArray<StaleWait>,
+) {
+  const diagnostic = yield* encodeWaitStaleDiagnostic({
+    type: "wait_stale_timeout",
+    waits: stale.map(({ lastProgressAtMs: _, ...entry }) => entry),
+  }).pipe(Effect.orDie);
+  return {
+    text: `${diagnostic}\n\nCheck why this work is quiet. T3 Code keeps its normal completion wake armed and reports staleness again only after progress.`,
+    notification: {
+      source: {
+        kind: "monitor",
+        staleWaits: stale.map(({ kind, taskId, lastProgressAtMs }) => ({
+          kind,
+          taskId,
+          lastProgressAtMs,
+        })),
+      },
+      outcome: "updated",
+      summary: `No progress on ${stale.length === 1 ? "one wait" : `${stale.length} waits`}`,
+    } satisfies OrchestrationV2Notification,
+  };
+});
+
+function isOpenStalenessDelegate(task: OrchestrationV2Subagent): boolean {
+  return (
+    task.origin === "app_owned" &&
+    task.result === null &&
+    task.completionDelivery?.state !== "disposed" &&
+    (task.status === "pending" || task.status === "running" || task.status === "waiting")
+  );
 }
 
 function isStalePullRequestWatchWake(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
   run: OrchestrationV2Run,
+  held: boolean,
 ): boolean {
   const stamps = monitorPullRequestStamps(
     projection.messages.find((message) => message.id === run.userMessageId)?.notification?.source,
   );
   return (
-    stamps.length > 0 && stamps.every((stamp) => isStalePullRequestWatchStamp(projection, stamp))
+    stamps.length > 0 &&
+    stamps.every((stamp) => isStalePullRequestWatchStamp(projection, stamp, held))
   );
 }
 
@@ -1352,11 +1375,12 @@ function isStalePullRequestWatchWake(
 function currentPullRequestWatchWake(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
   run: OrchestrationV2Run,
+  held: boolean,
 ): OrchestrationV2ConversationMessage | undefined {
   const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
   const stamps = monitorPullRequestStamps(message?.notification?.source);
   if (message === undefined || stamps.length < 2) return undefined;
-  const current = stamps.filter((stamp) => !isStalePullRequestWatchStamp(projection, stamp));
+  const current = stamps.filter((stamp) => !isStalePullRequestWatchStamp(projection, stamp, held));
   const [first, ...rest] = current;
   if (first === undefined || rest.length === stamps.length - 1) return undefined;
   const sections = current.flatMap(({ section }) => (section === undefined ? [] : [section]));
@@ -2639,6 +2663,98 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
   });
 
+  const revalidateQueuedDeadline = Effect.fn("Orchestrator.revalidateQueuedDeadline")(function* (
+    projection: OrchestrationV2ThreadProjection,
+    run: OrchestrationV2Run,
+  ) {
+    const message = projection.messages.find((message) => message.id === run.userMessageId);
+    const source = message?.notification?.source;
+    const prStamps = monitorPullRequestStamps(source).filter(
+      (stamp) => stamp.staleProgressAt !== undefined,
+    );
+    if (
+      message === undefined ||
+      source?.kind !== "monitor" ||
+      (source.staleWaits === undefined && prStamps.length === 0)
+    )
+      return { type: "keep" } as const;
+    const thread = projection.thread;
+    const shell = yield* projectionStore.getThreadShell(thread.id);
+    if (shell === null || shell.settledAt !== null || shell.settledOverride === "settled")
+      return { type: "cancel" } as const;
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const held = waitIntentionallyHeld(shell, nowMs);
+    if (source.staleWaits === undefined) {
+      if (!held) return { type: "keep" } as const;
+      const links = threadPullRequestsOf(thread).map((link) => {
+        if (
+          !prStamps.some(
+            (stamp) =>
+              threadPullRequestKeysEqual(stamp, link) &&
+              stamp.watchStartedAt === link.watch?.startedAt &&
+              stamp.staleProgressAt === link.watch?.staleness?.lastProgressAt,
+          ) ||
+          link.watch?.staleness === undefined
+        )
+          return link;
+        const { alerted: _, ...progress } = link.watch.staleness;
+        return { ...link, watch: { ...link.watch, staleness: progress } };
+      });
+      return { type: "keep", prHeld: true, thread: { ...thread, pullRequests: links } } as const;
+    }
+    const tasks = yield* projectionStore.getThreadRecords(
+      thread.id,
+      ["subagents", "providerThreads"],
+      {
+        subagentIds: source.staleWaits
+          .filter((stamp) => stamp.kind === "delegate")
+          .map((stamp) => NodeId.make(stamp.taskId)),
+      },
+    );
+    const provider = tasks.providerThreads.find(
+      (provider) => provider.id === thread.activeProviderThreadId,
+    );
+    const current: StaleWait[] = [];
+    const rearmed = new Set<ThreadStalenessWait>();
+    for (const stamp of source.staleWaits) {
+      const wait = thread.stalenessWaits?.find(
+        (wait) => wait.kind === stamp.kind && wait.taskId === stamp.taskId,
+      );
+      if (wait?.lastProgressAtMs !== stamp.lastProgressAtMs || wait.alerted !== true) continue;
+      const observation = yield* observeStalenessWait(
+        thread.id,
+        wait,
+        provider,
+        tasks.subagents,
+        nowMs,
+      );
+      if (observation === null || observation.current.lastProgressAtMs !== stamp.lastProgressAtMs)
+        continue;
+      if (held || observation.held || observation.diagnostic === undefined) rearmed.add(wait);
+      else current.push(observation.diagnostic);
+    }
+    const updated =
+      rearmed.size === 0
+        ? undefined
+        : {
+            ...thread,
+            stalenessWaits:
+              thread.stalenessWaits?.map((wait) => {
+                if (!rearmed.has(wait)) return wait;
+                const { alerted: _, ...next } = wait;
+                return next;
+              }) ?? [],
+          };
+    return current.length === 0
+      ? ({ type: "cancel", thread: updated } as const)
+      : ({
+          type: "replace",
+          thread: updated,
+          message: { ...message, ...(yield* waitStaleNotice(current)) },
+        } as const);
+  });
+
   const startNextQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(
     function* (
       threadId: ThreadId,
@@ -2698,22 +2814,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
-      while (
-        storedQueuedRun !== undefined &&
-        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
-          isStaleBackgroundWaitWake(projection, storedQueuedRun))
-      ) {
+      let currentWake: OrchestrationV2ConversationMessage | undefined;
+      while (storedQueuedRun !== undefined) {
+        const deadline = yield* revalidateQueuedDeadline(projection, storedQueuedRun).pipe(
+          Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+        );
+        if ("thread" in deadline && deadline.thread !== undefined) {
+          yield* writeSystemEvents([
+            {
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: checkedAt,
+              providerInstanceId: deadline.thread.providerInstanceId,
+              payload: deadline.thread,
+            },
+          ]);
+        }
+        const prHeld = "prHeld" in deadline && deadline.prHeld;
+        if (
+          deadline.type !== "cancel" &&
+          !isStalePullRequestWatchWake(projection, storedQueuedRun, prHeld)
+        ) {
+          currentWake =
+            deadline.type === "replace"
+              ? deadline.message
+              : currentPullRequestWatchWake(projection, storedQueuedRun, prHeld);
+          break;
+        }
         yield* writeSystemEvents(
-          queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
+          queuedRunCancellationEvents(projection, storedQueuedRun, checkedAt),
         );
         projection = yield* readCommandProjection(threadId);
         storedQueuedRun = nextQueuedRun(projection);
       }
-      // A wake that outlived some of its pull requests tells only the current ones.
-      const currentWake =
-        storedQueuedRun === undefined
-          ? undefined
-          : currentPullRequestWatchWake(projection, storedQueuedRun);
       if (storedQueuedRun !== undefined && currentWake !== undefined) {
         const now = yield* DateTime.now;
         yield* writeSystemEvents([
@@ -4241,6 +4374,137 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  const emitDeadlineNotice = Effect.fn("Orchestrator.emitDeadlineNotice")(function* (
+    command: Extract<
+      OrchestrationV2ServerCommand,
+      { type: "thread.wait-staleness.update" | "thread.pull-request-watch.sync" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    runId: RunId,
+    now: DateTime.Utc,
+    title: string,
+    message: string,
+  ) {
+    const run = yield* projectionStore
+      .getRun(command.threadId, runId)
+      .pipe(mapDispatchError(command));
+    if (run === undefined)
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Deadline notice run disappeared.",
+      });
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "turn-item.updated",
+      threadId: run.threadId,
+      runId,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        type: "system_notice",
+        id: TurnItemId.make(`item:deadline:${command.commandId}`),
+        threadId: run.threadId,
+        runId,
+        nodeId: run.rootNodeId,
+        providerThreadId: run.providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title,
+        message,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      },
+    });
+  });
+
+  const observeStalenessWait = Effect.fn("Orchestrator.observeStalenessWait")(function* (
+    threadId: ThreadId,
+    wait: ThreadStalenessWait,
+    provider: OrchestrationV2ProviderThread | undefined,
+    subagents: ReadonlyArray<OrchestrationV2Subagent>,
+    nowMs: number,
+  ) {
+    let progressAtMs = wait.lastProgressAtMs;
+    let state: string;
+    let childLink: string | undefined;
+    let held = false;
+    let observed = wait;
+    if (wait.kind === "background") {
+      if (wait.providerThreadId !== undefined && wait.providerThreadId !== provider?.id)
+        return null;
+      const task = provider?.pendingBackgroundTasks?.find((task) => task.taskId === wait.taskId);
+      if (task?.awaited !== true || provider === undefined) {
+        return wait.backgroundObserved === true || wait.providerThreadId === undefined
+          ? null
+          : { current: wait, held: false, diagnostic: undefined };
+      }
+      if (wait.backgroundObserved !== true && provider !== undefined) {
+        const { registeredBy: _, ...registration } = wait;
+        observed = { ...registration, providerThreadId: provider.id, backgroundObserved: true };
+      }
+      state = task.kind;
+      const item =
+        task.itemId === undefined
+          ? null
+          : yield* projectionStore.getTurnItem({
+              threadId: task.sourceThreadId ?? threadId,
+              itemId: task.itemId,
+            });
+      progressAtMs = Math.max(
+        progressAtMs,
+        task.progressAtMs ?? 0,
+        item === null ? 0 : DateTime.toEpochMillis(item.updatedAt),
+      );
+    } else {
+      const task = subagents.find((task) => task.id === wait.taskId);
+      if (task === undefined || !isOpenStalenessDelegate(task)) return null;
+      state = task.status;
+      if (task.remoteChild !== undefined) {
+        childLink = formatThreadLink(task.remoteChild, task.remoteChild.title);
+        held = wait.remoteHeld === true;
+      } else if (task.childThreadId !== null) {
+        const child = yield* projectionStore.getThreadShell(task.childThreadId);
+        if (
+          child === null ||
+          child.deletedAt !== null ||
+          child.archivedAt !== null ||
+          child.settledOverride === "settled"
+        )
+          return null;
+        state = child.status;
+        childLink = formatThreadLink({ environmentId: null, threadId: child.id }, child.title);
+        held = waitIntentionallyHeld(child, nowMs);
+        const itemActivity = yield* projectionStore.getWaitActivityMs(child.id, child.latestRunId);
+        progressAtMs = Math.max(progressAtMs, waitActivityMs(child), itemActivity);
+      }
+    }
+    const { alerted: _, ...rearmed } = observed;
+    const current =
+      progressAtMs > wait.lastProgressAtMs
+        ? { ...rearmed, lastProgressAtMs: progressAtMs }
+        : observed;
+    const idleMs = nowMs - current.lastProgressAtMs;
+    const diagnostic: StaleWait | undefined =
+      idleMs < current.staleTimeoutMs
+        ? undefined
+        : {
+            taskId: current.taskId,
+            kind: current.kind,
+            state,
+            idleMinutes: Math.floor(idleMs / 60_000),
+            lastProgressAtMs: current.lastProgressAtMs,
+            ...(childLink === undefined ? {} : { childLink }),
+          };
+    return { current, held, diagnostic };
+  });
+
   const updateWaitStaleness = Effect.fn("Orchestrator.updateWaitStaleness")(function* (
     command: Extract<OrchestrationV2InternalCommand, { type: "thread.wait-staleness.update" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -4253,39 +4517,55 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (thread.deletedAt !== null) return;
     const waits = thread.stalenessWaits ?? [];
     let next = waits;
-    const stale: Array<{
-      taskId: string;
-      kind: ThreadStalenessWait["kind"];
-      state: string;
-      childLink?: string;
-      idleMinutes: number;
-      lastProgressAtMs: number;
-    }> = [];
+    const stale: Array<StaleWait> = [];
+    let activeRunId: RunId | null = null;
     switch (operation.type) {
       case "register": {
+        const providerThreadId =
+          operation.kind === "background"
+            ? (operation.providerThreadId ?? thread.activeProviderThreadId ?? undefined)
+            : undefined;
+        if (
+          operation.providerThreadId !== undefined &&
+          operation.providerThreadId !== thread.activeProviderThreadId
+        )
+          return;
+        const matches = (wait: ThreadStalenessWait, taskId: string) =>
+          wait.kind === operation.kind && wait.taskId === taskId;
+        const current = (wait: ThreadStalenessWait) =>
+          wait.providerThreadId === undefined ||
+          operation.providerThreadId === undefined ||
+          wait.providerThreadId === operation.providerThreadId;
         const added = [...new Set(operation.taskIds)].filter(
-          (taskId) => !waits.some((wait) => wait.kind === operation.kind && wait.taskId === taskId),
+          (taskId) => !waits.some((wait) => matches(wait, taskId) && current(wait)),
         );
         next = [
-          ...waits.map((wait) =>
-            wait.kind === operation.kind &&
-            operation.taskIds.includes(wait.taskId) &&
-            wait.staleTimeoutMs !== operation.staleTimeoutMs
-              ? { ...wait, staleTimeoutMs: operation.staleTimeoutMs }
-              : wait,
-          ),
+          ...waits
+            .filter((wait) => current(wait) || !operation.taskIds.some((id) => matches(wait, id)))
+            .map((wait) =>
+              operation.onlyIfMissing !== true &&
+              operation.taskIds.some((id) => matches(wait, id)) &&
+              wait.staleTimeoutMs !== operation.staleTimeoutMs
+                ? { ...wait, staleTimeoutMs: operation.staleTimeoutMs }
+                : wait,
+            ),
           ...added.map((taskId) => ({
             kind: operation.kind,
             taskId,
             staleTimeoutMs: operation.staleTimeoutMs,
             lastProgressAtMs: nowMs,
+            ...(providerThreadId === undefined ? {} : { providerThreadId }),
+            ...(operation.onlyIfMissing === true ? { registeredBy: command.commandId } : {}),
           })),
         ];
         break;
       }
       case "clear":
         next = waits.filter(
-          (wait) => wait.kind !== operation.kind || !operation.taskIds.includes(wait.taskId),
+          (wait) =>
+            wait.kind !== operation.kind ||
+            !operation.taskIds.includes(wait.taskId) ||
+            (operation.registeredBy !== undefined && wait.registeredBy !== operation.registeredBy),
         );
         break;
       case "remote-progress":
@@ -4318,119 +4598,64 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           next = [];
           break;
         }
+        activeRunId = shell.activeRunId;
         const tasks = yield* projectionStore
-          .getThreadRecords(threadId, ["subagents", "providerThreads"], {
-            subagentIds: waits.flatMap((wait) =>
-              wait.kind === "delegate" ? [NodeId.make(wait.taskId)] : [],
-            ),
-          })
+          .getThreadRecords(threadId, ["subagents", "providerThreads"], { openSubagentsOnly: true })
           .pipe(mapDispatchError(command));
         const parentHeld = waitIntentionallyHeld(shell, nowMs);
         const provider = tasks.providerThreads.find(
           (provider) => provider.id === thread.activeProviderThreadId,
         );
-        const roster = provider?.pendingBackgroundTasks ?? [];
         const registrations = [...waits];
-        for (const task of roster) {
+        for (const task of provider?.pendingBackgroundTasks ?? []) {
           if (
-            task.kind !== "monitor" ||
+            provider === undefined ||
             task.awaited !== true ||
-            waits.some((wait) => wait.kind === "background" && wait.taskId === task.taskId)
+            waits.some(
+              (wait) =>
+                wait.kind === "background" &&
+                wait.taskId === task.taskId &&
+                (wait.providerThreadId ?? provider.id) === provider.id,
+            )
           )
             continue;
           registrations.push({
             kind: "background",
             taskId: task.taskId,
             staleTimeoutMs: BACKGROUND_WAIT_STALE_MINUTES * 60_000,
-            lastProgressAtMs:
-              task.progressAtMs ?? DateTime.toEpochMillis(provider?.updatedAt ?? now),
+            lastProgressAtMs: task.progressAtMs ?? DateTime.toEpochMillis(provider.updatedAt),
+            providerThreadId: provider.id,
+            backgroundObserved: true,
+          });
+        }
+        for (const task of tasks.subagents) {
+          if (
+            !isOpenStalenessDelegate(task) ||
+            (task.completionWake !== "settled_only" && task.waitedBeforeRecovery !== true) ||
+            waits.some((wait) => wait.kind === "delegate" && wait.taskId === task.id)
+          )
+            continue;
+          registrations.push({
+            kind: "delegate",
+            taskId: task.id,
+            staleTimeoutMs: BACKGROUND_WAIT_STALE_MINUTES * 60_000,
+            lastProgressAtMs: DateTime.toEpochMillis(task.startedAt ?? task.updatedAt),
           });
         }
         const retained: ThreadStalenessWait[] = [];
         for (const wait of registrations) {
-          let progressAtMs = wait.lastProgressAtMs;
-          let state = "pending";
-          let childLink: string | undefined;
-          let held = parentHeld;
-          if (wait.kind === "background") {
-            const task = roster.find(
-              (task) => task.taskId === wait.taskId && task.awaited === true,
-            );
-            if (task === undefined) {
-              // The provider's roster event and the MCP registration can commit in either order.
-              if (nowMs < wait.lastProgressAtMs + 60_000) retained.push(wait);
-              continue;
-            }
-            state = task.kind;
-            const item =
-              task.itemId === undefined
-                ? null
-                : yield* projectionStore
-                    .getTurnItem({
-                      threadId: task.sourceThreadId ?? threadId,
-                      itemId: task.itemId,
-                    })
-                    .pipe(mapDispatchError(command));
-            progressAtMs = Math.max(
-              progressAtMs,
-              task.progressAtMs ?? 0,
-              item === null ? 0 : DateTime.toEpochMillis(item.updatedAt),
-            );
-          } else {
-            const task = tasks.subagents.find(
-              (task) => task.id === wait.taskId && task.origin === "app_owned",
-            );
-            if (
-              task === undefined ||
-              task.result !== null ||
-              task.completionDelivery?.state === "disposed" ||
-              task.status === "completed" ||
-              task.status === "failed" ||
-              task.status === "interrupted" ||
-              task.status === "cancelled"
-            )
-              continue;
-            state = task.status;
-            if (task.remoteChild !== undefined) {
-              childLink = formatThreadLink(task.remoteChild, task.remoteChild.title);
-              held ||= wait.remoteHeld === true;
-            } else if (task.childThreadId !== null) {
-              const child = yield* projectionStore
-                .getThreadShell(task.childThreadId)
-                .pipe(mapDispatchError(command));
-              if (
-                child === null ||
-                child.deletedAt !== null ||
-                child.archivedAt !== null ||
-                child.settledOverride === "settled"
-              )
-                continue;
-              childLink = formatThreadLink(
-                { environmentId: null, threadId: child.id },
-                child.title,
-              );
-              state = child.status;
-              held ||= waitIntentionallyHeld(child, nowMs);
-              const itemActivity = yield* projectionStore
-                .getWaitActivityMs(child.id, child.latestRunId)
-                .pipe(mapDispatchError(command));
-              progressAtMs = Math.max(progressAtMs, waitActivityMs(child), itemActivity);
-            }
-          }
-          const rearmed = progressAtMs > wait.lastProgressAtMs;
-          const { alerted: _, ...registration } = wait;
-          const current = rearmed ? { ...registration, lastProgressAtMs: progressAtMs } : wait;
-          const idleMs = nowMs - current.lastProgressAtMs;
-          if (!held && !current.alerted && idleMs >= current.staleTimeoutMs) {
+          const observation = yield* observeStalenessWait(
+            threadId,
+            wait,
+            provider,
+            tasks.subagents,
+            nowMs,
+          ).pipe(mapDispatchError(command));
+          if (observation === null) continue;
+          const { current, diagnostic, held } = observation;
+          if (!parentHeld && !held && !current.alerted && diagnostic !== undefined) {
             retained.push({ ...current, alerted: true });
-            stale.push({
-              taskId: wait.taskId,
-              kind: wait.kind,
-              state,
-              idleMinutes: Math.floor(idleMs / 60_000),
-              lastProgressAtMs: current.lastProgressAtMs,
-              ...(childLink === undefined ? {} : { childLink }),
-            });
+            stale.push(diagnostic);
           } else {
             retained.push(current);
           }
@@ -4451,11 +4676,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       payload: { ...thread, stalenessWaits: next },
     });
     if (stale.length === 0) return;
-    const diagnostic = yield* encodeWaitStaleDiagnostic({
-      type: "wait_stale_timeout",
-      waits: stale.map(({ lastProgressAtMs: _, ...diagnostic }) => diagnostic),
-    }).pipe(Effect.orDie);
-    const text = `${diagnostic}\n\nCheck why this work is quiet. T3 Code keeps its normal completion wake armed and reports staleness again only after progress.`;
+    const { text, notification } = yield* waitStaleNotice(stale);
+    if (activeRunId !== null) {
+      yield* emitDeadlineNotice(command, events, activeRunId, now, notification.summary, text);
+      return;
+    }
     yield* dispatchMessage(
       {
         type: "message.dispatch",
@@ -4464,18 +4689,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageId: MessageId.make(`message:${command.commandId}`),
         text,
         attachments: [],
-        notification: {
-          source: {
-            kind: "monitor",
-            staleWaits: stale.map(({ kind, taskId, lastProgressAtMs }) => ({
-              kind,
-              taskId,
-              lastProgressAtMs,
-            })),
-          },
-          outcome: "updated",
-          summary: `No progress on ${stale.length === 1 ? "one wait" : `${stale.length} waits`}`,
-        },
+        notification,
         dispatchMode: { type: "queue_after_active" },
         createdBy: "agent",
         creationSource: "server",
@@ -4543,11 +4757,62 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "The pull request watch ended or its thread settled while it was read.",
         });
       }
-      for (const { entry } of entries) {
+      const hasDeadline = entries.some(({ entry }) => entry.staleProgressAt !== undefined);
+      const shell = hasDeadline
+        ? yield* projectionStore.getThreadShell(thread.id).pipe(mapDispatchError(command))
+        : null;
+      const now = yield* DateTime.now;
+      const nowMs = DateTime.toEpochMillis(now);
+      let suppressDeadline = false;
+      for (const { entry, link } of entries) {
         const { includesRemarks: _, ...mutation } = entry;
-        yield* dispatchThreadMutation(mutation, events, effects);
+        if (
+          entry.staleProgressAt === undefined ||
+          link?.watch === undefined ||
+          entry.watch?.staleness === undefined
+        ) {
+          yield* dispatchThreadMutation(mutation, events, effects);
+          continue;
+        }
+        const existing = pullRequestWatchStaleness(link.watch);
+        const { alerted: _mark, ...progress } = entry.watch.staleness;
+        if (existing.lastProgressAt !== entry.staleProgressAt) {
+          suppressDeadline = true;
+          continue;
+        }
+        const held =
+          shell === null ||
+          waitIntentionallyHeld(shell, nowMs) ||
+          outdated[0] ||
+          nowMs - Date.parse(progress.lastProgressAt) < existing.staleTimeoutMs;
+        suppressDeadline ||= held || existing.alerted === true;
+        yield* dispatchThreadMutation(
+          {
+            ...mutation,
+            watch: {
+              ...entry.watch,
+              staleness: {
+                ...progress,
+                ...(existing.alerted === true || !held ? { alerted: true } : {}),
+              },
+            },
+          },
+          events,
+          effects,
+        );
       }
-      if (wake === undefined || outdated[0]) return;
+      if (wake === undefined || outdated[0] || suppressDeadline) return;
+      if (hasDeadline && shell?.activeRunId != null) {
+        yield* emitDeadlineNotice(
+          command,
+          events,
+          shell.activeRunId,
+          now,
+          wake.notification.summary,
+          wake.text,
+        );
+        return;
+      }
       const { sections, ...wakeMessage } = wake;
       const stamps = entries.map(({ entry, key }, index) => ({
         ...key,
@@ -5659,47 +5924,57 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 : existing.watch
               : !command.watching
                 ? undefined
-                : (existing.watch ?? {
-                    startedAt,
-                    staleness: {
-                      staleTimeoutMs: command.staleTimeoutMs ?? PR_WATCH_STALE_MINUTES * 60_000,
-                      lastProgressAt: startedAt,
-                    },
-                    headSha: null,
-                    failedChecks: [],
-                    passed: false,
-                    passedChecks: [],
-                    conflicting: false,
-                    // Watching again must not repeat check or conflict news the last watch told.
-                    ...(existing.endedWatch && {
-                      headSha: existing.endedWatch.headSha,
-                      failedChecks: existing.endedWatch.failedChecks,
-                      passed: existing.endedWatch.passed,
-                      passedChecks: existing.endedWatch.passedChecks,
-                      conflicting: existing.endedWatch.conflicting,
-                      rebaseRequired: existing.endedWatch.rebaseRequired,
-                    }),
-                    awaitingBaseline: existing.endedWatch
-                      ? existing.endedWatch.awaitingBaseline
-                      : "all",
-                    ...(existing.endedWatch?.owedChecks !== undefined && {
-                      owedChecks: existing.endedWatch.owedChecks,
-                    }),
-                    ...(existing.endedWatch?.awaitingApproval !== undefined && {
-                      awaitingApproval: existing.endedWatch.awaitingApproval,
-                    }),
-                    ...(existing.endedWatch?.approvalAnnounced !== undefined && {
-                      approvalAnnounced: existing.endedWatch.approvalAnnounced,
-                    }),
-                    // A finished-checks answer may be an older head's; a fresh read decides.
-                    ...(existing.endedWatch?.checksPending === true && { checksPending: true }),
-                    ...(existing.endedWatch?.checksAwaitedSince !== undefined && {
-                      checksAwaitedSince: existing.endedWatch.checksAwaitedSince,
-                    }),
-                    remarksThrough: startedAt,
-                    remarkIds: [],
-                    wakes: 0,
-                  });
+                : existing.watch !== undefined
+                  ? command.staleTimeoutMs === undefined
+                    ? existing.watch
+                    : {
+                        ...existing.watch,
+                        staleness: {
+                          ...pullRequestWatchStaleness(existing.watch),
+                          staleTimeoutMs: command.staleTimeoutMs,
+                        },
+                      }
+                  : {
+                      startedAt,
+                      staleness: {
+                        staleTimeoutMs: command.staleTimeoutMs ?? PR_WATCH_STALE_MINUTES * 60_000,
+                        lastProgressAt: startedAt,
+                      },
+                      headSha: null,
+                      failedChecks: [],
+                      passed: false,
+                      passedChecks: [],
+                      conflicting: false,
+                      // Watching again must not repeat check or conflict news the last watch told.
+                      ...(existing.endedWatch && {
+                        headSha: existing.endedWatch.headSha,
+                        failedChecks: existing.endedWatch.failedChecks,
+                        passed: existing.endedWatch.passed,
+                        passedChecks: existing.endedWatch.passedChecks,
+                        conflicting: existing.endedWatch.conflicting,
+                        rebaseRequired: existing.endedWatch.rebaseRequired,
+                      }),
+                      awaitingBaseline: existing.endedWatch
+                        ? existing.endedWatch.awaitingBaseline
+                        : "all",
+                      ...(existing.endedWatch?.owedChecks !== undefined && {
+                        owedChecks: existing.endedWatch.owedChecks,
+                      }),
+                      ...(existing.endedWatch?.awaitingApproval !== undefined && {
+                        awaitingApproval: existing.endedWatch.awaitingApproval,
+                      }),
+                      ...(existing.endedWatch?.approvalAnnounced !== undefined && {
+                        approvalAnnounced: existing.endedWatch.approvalAnnounced,
+                      }),
+                      // A finished-checks answer may be an older head's; a fresh read decides.
+                      ...(existing.endedWatch?.checksPending === true && { checksPending: true }),
+                      ...(existing.endedWatch?.checksAwaitedSince !== undefined && {
+                        checksAwaitedSince: existing.endedWatch.checksAwaitedSince,
+                      }),
+                      remarksThrough: startedAt,
+                      remarkIds: [],
+                      wakes: 0,
+                    };
           if (watch === existing.watch && links === linked) return thread;
           const final =
             command.type === "thread.pull-request-watch.sync" && watch === undefined
@@ -16353,6 +16628,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.visit" ||
           // A read can answer a watch again before a push's reopen lands; nothing is left to clear.
           command.type === "thread.pull-request-watch.checks-reopen" ||
+          (command.type === "thread.pull-request-watch.sync" &&
+            command.staleProgressAt !== undefined) ||
           command.type === "thread.wait-staleness.update" ||
           command.type === "thread.interrupt.unresponsive" ||
           command.type === "thread.stop" ||

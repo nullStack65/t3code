@@ -833,7 +833,12 @@ export const make = Effect.gen(function* () {
           driver: task.driver,
           providerInstanceId: task.providerInstanceId,
           occurredAt: now,
-          payload: { ...task, completionWake: "always", updatedAt: now },
+          payload: {
+            ...task,
+            completionWake: "always",
+            waitedBeforeRecovery: true,
+            updatedAt: now,
+          },
         });
       }
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));

@@ -43,6 +43,7 @@ import {
   PULL_REQUEST_WATCH_NO_CHECKS_MS,
   pullRequestWatchMessage,
   stalePullRequestWatch,
+  pullRequestWatchStaleness,
 } from "./pullRequestWatch.ts";
 
 /** Checks take minutes; faster sweeps waste the account's shared host quota. */
@@ -324,7 +325,7 @@ export const make = Effect.gen(function* () {
     endedWatch?: ThreadPullRequestWatch,
   ) {
     const uuid = yield* random.uuidV4();
-    yield* engine.dispatch({
+    return yield* engine.dispatch({
       type: "thread.pull-request-watch.sync",
       commandId: CommandId.make(`server:pr-watch:${target.thread.id}:${uuid}`),
       threadId: target.thread.id,
@@ -607,8 +608,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const holdStale = (
-    group: WatchGroup,
+  const sendStale = (
     target: WatchTarget,
     watch: ThreadPullRequestWatch,
     now: number,
@@ -624,22 +624,24 @@ export const make = Effect.gen(function* () {
     );
     return stale === undefined
       ? Effect.succeed(false)
-      : hold({
-          groupKey: group.key,
-          target,
-          ...stale,
-          wake: {
-            ...stale.wake,
-            ...(stale.next.staleness === undefined
-              ? {}
-              : { staleProgressAt: stale.next.staleness.lastProgressAt }),
-          },
-        }).pipe(Effect.as(true));
+      : record(target, stale.next, {
+          ...stale.wake,
+          staleProgressAt: pullRequestWatchStaleness(stale.next).lastProgressAt,
+        }).pipe(
+          Effect.tap(({ storedEvents }) =>
+            storedEvents.some(
+              ({ event }) => event.type === "message.updated" || event.type === "turn-item.updated",
+            )
+              ? woke(target)
+              : Effect.void,
+          ),
+          Effect.as(true),
+        );
   };
 
   const checkStaleness = (group: WatchGroup, now: number, observation: "current" | "unavailable") =>
     eachTarget(group, (target) =>
-      holdStale(group, target, target.watch, now, observation).pipe(Effect.asVoid),
+      sendStale(target, target.watch, now, observation).pipe(Effect.asVoid),
     );
 
   const readGroup = Effect.fn("PullRequestWatchReactor.readGroup")(function* (
@@ -787,11 +789,11 @@ export const make = Effect.gen(function* () {
             : { groupKey: group.key, target, next: report.next, wake },
         );
       }
-      return holdStale(group, target, report.next, now, "current").pipe(
+      return sendStale(target, report.next, now, "current").pipe(
         Effect.flatMap((held) =>
           held || watchesEqual(report.next, target.watch)
             ? Effect.void
-            : record(target, report.next),
+            : record(target, report.next).pipe(Effect.asVoid),
         ),
       );
     });

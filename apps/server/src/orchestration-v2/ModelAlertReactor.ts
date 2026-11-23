@@ -1076,7 +1076,13 @@ export const make = Effect.gen(function* () {
     return (
       trigger === "sweep" &&
       shell.activeRunId !== null &&
-      ((yield* projections.getThread(shell.id)).stalenessWaits?.length ?? 0) > 0
+      ((yield* projections.getThread(shell.id)).stalenessWaits ?? []).some(
+        (wait) =>
+          wait.kind === "delegate" ||
+          shell.pendingBackgroundTasks?.some(
+            (task) => task.taskId === wait.taskId && task.awaited === true,
+          ),
+      )
     );
   });
 

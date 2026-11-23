@@ -164,7 +164,14 @@ const make = Effect.gen(function* () {
         ...(watching
           ? {
               link: { url: target.url, source: "agent" as const },
-              staleTimeoutMs: staleTimeoutMs(input.staleTimeoutMinutes, PR_WATCH_STALE_MINUTES),
+              ...(input.staleTimeoutMinutes === undefined
+                ? {}
+                : {
+                    staleTimeoutMs: staleTimeoutMs(
+                      input.staleTimeoutMinutes,
+                      PR_WATCH_STALE_MINUTES,
+                    ),
+                  }),
             }
           : {}),
       })

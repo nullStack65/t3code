@@ -643,6 +643,7 @@ it.effect("waitForThread returns the cut run once its continuation is declined",
 it.effect.each([
   "live",
   "no-match",
+  "provider-failed",
   "no-match-clear",
   "no-session",
   "unsupported-runtime",
@@ -676,6 +677,7 @@ it.effect.each([
         updatedAt: now,
       };
       const calls: Array<{ providerThreadId: ProviderThreadId; awaited: boolean }> = [];
+      const order: string[] = [];
       const runtime = {
         driver,
         providerSessionId,
@@ -687,11 +689,18 @@ it.effect.each([
                 readonly taskIds: ReadonlyArray<string>;
                 readonly awaited: boolean;
               }) =>
-                Effect.sync(() => {
+                Effect.gen(function* () {
+                  order.push("provider");
                   calls.push({
                     providerThreadId: input.providerThread.id,
                     awaited: input.awaited,
                   });
+                  if (state === "provider-failed") {
+                    return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver,
+                      detail: "Enrollment unavailable",
+                    });
+                  }
                   return { matched: input.taskIds.filter((taskId) => taskId === "tests") };
                 }),
             }),
@@ -701,7 +710,12 @@ it.effect.each([
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
-              dispatch: () => Effect.succeed({ sequence: 0, storedEvents: [] }),
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  if (command.type === "thread.wait-staleness.update")
+                    order.push(command.operation.type);
+                  return { sequence: 0, storedEvents: [] };
+                }),
               getThreadRecords: () =>
                 Effect.succeed({
                   thread: {
@@ -728,16 +742,22 @@ it.effect.each([
             threadId,
             taskIds: state.startsWith("no-match") ? ["finished"] : ["tests", "finished"],
             awaited: state !== "no-match-clear",
+            staleTimeoutMinutes: 7,
           })
           .pipe(Effect.result);
       }).pipe(Effect.provide(Layer.merge(layerTest, ThreadCommandExecutor.layer)));
 
       if (state === "live") {
+        expect(order.slice(0, 2)).toEqual(["register", "provider"]);
         expect(result).toMatchObject({
           success: { matched: ["tests"], unmatched: ["finished"] },
         });
         expect(calls).toEqual([{ providerThreadId, awaited: true }]);
+      } else if (state === "provider-failed") {
+        expect(order).toEqual(["register", "provider", "clear"]);
+        expect(result).toMatchObject({ failure: { reason: "failed" } });
       } else if (state === "no-match") {
+        expect(order).toEqual(["register", "provider", "clear"]);
         expect(result).toMatchObject({
           failure: { _tag: "ThreadManagementBackgroundWaitError", reason: "unmatched" },
         });

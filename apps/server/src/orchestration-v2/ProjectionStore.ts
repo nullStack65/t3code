@@ -383,6 +383,7 @@ export interface ProjectionRecordFilter {
   readonly runtimeRequestStatuses?: ReadonlyArray<OrchestrationV2RuntimeRequest["status"]>;
   readonly contextTransferStatuses?: ReadonlyArray<OrchestrationV2ContextTransfer["status"]>;
   readonly subagentIds?: ReadonlyArray<NodeId>;
+  readonly openSubagentsOnly?: true;
   readonly subagentRunIds?: ReadonlyArray<RunId>;
   readonly subagentChildThreadIds?: ReadonlyArray<ThreadId>;
   readonly nodeIds?: ReadonlyArray<NodeId>;
@@ -4160,6 +4161,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT payload_json
             FROM orchestration_v2_projection_subagents AS subagent
             WHERE ${threadColumn(filter?.subagentIds ?? filter?.subagentChildThreadIds)} = ${threadId}
+              ${filter?.openSubagentsOnly === true ? sql`AND subagent.status IN ('pending', 'running', 'waiting')` : sql``}
               ${filter?.subagentIds === undefined ? sql`` : sql`AND subagent_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentIds)}))`}
               ${filter?.subagentChildThreadIds === undefined ? sql`` : sql`AND child_thread_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentChildThreadIds)}))`}
               ${filter?.subagentRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentRunIds)}))`}
@@ -9247,12 +9249,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           OR (
             json_extract(t.payload_json, '$.settledAt') IS NULL
             AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
-            AND EXISTS (
-              SELECT 1 FROM orchestration_v2_projection_provider_threads p,
-                json_each(p.payload_json, '$.pendingBackgroundTasks') task
-              WHERE p.provider_thread_id = t.active_provider_thread_id
-                AND json_extract(task.value, '$.kind') = 'monitor'
-                AND json_extract(task.value, '$.awaited') = 1
+            AND (
+              EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_provider_threads p,
+                  json_each(p.payload_json, '$.pendingBackgroundTasks') task
+                WHERE p.provider_thread_id = t.active_provider_thread_id
+                  AND json_extract(task.value, '$.awaited') = 1
+              ) OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents task
+                WHERE task.thread_id = t.thread_id AND task.origin = 'app_owned'
+                  AND task.status IN ('pending', 'running', 'waiting')
+                  AND task.completion_delivery_state IS NOT 'disposed'
+                  AND json_extract(task.payload_json, '$.result') IS NULL
+                  AND (json_extract(task.payload_json, '$.completionWake') = 'settled_only'
+                    OR json_extract(task.payload_json, '$.waitedBeforeRecovery') = 1)
+              )
             )
           )
         )
@@ -9268,6 +9279,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         SELECT max(updated_at) AS activity FROM orchestration_v2_projection_turn_items
         WHERE thread_id = ${threadId} AND run_id = ${runId}
           AND type NOT IN ('user_message', 'link_request')
+          AND turn_item_id NOT LIKE 'item:deadline:%'
       `;
         const activity = rows[0]?.activity;
         return activity == null ? 0 : Date.parse(activity);

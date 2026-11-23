@@ -1747,7 +1747,35 @@ const make = Effect.gen(function* () {
         reason: "unsupported",
       });
     }
-    const { matched } = yield* runtime.value
+    const uuid = SecureRandom.uuidV4Unsafe();
+    const registrationId = CommandId.make(`server:background-wait:${uuid}:prepare`);
+    const dispatchWait = (
+      commandId: CommandId,
+      operation: Extract<
+        OrchestrationV2ServerCommand,
+        { type: "thread.wait-staleness.update" }
+      >["operation"],
+    ) =>
+      orchestrator
+        .dispatch({
+          type: "thread.wait-staleness.update",
+          commandId,
+          threadId: input.threadId,
+          operation,
+        })
+        .pipe(Effect.mapError(unavailable));
+    const timeout = staleTimeoutMs(input.staleTimeoutMinutes, BACKGROUND_WAIT_STALE_MINUTES);
+    if (input.awaited) {
+      yield* dispatchWait(registrationId, {
+        type: "register",
+        kind: "background",
+        taskIds: input.taskIds,
+        staleTimeoutMs: timeout,
+        providerThreadId: providerThread.id,
+        onlyIfMissing: true,
+      });
+    }
+    const result = yield* runtime.value
       .awaitBackgroundTasks({ providerThread, taskIds: input.taskIds, awaited: input.awaited })
       .pipe(
         Effect.timeout("15 seconds"),
@@ -1759,35 +1787,39 @@ const make = Effect.gen(function* () {
               cause,
             }),
         ),
+        Effect.result,
       );
+    const matched = result._tag === "Success" ? result.success.matched : [];
+    const matchedIds = new Set(matched);
+    const unmatched = input.taskIds.filter((taskId) => !matchedIds.has(taskId));
+    if (input.awaited && unmatched.length > 0) {
+      yield* dispatchWait(CommandId.make(`${registrationId}:reconcile`), {
+        type: "clear",
+        kind: "background",
+        taskIds: unmatched,
+        registeredBy: registrationId,
+      });
+    }
+    if (result._tag === "Failure") return yield* result.failure;
     if (input.awaited && matched.length === 0) {
       return yield* new ThreadManagementBackgroundWaitError({
         threadId: input.threadId,
         reason: "unmatched",
       });
     }
-    const taskIds = input.awaited ? matched : input.taskIds;
-    const uuid = SecureRandom.uuidV4Unsafe();
-    yield* orchestrator
-      .dispatch({
-        type: "thread.wait-staleness.update",
-        commandId: CommandId.make(`server:background-wait:${uuid}`),
-        threadId: input.threadId,
-        operation: input.awaited
-          ? {
-              type: "register",
-              kind: "background",
-              taskIds,
-              staleTimeoutMs: staleTimeoutMs(
-                input.staleTimeoutMinutes,
-                BACKGROUND_WAIT_STALE_MINUTES,
-              ),
-            }
-          : { type: "clear", kind: "background", taskIds },
-      })
-      .pipe(Effect.mapError(unavailable));
-    const matchedIds = new Set(matched);
-    return { matched, unmatched: input.taskIds.filter((taskId) => !matchedIds.has(taskId)) };
+    yield* dispatchWait(
+      CommandId.make(`${registrationId}:finish`),
+      input.awaited
+        ? {
+            type: "register",
+            kind: "background",
+            taskIds: matched,
+            staleTimeoutMs: timeout,
+            providerThreadId: providerThread.id,
+          }
+        : { type: "clear", kind: "background", taskIds: input.taskIds },
+    );
+    return { matched, unmatched };
   });
 
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = Effect.fn(
