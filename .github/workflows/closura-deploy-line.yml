@@ -19,12 +19,12 @@ concurrency:
 
 jobs:
   deploy-line:
-    if: ${{ github.repository == 'nullStack65/t3code' }}
+    if: ${{ github.repository_id == '1372173214' }}
     name: Deploy line declared
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: 'Require one Deploy line: none or fleet'
+      - name: "Require one Deploy line: none or fleet"
         shell: bash
         env:
           PR_BODY: ${{ github.event.pull_request.body }}

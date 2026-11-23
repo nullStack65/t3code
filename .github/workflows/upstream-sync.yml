@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   sync:
-    if: ${{ github.repository == 'nullStack65/t3code' }}
+    if: ${{ github.repository_id == '1372173214' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -38,7 +38,7 @@ jobs:
         env:
           UPSTREAM_URL: https://github.com/pingdotgg/t3code.git
           BASE_BRANCH: release/native-0.1.10
-          GH_REPO: nullStack65/t3code
+          GH_REPO: ${{ github.repository }}
           # Empty when the secret is unset. gh then uses the default token,
           # which can open the pull request but cannot start its checks.
           T3_FORK_SYNC_TOKEN: ${{ secrets.T3_FORK_SYNC_TOKEN }}

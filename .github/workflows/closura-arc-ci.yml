@@ -47,7 +47,7 @@ jobs:
     # require an authorized actor and one of the two exact branches above.
     if: >-
       ${{
-        github.repository == 'nullStack65/t3code' &&
+        github.repository_id == '1372173214' &&
         (
           (github.event_name == 'pull_request' &&
            !github.event.pull_request.draft &&
@@ -86,7 +86,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = 'nullStack65/t3code'
+          test "$GITHUB_REPOSITORY_ID" = '1372173214'
           test -n "${RUNNER_NAME:-}"
           test "$RUNNER_OS" = Linux
           printf 'T3 ARC: repo=%s runner=%s ref=%s source=%s\n' \
@@ -208,7 +208,7 @@ jobs:
   voice-and-inbox-web:
     if: >-
       ${{
-        github.repository == 'nullStack65/t3code' &&
+        github.repository_id == '1372173214' &&
         (
           (github.event_name == 'pull_request' &&
            !github.event.pull_request.draft &&
@@ -286,7 +286,7 @@ jobs:
   voice-and-inbox-mobile:
     if: >-
       ${{
-        github.repository == 'nullStack65/t3code' &&
+        github.repository_id == '1372173214' &&
         (
           (github.event_name == 'pull_request' &&
            !github.event.pull_request.draft &&
