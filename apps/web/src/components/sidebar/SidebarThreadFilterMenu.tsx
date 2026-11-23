@@ -32,6 +32,7 @@ import {
 import { SidebarHeaderIconButton } from "./SidebarThreadHeader";
 import {
   changedThreadListFilters,
+  sidebarFilterIconClass,
   EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
   type olderSettledFilterCounts,
@@ -91,7 +92,7 @@ export function SidebarThreadFilterMenu<T extends CountedThread>({
   return (
     <Menu>
       <MenuTrigger render={<SidebarHeaderIconButton label={label} />}>
-        <SlidersHorizontalIcon className={cn("size-4", summary.length > 0 && "text-primary")} />
+        <SlidersHorizontalIcon className={sidebarFilterIconClass(summary.length > 0)} />
       </MenuTrigger>
       <MenuPopup align="end" className="w-[min(19rem,var(--available-width))]">
         <SidebarThreadFilterOptions
