@@ -22,7 +22,10 @@ import {
   TurnItemId,
   type ModelSelection,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderFailure,
+  OrchestrationV2ProviderFailoverRefused,
   type OrchestrationV2Run,
+  orchestrationV2RunFailure,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2RuntimeRequest,
   ProjectId,
@@ -13016,3 +13019,477 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
     );
   },
 );
+
+const failoverProjectId = ProjectId.make("project:provider-failover");
+const meteredInstanceId = ProviderInstanceId.make("metered_api");
+
+const layerProviderFailoverTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  ProjectStore.layer,
+  ProjectionStore.layer,
+  EffectOutbox.layer,
+  ThreadCommandExecutor.layer,
+).pipe(
+  Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(McpProviderSessions.layer),
+  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provide(layerCheckpointStoreTest),
+  Layer.provide(layerServerConfig),
+  Layer.provide(
+    ServerSettings.layerTest({
+      providerInstances: testProviderInstances,
+      projectSettingsOverrides: {
+        [failoverProjectId]: { providerInstances: { [antigravityInstanceId]: { enabled: false } } },
+      },
+      providerFailover: {
+        enabled: true,
+        includedProviderInstanceIds: [alternateInstanceId, claudeInstanceId, antigravityInstanceId],
+        maxAttempts: 3,
+      },
+    }),
+  ),
+  Layer.provide(layerTestProviderInstanceRegistry),
+  Layer.provide(layerGitWorkflowTest),
+  Layer.provide(layerProjectServiceTest),
+  Layer.provide(layerPlatformTest),
+  Layer.provide(ProviderRegistryMock.layer()),
+);
+
+const claudeTarget = { instanceId: claudeInstanceId, model: "claude-haiku-5-5" } as const;
+const alternateTarget = { instanceId: alternateInstanceId, model: "gpt-5.5" } as const;
+const disabledTarget = { instanceId: antigravityInstanceId, model: "gemini" } as const;
+const meteredTarget = { instanceId: meteredInstanceId, model: "metered" } as const;
+
+const failoverFailures: Record<
+  "payment" | "rate_limit" | "auth" | "quota" | "policy",
+  OrchestrationV2ProviderFailure
+> = {
+  payment: {
+    class: "provider_error",
+    message: "Payment required.",
+    code: "api_error_402",
+    retryable: null,
+    httpStatus: 402,
+  },
+  rate_limit: {
+    class: "usage_limit",
+    message: "Too many requests.",
+    code: "responseTooManyFailedAttempts",
+    retryable: false,
+    httpStatus: 429,
+  },
+  auth: {
+    class: "provider_error",
+    message: "Unauthorized.",
+    code: "unauthorized",
+    retryable: null,
+    httpStatus: 401,
+  },
+  quota: {
+    class: "usage_limit",
+    message: "Plan limit reached.",
+    code: "usageLimitExceeded",
+    retryable: null,
+  },
+  policy: {
+    class: "provider_error",
+    message: "Refused.",
+    code: "content_policy_violation",
+    retryable: null,
+    httpStatus: 403,
+  },
+};
+
+type FailoverScenario = {
+  readonly failure: keyof typeof failoverFailures;
+  readonly candidates: ReadonlyArray<ModelSelection>;
+  readonly sideEffect?: true;
+  readonly pendingApproval?: true;
+  readonly repeat?: true;
+  readonly expected:
+    | { readonly admitted: ModelSelection }
+    | {
+        readonly refused: OrchestrationV2ProviderFailoverRefused["reason"];
+        readonly skipped?: OrchestrationV2ProviderFailoverRefused["candidates"];
+      };
+};
+
+it.layer(layerProviderFailoverTest)("provider failover", (it) => {
+  it.effect.each<[string, FailoverScenario]>([
+    [
+      "402",
+      { failure: "payment", candidates: [claudeTarget], expected: { admitted: claudeTarget } },
+    ],
+    [
+      "429",
+      { failure: "rate_limit", candidates: [claudeTarget], expected: { admitted: claudeTarget } },
+    ],
+    ["auth", { failure: "auth", candidates: [claudeTarget], expected: { admitted: claudeTarget } }],
+    [
+      "quota",
+      { failure: "quota", candidates: [claudeTarget], expected: { admitted: claudeTarget } },
+    ],
+    [
+      "an unavailable or metered provider, skipped",
+      {
+        failure: "payment",
+        candidates: [disabledTarget, meteredTarget, alternateTarget],
+        expected: { admitted: alternateTarget },
+      },
+    ],
+    [
+      "a duplicate request, accepted once",
+      {
+        failure: "payment",
+        candidates: [claudeTarget],
+        repeat: true,
+        expected: { admitted: claudeTarget },
+      },
+    ],
+    [
+      "a policy denial, refused",
+      {
+        failure: "policy",
+        candidates: [claudeTarget],
+        expected: { refused: "not_failover_class" },
+      },
+    ],
+    [
+      "a pending approval, refused",
+      {
+        failure: "payment",
+        candidates: [claudeTarget],
+        pendingApproval: true,
+        expected: { refused: "pending_request" },
+      },
+    ],
+    [
+      "a partial run with effects, refused",
+      {
+        failure: "payment",
+        candidates: [claudeTarget],
+        sideEffect: true,
+        expected: { refused: "side_effects" },
+      },
+    ],
+    [
+      "an exhausted list, refused with each skip",
+      {
+        failure: "quota",
+        candidates: [modelSelection, disabledTarget, meteredTarget],
+        expected: {
+          refused: "exhausted",
+          skipped: [
+            {
+              providerInstanceId: modelSelection.instanceId,
+              model: modelSelection.model,
+              skipped: "already_tried",
+            },
+            {
+              providerInstanceId: disabledTarget.instanceId,
+              model: disabledTarget.model,
+              skipped: "unavailable",
+            },
+            {
+              providerInstanceId: meteredTarget.instanceId,
+              model: meteredTarget.model,
+              skipped: "not_included",
+            },
+          ],
+        },
+      },
+    ],
+  ])("continues a failed run on another provider: %s", ([name, scenario]) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make(`failover:${name}`);
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId: failoverProjectId,
+        title: "Failover project",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: failoverProjectId,
+        title: "Failing thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`${threadId}:start`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:start`),
+        text: "Do the task.",
+        attachments: [],
+        dispatchMode: { type: "defer_start" },
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      const [source] = (yield* orchestrator.getThreadProjection(threadId)).runs as [
+        OrchestrationV2Run,
+      ];
+      const item = (id: string, ordinal: number) => ({
+        id: TurnItemId.make(`${threadId}:${id}`),
+        threadId,
+        runId: source.id,
+        nodeId: source.rootNodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      });
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:failed`),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...source, status: "failed", completedAt: now },
+          },
+          {
+            id: EventId.make(`${threadId}:error`),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...item("error", 3),
+              type: "error",
+              status: "failed",
+              title: "Provider error",
+              failure: failoverFailures[scenario.failure],
+            },
+          },
+          ...(scenario.pendingApproval
+            ? [
+                {
+                  id: EventId.make(`${threadId}:approval`),
+                  type: "runtime-request.updated" as const,
+                  threadId,
+                  runId: source.id,
+                  occurredAt: now,
+                  payload: {
+                    id: RuntimeRequestId.make(`${threadId}:approval`),
+                    nodeId: source.rootNodeId!,
+                    providerTurnId: null,
+                    nativeRequestRef: null,
+                    kind: "command" as const,
+                    status: "pending" as const,
+                    responseCapability: { type: "message" as const },
+                    createdAt: now,
+                    resolvedAt: null,
+                  },
+                },
+              ]
+            : []),
+          ...(scenario.sideEffect
+            ? [
+                {
+                  id: EventId.make(`${threadId}:command`),
+                  type: "turn-item.updated" as const,
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    ...item("command", 2),
+                    type: "command_execution" as const,
+                    status: "completed" as const,
+                    title: "git push",
+                    input: "git push",
+                  },
+                },
+              ]
+            : []),
+        ],
+      });
+      const failed = yield* orchestrator.getThreadProjection(threadId);
+      const errorItem = failed.turnItems.find((turnItem) => turnItem.type === "error");
+      // The typed error survives the event store and projection read.
+      assert.deepEqual(
+        errorItem?.type === "error" ? orchestrationV2RunFailure(source, errorItem.failure) : null,
+        {
+          providerInstanceId: modelSelection.instanceId,
+          model: modelSelection.model,
+          httpStatus: failoverFailures[scenario.failure].httpStatus ?? null,
+          class: scenario.failure === "policy" ? "other" : scenario.failure,
+          code: failoverFailures[scenario.failure].code,
+          retryable: failoverFailures[scenario.failure].retryable,
+        },
+      );
+      const failover = (suffix: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:failover:${suffix}`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:failover:${suffix}`),
+          providerFailover: { ofRunId: source.id, candidates: scenario.candidates },
+          text: "Continue the task.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+
+      if ("refused" in scenario.expected) {
+        const error = yield* failover("first").pipe(Effect.flip);
+        assert.instanceOf(error.cause, OrchestrationV2ProviderFailoverRefused);
+        const refusal = error.cause as OrchestrationV2ProviderFailoverRefused;
+        assert.equal(refusal.reason, scenario.expected.refused);
+        assert.equal(refusal.runId, source.id);
+        assert.equal(
+          refusal.failure?.httpStatus,
+          failoverFailures[scenario.failure].httpStatus ?? null,
+        );
+        assert.deepEqual(refusal.candidates, scenario.expected.skipped ?? []);
+        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+        return;
+      }
+      yield* failover("first");
+      if (scenario.repeat) yield* failover("second");
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(after.runs, 2);
+      const continued = after.runs.find((run) => run.id !== source.id);
+      assert.equal(continued?.providerFailoverOfRunId, source.id);
+      assert.deepEqual(continued?.modelSelection, scenario.expected.admitted);
+      assert.equal(continued?.providerInstanceId, scenario.expected.admitted.instanceId);
+    }),
+  );
+  it.effect("bounds a run lineage and never retries a provider it already tried", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("failover:lineage");
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId: failoverProjectId,
+        title: "Failover project",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: failoverProjectId,
+        title: "Failing thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`${threadId}:start`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:start`),
+        text: "Do the task.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      const failLatest = (hop: number) =>
+        Effect.gen(function* () {
+          const runs = (yield* orchestrator.getThreadProjection(threadId)).runs;
+          const run = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0]!;
+          yield* events.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}:failed:${hop}`),
+                type: "run.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...run,
+                  status: "failed",
+                  completedAt: DateTime.add(now, { seconds: hop }),
+                },
+              },
+              {
+                id: EventId.make(`${threadId}:error:${hop}`),
+                type: "turn-item.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  id: TurnItemId.make(`${threadId}:error:${hop}`),
+                  threadId,
+                  runId: run.id,
+                  nodeId: run.rootNodeId,
+                  providerThreadId: null,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 3,
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  type: "error",
+                  status: "failed",
+                  title: "Provider error",
+                  failure: failoverFailures.payment,
+                },
+              },
+            ],
+          });
+          return run;
+        });
+      const failover = (hop: number, ofRunId: RunId) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:failover:${hop}`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:failover:${hop}`),
+          providerFailover: {
+            ofRunId,
+            candidates: [modelSelection, claudeTarget, alternateTarget],
+          },
+          text: "Continue the task.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+
+      yield* failover(1, (yield* failLatest(1)).id);
+      yield* failover(2, (yield* failLatest(2)).id);
+      const runs = (yield* orchestrator.getThreadProjection(threadId)).runs.toSorted(
+        (a, b) => a.ordinal - b.ordinal,
+      );
+      assert.deepEqual(
+        runs.map((run) => [run.modelSelection.instanceId, run.providerFailoverOfRunId]),
+        [
+          [modelSelection.instanceId, undefined],
+          [claudeTarget.instanceId, runs[0]!.id],
+          [alternateTarget.instanceId, runs[1]!.id],
+        ],
+      );
+      const error = yield* failover(3, (yield* failLatest(3)).id).pipe(Effect.flip);
+      const refusal = error.cause as OrchestrationV2ProviderFailoverRefused;
+      assert.equal(refusal.reason, "exhausted");
+      assert.deepEqual(
+        refusal.candidates.map((candidate) => candidate.skipped),
+        ["already_tried", "already_tried", "already_tried"],
+      );
+    }),
+  );
+});

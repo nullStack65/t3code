@@ -7,6 +7,7 @@ import {
   ProviderSetupError,
   ProviderThreadId,
   ProviderTurnId,
+  providerFailoverClass,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -57,6 +58,33 @@ it("redacts credentials whose key names end in a credential word", () => {
     failure.message,
     'oauth refresh failed: client_secret=[REDACTED] refresh_token=[REDACTED] {"client_secret":"[REDACTED]"} clientSecret: [REDACTED] X-Auth-Token: [REDACTED] max_tokens=4096',
   );
+});
+
+it("keeps a provider failure's HTTP status and classes it for failover, failing closed", () => {
+  for (const [input, httpStatus, failoverClass] of [
+    [{ class: "provider_error", code: "api_error_402" }, 402, "payment"],
+    [{ class: "usage_limit", code: "api_error_429" }, 429, "rate_limit"],
+    [
+      { class: "usage_limit", code: "responseTooManyFailedAttempts", httpStatus: 429 },
+      429,
+      "rate_limit",
+    ],
+    [{ class: "usage_limit", code: "rateLimitExceeded" }, undefined, "rate_limit"],
+    [{ class: "provider_error", code: "api_error_401" }, 401, "auth"],
+    [{ class: "provider_error", code: "unauthorized" }, undefined, "auth"],
+    [{ class: "usage_limit", code: "usageLimitExceeded" }, undefined, "quota"],
+    // Policy and safety denials, sign-out prompts and other errors never fail over.
+    [{ class: "provider_error", code: "content_policy_violation", httpStatus: 403 }, 403, "other"],
+    [{ class: "usage_limit", code: "safety_refusal", httpStatus: 429 }, 429, "other"],
+    [{ class: "permission_error", code: null }, undefined, "other"],
+    [{ class: "provider_error", code: "api_error_403" }, 403, "other"],
+    [{ class: "provider_error", code: "api_error_500" }, 500, "other"],
+    [{ class: "transport_error", code: null, httpStatus: 0 }, undefined, "other"],
+  ] as const) {
+    const failure = makeProviderFailure({ message: "Provider failed.", ...input });
+    assert.equal(failure.httpStatus, httpStatus, input.code ?? input.class);
+    assert.equal(providerFailoverClass(failure), failoverClass, input.code ?? input.class);
+  }
 });
 
 it("reports an oversized provider request as not retryable instead of the gateway's error page", () => {

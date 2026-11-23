@@ -750,6 +750,23 @@ export const SessionSpendGuardSettings = Schema.Struct({
 });
 export type SessionSpendGuardSettings = typeof SessionSpendGuardSettings.Type;
 
+/**
+ * Closura: a failed run may continue on the next provider in a caller's ordered list only on a
+ * payment, rate-limit, auth or quota failure with no side effects. Off until Home's routing
+ * table supplies the list; `includedProviderInstanceIds` names the only targets that bill no
+ * extra spend, and `maxAttempts` bounds one run lineage.
+ */
+export const ProviderFailoverSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  includedProviderInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  maxAttempts: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 8 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(3)),
+  ),
+});
+export type ProviderFailoverSettings = typeof ProviderFailoverSettings.Type;
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     setupMode: Schema.optionalKey(Schema.Literals(["managed", "existing"])).pipe(
@@ -1747,6 +1764,7 @@ export const ServerSettings = Schema.Struct({
    * warning without stopping, and `off` disables the guard.
    */
   sessionSpendGuard: SessionSpendGuardSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  providerFailover: ProviderFailoverSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 
   // Schema.Unknown preserves unknown-driver configs across versions; see providerInstance.ts.
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
@@ -2163,6 +2181,15 @@ export const ServerSettingsPatch = Schema.Struct({
       idleStopUsd: Schema.optionalKey(SpendGuardUsd),
       sessionCeilingUsd: Schema.optionalKey(SpendGuardUsd),
       fallbackRate: Schema.optionalKey(UsageModelPriceOverride),
+    }),
+  ),
+  providerFailover: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      includedProviderInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+      maxAttempts: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 8 })),
+      ),
     }),
   ),
   observability: Schema.optionalKey(

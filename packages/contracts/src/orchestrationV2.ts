@@ -619,11 +619,9 @@ export function applyOrchestrationV2ThreadVisit<Thread extends OrchestrationV2Ap
 }
 
 /**
- * The cursors after `founder` reads a shared thread. The first such visit copies the old shared
- * cursor onto the other founder, then moves only the reader. A thread nobody has visited marks
- * both founders read as of this visit, so a later reply is still unread for the founder who was
- * not here. Leaving that founder unset hides the badge, because a missing stamp is not unread.
- * A visit that is not newer returns the existing map, so the caller can skip a write.
+ * Cursors after `founder` reads a shared thread. A first visit copies the shared cursor to the
+ * other founder (an unvisited thread marks both read now, since a missing stamp hides the badge),
+ * then moves only the reader. A visit that is not newer returns the existing map.
  */
 export function nextFounderVisits(
   thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
@@ -669,7 +667,7 @@ export function nextFounderSeenMessage(
 ): FounderSeenMessages {
   const current = thread.seenMessageByFounder;
   if (current?.[founder] === messageId) return current ?? { [founder]: messageId };
-  return { ...(current ?? {}), [founder]: messageId };
+  return { ...current, [founder]: messageId };
 }
 
 /** A thread another agent drives: a local subagent or a task delegated from a linked environment. */
@@ -895,6 +893,8 @@ export const OrchestrationV2Run = Schema.Struct({
   restartContinuationOfRunId: Schema.optional(RunId),
   manualContinuationOfRunId: Schema.optional(RunId),
   usageLimitContinuationOfRunId: Schema.optional(RunId),
+  /** The failed run this one continues on another provider; it and its ancestors form one lineage. */
+  providerFailoverOfRunId: Schema.optional(RunId),
   delegatedTaskId: Schema.optional(NodeId),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
@@ -1764,8 +1764,102 @@ export const OrchestrationV2ProviderFailure = Schema.Struct({
   code: Schema.NullOr(OrchestrationV2ProviderFailureCode),
   retryable: Schema.NullOr(Schema.Boolean),
   resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** The provider's HTTP status, when it reported one. */
+  httpStatus: Schema.optional(
+    Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
+  ),
 });
 export type OrchestrationV2ProviderFailure = typeof OrchestrationV2ProviderFailure.Type;
+
+/** Why a failed run may move to another provider; `other` never does. */
+export const OrchestrationV2ProviderFailoverClass = Schema.Literals([
+  "payment",
+  "rate_limit",
+  "auth",
+  "quota",
+  "other",
+]);
+export type OrchestrationV2ProviderFailoverClass = typeof OrchestrationV2ProviderFailoverClass.Type;
+
+// A refusal on policy or safety grounds fails the same way on any provider.
+const POLICY_DENIAL_CODE = /polic|safety|moderat|content.?filter|refus|guardrail|violat|cyber/iu;
+const AUTH_CODE = /^(?:unauthori[sz]ed|unauthenticated|authentication.*|invalid.?api.?key)$/iu;
+const RATE_LIMIT_CODE = /rate.?limit/iu;
+
+/** Unknown or ambiguous failures stay `other`, so they never fail over. */
+export function providerFailoverClass(
+  failure: Pick<OrchestrationV2ProviderFailure, "class" | "code" | "httpStatus">,
+): OrchestrationV2ProviderFailoverClass {
+  const code = failure.code ?? "";
+  if (
+    failure.class === "validation_error" ||
+    failure.class === "permission_error" ||
+    POLICY_DENIAL_CODE.test(code)
+  )
+    return "other";
+  if (failure.httpStatus === 402) return "payment";
+  if (failure.httpStatus === 401 || AUTH_CODE.test(code)) return "auth";
+  if (failure.httpStatus === 429 || RATE_LIMIT_CODE.test(code)) return "rate_limit";
+  if (failure.class === "usage_limit") return "quota";
+  return "other";
+}
+
+/** A failed run's provider error for readback. It carries no message text, which may quote the prompt. */
+export const OrchestrationV2RunFailure = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.String,
+  httpStatus: Schema.NullOr(Schema.Int),
+  class: OrchestrationV2ProviderFailoverClass,
+  code: Schema.NullOr(Schema.String),
+  retryable: Schema.NullOr(Schema.Boolean),
+});
+export type OrchestrationV2RunFailure = typeof OrchestrationV2RunFailure.Type;
+
+export function orchestrationV2RunFailure(
+  run: Pick<OrchestrationV2Run, "modelSelection">,
+  failure: OrchestrationV2ProviderFailure,
+): OrchestrationV2RunFailure {
+  return {
+    providerInstanceId: run.modelSelection.instanceId,
+    model: run.modelSelection.model,
+    httpStatus: failure.httpStatus ?? null,
+    class: providerFailoverClass(failure),
+    code: failure.code,
+    retryable: failure.retryable,
+  };
+}
+
+export const OrchestrationV2ProviderFailoverRefusalReason = Schema.Literals([
+  "disabled",
+  "not_failover_class",
+  "not_latest_failed_run",
+  "pending_request",
+  "side_effects",
+  "exhausted",
+]);
+export type OrchestrationV2ProviderFailoverRefusalReason =
+  typeof OrchestrationV2ProviderFailoverRefusalReason.Type;
+
+/** Why a provider failover was not admitted. Candidates lists each one passed over and why. */
+export class OrchestrationV2ProviderFailoverRefused extends Schema.TaggedError<OrchestrationV2ProviderFailoverRefused>()(
+  "OrchestrationV2ProviderFailoverRefused",
+  {
+    runId: RunId,
+    reason: OrchestrationV2ProviderFailoverRefusalReason,
+    failure: Schema.NullOr(OrchestrationV2RunFailure),
+    candidates: Schema.Array(
+      Schema.Struct({
+        providerInstanceId: ProviderInstanceId,
+        model: Schema.String,
+        skipped: Schema.Literals(["not_included", "unavailable", "already_tried"]),
+      }),
+    ),
+  },
+) {
+  override get message(): string {
+    return `Provider failover refused (${this.reason}) for run ${this.runId}.`;
+  }
+}
 
 export const OrchestrationV2ProviderRetry = Schema.Struct({
   attempt: PositiveInt,
@@ -3657,6 +3751,16 @@ export const OrchestrationV2Command = Schema.Union([
     restartContinuationOfRunId: Schema.optional(RunId),
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
+    /** Continue a failed run on the first eligible candidate, in order. Replaces `modelSelection`. */
+    providerFailover: Schema.optional(
+      Schema.Struct({
+        ofRunId: RunId,
+        candidates: Schema.Array(ModelSelection).check(
+          Schema.isMinLength(1),
+          Schema.isMaxLength(8),
+        ),
+      }),
+    ),
     steerFollowUpOfRunId: Schema.optional(RunId),
     steerFollowUpAfterRunOrdinal: Schema.optional(NonNegativeInt),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),

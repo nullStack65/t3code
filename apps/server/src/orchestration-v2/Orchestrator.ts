@@ -23,6 +23,7 @@ import {
   usageLimitBlockedRun,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { canonicalizeGitCafePullRequestUrl } from "@t3tools/source-control-definitions/registry";
+import { admitProviderFailover } from "./providerFailover.ts";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import {
   normalizeThreadPullRequestKey,
@@ -1097,6 +1098,7 @@ function carriesDigest(
     | "restartContinuationOfRunId"
     | "manualContinuationOfRunId"
     | "usageLimitContinuationOfRunId"
+    | "providerFailoverOfRunId"
   >,
   message: {
     readonly text: string;
@@ -1109,6 +1111,7 @@ function carriesDigest(
     run.restartContinuationOfRunId === undefined &&
     run.manualContinuationOfRunId === undefined &&
     run.usageLimitContinuationOfRunId === undefined &&
+    run.providerFailoverOfRunId === undefined &&
     message.idleCompaction === undefined &&
     !isNativeMaintenanceCommand(message) &&
     parseGoalCommand(message) === null
@@ -7061,6 +7064,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               command.manualContinuationOfRunId,
               command.restartContinuationOfRunId,
               command.usageLimitContinuationOfRunId,
+              command.providerFailover?.ofRunId,
               command.steerFollowUpOfRunId,
               ...(command.dispatchMode.type === "steer_active" ||
               command.dispatchMode.type === "restart_active"
@@ -7121,6 +7125,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: projection.thread,
       });
       return;
+    }
+    if (command.providerFailover !== undefined) {
+      const admission =
+        command.dispatchMode.type === "start_immediately" && command.modelSelection === undefined
+          ? admitProviderFailover(
+              command.providerFailover,
+              projection,
+              // The command projection keeps only user messages and errors; effects need every item.
+              (yield* projectionStore
+                .getThreadRecords(command.threadId, ["turnItems"], {
+                  turnItemRunId: command.providerFailover.ofRunId,
+                })
+                .pipe(mapDispatchError(command))).turnItems,
+              yield* serverSettings.getSettings.pipe(Effect.orDie),
+            )
+          : null;
+      if (admission?.type === "duplicate") {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: projection.thread,
+        });
+        return;
+      }
+      if (admission?.type !== "admitted") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            admission?.refusal ??
+            "A provider failover starts immediately and takes its model from its candidates.",
+        });
+      }
+      command = { ...command, modelSelection: admission.target };
     }
     const activeProviderInstanceId = projection.providerThreads.find(
       (candidate) => candidate.id === projection.thread.activeProviderThreadId,
@@ -8116,6 +8158,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.usageLimitContinuationOfRunId === undefined
           ? {}
           : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
+        ...(command.providerFailover === undefined
+          ? {}
+          : { providerFailoverOfRunId: command.providerFailover.ofRunId }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...(freshContext ? { freshContext: true } : {}),
         ...(command.delivery === undefined ? {} : { delivery: command.delivery }),
@@ -8534,6 +8579,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.usageLimitContinuationOfRunId === undefined
           ? {}
           : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
+        ...(command.providerFailover === undefined
+          ? {}
+          : { providerFailoverOfRunId: command.providerFailover.ofRunId }),
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
@@ -9346,6 +9394,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.usageLimitContinuationOfRunId === undefined
         ? {}
         : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
+      ...(command.providerFailover === undefined
+        ? {}
+        : { providerFailoverOfRunId: command.providerFailover.ofRunId }),
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...wakeWorkStartedAt(projection, command),
       ...(command.delivery === undefined ? {} : { delivery: command.delivery }),
