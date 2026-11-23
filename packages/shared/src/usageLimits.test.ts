@@ -1981,15 +1981,38 @@ describe("owners and not-applicable usage", () => {
   });
 
   it("lists not-applicable usage apart from failures, and a billing refusal as a notice", () => {
-    const view = presentations();
-    expect(collectNotApplicable(view)).toEqual([
+    const covered = presentations();
+    expect(collectNotApplicable(covered)).toEqual([]);
+    const host = covered.get(EnvironmentId.make("env-a"))!;
+    const uncovered = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        {
+          ...host,
+          serverConfig: { ...host.serverConfig, usageLimitSources: [] },
+        },
+      ],
+    ]);
+    expect(collectNotApplicable(uncovered)).toEqual([
       { environment: "Crown", subject: "Magpie Codex", reason: "gateway reports it." },
     ]);
-    expect(collectLimitNotices(view)).toEqual([
+    expect(collectLimitNotices(covered)).toEqual([
       "Antigravity: Sign in with Google to see limits.",
       "Magpie · owner.a@example.com · Team: the vendor says payment is required, so this subscription's billing needs attention.",
       "Magpie · k: Upstream timed out.",
     ]);
+  });
+
+  it("drops a gateway instance from the empty count once Magpie has its cards", () => {
+    const host = presentations().get(EnvironmentId.make("env-a"))!;
+    const withoutCards = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { ...host, serverConfig: { ...host.serverConfig, usageLimitSources: [] } },
+      ],
+    ]);
+    expect(collectNotApplicable(withoutCards)).toHaveLength(1);
+    expect(collectNotApplicable(presentations())).toHaveLength(0);
   });
 
   it("names a billing refusal once however many machines see it", () => {
@@ -2009,10 +2032,14 @@ describe("owners and not-applicable usage", () => {
 
   it("groups one instance and reason across machines into one row", () => {
     const base = presentations().get(EnvironmentId.make("env-a"))!;
+    const uncovered = {
+      ...base,
+      serverConfig: { ...base.serverConfig, usageLimitSources: [] },
+    };
     const view = new Map(
       ["r720", "asus", "laptop"].map((label) => [
         EnvironmentId.make(label),
-        { ...base, entry: { target: { label } } },
+        { ...uncovered, entry: { target: { label } } },
       ]),
     );
     const entries = collectNotApplicable(view);

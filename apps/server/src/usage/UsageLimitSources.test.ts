@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   ProviderDriverKind,
+  ProviderInstanceId,
   SecretProviderId,
   ServerConfigStreamEvent,
   UsageLimitSourceId,
@@ -12,6 +13,7 @@ import {
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -20,6 +22,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import { ProviderExhaustion } from "../orchestration-v2/ProviderExhaustion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UsageLimitSources from "./UsageLimitSources.ts";
 
@@ -265,6 +268,119 @@ it.each([
       NOW,
     ),
   ).toBe(expected);
+});
+
+it.each([
+  {
+    name: "the earliest future reset when every account is spent",
+    accounts: [{ windows: [spent("five_hour", 2)] }, { windows: [spent("five_hour", 4)] }],
+    expected: Date.parse(at(2)),
+  },
+  {
+    name: "room when an account is under the limit",
+    accounts: [{ windows: [{ ...spent("five_hour", 2), usedPercent: 40 }] }],
+    expected: null,
+  },
+  {
+    name: "unknown when an account could not be read",
+    accounts: [{ windows: [spent("five_hour", 2)] }, { unavailable: true as const }],
+    expected: undefined,
+  },
+  {
+    name: "unknown when an account has no window",
+    accounts: [{ windows: [] }],
+    expected: undefined,
+  },
+  {
+    name: "unknown when the driver has no account",
+    accounts: [{ driver: "codex", windows: [spent("five_hour", 2)] }],
+    expected: undefined,
+  },
+])("magpie exhaustion: $name", ({ accounts, expected }) => {
+  expect(
+    UsageLimitSources.magpieExhaustionDecision(
+      [hub(accounts)],
+      ProviderDriverKind.make("claudeAgent"),
+      NOW,
+    ),
+  ).toBe(expected);
+});
+
+it.effect("a manual refresh rereads Magpie live and marks a vendor that is still exhausted", () => {
+  const instanceId = "magpie-codex";
+  const stale = Date.parse("2026-12-01T00:00:00.000Z");
+  const reset = Date.parse("2027-01-01T00:00:00.000Z");
+  const urls: string[] = [];
+  const card = {
+    provider: "codex",
+    user: "first@example.com",
+    windows: [{ name: "5 hours", used: 100, resetsAt: "2027-01-01T00:00:00.000Z" }],
+  };
+  const toml = 'model_provider = "m"\n[model_providers.m]\nbase_url = "http://127.0.0.1:3425/v1"\n';
+  return Effect.gen(function* () {
+    ProviderExhaustion.mark(instanceId, stale);
+    const sources = yield* UsageLimitSources.make.pipe(
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.makeNoop({
+          readFileString: (path) => Effect.succeed(path.endsWith("config.toml") ? toml : ""),
+        }),
+      ),
+    );
+    yield* sources.refreshLive;
+    expect(
+      urls.some((url) =>
+        url.includes("/api/usage/quotas/refresh?provider=codex&user=first%40example.com"),
+      ),
+    ).toBe(true);
+    expect(urls.some((url) => url.includes("/v1/magpie/quotas/refresh"))).toBe(false);
+    expect(ProviderExhaustion.until(instanceId, Date.parse("2026-11-21T00:00:00.000Z"))).toBe(
+      reset,
+    );
+  }).pipe(
+    Effect.provide([
+      ServerSettings.layerTest({
+        usageLimitSources: {
+          [UsageLimitSourceId.make("magpie")]: {
+            kind: "magpie",
+            url: "http://127.0.0.1:3425",
+            managementKey: "",
+            enabled: true,
+          },
+        },
+        providerInstances: {
+          [ProviderInstanceId.make(instanceId)]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            config: { homePath: "/codex-home" },
+          },
+        },
+      }),
+      Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+        shouldRunScopeWork: () => Effect.succeed(false),
+      }),
+      Layer.succeed(SecretResolver.SecretResolver, {
+        label: (provider) => Effect.succeed(provider),
+        read: (references) => Effect.succeed(references.map(() => undefined)),
+        invalidate: () => Effect.void,
+      }),
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.sync(() => {
+            urls.push(request.url);
+            const body = request.url.includes("/api/usage/quotas/refresh")
+              ? [card]
+              : { data: [card] };
+            return HttpClientResponse.fromWeb(request, Response.json(body));
+          }),
+        ),
+      ),
+      NodeCrypto.layer,
+      NodeServices.layer,
+    ]),
+    Effect.ensuring(Effect.sync(() => ProviderExhaustion.clear(instanceId))),
+  );
 });
 
 it.effect("the reset fallback refreshes its hub, and a stalled hub cannot hold the failure", () =>

@@ -191,17 +191,23 @@ describe("manual usage refresh", () => {
 });
 
 describe("limits refresh cooldown", () => {
-  it("shares an in-flight check and skips duplicate automatic refreshes", async () => {
+  it("lets a manual refresh reread after an automatic one, and still coalesces automatic refreshes", async () => {
     const id = EnvironmentId.make("limits-in-flight");
     const oldCheck = Promise.withResolvers<string>();
-    const first = refreshUsageLimits(id, () => oldCheck.promise, true);
-    const newCheck = vi.fn(async () => "new limits");
-    const manual = refreshUsageLimits(id, newCheck);
-    expect(await refreshUsageLimits(id, newCheck, true)).toBeUndefined();
-    expect(newCheck).not.toHaveBeenCalled();
+    const automaticRefresh = vi.fn(() => oldCheck.promise);
+    const first = refreshUsageLimits(id, automaticRefresh, true);
+    const live = vi.fn(async () => "live limits");
+    const manual = refreshUsageLimits(id, live);
+    expect(live).not.toHaveBeenCalled();
+    expect(await refreshUsageLimits(id, live, true)).toBeUndefined();
     oldCheck.resolve("old limits");
     expect(await first).toBe("old limits");
-    expect(await manual).toBe("old limits");
-    expect(newCheck).not.toHaveBeenCalled();
+    expect(await manual).toBe("live limits");
+    expect(live).toHaveBeenCalledOnce();
+    expect(await refreshUsageLimits(id, live, true)).toBeUndefined();
+    expect(live).toHaveBeenCalledOnce();
+    const later = vi.fn(async () => "later limits");
+    expect(await refreshUsageLimits(id, later)).toBe("later limits");
+    expect(later).toHaveBeenCalledOnce();
   });
 });

@@ -553,6 +553,27 @@ export interface NotApplicableEntry {
   readonly reason: string;
 }
 
+const GATEWAY_REPORTED_NOT_APPLICABLE = /custom model provider|gateway reports/i;
+
+function magpieHasReadableAccount(
+  sources: ReadonlyArray<{
+    readonly kind: string;
+    readonly accounts: ReadonlyArray<{
+      readonly driver: string;
+      readonly usageLimits: { readonly unavailable?: unknown };
+    }>;
+  }>,
+  driver: string,
+): boolean {
+  return sources.some(
+    (source) =>
+      source.kind === "magpie" &&
+      source.accounts.some(
+        (account) => account.driver === driver && account.usageLimits.unavailable === undefined,
+      ),
+  );
+}
+
 /**
  * Usage that cannot be read on its current setup (a key with no subscription,
  * an instance whose gateway reports for it), so a missing bar reads as "not
@@ -579,6 +600,16 @@ export function collectNotApplicable(
         unavailable?.reason !== "unsupported" ||
         !unavailable.message?.startsWith(NOT_APPLICABLE_PREFIX) ||
         provider.usageLimits?.externalUsage
+      ) {
+        continue;
+      }
+      // Magpie already published this driver's cards, so the instance is not an empty row.
+      if (
+        GATEWAY_REPORTED_NOT_APPLICABLE.test(unavailable.message) &&
+        magpieHasReadableAccount(
+          presentation.serverConfig?.usageLimitSources ?? [],
+          provider.driver,
+        )
       ) {
         continue;
       }

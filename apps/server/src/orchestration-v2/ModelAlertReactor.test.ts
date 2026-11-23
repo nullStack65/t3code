@@ -727,6 +727,18 @@ it("a provider out of usage is tracked until its reset, and a healthy run clears
   assert.equal(ProviderExhaustion.until("magpie-primary-codex", 1_000), null);
 });
 
+it("a quota reread clears exhaustion, then marks a vendor that is still out", () => {
+  ProviderExhaustion.clear();
+  ProviderExhaustion.mark("magpie-primary-codex", 5_000);
+  ProviderExhaustion.reapply("magpie-primary-codex", () => {
+    assert.equal(ProviderExhaustion.until("magpie-primary-codex", 1_000), null);
+    return 9_000;
+  });
+  assert.equal(ProviderExhaustion.until("magpie-primary-codex", 1_000), 9_000);
+  ProviderExhaustion.reapply("magpie-primary-codex", () => null);
+  assert.equal(ProviderExhaustion.until("magpie-primary-codex", 1_000), null);
+});
+
 const linkAlert = (at: number): PeerLinkRenewalAlert => ({
   type: "peer-link-renewal",
   id: `peer-link-renewal:environment-box:${at}`,
