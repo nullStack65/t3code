@@ -3,27 +3,10 @@ import type { Founder, ThreadSeenMarkerSummary } from "@t3tools/contracts";
 const FOUNDER_NAMES = { kameron: "Kameron", jeff: "Jeff" } satisfies Record<Founder, string>;
 
 /** `[From: Kameron]` on a shared thread, so the model knows which founder typed it. */
-export function formatSharedSenderForProvider(
-  text: string,
-  founder: Founder | null | undefined,
-) {
+export function formatSharedSenderForProvider(text: string, founder: Founder | null | undefined) {
   if (founder == null) return text;
   if (text.trim().startsWith("/")) return text;
   return `[From: ${FOUNDER_NAMES[founder]}]\n\n${text}`;
-}
-
-/**
- * A person whose client nobody has named credits this machine's owner. An assigned client, a
- * bot, and a machine with no owner stay as they are.
- */
-export function creditUnassignedSender<T extends { founder: Founder | null; deviceType: string }>(
-  sentBy: T,
-  ownerFounder: Founder | null,
-): T {
-  if (sentBy.founder !== null || sentBy.deviceType === "bot" || ownerFounder === null) {
-    return sentBy;
-  }
-  return { ...sentBy, founder: ownerFounder };
 }
 
 export function formatSeenMarkerForProvider(

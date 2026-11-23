@@ -417,6 +417,8 @@ export class SessionStore extends Context.Service<
       readonly peerLink?: boolean;
       readonly replaceActiveForSubjectAndMethod?: boolean;
       readonly replaceSessionId?: AuthSessionId;
+      /** The founder the client's pairing code enrolled. */
+      readonly founder?: Founder;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
     /**
@@ -762,6 +764,7 @@ const make = Effect.gen(function* () {
         issuedAt,
         expiresAt,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+        ...(input?.founder === undefined ? {} : { founder: input.founder }),
       } satisfies AuthSessions.CreateAuthSessionInput;
       const replacedSessionIds = yield* (
         input?.replaceSessionId !== undefined || input?.replaceActiveForSubjectAndMethod
@@ -788,6 +791,17 @@ const make = Effect.gen(function* () {
           discard: true,
         });
       }
+      // An approved T3 Connect device key can supply the founder, so read back what was stored.
+      const founder =
+        client.deviceType === "bot"
+          ? null
+          : (input?.founder ??
+            (claims.jkt === undefined
+              ? null
+              : yield* authSessions.getById({ sessionId }).pipe(
+                  Effect.map((row) => (Option.isSome(row) ? row.value.founder : null)),
+                  Effect.orElseSucceed(() => null),
+                )));
       yield* emitUpsert(
         toAuthClientSession({
           sessionId,
@@ -799,6 +813,7 @@ const make = Effect.gen(function* () {
           expiresAt,
           lastConnectedAt: null,
           connected: false,
+          ...(founder === null ? {} : { founder }),
         }),
       );
 

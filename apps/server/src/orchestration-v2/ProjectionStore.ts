@@ -1760,7 +1760,7 @@ const shellAttentionMentions = (text: string | null | undefined) => {
 };
 
 const shellInbox = (
-  inbox: ThreadInbox | undefined,
+  { inbox, standing }: { readonly inbox?: ThreadInbox | undefined; readonly standing?: unknown },
   pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null,
   latestUserAuthoredMessageAt: DateTime.Utc | null,
 ) =>
@@ -1768,6 +1768,7 @@ const shellInbox = (
     ? {}
     : {
         inbox: projectThreadInbox(inbox, {
+          standing: standing != null,
           pendingHumanRequest: pendingRuntimeRequest !== null,
           latestHumanMessageAt:
             latestUserAuthoredMessageAt === null
@@ -1861,7 +1862,7 @@ export function threadShellFromProjection(
   });
   return {
     createdBy: projection.thread.createdBy,
-    ...shellInbox(projection.thread.inbox, pendingRuntimeRequest, latestUserAuthoredMessageAt),
+    ...shellInbox(projection.thread, pendingRuntimeRequest, latestUserAuthoredMessageAt),
     creationSource: projection.thread.creationSource,
     id: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -2215,7 +2216,7 @@ function shellFromState(input: {
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),
     ...shellInbox(
-      input.state.thread.inbox,
+      input.state.thread,
       input.state.pendingRuntimeRequest,
       input.state.latestUserAuthoredMessageAt,
     ),
@@ -8644,7 +8645,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   pendingRuntimeRequest: null,
                   // The same projected inbox the shell carries, so an answered ask is already gone.
                   ...shellInbox(
-                    thread.inbox,
+                    thread,
                     null,
                     row.latest_user_authored_message_at === null
                       ? null

@@ -1318,6 +1318,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     managedTunnelOnly: true,
   },
   {
+    id: "require-founder-identity",
+    title: "Require enrolled founders",
+    to: "/settings/access",
+    targetId: "connections-environment",
+    searchTerms: ["founder kameron jeff identity enroll pairing sender attribution inbox approval"],
+  },
+  {
     id: "hold-webhooks-while-offline",
     localEnvironmentOnly: true,
     title: "Hold webhooks while offline",

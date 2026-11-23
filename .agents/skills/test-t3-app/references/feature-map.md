@@ -209,7 +209,7 @@ Code:
 Connections:
 
 - **settings.connections** — `/settings/connections`, "Environments": "This machine", "Linked environments", "Network access", "Tailscale HTTPS", "T3 Connect", "Load balancing".
-- **settings.access** — `/settings/access`, "Sharing & access": paired devices, "Guest links", "Require approval for new devices".
+- **settings.access** — `/settings/access`, "Sharing & access": paired devices, "Guest links", "Require approval for new devices", "Require enrolled founders".
 - **settings.secrets** — `/settings/secrets`, "Secrets" (only when secrets are enabled).
 
 More:

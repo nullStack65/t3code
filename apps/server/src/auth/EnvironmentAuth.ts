@@ -535,6 +535,7 @@ export class EnvironmentAuth extends Context.Service<
       readonly purpose?: "startup";
       readonly mcpApproval?: AuthMcpClientAccess;
       readonly requiresConnectApproval?: boolean;
+      readonly founder?: Founder;
     }) => Effect.Effect<
       IssuedPairingLink,
       ServerAuthInternalError | ManagedLimits.ManagedPolicyRefusedError
@@ -1004,6 +1005,7 @@ export const make = Effect.gen(function* () {
           ...requestMetadata,
           ...(grant.label ? { label: grant.label } : {}),
         },
+        ...(grant.founder === undefined ? {} : { founder: grant.founder }),
       })
       .pipe(Effect.mapError((cause) => new ServerAuthAuthenticatedSessionIssueError({ cause })));
     return {
@@ -1019,7 +1021,7 @@ export const make = Effect.gen(function* () {
 
   type ResolvedBootstrapGrant = Pick<
     PairingGrantStore.BootstrapGrant,
-    "scopes" | "subject" | "label"
+    "scopes" | "subject" | "label" | "founder"
   > & {
     readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token";
   };
@@ -1124,6 +1126,7 @@ export const make = Effect.gen(function* () {
                   ...requestMetadata,
                   ...(grant.label ? { label: grant.label } : {}),
                 },
+                ...(grant.founder === undefined ? {} : { founder: grant.founder }),
               })
               .pipe(
                 Effect.mapError(
@@ -1176,6 +1179,7 @@ export const make = Effect.gen(function* () {
         ...(input?.purpose ? { purpose: input.purpose } : {}),
         ...(input?.mcpApproval ? { mcpApproval: input.mcpApproval } : {}),
         ...(input?.requiresConnectApproval ? { requiresConnectApproval: true } : {}),
+        ...(input?.founder === undefined ? {} : { founder: input.founder }),
       });
       return {
         id: issued.id,
@@ -1386,6 +1390,8 @@ export const make = Effect.gen(function* () {
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
       ...(input?.access ? { mcpApproval: input.access } : {}),
+      // An agent sign-in is never a founder.
+      ...(input?.founder === undefined || input.access ? {} : { founder: input.founder }),
     }).pipe(
       Effect.map((issued) => ({
         ...toPairingCredential(issued),

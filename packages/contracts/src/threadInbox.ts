@@ -321,11 +321,15 @@ export function inboxAfterFounderReply<Inbox extends ThreadInbox | undefined>(
 /**
  * The inbox clients read. A decision request closes once a person writes on the thread after it
  * was asked. A joint sign-off stays open until each founder has signed. A pending approval or
- * user-input request surfaces to the owner.
+ * user-input request surfaces to the owner. A standing desk reads as FYI unless one is open.
  */
 export function projectThreadInbox(
   inbox: ThreadInbox,
-  state: { readonly pendingHumanRequest: boolean; readonly latestHumanMessageAt: string | null },
+  state: {
+    readonly pendingHumanRequest: boolean;
+    readonly latestHumanMessageAt: string | null;
+    readonly standing?: boolean;
+  },
 ): ThreadInbox {
   const { decisionRequest, pendingHumanRequest: _stored, ...rest } = inbox;
   const joint = jointSignOff(decisionRequest?.signOff);
@@ -335,8 +339,15 @@ export function projectThreadInbox(
       ? joint.some((entry) => !entry.signed)
       : state.latestHumanMessageAt === null ||
         Date.parse(state.latestHumanMessageAt) <= Date.parse(decisionRequest.requestedAt));
+  // A standing desk (CoS, CTO) is somewhere to talk, not an ask: FYI until something is asked.
+  const quietDesk =
+    state.standing === true &&
+    rest.attentionKind === "action" &&
+    !open &&
+    !state.pendingHumanRequest;
   return {
     ...rest,
+    ...(quietDesk ? { attentionKind: "FYI" as const } : {}),
     ...(open ? { decisionRequest } : {}),
     ...(state.pendingHumanRequest ? { pendingHumanRequest: true } : {}),
   };
@@ -431,6 +442,46 @@ export const inboxOriginFor = (settings: {
   settings.founderInboxOwner === undefined
     ? undefined
     : { kind: "human", id: settings.founderInboxOwner };
+
+/**
+ * Who a person's new thread is filed under. A session assigned to a founder files as that founder
+ * whatever the client claims. An unassigned session keeps the client's choice and is never filed
+ * under a guessed founder.
+ */
+export function creatorInboxOrigin(
+  claimed: InboxActor | undefined,
+  sender: { readonly founder: Founder | null; readonly deviceType: string },
+): InboxActor | undefined {
+  return sender.founder === null || sender.deviceType === "bot"
+    ? claimed
+    : { kind: "human", id: sender.founder };
+}
+
+/** Commands the server records a founder for: what they say, answer, or start. */
+const FOUNDER_ATTRIBUTED_COMMANDS: ReadonlySet<string> = new Set([
+  "message.dispatch",
+  "queued-run.edit",
+  "runtime-request.respond",
+  "thread.create",
+]);
+
+/**
+ * Whether `requireFounderIdentity` refuses this command: a person's session that no pairing code
+ * or approved device enrolled as a founder may not send, answer or start work. Bots act as
+ * themselves, and other commands are unaffected.
+ */
+export function refusesUnenrolledSender(
+  requireFounderIdentity: boolean,
+  commandType: string,
+  sender: { readonly founder: Founder | null; readonly deviceType: string },
+): boolean {
+  return (
+    requireFounderIdentity &&
+    FOUNDER_ATTRIBUTED_COMMANDS.has(commandType) &&
+    sender.deviceType !== "bot" &&
+    sender.founder === null
+  );
+}
 
 /** All deliberately includes every thread, including unclassified history. */
 export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: InboxView) {
