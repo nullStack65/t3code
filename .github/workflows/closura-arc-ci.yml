@@ -1,7 +1,12 @@
 name: T3 fork ARC CI
 
-# Self-hosted, repository-scoped ARC only. No paid Blacksmith, hosted fallback,
-# macOS/Windows runners, new controller or deployment side effects.
+# Self-hosted, repository-scoped ARC only. No paid Blacksmith, macOS/Windows
+# runners, new controller or deployment side effects. The one hosted exception
+# is the CLO-694 emergency burst: when an admin sets the repository variable
+# CI_BURST_HOSTED to exactly `on` during an ARC backlog, these jobs run on
+# ubuntu-latest (free here, since this repository is public). Unset, it is ARC.
+# The toggle and runbook live in closura-agent-config: scripts/ci_burst.py and
+# docs/ci/emergency-burst.md.
 on:
   push:
     # Every merged head of the native release branch gets a check run on its
@@ -58,7 +63,7 @@ jobs:
         )
       }}
     name: Voice + inbox core (Linux ARC)
-    runs-on: t3code-ci-arc
+    runs-on: ${{ vars.CI_BURST_HOSTED == 'on' && 'ubuntu-latest' || 't3code-ci-arc' }}
     timeout-minutes: 45
     env:
       CI: "true"
@@ -212,7 +217,7 @@ jobs:
         )
       }}
     name: Voice + inbox web (Linux ARC)
-    runs-on: t3code-ci-arc
+    runs-on: ${{ vars.CI_BURST_HOSTED == 'on' && 'ubuntu-latest' || 't3code-ci-arc' }}
     timeout-minutes: 45
     env:
       CI: "true"
@@ -292,7 +297,7 @@ jobs:
         )
       }}
     name: Voice + inbox mobile (Linux ARC)
-    runs-on: t3code-ci-arc
+    runs-on: ${{ vars.CI_BURST_HOSTED == 'on' && 'ubuntu-latest' || 't3code-ci-arc' }}
     timeout-minutes: 45
     env:
       CI: "true"
@@ -467,7 +472,7 @@ jobs:
     name: Voice + founder inbox (Linux ARC)
     needs: [voice-and-inbox-core, voice-and-inbox-web, voice-and-inbox-mobile]
     if: ${{ !cancelled() }}
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'ubuntu-latest' || 't3code-ci-arc' }}
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.draft) || vars.CI_BURST_HOSTED == 'on') && 'ubuntu-latest' || 't3code-ci-arc' }}
     timeout-minutes: 5
     steps:
       - name: Hold drafts until ready for review
