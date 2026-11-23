@@ -140,7 +140,7 @@ export const layerEnforcingCeiling: Layer.Layer<
   }),
 );
 
-export const applyThreadTypePolicy = Effect.fn("RuntimePolicyV2.applyThreadTypePolicy")(function* (
+const applyThreadTypePolicy = Effect.fn("RuntimePolicyV2.applyThreadTypePolicy")(function* (
   policyPath: string,
   input: { readonly thread: OrchestrationV2AppThread; readonly modelSelection: ModelSelection },
 ) {

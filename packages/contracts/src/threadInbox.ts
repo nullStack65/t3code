@@ -94,7 +94,6 @@ export const ThreadInbox = Schema.Struct({
   executorEnvironmentId: Schema.NullOr(EnvironmentId),
 });
 export type ThreadInbox = typeof ThreadInbox.Type;
-export const INBOX_CAPABILITY = "closura-founder-inbox-v2" as const;
 export const InboxView = Schema.Literals(["kameron", "jeff", "shared", "agents", "all"]);
 export type InboxView = typeof InboxView.Type;
 /** An inbox a thread can be filed into: every view except All. */

@@ -227,7 +227,7 @@ export function buildSearchSnippet(text: string, matchStart: number): string {
  * among "people" but never Kameron's or Jeff's. A legacy scheduled-task prompt is known by its
  * server-made id; a message the server stamped with a person's client is a person's regardless.
  */
-export const messageSenderCondition = (
+const messageSenderCondition = (
   sql: SqlClient.SqlClient,
   sender: OrchestrationSearchSenderFilter | null,
 ) => {

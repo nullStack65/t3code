@@ -21,7 +21,7 @@ function parseKeyValues(text: string): Map<string, string> {
 }
 
 /** The graphical login's state from logind; a session that cannot be read counts as in use. */
-export function linuxSessionInUse(shown: string): boolean {
+function linuxSessionInUse(shown: string): boolean {
   const values = parseKeyValues(shown);
   return !(
     values.get("Active") === "no" ||
@@ -31,7 +31,7 @@ export function linuxSessionInUse(shown: string): boolean {
 }
 
 /** A login at this machine's own screen, not a remote or text session. */
-export function isLocalGraphicalSession(shown: string): boolean {
+function isLocalGraphicalSession(shown: string): boolean {
   const values = parseKeyValues(shown);
   const type = values.get("Type");
   return (type === "x11" || type === "wayland" || type === "mir") && values.get("Remote") !== "yes";
@@ -46,7 +46,7 @@ type GraphicalLogin =
   | { readonly kind: "session"; readonly shown: string }
   | { readonly kind: "unknown" };
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   const runner = yield* ProcessRunner.ProcessRunner;
   const settingsService = yield* ServerSettings.ServerSettingsService;

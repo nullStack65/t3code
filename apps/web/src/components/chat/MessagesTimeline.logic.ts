@@ -2413,7 +2413,7 @@ const KEPT_ACTIVITY_ROW_KINDS = new Set<MessagesTimelineRow["kind"]>([
   "viewed-images",
 ]);
 
-export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
+function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
   if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return true;
   // A secret or a link is answered only on its own card, so it must not fold away.
   if (
@@ -2434,7 +2434,10 @@ export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolea
  * streaming in and earlier history loading above it. A live turn's own rows use
  * constant ids that vanish when the turn settles, so they never anchor a pill.
  */
-function activityPillId(anchor: MessagesTimelineRow | undefined, run: MessagesTimelineRow[]): string {
+function activityPillId(
+  anchor: MessagesTimelineRow | undefined,
+  run: MessagesTimelineRow[],
+): string {
   return `activity:${anchor?.id ?? run[0]!.id}`;
 }
 

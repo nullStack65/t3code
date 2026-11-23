@@ -18,7 +18,7 @@ export type BotAttention =
   | { readonly kind: "sign-off"; readonly founders: ReadonlyArray<FounderSignOff> };
 
 /** Both founders, in the order the pill writes them. */
-export const JOINT_SIGN_OFF_FOUNDERS: readonly Founder[] = Founder.literals;
+const JOINT_SIGN_OFF_FOUNDERS: readonly Founder[] = Founder.literals;
 
 /** How much of a message is scanned for an @-mention. The shell stores the names, not the text. */
 export const ATTENTION_MENTION_TEXT_LIMIT = 2000;
@@ -42,11 +42,6 @@ export function attentionMentionsFromText(
 ): ReadonlyArray<Founder> | undefined {
   const found = mentionedFounders(text?.slice(0, ATTENTION_MENTION_TEXT_LIMIT));
   return found.length > 0 ? found : undefined;
-}
-
-/** True when the ask lists both founders, so one founder's answer is not enough. */
-export function isJointSignOff(signOff: ReadonlyArray<FounderSignOff> | null | undefined): boolean {
-  return jointSignOff(signOff) !== null;
 }
 
 /**

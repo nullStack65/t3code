@@ -56,7 +56,7 @@ const GiB = 1024 ** 3;
  * working. Small machines still give agents at least half of RAM before
  * throttling and three quarters before a kill.
  */
-export function agentSliceMemoryLimits(totalBytes: number, role: AgentHostRole = "headless") {
+function agentSliceMemoryLimits(totalBytes: number, role: AgentHostRole = "headless") {
   if (role === "interactive") {
     // A person's computer keeps 4 GB or 40% for them before agents slow, and 3 GB or 30%
     // before one is killed.
