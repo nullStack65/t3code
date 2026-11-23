@@ -25,6 +25,7 @@ import { contextMenuSourceOf } from "../../contextMenuSource";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { BotAvatar, BOT_ACCENT_CLASSES } from "../bots/BotAvatar";
+import { orderBotTree } from "../bots/botOrgTree";
 import { resolveBotPresence } from "../bots/botPresence";
 import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "../Sidebar.logic";
 import { useClientSettings } from "../../hooks/useSettings";
@@ -61,6 +62,7 @@ export function SidebarBotsGroup(
       current[environmentId] === next ? current : { ...current, [environmentId]: next },
     );
   }, []);
+  const rows = orderBotTree(props.threads);
   if (props.threads.length === 0) return null;
   const label = props.label ?? "Bots";
   const environmentIds = [...new Set(props.threads.map((thread) => thread.environmentId))];
@@ -78,12 +80,13 @@ export function SidebarBotsGroup(
         <span aria-hidden className="h-px flex-1 bg-sidebar-foreground/15" />
       </div>
       <ul role="list" className="flex flex-col gap-px">
-        {props.threads.map((thread) => {
+        {rows.map(({ thread, depth }) => {
           const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
             <SidebarBotRow
               key={key}
               thread={thread}
+              depth={depth}
               threadKey={key}
               isActive={props.activeThreadKey === key}
               typing={typingByEnvironment[thread.environmentId]}
@@ -119,6 +122,8 @@ function TypingFeed(props: {
 const SidebarBotRow = memo(function SidebarBotRow(
   props: BotRowHandlers & {
     readonly thread: EnvironmentThreadShell;
+    /** Reporting-line depth: 0 is a root; each level indents one step. */
+    readonly depth: number;
     readonly threadKey: string;
     readonly isActive: boolean;
     readonly typing: TypingByThread | undefined;
@@ -154,7 +159,11 @@ const SidebarBotRow = memo(function SidebarBotRow(
     props.onThreadActivate(threadRef);
   };
   return (
-    <li className="list-none">
+    <li
+      className="list-none"
+      data-bot-depth={props.depth}
+      style={props.depth > 0 ? { paddingLeft: `${props.depth * 14}px` } : undefined}
+    >
       <div
         role="button"
         tabIndex={0}
