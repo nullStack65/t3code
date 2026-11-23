@@ -284,12 +284,15 @@ function isClaudeEnvTruthy(value: string | undefined): boolean {
 const CLAUDE_COMPACT_OUTPUT_RESERVE = 20_000;
 const CLAUDE_COMPACT_FLOOR_GAP = 13_000;
 
-function claudeCompactEffectiveWindow(contextWindow: number, modelMaxTokens: number | null): number {
+function claudeCompactEffectiveWindow(
+  contextWindow: number,
+  modelMaxTokens: number | null,
+): number {
   const window = modelMaxTokens === null ? contextWindow : Math.min(modelMaxTokens, contextWindow);
   return window - CLAUDE_COMPACT_OUTPUT_RESERVE;
 }
 
-export function claudeAutoCompactPercent(
+function claudeAutoCompactPercent(
   threadType: { readonly contextWindow: number; readonly compactAt: number },
   modelMaxTokens: number | null = null,
 ): string {
@@ -2337,7 +2340,10 @@ export function makeClaudeQueryOptions(input: {
               ? {}
               : {
                   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: claudeAutoCompactPercent(
-                    { contextWindow: threadType.claudeContextWindow, compactAt: threadType.compactAt },
+                    {
+                      contextWindow: threadType.claudeContextWindow,
+                      compactAt: threadType.compactAt,
+                    },
                     modelMaxTokens,
                   ),
                   CLAUDE_CODE_PROMPT_CACHE_TTL: threadType.cacheTtl,

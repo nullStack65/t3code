@@ -68,7 +68,7 @@ const linkedSidebarSupplementAtom = Atom.make((get) => {
   return next;
 }).pipe(Atom.keepAlive, Atom.withLabel("linked-sidebar:supplement"));
 
-export const sidebarEnvironmentIdentitiesAtom = Atom.make((get) => {
+const sidebarEnvironmentIdentitiesAtom = Atom.make((get) => {
   const catalog = get(environmentSummaries.identitiesAtom);
   const extra = get(linkedSidebarSupplementAtom).identities;
   const next = extra.length === 0 ? catalog : [...catalog, ...extra];
@@ -82,7 +82,7 @@ export const sidebarEnvironmentIdentitiesAtom = Atom.make((get) => {
     : next;
 }).pipe(Atom.withLabel("linked-sidebar:identities"));
 
-export const sidebarProjectsAtom = Atom.make((get) => {
+const sidebarProjectsAtom = Atom.make((get) => {
   const local = get(environmentProjects.projectsAtom);
   const extra = get(linkedSidebarSupplementAtom).projects;
   if (extra.length === 0) return local;
@@ -95,7 +95,7 @@ export const sidebarProjectsAtom = Atom.make((get) => {
     : next;
 }).pipe(Atom.withLabel("linked-sidebar:projects"));
 
-export const sidebarThreadShellsAtom = Atom.make((get) => {
+const sidebarThreadShellsAtom = Atom.make((get) => {
   const local = get(environmentThreadShells.quietThreadShellsAtom);
   const extra = get(linkedSidebarSupplementAtom).threads;
   if (extra.length === 0) return local;

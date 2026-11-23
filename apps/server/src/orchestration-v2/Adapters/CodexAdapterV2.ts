@@ -1504,7 +1504,7 @@ const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 const CODEX_T3_DIRECT_MCP_SERVER = "t3-code-direct";
 const CODEX_DIRECT_ONLY_T3_TOOLS = ["t3_thread_wait", "delegate_task"];
 
-export function codexThreadTypeConfig(
+function codexThreadTypeConfig(
   threadType: ProviderAdapter.ProviderAdapterV2RuntimePolicy["threadType"],
 ): Readonly<Record<string, Schema.Json>> {
   return threadType === undefined

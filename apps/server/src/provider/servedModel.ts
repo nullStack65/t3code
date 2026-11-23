@@ -21,7 +21,7 @@ export function findServedModel<Model extends Pick<ServerProviderModel, "slug" |
   );
 }
 
-export function servedModelsHint(models: ReadonlyArray<ListedModel>, requested: string): string {
+function servedModelsHint(models: ReadonlyArray<ListedModel>, requested: string): string {
   const lastSegment = (slug: string) => slug.slice(slug.lastIndexOf("/") + 1).toLowerCase();
   const wanted = lastSegment(requested);
   const close = models.filter((model) => lastSegment(model.slug) === wanted);

@@ -101,7 +101,7 @@ const openPullRequests = (shell: WatchedShell) =>
   );
 
 /** A pending task, a watching PR, a delegated task or a snooze that will bring the thread back. */
-export function hasWakeHandle(shell: WatchedShell, remoteTaskCount: number, nowMs: number) {
+function hasWakeHandle(shell: WatchedShell, remoteTaskCount: number, nowMs: number) {
   if ((shell.pendingBackgroundTasks ?? []).length > 0) return true;
   if (remoteTaskCount > 0) return true;
   if ((shell.pullRequests ?? []).some((link) => link.watch !== undefined)) return true;
@@ -148,7 +148,7 @@ export interface StrandedQueue {
   readonly queueHeld?: boolean;
 }
 
-export const strandedQueueSignature = (queue: StrandedQueue) => `stranded-queue:${queue.runId}`;
+const strandedQueueSignature = (queue: StrandedQueue) => `stranded-queue:${queue.runId}`;
 export const isStrandedQueueSignature = (signature: string) =>
   signature.startsWith("stranded-queue:");
 

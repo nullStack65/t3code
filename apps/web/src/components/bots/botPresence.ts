@@ -64,7 +64,7 @@ export function splitStandingThreads<T extends { readonly standing: unknown }>(
 }
 
 /** A shared bot belongs to both founders; every other standing bot is one's own. */
-export function isSharedBotThread(thread: {
+function isSharedBotThread(thread: {
   readonly source: { readonly inbox?: { readonly audience?: string } | null | undefined };
 }): boolean {
   return thread.source.inbox?.audience === "shared";
