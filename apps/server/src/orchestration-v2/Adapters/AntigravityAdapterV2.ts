@@ -37,6 +37,7 @@ import { watchAntigravityPromptOutcome } from "../../provider/acp/AntigravityTur
 import {
   antigravityApprovalOptions,
   antigravitySubagentOutput,
+  antigravityToolOutlivesPrompt,
   classifyAntigravitySubagentToolCall,
   extractAntigravityUserInputQuestion,
   makeAntigravityReadRepair,
@@ -236,6 +237,13 @@ export function makeAntigravityAcpAdapterFlavor(
       ),
     // Loading history replays tool calls; resume avoids replay.
     subagentsIdleOnTurnCompletion: true,
+    // agy ends session/prompt while a command it backgrounded still runs, then replies by itself.
+    deferFinalizeForBackgroundWork: true,
+    replyEndsWithUsageUpdate: true,
+    toolOutlivesPrompt: antigravityToolOutlivesPrompt,
+    // session/cancel ends the agent's running commands, so only Stop sends it once the prompt
+    // has ended. A message sent while a command runs leaves the command alone.
+    preserveRuntimeOnSettledInterrupt: true,
     ...(options.onSessionEvent === undefined ? {} : { onSessionEvent: options.onSessionEvent }),
     applyModelSelection: Effect.fn("AntigravityAdapterV2.applyModelSelection")(function* ({
       runtime,

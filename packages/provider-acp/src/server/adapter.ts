@@ -143,6 +143,8 @@ export const ACP_PROTOCOL = "acp.ndjson-jsonrpc" as const;
 
 // Grok summaries can trail hydrated tools by over two seconds; shorter waits split the wake.
 const ACP_DEFERRED_FINALIZE_DEBOUNCE: Duration.Input = "3000 millis";
+// A command completion opens the agent's own reply. That reply can take longer than the quiet window.
+const ACP_OPEN_REPLY_QUIET_LIMIT: Duration.Input = "2 minutes";
 const ACP_BUSY_PROMPT_RETRY_INTERVAL: Duration.Input = "1 second";
 
 // pi-agent-core agents (oh-my-pi) end a turn while background work runs and reject
@@ -576,6 +578,16 @@ export interface AcpAdapterV2Flavor {
     readonly appendOutput: string;
   }>;
   readonly isPersistentBackgroundTool?: (toolCall: AcpToolCallState) => boolean;
+  /**
+   * A tool the agent goes on running after its prompt ends, and reports on by itself when the
+   * tool ends. With `deferFinalizeForBackgroundWork`, the turn stays open until then.
+   */
+  readonly toolOutlivesPrompt?: (toolCall: AcpToolCallState) => boolean;
+  /**
+   * The agent's reply ends on the usage update that follows its output. A held turn waits out
+   * that reply instead of the short quiet window.
+   */
+  readonly replyEndsWithUsageUpdate?: boolean;
   readonly isProviderWakeNotification?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => boolean;
@@ -1533,6 +1545,8 @@ interface ActiveAcpTurn {
   readonly promptStarted: Deferred.Deferred<void, never>;
   promptUsage: EffectAcpSchema.Usage | undefined;
   backgroundFinalizeGeneration: number;
+  /** `replyEndsWithUsageUpdate`: output arrived and its closing `usage_update` has not. */
+  replyOpen: boolean;
   /** The agent's own id for this turn's prompt, from `forkFromTurn.nativeTurnId`. */
   nativePromptId: string | undefined;
   /** Clock millis of the prompt's last progress, for `promptInactivityTimeout`. */
@@ -2533,7 +2547,31 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             runtimeGeneration,
             Effect.gen(function* () {
               yield* Ref.set(runtimeRestartRequired, true);
-              if (!followsAgentWorkState) return;
+              if (!followsAgentWorkState) {
+                // An open prompt fails with its transport. A turn held open for a running tool
+                // has no prompt, so nothing else ends it.
+                const held = yield* Ref.get(activeTurn);
+                if (
+                  flavor.toolOutlivesPrompt === undefined ||
+                  held === null ||
+                  !held.promptSettled ||
+                  held.finalized ||
+                  !hasDeferredBackgroundWork(held)
+                )
+                  return;
+                for (const tool of held.tools.values()) {
+                  const status = toolStatus(tool.status);
+                  if (status === "pending" || status === "running" || status === "waiting") {
+                    yield* emitTool(held, tool, "failed");
+                  }
+                }
+                yield* finalizeTurn(
+                  held,
+                  "failed",
+                  makeProviderFailure({ class: "transport_error" }),
+                );
+                return;
+              }
               agentWork = { sessionUpdate: "state_update", state: "idle", stopReason: "error" };
               for (const child of nativeChildren.values()) {
                 if (child.status !== "running") continue;
@@ -4008,6 +4046,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           /Monitor\s+["']?[0-9a-f-]{8,}/i.test(text) && /ended/i.test(text);
 
         const hasDeferredBackgroundWork = (context: ActiveAcpTurn): boolean => {
+          if (flavor.toolOutlivesPrompt !== undefined) {
+            // A tool that never started has nothing to report later.
+            for (const tool of context.tools.values()) {
+              if (toolStatus(tool.status) === "running" && flavor.toolOutlivesPrompt(tool))
+                return true;
+            }
+          }
           if (context.awaitingBackgroundHydration.size > 0) return true;
           if (context.pendingInjectedReport.size > 0) return true;
           for (const [taskId, toolCallId] of context.toolCallIdsByBackgroundTaskId) {
@@ -5317,6 +5362,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             return;
           if (yield* projectAgentTerminalUpdate(notification, context)) return;
           if (yield* projectDetachedBackgroundCommand(notification, context)) return;
+          if (
+            flavor.replyEndsWithUsageUpdate === true &&
+            context !== null &&
+            context.nativeThreadId === notification.sessionId
+          ) {
+            if (update.sessionUpdate === "usage_update") {
+              context.replyOpen = false;
+              if (context.promptSettled) yield* rearmDeferredFinalize(context);
+            } else if (acpRootSessionUpdateIngestsOutput(notification)) {
+              context.replyOpen = true;
+            }
+          }
           if (
             update.sessionUpdate === "usage_update" ||
             update.sessionUpdate === "session_info_update"
@@ -8232,8 +8289,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (hasDeferredBackgroundWork(context)) return;
           context.backgroundFinalizeGeneration += 1;
           const generation = context.backgroundFinalizeGeneration;
+          const debounce = context.replyOpen
+            ? ACP_OPEN_REPLY_QUIET_LIMIT
+            : ACP_DEFERRED_FINALIZE_DEBOUNCE;
           yield* Effect.gen(function* () {
-            yield* Effect.sleep(ACP_DEFERRED_FINALIZE_DEBOUNCE);
+            yield* Effect.sleep(debounce);
             if (
               context.finalized ||
               context.interrupted ||
@@ -8245,10 +8305,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const status = context.promptSettledStatus ?? "completed";
             yield* finalizeTurn(context, status);
           }).pipe(Effect.forkIn(sessionScope), Effect.asVoid);
-          yield* (
-            options.testHooks?.onDeferredFinalizeScheduled?.(ACP_DEFERRED_FINALIZE_DEBOUNCE) ??
-              Effect.void
-          );
+          yield* options.testHooks?.onDeferredFinalizeScheduled?.(debounce) ?? Effect.void;
         });
 
         const promptInactivityPaused = Effect.fn("AcpAdapterV2.promptInactivityPaused")(function* (
@@ -8684,6 +8741,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               promptStarted,
               promptUsage: undefined,
               backgroundFinalizeGeneration: 0,
+              replyOpen: false,
               nativePromptId: undefined,
               lastProgressAt: 0,
               inactivityWatchdog: undefined,
@@ -9375,6 +9433,33 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 ),
               ),
           ),
+          // The held turn already waits on these commands; their tool calls carry no task id,
+          // so any id matches while one runs on this thread.
+          ...(flavor.toolOutlivesPrompt === undefined
+            ? {}
+            : {
+                awaitBackgroundTasks: Effect.fn("AcpAdapterV2.awaitBackgroundTasks")(function* ({
+                  providerThread,
+                  taskIds,
+                }: {
+                  readonly providerThread: OrchestrationV2ProviderThread;
+                  readonly taskIds: ReadonlyArray<string>;
+                  readonly awaited: boolean;
+                }) {
+                  const outlives = flavor.toolOutlivesPrompt;
+                  const context = yield* Ref.get(activeTurn);
+                  const holdsCommand =
+                    outlives !== undefined &&
+                    flavor.deferFinalizeForBackgroundWork === true &&
+                    context !== null &&
+                    !context.finalized &&
+                    context.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+                    [...context.tools.values()].some(
+                      (tool) => toolStatus(tool.status) === "running" && outlives(tool),
+                    );
+                  return { matched: holdsCommand ? [...new Set(taskIds)] : [] };
+                }),
+              }),
           interruptTurn: Effect.fn("AcpAdapterV2.interruptTurn")(
             function* (turnInput: ProviderAdapter.ProviderAdapterV2InterruptInput) {
               return yield* Effect.uninterruptibleMask((restore) =>
