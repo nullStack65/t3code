@@ -268,7 +268,7 @@ const ThreadReadTool = Tool.make("t3_thread_read", {
 
 const ThreadUpdateTool = Tool.make("t3_thread_update", {
   description:
-    "Default: this thread. `request_decision` with `decision` opens the founder inbox item until reply, `resolve_decision` or settle. `route` takes `inboxRouting` with `reason` for founder/shared. `rename` takes `title`; `set_standing` takes `standing`. Workspace and branch are fixed.",
+    "Default: this thread. Founder must decide/review/approve: `request_decision` with `decision`; stays in their inbox until reply, `resolve_decision` or settle. `route`: `inboxRouting`, `reason` for founder/shared. `rename`: `title`; `set_standing`: `standing`. Not workspace/branch.",
   // Keeps the input's action/field check, which rebuilding the struct would drop.
   parameters: ThreadMetadataMcpUpdateInput.mapFields(
     Struct.assign({ environmentId: OrchestratorMcpEnvironmentTarget }),
