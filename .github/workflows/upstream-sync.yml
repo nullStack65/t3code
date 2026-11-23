@@ -1,0 +1,46 @@
+name: Upstream fork sync
+
+# Fetches pingdotgg/t3code main once a day. A clean merge becomes a pull
+# request against release/native-0.1.10. Conflicts are filed for Platform /
+# CTO. This workflow never merges that pull request and never force-pushes.
+# It runs on a hosted runner because it only fetches and merges git history;
+# it does not execute upstream code. The fork's ARC workflow still has to
+# pass before anyone merges.
+on:
+  schedule:
+    - cron: "15 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: t3-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ github.repository == 'nullStack65/t3code' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the release line
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: release/native-0.1.10
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Sync upstream main
+        shell: bash
+        env:
+          UPSTREAM_URL: https://github.com/pingdotgg/t3code.git
+          BASE_BRANCH: release/native-0.1.10
+          GH_REPO: nullStack65/t3code
+          # Empty when the secret is unset. gh then uses the default token,
+          # which can open the pull request but cannot start its checks.
+          T3_FORK_SYNC_TOKEN: ${{ secrets.T3_FORK_SYNC_TOKEN }}
+          GH_TOKEN: ${{ secrets.T3_FORK_SYNC_TOKEN || github.token }}
+        run: bash scripts/upstream-sync.sh
