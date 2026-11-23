@@ -2,8 +2,8 @@ name: T3 fork ARC CI
 
 # Self-hosted, repository-scoped ARC only. No paid Blacksmith, macOS/Windows
 # runners, new controller or deployment side effects. The one hosted exception
-# is the CLO-694 emergency burst: when an admin sets the repository variable
-# CI_BURST_HOSTED to exactly `on` during an ARC backlog, these jobs run on
+# is the CLO-694 emergency burst: when a burst operator sets the repository variable
+# CI_BURST_HOSTED to `on` (any case) during an ARC backlog, these jobs run on
 # ubuntu-latest (free here, since this repository is public). Unset, it is ARC.
 # The toggle and runbook live in closura-agent-config: scripts/ci_burst.py and
 # docs/ci/emergency-burst.md.
@@ -482,6 +482,21 @@ jobs:
           echo "::error::Draft pull request: the ARC workers run when it is marked ready for review."
           exit 1
 
+      # Before any checkout: a run whose workers failed or were skipped (for
+      # example a rejected fork PR) fails here without executing PR content.
+      - name: Report the three workers
+        shell: bash
+        env:
+          CORE: ${{ needs.voice-and-inbox-core.result }}
+          WEB: ${{ needs.voice-and-inbox-web.result }}
+          MOBILE: ${{ needs.voice-and-inbox-mobile.result }}
+        run: |
+          set -euo pipefail
+          printf 'core=%s web=%s mobile=%s\n' "$CORE" "$WEB" "$MOBILE"
+          for result in "$CORE" "$WEB" "$MOBILE"; do
+            test "$result" = success
+          done
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -508,16 +523,3 @@ jobs:
       - name: Guard the parallel coverage
         shell: bash
         run: node .github/scripts/arc-ci-coverage.cjs
-
-      - name: Report the three workers
-        shell: bash
-        env:
-          CORE: ${{ needs.voice-and-inbox-core.result }}
-          WEB: ${{ needs.voice-and-inbox-web.result }}
-          MOBILE: ${{ needs.voice-and-inbox-mobile.result }}
-        run: |
-          set -euo pipefail
-          printf 'core=%s web=%s mobile=%s\n' "$CORE" "$WEB" "$MOBILE"
-          for result in "$CORE" "$WEB" "$MOBILE"; do
-            test "$result" = success
-          done
