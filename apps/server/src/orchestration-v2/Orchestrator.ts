@@ -2663,98 +2663,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
   });
 
-  const revalidateQueuedDeadline = Effect.fn("Orchestrator.revalidateQueuedDeadline")(function* (
-    projection: OrchestrationV2ThreadProjection,
-    run: OrchestrationV2Run,
-  ) {
-    const message = projection.messages.find((message) => message.id === run.userMessageId);
-    const source = message?.notification?.source;
-    const prStamps = monitorPullRequestStamps(source).filter(
-      (stamp) => stamp.staleProgressAt !== undefined,
-    );
-    if (
-      message === undefined ||
-      source?.kind !== "monitor" ||
-      (source.staleWaits === undefined && prStamps.length === 0)
-    )
-      return { type: "keep" } as const;
-    const thread = projection.thread;
-    const shell = yield* projectionStore.getThreadShell(thread.id);
-    if (shell === null || shell.settledAt !== null || shell.settledOverride === "settled")
-      return { type: "cancel" } as const;
-    const now = yield* DateTime.now;
-    const nowMs = DateTime.toEpochMillis(now);
-    const held = waitIntentionallyHeld(shell, nowMs);
-    if (source.staleWaits === undefined) {
-      if (!held) return { type: "keep" } as const;
-      const links = threadPullRequestsOf(thread).map((link) => {
-        if (
-          !prStamps.some(
-            (stamp) =>
-              threadPullRequestKeysEqual(stamp, link) &&
-              stamp.watchStartedAt === link.watch?.startedAt &&
-              stamp.staleProgressAt === link.watch?.staleness?.lastProgressAt,
-          ) ||
-          link.watch?.staleness === undefined
-        )
-          return link;
-        const { alerted: _, ...progress } = link.watch.staleness;
-        return { ...link, watch: { ...link.watch, staleness: progress } };
-      });
-      return { type: "keep", prHeld: true, thread: { ...thread, pullRequests: links } } as const;
-    }
-    const tasks = yield* projectionStore.getThreadRecords(
-      thread.id,
-      ["subagents", "providerThreads"],
-      {
-        subagentIds: source.staleWaits
-          .filter((stamp) => stamp.kind === "delegate")
-          .map((stamp) => NodeId.make(stamp.taskId)),
-      },
-    );
-    const provider = tasks.providerThreads.find(
-      (provider) => provider.id === thread.activeProviderThreadId,
-    );
-    const current: StaleWait[] = [];
-    const rearmed = new Set<ThreadStalenessWait>();
-    for (const stamp of source.staleWaits) {
-      const wait = thread.stalenessWaits?.find(
-        (wait) => wait.kind === stamp.kind && wait.taskId === stamp.taskId,
-      );
-      if (wait?.lastProgressAtMs !== stamp.lastProgressAtMs || wait.alerted !== true) continue;
-      const observation = yield* observeStalenessWait(
-        thread.id,
-        wait,
-        provider,
-        tasks.subagents,
-        nowMs,
-      );
-      if (observation === null || observation.current.lastProgressAtMs !== stamp.lastProgressAtMs)
-        continue;
-      if (held || observation.held || observation.diagnostic === undefined) rearmed.add(wait);
-      else current.push(observation.diagnostic);
-    }
-    const updated =
-      rearmed.size === 0
-        ? undefined
-        : {
-            ...thread,
-            stalenessWaits:
-              thread.stalenessWaits?.map((wait) => {
-                if (!rearmed.has(wait)) return wait;
-                const { alerted: _, ...next } = wait;
-                return next;
-              }) ?? [],
-          };
-    return current.length === 0
-      ? ({ type: "cancel", thread: updated } as const)
-      : ({
-          type: "replace",
-          thread: updated,
-          message: { ...message, ...(yield* waitStaleNotice(current)) },
-        } as const);
-  });
-
   const startNextQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(
     function* (
       threadId: ThreadId,
@@ -4697,6 +4605,98 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       events,
       effects,
     );
+  });
+
+  const revalidateQueuedDeadline = Effect.fn("Orchestrator.revalidateQueuedDeadline")(function* (
+    projection: OrchestrationV2ThreadProjection,
+    run: OrchestrationV2Run,
+  ) {
+    const message = projection.messages.find((message) => message.id === run.userMessageId);
+    const source = message?.notification?.source;
+    const prStamps = monitorPullRequestStamps(source).filter(
+      (stamp) => stamp.staleProgressAt !== undefined,
+    );
+    if (
+      message === undefined ||
+      source?.kind !== "monitor" ||
+      (source.staleWaits === undefined && prStamps.length === 0)
+    )
+      return { type: "keep" } as const;
+    const thread = projection.thread;
+    const shell = yield* projectionStore.getThreadShell(thread.id);
+    if (shell === null || shell.settledAt !== null || shell.settledOverride === "settled")
+      return { type: "cancel" } as const;
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const held = waitIntentionallyHeld(shell, nowMs);
+    if (source.staleWaits === undefined) {
+      if (!held) return { type: "keep" } as const;
+      const links = threadPullRequestsOf(thread).map((link) => {
+        if (
+          !prStamps.some(
+            (stamp) =>
+              threadPullRequestKeysEqual(stamp, link) &&
+              stamp.watchStartedAt === link.watch?.startedAt &&
+              stamp.staleProgressAt === link.watch?.staleness?.lastProgressAt,
+          ) ||
+          link.watch?.staleness === undefined
+        )
+          return link;
+        const { alerted: _, ...progress } = link.watch.staleness;
+        return { ...link, watch: { ...link.watch, staleness: progress } };
+      });
+      return { type: "keep", prHeld: true, thread: { ...thread, pullRequests: links } } as const;
+    }
+    const tasks = yield* projectionStore.getThreadRecords(
+      thread.id,
+      ["subagents", "providerThreads"],
+      {
+        subagentIds: source.staleWaits
+          .filter((stamp) => stamp.kind === "delegate")
+          .map((stamp) => NodeId.make(stamp.taskId)),
+      },
+    );
+    const provider = tasks.providerThreads.find(
+      (provider) => provider.id === thread.activeProviderThreadId,
+    );
+    const current: StaleWait[] = [];
+    const rearmed = new Set<ThreadStalenessWait>();
+    for (const stamp of source.staleWaits) {
+      const wait = thread.stalenessWaits?.find(
+        (wait) => wait.kind === stamp.kind && wait.taskId === stamp.taskId,
+      );
+      if (wait?.lastProgressAtMs !== stamp.lastProgressAtMs || wait.alerted !== true) continue;
+      const observation = yield* observeStalenessWait(
+        thread.id,
+        wait,
+        provider,
+        tasks.subagents,
+        nowMs,
+      );
+      if (observation === null || observation.current.lastProgressAtMs !== stamp.lastProgressAtMs)
+        continue;
+      if (held || observation.held || observation.diagnostic === undefined) rearmed.add(wait);
+      else current.push(observation.diagnostic);
+    }
+    const updated =
+      rearmed.size === 0
+        ? undefined
+        : {
+            ...thread,
+            stalenessWaits:
+              thread.stalenessWaits?.map((wait) => {
+                if (!rearmed.has(wait)) return wait;
+                const { alerted: _, ...next } = wait;
+                return next;
+              }) ?? [],
+          };
+    return current.length === 0
+      ? ({ type: "cancel", thread: updated } as const)
+      : ({
+          type: "replace",
+          thread: updated,
+          message: { ...message, ...(yield* waitStaleNotice(current)) },
+        } as const);
   });
 
   // Recheck under the lock after reading the host. Record the watch first so wake events carry it.
