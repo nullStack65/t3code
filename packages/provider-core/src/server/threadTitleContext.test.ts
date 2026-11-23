@@ -55,6 +55,15 @@ describe("thread title context", () => {
     expect(result.message.match(/USER:/g)).toHaveLength(1);
   });
 
+  it("leaves a person's private note out of the model context", () => {
+    const result = formatThreadTitleContext([
+      { role: "user", text: "Private aside about the board", humanNote: true },
+      { role: "user", text: "Fix Android pairing." },
+      { role: "assistant", text: "Found the cause." },
+    ]);
+    expect(result.message).toBe("USER:\nFix Android pairing.\n\nASSISTANT:\nFound the cause.");
+  });
+
   it("cuts both ends of a long message without splitting an emoji", () => {
     const result = limitTitleMessage(`${"a".repeat(9)}🚀${"b".repeat(20)}🚀${"c".repeat(9)}`, 41);
     expect(result).toBe(`${"a".repeat(9)}\n[Content truncated]\n${"c".repeat(9)}`);
