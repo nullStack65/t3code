@@ -97,6 +97,7 @@ import {
   liveAnswerPreview,
   collapseTimelineActivity,
   activityPillIdForEntry,
+  timelineActivityContext,
   type MessagesTimelineRow,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
@@ -308,6 +309,7 @@ interface MessagesTimelineProps {
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
   onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
   onSendAppMessage?: (text: string) => Promise<void>;
+  onPromoteNote?: ((noteId: MessageId) => Promise<void>) | undefined;
   onRunShellCommand?: (command: string) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -319,7 +321,9 @@ interface MessagesTimelineProps {
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<ServerProviderSkill>;
-  runs: ReadonlyArray<HandoffTimelineRun>;
+  runs: ReadonlyArray<
+    HandoffTimelineRun & { status?: import("@t3tools/contracts").OrchestrationV2Run["status"] }
+  >;
   anchorMessageId: MessageId | null;
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
   onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
@@ -348,6 +352,10 @@ interface MessagesTimelineProps {
    * Off by default; a standing thread turns it on.
    */
   collapseActivity?: boolean;
+  includeOtherActivity?: boolean;
+  decisionRequestedAt?: string | undefined;
+  /** Person messages name which founder sent them. */
+  sharedThread?: boolean;
 }
 
 export function MessagesTimeline(props: MessagesTimelineProps) {
@@ -395,7 +403,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
   activeFindMatch = null,
   findNavigationId = 0,
   findSender = null,
-  collapseActivity = false,
+  collapseActivity = true,
+  includeOtherActivity = false,
+  decisionRequestedAt,
+  sharedThread = false,
   latestRun,
   announcedRun = null,
   detailBehindShell = false,
@@ -418,6 +429,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onRevertToTurnCount,
   onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
   onSendAppMessage,
+  onPromoteNote,
   onRunShellCommand,
   isRevertingCheckpoint,
   onImageExpand,
@@ -613,16 +625,19 @@ const ConversationTimeline = memo(function ConversationTimeline({
   };
 
   // Turn and attempt folds reveal later rows rather than growing their own row.
-  const onToggleActivity = (id: string) => {
-    preserveDisclosurePosition(id);
+  const onToggleActivity = (row: Extract<TimelineRow, { kind: "activity" }>) => {
+    preserveDisclosurePosition(row.id);
     setExpandedActivity((existing) => {
       const ids = new Set(existing.threadKey === listIdentityKey ? existing.ids : []);
-      if (ids.has(id)) {
-        ids.delete(id);
+      const dismissed = new Map(existing.threadKey === listIdentityKey ? existing.dismissed : []);
+      if (row.expanded) {
+        ids.delete(row.id);
+        if (row.attention !== null) dismissed.set(row.id, row.attention);
       } else {
-        ids.add(id);
+        ids.add(row.id);
+        dismissed.delete(row.id);
       }
-      return { threadKey: listIdentityKey, ids };
+      return { threadKey: listIdentityKey, ids, dismissed };
     });
   };
   const onToggleTurnFold = (runId: RunId) => {
@@ -829,27 +844,36 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // A sender filter already removed every other message, so collapsing what it
   // kept would hide the very rows it was asked to show.
   const collapseRows = collapseActivity && findSender === null;
+  const chatter = collapseRows
+    ? timelineActivityContext(timelineEntries, runsProp, includeOtherActivity, decisionRequestedAt)
+    : undefined;
   const [expandedActivity, setExpandedActivity] = useState<{
     readonly threadKey: string;
     readonly ids: ReadonlySet<string>;
-  }>(() => ({ threadKey: listIdentityKey, ids: new Set() }));
+    readonly dismissed: ReadonlyMap<string, string>;
+  }>(() => ({ threadKey: listIdentityKey, ids: new Set(), dismissed: new Map() }));
   // Pill ids repeat across threads (`activity:` plus a message id can coincide,
   // and a live turn's rows share constant ids), so expansion belongs to one thread.
   const expandedActivityIds =
     expandedActivity.threadKey === listIdentityKey ? expandedActivity.ids : new Set<string>();
   if (collapseRows && expandedActivity.threadKey !== listIdentityKey) {
-    setExpandedActivity({ threadKey: listIdentityKey, ids: expandedActivityIds });
+    setExpandedActivity({
+      threadKey: listIdentityKey,
+      ids: expandedActivityIds,
+      dismissed: new Map(),
+    });
   }
   // A search hit or a restored scroll position inside a collapsed run opens that
   // run, the way a find match opens the turn fold that hides it.
   const revealedEntryId =
     (findActive ? activeFindMatch?.entryId : undefined) ??
+    revealedMessageId ??
     (restoringThreadPosition && rememberedPosition?.atEnd === false
       ? rememberedPosition.rowId
       : undefined);
   const revealedPillId =
     collapseRows && revealedEntryId !== undefined
-      ? activityPillIdForEntry(senderRows, revealedEntryId)
+      ? activityPillIdForEntry(senderRows, revealedEntryId, chatter)
       : undefined;
   if (
     revealedPillId !== undefined &&
@@ -858,9 +882,16 @@ const ConversationTimeline = memo(function ConversationTimeline({
   ) {
     const ids = new Set(expandedActivity.ids);
     ids.add(revealedPillId);
-    setExpandedActivity({ threadKey: listIdentityKey, ids });
+    setExpandedActivity({ ...expandedActivity, ids });
   }
-  const rows = collapseRows ? collapseTimelineActivity(senderRows, expandedActivityIds) : senderRows;
+  const rows = collapseRows
+    ? collapseTimelineActivity(
+        senderRows,
+        expandedActivityIds,
+        chatter,
+        expandedActivity.threadKey === listIdentityKey ? expandedActivity.dismissed : undefined,
+      )
+    : senderRows;
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =
@@ -1220,6 +1251,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     skills,
     runs,
     activeThreadEnvironmentId,
+    sharedThread,
     onRevertToTurnCount,
     onRunShellCommand,
     findActive,
@@ -1227,6 +1259,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     onFileOpen,
     onUseArtifactTemplate,
     onSendAppMessage,
+    onPromoteNote,
     onAppFullscreenChange,
     onFileDownload,
     openPullRequest,
@@ -1935,18 +1968,17 @@ function ActivityTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "activ
         type="button"
         aria-expanded={row.expanded}
         data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleActivity(row.id)}
-        className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+        onClick={() => ctx.onToggleActivity(row)}
+        className="flex max-w-full cursor-pointer select-none items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 text-xs leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
-        <span>
-          {row.summary}
-          {row.expanded ? "" : " · click to expand"}
-        </span>
-        {row.expanded ? (
-          <ChevronDownIcon className="size-3.5" />
-        ) : (
-          <ChevronRightIcon className="size-3.5" />
-        )}
+        <ChevronRightIcon
+          aria-hidden
+          className={cn(
+            "size-3.5 shrink-0 motion-safe:transition-transform",
+            row.expanded && "rotate-90",
+          )}
+        />
+        <span className="truncate">{row.summary}</span>
       </button>
     </div>
   );

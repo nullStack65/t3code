@@ -75,6 +75,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly projection?: OrchestrationV2ThreadProjection;
   readonly projectionRequests?: ThreadId[];
   readonly advertiseThreadStop?: boolean;
+  readonly advertiseHumanNote?: boolean;
 }) {
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
@@ -123,6 +124,9 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
         capabilities: {
           repositoryIdentity: true,
           ...(input.advertiseThreadStop === true ? { threadStop: true } : {}),
+          ...(input.advertiseHumanNote === undefined
+            ? {}
+            : { humanNote: input.advertiseHumanNote }),
         },
       },
     } as never),
@@ -306,6 +310,42 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
+  it.effect.each([undefined, false, true])("requires explicit human note support (%s)", (support) =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({
+        commands,
+        projects: [],
+        ...(support === undefined ? {} : { advertiseHumanNote: support }),
+      });
+      const exit = yield* startThreadTurn({
+        commandId: CommandId.make("command-note"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-note"),
+          role: "user",
+          text: "Synthetic note",
+          attachments: [],
+          humanNote: true,
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        dispatchMode: "start",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.exit,
+      );
+
+      if (support === true) {
+        expect(commands).toMatchObject([{ type: "message.dispatch", humanNote: true }]);
+        expect(Exit.isSuccess(exit)).toBe(true);
+      } else {
+        expect(commands).toEqual([]);
+        expect(Exit.isFailure(exit)).toBe(true);
+      }
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   // A dead socket reaches the caller as a protocol error, or as an interrupt when
   // the supervisor closes the session before the protocol reports the error.
   it.effect.each([
@@ -317,9 +357,11 @@ describe("V2 environment commands", () => {
           cause: new Error("socket closed"),
         }),
       }),
+      false,
     ],
-    ["session close", Effect.failCause(Cause.interrupt())],
-  ] as const)("retries a message dispatch lost to a %s with the same command id", ([, loss]) =>
+    ["session close", Effect.failCause(Cause.interrupt()), false],
+    ["session close followed by an older server", Effect.failCause(Cause.interrupt()), true],
+  ] as const)("handles a message dispatch lost to a %s", ([, loss, humanNote]) =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
       const supervisor = yield* makeSupervisor({ commands, projects: [] });
@@ -337,7 +379,19 @@ describe("V2 environment commands", () => {
       } as unknown as WsRpcProtocolClient;
       yield* SubscriptionRef.set(
         supervisor.session,
-        Option.some({ ...healthySession, client: lostClient }),
+        Option.some({
+          ...healthySession,
+          client: lostClient,
+          initialConfig: healthySession.initialConfig.pipe(
+            Effect.map((config) => ({
+              ...config,
+              environment: {
+                ...config.environment,
+                capabilities: { ...config.environment.capabilities, humanNote: true },
+              },
+            })),
+          ),
+        }),
       );
 
       const sendFiber = yield* startThreadTurn({
@@ -348,6 +402,7 @@ describe("V2 environment commands", () => {
           role: "user",
           text: "hello",
           attachments: [],
+          ...(humanNote ? { humanNote: true as const } : {}),
         },
         runtimeMode: "full-access",
         interactionMode: "default",
@@ -361,9 +416,9 @@ describe("V2 environment commands", () => {
 
       expect(commands.map((command) => [command.type, command.commandId])).toEqual([
         ["message.dispatch", "command-lost-ack"],
-        ["message.dispatch", "command-lost-ack"],
+        ...(humanNote ? [] : [["message.dispatch", "command-lost-ack"]]),
       ]);
-      expect(Exit.isSuccess(exit)).toBe(true);
+      expect(Exit.isSuccess(exit)).toBe(!humanNote);
     }).pipe(Effect.provide(layerTestRandom)),
   );
 

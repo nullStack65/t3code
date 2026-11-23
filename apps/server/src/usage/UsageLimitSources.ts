@@ -24,14 +24,22 @@ import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
-import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import { ProviderExhaustion } from "../orchestration-v2/ProviderExhaustion.ts";
+import { windowLimitsModel } from "../provider/claudeUsageLimits.ts";
 import * as SecretResolverLayer from "../secrets/SecretResolver.ts";
 import { resolveSettingsSecrets } from "../secrets/settingsSecretValue.ts";
 import * as Settings from "../serverSettings.ts";
-import { windowLimitsModel } from "../provider/claudeUsageLimits.ts";
 import { makeCliproxyApi } from "./cliproxyApi.ts";
-import { discoverGatewayOrigins, gatewayOrigin, makeMagpieApi } from "./magpieQuotas.ts";
+import {
+  discoverGatewayOrigins,
+  discoverMagpieRoutes,
+  gatewayOrigin,
+  makeMagpieApi,
+  type MagpieGatewayRoute,
+} from "./magpieQuotas.ts";
 
 export class UsageLimitSources extends Context.Service<
   UsageLimitSources,
@@ -39,6 +47,8 @@ export class UsageLimitSources extends Context.Service<
     readonly current: Effect.Effect<ReadonlyArray<UsageLimitSourceSnapshot>>;
     readonly streamChanges: Stream.Stream<ReadonlyArray<UsageLimitSourceSnapshot>>;
     readonly refresh: Effect.Effect<void>;
+    /** Manual Limits refresh: reread Magpie cards live and re-probe exhaustion. */
+    readonly refreshLive: Effect.Effect<void>;
     readonly consumeResetCredit: (
       input: UsageLimitSourceConsumeResetCreditInput,
     ) => Effect.Effect<ProviderConsumeResetCreditResult, UsageLimitSourceError>;
@@ -59,6 +69,37 @@ function missingManagementKey(config: UsageLimitSourceConfig): string {
   return typeof config.managementKey === "string"
     ? "No management key configured."
     : "Could not read the management key from its secret provider.";
+}
+
+function sourceSnapshotBase(
+  id: UsageLimitSourceId,
+  config: UsageLimitSourceConfig,
+  checkedAt: string,
+) {
+  const url = URL.parse(config.url);
+  return {
+    id,
+    kind: config.kind,
+    label: sourceLabel(id, config),
+    ...(url && /^https?:$/.test(url.protocol)
+      ? {
+          origin: url.origin,
+          endpoint: `${url.origin}${url.pathname.replace(/(\/management\.html)?\/*$/i, "")}`,
+        }
+      : {}),
+    checkedAt,
+  } as const;
+}
+
+function labelDiscoveredMagpie(
+  discovered: ReadonlyArray<UsageLimitSourceSnapshot>,
+): ReadonlyArray<UsageLimitSourceSnapshot> {
+  return discovered.length > 1
+    ? discovered.map((source) => ({
+        ...source,
+        label: `Magpie · ${source.id.slice("magpie:".length)}`,
+      }))
+    : discovered;
 }
 
 /** @public */
@@ -87,19 +128,7 @@ export const make = Effect.gen(function* () {
     config: UsageLimitSourceConfig,
   ) {
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
-    const url = URL.parse(config.url);
-    const base = {
-      id,
-      kind: config.kind,
-      label: sourceLabel(id, config),
-      ...(url && /^https?:$/.test(url.protocol)
-        ? {
-            origin: url.origin,
-            endpoint: `${url.origin}${url.pathname.replace(/(\/management\.html)?\/*$/i, "")}`,
-          }
-        : {}),
-      checkedAt,
-    } as const;
+    const base = sourceSnapshotBase(id, config, checkedAt);
     const managementKey = yield* readManagementKey(config);
     // A Magpie gateway on loopback answers without a key.
     if (config.kind === "cliproxy" && managementKey.length === 0) {
@@ -163,12 +192,7 @@ export const make = Effect.gen(function* () {
           accounts: read.value.accounts,
         });
       }
-      return discovered.length > 1
-        ? discovered.map((source) => ({
-            ...source,
-            label: `Magpie · ${source.id.slice("magpie:".length)}`,
-          }))
-        : discovered;
+      return labelDiscoveredMagpie(discovered);
     },
     Effect.orElseSucceed((): ReadonlyArray<UsageLimitSourceSnapshot> => []),
   );
@@ -197,6 +221,125 @@ export const make = Effect.gen(function* () {
       { concurrency: 4 },
     );
     yield* publish([...snapshots, ...(yield* discoverMagpieSources(settings, snapshots))]);
+  }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
+
+  const readLiveMagpie = Effect.fn("UsageLimitSources.readLiveMagpie")(function* (
+    id: UsageLimitSourceId,
+    config: UsageLimitSourceConfig,
+    drivers: ReadonlyArray<ProviderDriverKind>,
+  ) {
+    const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const managementKey = yield* readManagementKey(config);
+    const base = sourceSnapshotBase(id, config, checkedAt);
+    const accounts = yield* magpie
+      .refreshLive({ url: config.url, managementKey, drivers })
+      .pipe(Effect.result);
+    if (accounts._tag === "Failure") {
+      yield* Effect.logDebug("usage limit source live reread failed", {
+        id,
+        cause: accounts.failure,
+      });
+      return {
+        live: false as const,
+        snapshot: { ...base, accounts: [], error: accounts.failure.detail },
+      };
+    }
+    return { live: true as const, snapshot: { ...base, accounts: accounts.success } };
+  });
+
+  // Same lock as the cached refresh, so a slow poll cannot put the cache back after a reread.
+  const refreshLive = Effect.gen(function* () {
+    const settings = yield* settingsService.getSettings.pipe(
+      Effect.orElseSucceed((): ServerSettings | null => null),
+    );
+    const entries = Object.entries(settings?.usageLimitSources ?? {}).filter(
+      ([, config]) => config.enabled,
+    );
+    const snapshots = yield* Effect.forEach(
+      entries.filter(([, config]) => config.kind !== "magpie"),
+      ([id, config]) => readSource(id as UsageLimitSourceId, config),
+      { concurrency: 4 },
+    );
+    const routes =
+      settings === null
+        ? []
+        : yield* discoverMagpieRoutes(settings, process.env).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.orElseSucceed((): ReadonlyArray<MagpieGatewayRoute> => []),
+          );
+    const driversFor = (origin: string | null) => {
+      const seen = new Set<string>();
+      const drivers: ProviderDriverKind[] = [];
+      for (const route of routes) {
+        if (origin === null || route.origin !== origin || seen.has(route.driver)) continue;
+        seen.add(route.driver);
+        drivers.push(route.driver);
+      }
+      return drivers;
+    };
+    const configured = entries.filter(([, config]) => config.kind === "magpie");
+    const configuredReads = yield* Effect.forEach(
+      configured,
+      ([id, config]) =>
+        readLiveMagpie(id as UsageLimitSourceId, config, driversFor(gatewayOrigin(config.url))),
+      { concurrency: 1 },
+    );
+    const explicit = new Set(configured.map(([, config]) => gatewayOrigin(config.url)));
+    const discoveredOrigins = [...new Set(routes.map((route) => route.origin))].filter(
+      (origin) => !explicit.has(origin),
+    );
+    const discoveredReads = yield* Effect.forEach(
+      discoveredOrigins,
+      (origin) =>
+        magpie.refreshLive({ url: origin, managementKey: "", drivers: driversFor(origin) }).pipe(
+          Effect.map((accounts) => ({ origin, accounts })),
+          Effect.option,
+        ),
+      { concurrency: 1 },
+    );
+    const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const seenAccounts = new Set([
+      ...snapshots.map((source) => accountSet(source.accounts)),
+      ...configuredReads.map((read) => accountSet(read.snapshot.accounts)),
+    ]);
+    const discovered: UsageLimitSourceSnapshot[] = [];
+    const liveByOrigin = new Map<string, UsageLimitSourceSnapshot>();
+    for (const read of configuredReads) {
+      const origin = read.snapshot.origin;
+      if (read.live && origin) liveByOrigin.set(origin, read.snapshot);
+    }
+    for (const read of discoveredReads) {
+      if (read._tag === "None") continue;
+      const key = accountSet(read.value.accounts);
+      if (seenAccounts.has(key)) continue;
+      seenAccounts.add(key);
+      const snapshot: UsageLimitSourceSnapshot = {
+        id: `magpie:${new URL(read.value.origin).host}` as UsageLimitSourceId,
+        kind: "magpie",
+        label: "Magpie",
+        origin: read.value.origin,
+        endpoint: read.value.origin,
+        checkedAt,
+        accounts: read.value.accounts,
+      };
+      discovered.push(snapshot);
+      liveByOrigin.set(read.value.origin, snapshot);
+    }
+    yield* publish([
+      ...snapshots,
+      ...configuredReads.map((read) => read.snapshot),
+      ...labelDiscoveredMagpie(discovered),
+    ]);
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    for (const route of routes) {
+      const snapshot = liveByOrigin.get(route.origin);
+      if (snapshot === undefined) continue;
+      const decision = magpieExhaustionDecision([snapshot], route.driver, nowMs);
+      if (decision === undefined) continue;
+      const until = decision;
+      ProviderExhaustion.reapply(route.instanceId, () => until);
+    }
   }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
 
   // Shares the refresh lock so a stale in-flight read cannot overwrite a redemption.
@@ -260,6 +403,7 @@ export const make = Effect.gen(function* () {
     current: Ref.get(stateRef),
     consumeResetCredit,
     refresh,
+    refreshLive,
     get streamChanges() {
       return Stream.unwrap(
         Effect.gen(function* () {
@@ -310,6 +454,35 @@ export function hubPoolResetAt(
     }
   }
   return earliest === null ? null : DateTime.formatIso(DateTime.makeUnsafe(earliest));
+}
+
+/**
+ * What a live Magpie reread says about one driver.
+ * `undefined` means the cards did not decide, so the remembered limit stays.
+ * `null` means a readable account has room. A number is the epoch ms every account is out until.
+ */
+export function magpieExhaustionDecision(
+  sources: ReadonlyArray<UsageLimitSourceSnapshot>,
+  driver: ProviderDriverKind,
+  nowMs: number,
+): number | null | undefined {
+  const accounts = sources.flatMap((source) =>
+    source.error ? [] : source.accounts.filter((account) => account.driver === driver),
+  );
+  if (accounts.length === 0) return undefined;
+  if (accounts.some((account) => account.usageLimits.unavailable !== undefined)) return undefined;
+  let earliest: number | null = null;
+  for (const account of accounts) {
+    const windows = account.usageLimits.windows.filter((window) => windowLimitsModel(window, null));
+    if (windows.length === 0) return undefined;
+    if (windows.some((window) => window.usedPercent < 100)) return null;
+    const resets = windows.map((window) => Date.parse(window.resetsAt ?? ""));
+    if (resets.some((reset) => !Number.isFinite(reset))) return undefined;
+    const recoversAt = Math.max(...resets);
+    if (recoversAt <= nowMs) return null;
+    earliest = earliest === null ? recoversAt : Math.min(earliest, recoversAt);
+  }
+  return earliest === null ? undefined : earliest;
 }
 
 export class UsageLimitResetFallback extends Context.Reference<{

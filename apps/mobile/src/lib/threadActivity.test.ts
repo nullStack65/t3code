@@ -19,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import { deriveThreadCheckpointSummaries } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
+import { foldThreadFeedActivity } from "../features/threads/pending-thread-feed";
 import { getReviewSectionIdForCheckpoint } from "../features/review/reviewModel";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -1292,6 +1293,25 @@ describe("buildThreadFeed", () => {
 
     const finished = present([subagent("item-done", "2026-06-20T00:00:03.000Z", 2, "completed")]);
     expect(finished.map((entry) => entry.type)).toEqual(["message", "run-fold", "message"]);
+    const raw = buildThreadFeed([
+      projected({ ...userMessage(), createdBy: "agent", creationSource: "mcp" }, 0),
+      projected(command("2026-06-20T00:00:02.000Z"), 1),
+      projected(subagent("item-done", "2026-06-20T00:00:03.000Z", 2, "completed"), 2),
+      projected(assistantMessage("2026-06-20T00:00:05.000Z"), 3),
+    ]);
+    const options = {
+      open: {},
+      dismissed: new Map(),
+      revealedMessageId: null,
+      latestRun: { id: runId, status: "completed" as const },
+    };
+    for (const expandedRuns of [new Set<RunId>(), new Set([runId])]) {
+      const presented = deriveThreadFeedPresentation(raw, latestRun, expandedRuns);
+      const capsule = foldThreadFeedActivity(presented, raw, options).find(
+        (row) => row.type === "activity-fold",
+      );
+      expect(capsule?.summary).toContain("1 settled");
+    }
   });
 
   it("folds each run of a provider-native subagent thread like a normal turn", () => {

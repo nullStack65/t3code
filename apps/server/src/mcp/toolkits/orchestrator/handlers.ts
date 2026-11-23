@@ -245,12 +245,14 @@ const handlers = {
       return yield* service.deleteScheduledTask(scope, input);
     }),
   ),
-  request_secret: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.requestSecret(scope, input);
-    }),
+  request_secret: McpToolAccess.withoutSubagents(
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.requestSecret(scope, input);
+      }),
+    ),
   ),
   create_threads: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
@@ -273,14 +275,17 @@ const handlers = {
       return yield* service.readThread(scope, input);
     }),
   ),
-  t3_thread_update: McpToolAccess.writesThreads(
-    (input) => [input.threadId],
-    (input) =>
-      Effect.gen(function* () {
-        const scope = yield* McpInvocationContext.McpInvocationContext;
-        const service = yield* ThreadMetadataMcpService.ThreadMetadataMcpService;
-        return yield* service.update(scope, input);
-      }),
+  t3_thread_update: McpToolAccess.withoutSubagents(
+    McpToolAccess.writesThreads(
+      (input) => [input.threadId],
+      (input) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          const service = yield* ThreadMetadataMcpService.ThreadMetadataMcpService;
+          return yield* service.update(scope, input);
+        }),
+    ),
+    (input) => input.action === "request_decision",
   ),
   t3_thread_send: McpToolAccess.afterForwarding(
     McpToolAccess.writesThreads(

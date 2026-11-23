@@ -321,6 +321,102 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
       }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
     );
 
+    it.effect("binds a founder only from its pairing code or its approved Connect device", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sessions = yield* SessionStore.SessionStore;
+        const founderOf = (sessionId: Parameters<typeof serverAuth.messageSenderOf>[0]) =>
+          serverAuth.messageSenderOf(sessionId).pipe(Effect.map((sender) => sender.founder));
+        const admin = yield* serverAuth.issueSession({ label: "Owner" });
+
+        const enrolled = yield* serverAuth.issuePairingCredential({ founder: "kameron" });
+        const phone = yield* serverAuth.createBrowserSession(enrolled.credential, requestMetadata);
+        expect(yield* founderOf((yield* sessions.verify(phone.sessionToken)).sessionId)).toBe(
+          "kameron",
+        );
+        // An agent sign-in code never names a person.
+        const agentCode = yield* serverAuth.issuePairingCredential({
+          access: "auto",
+          founder: "jeff",
+        });
+        expect(
+          (yield* serverAuth.listPairingLinks()).find((link) => link.id === agentCode.id)?.founder,
+        ).toBeUndefined();
+
+        // Earlier sessions are not evidence of who holds a new one.
+        const desktop = () =>
+          sessions.issue({
+            subject: "desktop-bootstrap",
+            method: "browser-session-cookie",
+            client: { label: "Desktop", deviceType: "desktop" },
+          });
+        const firstDesktop = yield* desktop();
+        yield* serverAuth.setClientSessionFounder(admin.sessionId, firstDesktop.sessionId, "jeff");
+        expect(yield* founderOf((yield* desktop()).sessionId)).toBeNull();
+        const reusedKey = "reused-proof-key";
+        const pairWithKey = () =>
+          serverAuth
+            .issuePairingCredential()
+            .pipe(
+              Effect.flatMap((code) =>
+                serverAuth.exchangeBootstrapCredentialForAccessToken(
+                  code.credential,
+                  undefined,
+                  requestMetadata,
+                  { proofKeyThumbprint: reusedKey },
+                ),
+              ),
+            );
+        yield* pairWithKey();
+        const [keyed] = (yield* serverAuth.listClientSessions(admin.sessionId)).filter(
+          (session) => session.subject !== "desktop-bootstrap" && session.founder === undefined,
+        );
+        yield* serverAuth.setClientSessionFounder(admin.sessionId, keyed!.sessionId, "jeff");
+        yield* pairWithKey();
+        expect(
+          (yield* serverAuth.listClientSessions(admin.sessionId)).filter(
+            (session) => session.founder === "jeff" && session.subject !== "desktop-bootstrap",
+          ),
+        ).toHaveLength(1);
+
+        // An approved Connect device keeps its founder through renewal, until it is revoked.
+        const deviceKey = "Hn4wT7qZpL2xV9cRb6mYs3kDf8gJa5eUo1iWt0zQrNE";
+        const signIn = () =>
+          serverAuth
+            .issueConnectCredential({ proofKeyThumbprint: deviceKey, requireApproval: false })
+            .pipe(
+              Effect.flatMap((code) =>
+                serverAuth.exchangeBootstrapCredentialForAccessToken(
+                  code.credential,
+                  undefined,
+                  requestMetadata,
+                  { proofKeyThumbprint: deviceKey },
+                ),
+              ),
+            );
+        const deviceSessions = () =>
+          serverAuth
+            .listClientSessions(admin.sessionId)
+            .pipe(
+              Effect.map((all) =>
+                all.filter((session) => session.subject === EnvironmentAuth.CLOUD_CONNECT_SUBJECT),
+              ),
+            );
+        yield* signIn();
+        const [device] = yield* deviceSessions();
+        expect(device?.founder).toBeUndefined();
+        yield* serverAuth.setClientSessionFounder(admin.sessionId, device!.sessionId, "kameron");
+        yield* signIn();
+        expect((yield* deviceSessions()).map((session) => session.founder)).toEqual([
+          "kameron",
+          "kameron",
+        ]);
+        yield* serverAuth.revokeClientSession(admin.sessionId, device!.sessionId);
+        yield* signIn();
+        expect((yield* deviceSessions()).map((session) => session.founder)).toEqual([undefined]);
+      }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
+    );
+
     it.effect("prefers a bearer token over an empty primary cookie", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

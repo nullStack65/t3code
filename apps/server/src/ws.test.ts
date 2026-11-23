@@ -9,6 +9,7 @@ import { assert, it } from "@effect/vitest";
 import {
   AuthAccessReadScope,
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
   CommandId,
@@ -46,6 +47,7 @@ import {
 } from "@t3tools/contracts";
 import { SOCKET_FRAME_PARTS_QUERY_PARAM } from "@t3tools/shared/socketFrameParts";
 import * as Deferred from "effect/Deferred";
+import * as Option from "effect/Option";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -65,7 +67,9 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as ProviderInstallationGate from "./provider/ProviderInstallationGate.ts";
 import * as Ws from "./ws.ts";
-import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
+import { RpcClient, RpcGroup, RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as RpcTest from "effect/rpc/RpcTest";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
@@ -96,6 +100,7 @@ import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
 import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
+import * as McpSignIn from "./mcpApps/McpSignIn.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
@@ -847,6 +852,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
   Layer.mock(HostResources.HostResources)({}),
   Layer.mock(McpAppRequests.McpAppRequests)({}),
+  Layer.mock(McpSignIn.McpSignIn)({}),
   Layer.mock(ModelManifest.ModelManifest)({}),
   Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({}),
   Layer.mock(Orchestrator.OrchestratorV2)({}),
@@ -2652,12 +2658,41 @@ it.effect.each([
   { label: "a revoked session", expiresInMs: 3_600_000, listed: false, admitted: false },
 ] as const)(
   "a native placement admission writes only for $label",
-  ({ expiresInMs, listed, admitted }) =>
-    Effect.gen(function* () {
+  ({ expiresInMs, listed, admitted }) => {
+    const asked: Array<{ readonly sessionId: string; readonly authorized: boolean }> = [];
+    // Captured here and passed in. The RPC layer does not get this service, so a request-time
+    // serviceOption admits None.
+    const delegation = Layer.mock(RemoteDelegation.RemoteDelegation)({
+      admit: (caller, input) =>
+        caller.stillAuthorized.pipe(
+          Effect.tap((authorized) =>
+            Effect.sync(() => asked.push({ sessionId: caller.sessionId, authorized })),
+          ),
+          Effect.flatMap((authorized) =>
+            authorized
+              ? Effect.succeed({
+                  environmentId: EnvironmentId.make("environment-box"),
+                  projectId: input.projectId,
+                  reason: "capacity" as const,
+                  resumed: false,
+                })
+              : Effect.fail(
+                  new OrchestrationV2ThreadPlacementAdmitError({
+                    commandId: input.commandId,
+                    reason: "unavailable",
+                    detail: "signed out",
+                  }),
+                ),
+          ),
+        ),
+    });
+    return Effect.gen(function* () {
       const sessionId = AuthSessionId.make("web-session");
       const now = yield* DateTime.now;
-      const asked: Array<{ readonly sessionId: string; readonly authorized: boolean }> = [];
       const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+      const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation).pipe(
+        Effect.provide(delegation),
+      );
       const services = Layer.mergeAll(
         layerUnusedConfigRpcServices,
         Layer.mock(ExternalLauncher.ExternalLauncher)({}),
@@ -2695,31 +2730,6 @@ it.effect.each([
                 : [],
             ),
         }),
-        // The delegation itself is covered with real links; here, what the socket hands it.
-        Layer.mock(RemoteDelegation.RemoteDelegation)({
-          admit: (caller, input) =>
-            caller.stillAuthorized.pipe(
-              Effect.tap((authorized) =>
-                Effect.sync(() => asked.push({ sessionId: caller.sessionId, authorized })),
-              ),
-              Effect.flatMap((authorized) =>
-                authorized
-                  ? Effect.succeed({
-                      environmentId: EnvironmentId.make("environment-box"),
-                      projectId: input.projectId,
-                      reason: "capacity" as const,
-                      resumed: false,
-                    })
-                  : Effect.fail(
-                      new OrchestrationV2ThreadPlacementAdmitError({
-                        commandId: input.commandId,
-                        reason: "unavailable",
-                        detail: "signed out",
-                      }),
-                    ),
-              ),
-            ),
-        }),
       );
       const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
         ...WS_RPC_SERVER_OPTIONS,
@@ -2738,6 +2748,7 @@ it.effect.each([
             yield* ServerBrowser.ServerBrowser,
             () => Effect.void,
             { secretReferences: true },
+            { remoteDelegation, managedPolicy: Option.none() },
           ).pipe(
             Layer.provide(services),
             Layer.merge(RpcAuthorization.layer([AuthOrchestrationOperateScope])),
@@ -2774,7 +2785,8 @@ it.effect.each([
           Layer.mock(ServerBrowser.ServerBrowser)({}),
         ),
       ),
-    ),
+    );
+  },
 );
 
 it.effect("a native placement admission needs operate access before anything is asked", () =>
@@ -2849,4 +2861,262 @@ it.effect("a native placement admission needs operate access before anything is 
       ),
     ),
   ),
+);
+
+it.live(
+  "a route-layer placement capture admits when the request context has no RemoteDelegation",
+  () =>
+    Effect.gen(function* () {
+      let asked = 0;
+      let modelAvailable: boolean | undefined;
+      const delegation = Layer.mock(RemoteDelegation.RemoteDelegation)({
+        admit: (_caller, input) =>
+          input.here.pipe(
+            Effect.tap((here) =>
+              Effect.sync(() => {
+                asked += 1;
+                modelAvailable = here.modelAvailable;
+              }),
+            ),
+            Effect.as({
+              environmentId: EnvironmentId.make("environment-box"),
+              projectId: input.projectId,
+              reason: "capacity" as const,
+              resumed: false,
+            }),
+          ),
+      });
+      // A ceiling that full-access fails. Visible only while Ws.layer builds, not on the request.
+      const policy = ManagedPolicy.layerTest({
+        schemaVersion: 1,
+        organization: "Closura",
+        limits: { maxRuntimeMode: "approval-required" },
+      });
+      const services = Layer.mergeAll(
+        layerUnusedConfigRpcServices,
+        Layer.mock(ServerBrowser.ServerBrowser)({
+          profileReporter: Effect.succeed(() => Effect.void),
+        }),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+          authenticateWebSocketUpgrade: () =>
+            Effect.succeed({
+              sessionId: AuthSessionId.make("placement-capture"),
+              subject: "browser",
+              method: "browser-session-cookie",
+              scopes: [AuthOrchestrationOperateScope],
+            }),
+        }),
+        Layer.mock(SessionStore.SessionStore)({
+          cookieName: "placement-capture",
+          legacyCookieName: undefined,
+          markConnected: () => Effect.void,
+          markDisconnected: () => Effect.void,
+          awaitInvalidation: () => Effect.never,
+        }),
+        Layer.mock(AnalyticsService.AnalyticsService)({
+          recordOwners: () => Effect.void,
+          record: () => Effect.void,
+        }),
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([
+            {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              driver: ProviderDriverKind.make("claudeAgent"),
+              enabled: true,
+              installed: true,
+              status: "ready",
+              version: "test",
+              auth: { status: "authenticated" },
+              checkedAt: "2026-01-01T00:00:00.000Z",
+              models: [
+                {
+                  slug: "claude-sonnet-4-6",
+                  name: "Sonnet",
+                  aliases: [],
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+              slashCommands: [],
+              skills: [],
+            } as ServerProvider,
+          ]),
+        }),
+        Layer.mock(HostResources.HostResources)({
+          read: Effect.succeed({
+            sampledAt: 0,
+            cpuUtilization: null,
+            cpuCount: 1,
+            availableMemoryBytes: 1,
+            totalMemoryBytes: 1,
+          }),
+        }),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: process.cwd(),
+        }),
+        Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+        Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+        Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+        Layer.mock(VcsProcess.VcsProcess)({
+          run: (input) =>
+            Effect.fail(
+              new VcsProcessSpawnError({
+                operation: input.operation,
+                command: input.command,
+                cwd: input.cwd,
+                cause: "No VCS commands in the placement fixture",
+              }),
+            ),
+        }),
+        ProviderInstallationGate.layer,
+        FetchHttpClient.layer,
+      );
+      const context = yield* Layer.build(
+        HttpRouter.serve(Ws.layer.pipe(Layer.provide(delegation), Layer.provide(policy)), {
+          disableListenLog: true,
+        }).pipe(
+          Layer.provideMerge(
+            NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),
+          ),
+          Layer.provide(services),
+          Layer.provide(layerConfigSources),
+        ),
+      );
+      const server = Context.get(context, HttpServer.HttpServer);
+      const origin = HttpServer.formatAddress(server.address);
+      const admitted = yield* Effect.gen(function* () {
+        const client = yield* RpcClient.make(WsRpcGroup);
+        return yield* client[ORCHESTRATION_V2_WS_METHODS.admitThreadPlacement]({
+          commandId: CommandId.make("web-launch"),
+          threadId: ThreadId.make("thread:web-launch"),
+          projectId: ProjectId.make("project:app"),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          candidateEnvironmentIds: [EnvironmentId.make("environment-box")],
+        });
+      }).pipe(
+        Effect.provide(
+          RpcClient.layerProtocolSocket().pipe(
+            Layer.provide(
+              Socket.layerWebSocket(
+                `${origin.replace(/^http/, "ws")}/ws?${ORCHESTRATION_PROTOCOL_QUERY_PARAM}=${ORCHESTRATION_PROTOCOL_VERSION}`,
+                { openTimeout: "10 seconds" },
+              ).pipe(Layer.provide(NodeSocket.layerWebSocketConstructor)),
+            ),
+            Layer.provide(RpcSerialization.layerJson),
+          ),
+        ),
+      );
+      assert.equal(asked, 1);
+      // The captured policy removes full access. A request-time read would see no policy.
+      assert.equal(modelAvailable, false);
+      assert.equal(admitted.environmentId, EnvironmentId.make("environment-box"));
+      assert.equal(admitted.resumed, false);
+    }).pipe(Effect.scoped),
+);
+
+it.live("every WebSocket connection updates providers through the server's one runner", () =>
+  Effect.gen(function* () {
+    const updates: Array<string> = [];
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ProviderMaintenanceRunner.ProviderMaintenanceRunner)({
+        updateProvider: (target) =>
+          Effect.sync(() => {
+            updates.push(typeof target === "string" ? target : target.provider);
+            return { providers: [] };
+          }),
+      }),
+      Layer.mock(ServerBrowser.ServerBrowser)({
+        profileReporter: Effect.succeed(() => Effect.void),
+      }),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+        authenticateWebSocketUpgrade: () =>
+          Effect.succeed({
+            sessionId: AuthSessionId.make("shared-runner"),
+            subject: "browser",
+            method: "browser-session-cookie",
+            scopes: [AuthProvidersManageScope],
+          }),
+      }),
+      Layer.mock(SessionStore.SessionStore)({
+        cookieName: "shared-runner",
+        legacyCookieName: undefined,
+        markConnected: () => Effect.void,
+        markDisconnected: () => Effect.void,
+        awaitInvalidation: () => Effect.never,
+      }),
+      Layer.mock(AnalyticsService.AnalyticsService)({
+        recordOwners: () => Effect.void,
+        record: () => Effect.void,
+      }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: process.cwd(),
+      }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(VcsProcess.VcsProcess)({
+        run: (input) =>
+          Effect.fail(
+            new VcsProcessSpawnError({
+              operation: input.operation,
+              command: input.command,
+              cwd: input.cwd,
+              cause: "No VCS commands in the shared-runner fixture",
+            }),
+          ),
+      }),
+      ProviderInstallationGate.layer,
+      FetchHttpClient.layer,
+    );
+    const context = yield* Layer.build(
+      HttpRouter.serve(Ws.layer, { disableListenLog: true }).pipe(
+        Layer.provideMerge(
+          NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),
+        ),
+        Layer.provide(services),
+        Layer.provide(layerConfigSources),
+      ),
+    );
+    const server = Context.get(context, HttpServer.HttpServer);
+    const url = `${HttpServer.formatAddress(server.address).replace(/^http/, "ws")}/ws?${ORCHESTRATION_PROTOCOL_QUERY_PARAM}=${ORCHESTRATION_PROTOCOL_VERSION}`;
+    const updateFromNewConnection = (provider: string) =>
+      Effect.gen(function* () {
+        const client = yield* RpcClient.make(WsRpcGroup);
+        return yield* client[WS_METHODS.serverUpdateProvider]({
+          provider: ProviderDriverKind.make(provider),
+        });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          RpcClient.layerProtocolSocket().pipe(
+            Layer.provide(
+              Socket.layerWebSocket(url, { openTimeout: "10 seconds" }).pipe(
+                Layer.provide(NodeSocket.layerWebSocketConstructor),
+              ),
+            ),
+            Layer.provide(RpcSerialization.layerJson),
+          ),
+        ),
+      );
+    yield* updateFromNewConnection("codex");
+    yield* updateFromNewConnection("claudeAgent");
+    // A runner built per connection would hold its own "already running" set and package locks.
+    assert.deepEqual(updates, ["codex", "claudeAgent"]);
+  }).pipe(Effect.scoped),
 );

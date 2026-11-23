@@ -3,6 +3,7 @@ import { threadPullRequestsOf } from "../threadPullRequests.ts";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
+  Founder,
   MessageId,
   OrchestrationProjectShell,
   OrchestrationV2ProviderGoal,
@@ -216,6 +217,34 @@ function nullableIso(value: DateTime.Utc | null): string | null {
   return value === null ? null : iso(value);
 }
 
+/**
+ * The read cursor this viewer should use. A shared thread with per-founder cursors returns that
+ * founder's stamp (or null when they have none). Every other thread keeps the shared watermark,
+ * including `undefined` from a server that does not track visits.
+ */
+export function seenCursorForViewer(
+  thread: {
+    readonly lastVisitedAt?: DateTime.Utc | null | undefined;
+    readonly inbox?: { readonly audience?: string } | null | undefined;
+    readonly visitsByFounder?:
+      | {
+          readonly kameron?: DateTime.Utc | undefined;
+          readonly jeff?: DateTime.Utc | undefined;
+        }
+      | undefined;
+  },
+  viewer: Founder | null,
+): DateTime.Utc | null | undefined {
+  if (
+    viewer == null ||
+    thread.inbox?.audience !== "shared" ||
+    thread.visitsByFounder === undefined
+  ) {
+    return thread.lastVisitedAt;
+  }
+  return thread.visitsByFounder[viewer] ?? null;
+}
+
 function terminalRunStatus(status: OrchestrationV2RunStatus): boolean {
   return (
     status === "completed" ||
@@ -268,8 +297,10 @@ export function presentThreadShell(
   environmentId: EnvironmentId,
   thread: OrchestrationV2ThreadShell,
   pendingSubagentRequest: PendingSubagentRequest | null = null,
+  viewer: Founder | null = null,
 ): EnvironmentThreadShell {
   const updatedAt = iso(thread.updatedAt);
+  const seenAt = seenCursorForViewer(thread, viewer);
   const latestRun =
     thread.latestRunId === null
       ? null
@@ -348,9 +379,7 @@ export function presentThreadShell(
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
     pinOrderKey: thread.pinOrderKey ?? null,
     activeOrderKey: thread.activeOrderKey ?? null,
-    ...(thread.lastVisitedAt === undefined
-      ? {}
-      : { lastVisitedAt: nullableIso(thread.lastVisitedAt) }),
+    ...(seenAt === undefined ? {} : { lastVisitedAt: nullableIso(seenAt) }),
     opens: thread.opens ?? null,
     titleRegeneration:
       thread.titleRegeneration == null

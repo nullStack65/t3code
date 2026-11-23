@@ -958,6 +958,10 @@ function listItemFromShell(
     creationSource: shell.creationSource,
     status: listedThreadStatus(shell),
     latestRunId: shell.latestRunId,
+    latestRunCompletedAt:
+      shell.latestRunCompletedAt === undefined || shell.latestRunCompletedAt === null
+        ? null
+        : DateTime.formatIso(shell.latestRunCompletedAt),
     providerInstanceId: shell.modelSelection.instanceId,
     model: shell.modelSelection.model,
     runtimeMode: shell.runtimeMode,
@@ -974,6 +978,10 @@ function listItemFromShell(
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
     updatedAt: DateTime.formatIso(shell.updatedAt),
+    lastVisitedAt:
+      shell.lastVisitedAt === undefined || shell.lastVisitedAt === null
+        ? null
+        : DateTime.formatIso(shell.lastVisitedAt),
   };
 }
 
@@ -1080,6 +1088,7 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
     case "notification":
       return [item.summary, item.detail].filter((part) => part !== undefined).join("\n");
     case "user_message":
+      return item.humanNote ? null : item.text;
     case "assistant_message":
     case "reasoning":
       return item.text;
@@ -3574,6 +3583,36 @@ const make = Effect.gen(function* () {
       yield* assertTargetWithinLimits(limits, target.thread);
 
       const mode = input.mode ?? "auto";
+      // A message to another thread rides in that thread's next digest unless the sender
+      // names a class. A message to the sender's own thread keeps the mode it asked for.
+      const deliveryClass =
+        input.deliveryClass ??
+        (input.digestCategory !== undefined ||
+        (parent !== undefined && parent.thread.id !== input.threadId)
+          ? "digest"
+          : undefined);
+      if (
+        deliveryClass === undefined &&
+        (input.coalesceKey !== undefined || input.expiresAt !== undefined)
+      ) {
+        return yield* failure("invalid_request", "coalesceKey and expiresAt need a deliveryClass.");
+      }
+      const expiresAt =
+        input.expiresAt === undefined
+          ? undefined
+          : Option.getOrUndefined(DateTime.make(input.expiresAt));
+      if (input.expiresAt !== undefined && expiresAt === undefined) {
+        return yield* failure("invalid_request", "expiresAt must be an ISO date-time.");
+      }
+      const delivery =
+        deliveryClass === undefined
+          ? undefined
+          : {
+              class: deliveryClass,
+              ...(input.coalesceKey === undefined ? {} : { coalesceKey: input.coalesceKey }),
+              ...(expiresAt === undefined ? {} : { expiresAt: DateTime.toUtc(expiresAt) }),
+              ...(input.digestCategory === undefined ? {} : { category: input.digestCategory }),
+            };
       const key = yield* requestKey(input.clientRequestId);
       const messageId = stableOperationMessageId({
         scope,
@@ -3599,6 +3638,7 @@ const make = Effect.gen(function* () {
           attachments: [],
           mode,
           ...(input.freshContext ? { freshContext: true } : {}),
+          ...(delivery === undefined ? {} : { delivery }),
           createdBy: "agent",
           creationSource: "mcp",
         })
@@ -3641,6 +3681,7 @@ const make = Effect.gen(function* () {
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
         status: result.run.status,
         delivery: result.delivery,
+        ...(deliveryClass === undefined ? {} : { deliveryClass }),
       } satisfies OrchestratorMcpThreadSendResult;
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {

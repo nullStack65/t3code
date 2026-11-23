@@ -8,6 +8,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   SecretProviderId,
   ThreadId,
   AuthOrchestrationOperateScope,
@@ -140,6 +141,70 @@ describe("RPC scope middleware", () => {
         requiredPermission: missing,
       });
       expect(handled).toEqual([]);
+    }),
+  );
+});
+
+describe("provider MCP sign-in authorization", () => {
+  const methods = [
+    WS_METHODS.providerMcpSignInStart,
+    WS_METHODS.providerMcpSignInComplete,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof methods)[number]> =>
+        tag !== methods[0] && tag !== methods[1],
+    ),
+  );
+
+  it.effect.each([false, true])("enforces provider management scope (granted: %s)", (granted) =>
+    Effect.gen(function* () {
+      const handled: string[] = [];
+      const signedInAt = "2026-11-22T00:00:00.000Z";
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.providerMcpSignInStart, () =>
+              Effect.sync(() => {
+                handled.push("start");
+                return { authorizationUrl: null, signedInAt };
+              }),
+            ),
+            group.toLayerHandler(WS_METHODS.providerMcpSignInComplete, () =>
+              Effect.sync(() => {
+                handled.push("complete");
+                return { signedInAt };
+              }),
+            ),
+            RpcAuthorization.layer(
+              granted ? [AuthProvidersManageScope] : [AuthOrchestrationOperateScope],
+            ),
+          ),
+        ),
+      );
+      const target = {
+        threadId: ThreadId.make("thread"),
+        providerThreadId: ProviderThreadId.make("provider-thread"),
+        server: "test-mcp",
+      };
+      const start = client[WS_METHODS.providerMcpSignInStart](target);
+      const complete = client[WS_METHODS.providerMcpSignInComplete]({
+        ...target,
+        callbackUrl: "http://127.0.0.1:50123/callback?code=fixture&state=fixture",
+      });
+      if (granted) {
+        expect(yield* start).toEqual({ authorizationUrl: null, signedInAt });
+        expect(yield* complete).toEqual({ signedInAt });
+        expect(handled).toEqual(["start", "complete"]);
+      } else {
+        for (const refusal of [yield* Effect.flip(start), yield* Effect.flip(complete)]) {
+          expect(refusal).toMatchObject({
+            _tag: "EnvironmentAuthorizationError",
+            requiredPermission: AuthProvidersManageScope,
+          });
+        }
+        expect(handled).toEqual([]);
+      }
     }),
   );
 });

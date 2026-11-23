@@ -1,6 +1,6 @@
 import { InlineAudioPreview } from "../files/InlineAudioPreview";
 import { messageSenderLabel, resolveMessageSender } from "@t3tools/client-runtime/message-sender";
-import { MessageSenderLine } from "./MessageSenderLine";
+import { FounderSenderBadge, MessageSenderLine } from "./MessageSenderLine";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import {
   CHAT_USER_MARKDOWN_REMARK_PLUGINS,
@@ -37,6 +37,7 @@ import ChatMarkdown from "../ChatMarkdown";
 import {
   CalendarClockIcon,
   ChevronDownIcon,
+  EyeOffIcon,
   DownloadIcon,
   EyeIcon,
   type LucideIcon,
@@ -46,6 +47,8 @@ import {
   LinkIcon,
 } from "lucide-react";
 import { Button, InlineButton } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { toastManager } from "../ui/toast";
 import { FreshSessionRow, ModelSwitchRow } from "./V2LifecycleRow";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { AttachmentImage } from "../media/AttachmentImage";
@@ -271,6 +274,8 @@ export function UserMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mes
 
 function UserMessageContent({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  if (row.message.humanNote)
+    return <UserTimelineRow row={row} sharedThread={ctx.sharedThread === true} />;
   return ctx.workflowOpening?.messageId === row.message.id ? (
     <WorkflowOpeningBlock
       opening={ctx.workflowOpening}
@@ -280,7 +285,48 @@ function UserMessageContent({ row }: { row: Extract<TimelineRow, { kind: "messag
   ) : resolveUserMessagePresentation(row.message).attribution === "automation" ? (
     <AutomationMessageRow row={row} />
   ) : (
-    <UserTimelineRow row={row} />
+    <UserTimelineRow row={row} sharedThread={ctx.sharedThread === true} />
+  );
+}
+
+function HumanNoteActions({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const { onPromoteNote } = use(TimelineRowCtx);
+  const [status, setStatus] = useState<"idle" | "sending" | "sent">("idle");
+  const promoted = row.message.humanNotePromoted || status === "sent";
+  return (
+    <div
+      className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1"
+      data-user-message-note=""
+    >
+      <Badge variant="warning" size="sm">
+        <EyeOffIcon aria-hidden />
+        Model-hidden note
+      </Badge>
+      {onPromoteNote && !promoted && row.projectedItem?.visibility !== "inherited" ? (
+        <InlineButton
+          type="button"
+          disabled={status === "sending"}
+          onClick={async () => {
+            setStatus("sending");
+            try {
+              await onPromoteNote(row.message.id);
+              setStatus("sent");
+              toastManager.add({ type: "success", title: "Note queued for the agent" });
+            } catch {
+              setStatus("idle");
+              toastManager.add({ type: "error", title: "Could not promote the note" });
+            }
+          }}
+        >
+          {status === "sending" ? "Sending…" : "Promote to agent"}
+        </InlineButton>
+      ) : null}
+      {promoted ? (
+        <span role="status" className="text-xs text-muted-foreground">
+          {row.message.humanNotePromoted ? "Promoted to agent" : "Queued for agent"}
+        </span>
+      ) : null}
+    </div>
   );
 }
 
@@ -433,7 +479,13 @@ function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind:
   );
 }
 
-function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+function UserTimelineRow({
+  row,
+  sharedThread,
+}: {
+  row: Extract<TimelineRow, { kind: "message" }>;
+  sharedThread: boolean;
+}) {
   const ctx = use(TimelineRowCtx);
   const { onImageExpand, onFileOpen } = ctx;
   const coarsePointer = useMediaQuery({ pointer: "coarse" });
@@ -475,8 +527,8 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const showSender = sender.kind === "person" && !row.groupedWithPrevious && !unsent;
   const personHeading = sender.kind === "person" && !unsent ? messageSenderLabel(sender) : "You";
   // Messages from other agents fold to one line so the user's own messages stay easy to find.
-  const folded = userMessage.attribution === "agent";
-  const [expanded, setExpanded] = useState(false);
+  const folded = !row.message.humanNote && userMessage.attribution === "agent";
+  const [expanded, setExpanded] = useState(row.activityRevealed === true);
   const revealFoldRef = findRevealRef(() => setExpanded(true));
   const senderShell = useQuietThreadShell(folded ? senderRef : null);
   const senderLabel =
@@ -866,7 +918,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       ) : null}
       {showSender ? (
         <div aria-hidden>
-          <MessageSenderLine sender={sender} align="end" />
+          {sharedThread && sender.kind === "person" && sender.sentBy?.founder != null ? (
+            <FounderSenderBadge founder={sender.sentBy.founder} />
+          ) : (
+            <MessageSenderLine sender={sender} align="end" />
+          )}
         </div>
       ) : null}
       {/* The row's heading already names the guest for screen readers. */}
@@ -896,14 +952,17 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           (mediaAboveText || row.groupedWithPrevious) && "rounded-tr-md",
           row.groupedWithNext && "rounded-br-md",
           BUBBLE_CHIP_CLASS_NAME,
-          userMessage.attribution === "guest"
-            ? guestBubbleClassName(false)
-            : !mediaOnly && !fileCardsOnly && !audioOnly && "bg-message",
+          row.message.humanNote
+            ? "border border-warning/20 bg-warning/8 text-foreground"
+            : userMessage.attribution === "guest"
+              ? guestBubbleClassName(false)
+              : !mediaOnly && !fileCardsOnly && !audioOnly && "bg-message",
           !folded && !mediaOnly && !fileCardsOnly && !audioOnly && "p-3",
           folded && expanded && "w-full",
         )}
         data-user-message-bubble=""
       >
+        {row.message.humanNote ? <HumanNoteActions row={row} /> : null}
         {/* Outside the fold so a collapsed message still has a heading to navigate to. */}
         {mediaAboveText ? null : (
           <MessageAuthorHeading>
@@ -1047,7 +1106,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                   renderContextReference={renderContextReference}
                   skills={ctx.skills}
                   markdownCwd={ctx.markdownCwd}
-                  collapsible={!folded}
+                  collapsible={!folded && !row.message.humanNote}
                 />
               </div>
             )}

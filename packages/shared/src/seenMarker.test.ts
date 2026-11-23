@@ -1,7 +1,7 @@
 import { MessageId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 
-import { formatSeenMarkerForProvider } from "./seenMarker.ts";
+import { formatSeenMarkerForProvider, formatSharedSenderForProvider } from "./seenMarker.ts";
 
 const seenAt = "2026-11-20T03:00:00.000Z";
 describe("formatSeenMarkerForProvider", () => {
@@ -38,5 +38,32 @@ describe("formatSeenMarkerForProvider", () => {
     const prose = formatSeenMarkerForProvider("Review the diff", marker);
     expect(prose.startsWith("<seen_marker")).toBe(true);
     expect(prose.endsWith("Review the diff")).toBe(true);
+  });
+});
+
+describe("formatSharedSenderForProvider", () => {
+  it("names the founder on a shared send and leaves a command alone", () => {
+    expect(formatSharedSenderForProvider("Ship the fix", "jeff")).toBe(
+      "[From: Jeff]\n\nShip the fix",
+    );
+    expect(formatSharedSenderForProvider("Ship the fix", "kameron")).toBe(
+      "[From: Kameron]\n\nShip the fix",
+    );
+    expect(formatSharedSenderForProvider("Ship the fix", null)).toBe("Ship the fix");
+    expect(formatSharedSenderForProvider("/compact", "jeff")).toBe("/compact");
+  });
+});
+
+describe("a shared catch-up", () => {
+  it("asks for two lines about the founder who was away", () => {
+    const text = formatSeenMarkerForProvider(
+      "Ship the fix",
+      { lastSeenMessageId: MessageId.make("message-user-1"), seenAt, unseenCount: 2 },
+      "jeff",
+    );
+    expect(text).toContain(
+      "Jeff last saw message message-user-1; 2 messages since are unseen. Open the reply with two lines on only those, while they were away.",
+    );
+    expect(text.endsWith("Ship the fix")).toBe(true);
   });
 });

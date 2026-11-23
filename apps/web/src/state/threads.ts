@@ -15,6 +15,7 @@ import {
 import {
   inboxOriginFor,
   type EnvironmentId,
+  type Founder,
   type OrchestrationV2ThreadShell,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -25,7 +26,11 @@ import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { serverEnvironment } from "./server";
 import { environmentShell } from "./shell";
-import { getClientSettings } from "../hooks/useSettings";
+import {
+  getClientSettings,
+  subscribeClientSettings,
+  subscribeClientSettingsHydration,
+} from "../hooks/useSettings";
 
 export const threadFamilies = createThreadFamilyAtoms(
   connectionAtomRuntime,
@@ -44,10 +49,18 @@ const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRunti
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
   environmentThreads.stateAtom,
 );
+/** The founder this browser is signed in as. Shared threads show that founder's unread mark. */
+export const viewerFounderAtom = Atom.make((get): Founder | null => {
+  get.addFinalizer(subscribeClientSettings(() => get.refreshSelf()));
+  get.addFinalizer(subscribeClientSettingsHydration(() => get.refreshSelf()));
+  return getClientSettings().founderInboxOwner ?? null;
+}).pipe(Atom.withLabel("web-viewer-founder"));
+
 export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: threadEnvironment.snapshotAtom,
   hiddenThreadTagsAtom: serverEnvironment.hiddenThreadTagsAtom,
+  viewerFounderAtom,
 });
 export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
   childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,

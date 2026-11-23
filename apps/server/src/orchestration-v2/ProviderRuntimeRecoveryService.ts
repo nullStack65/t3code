@@ -1,4 +1,3 @@
-import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -40,6 +39,7 @@ import {
   awaitingProviderThreadId,
   cancelledRosterTaskWork,
   cancelledTurnItemWork,
+  latestStartedRun,
   mergeRestartCancelledBackgroundWork,
   neverStarted,
 } from "./RestartBackgroundNote.ts";
@@ -173,23 +173,6 @@ const cancelledItem = (
         updatedAt: now,
       };
 
-function latestStartedRun(
-  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
-  providerThreadId: ProviderThreadId,
-) {
-  return projection.runs.reduce<OrchestrationV2ThreadProjection["runs"][number] | undefined>(
-    (latest, run) =>
-      run.providerThreadId === providerThreadId &&
-      run.status !== "queued" &&
-      run.status !== "rolled_back" &&
-      !neverStarted(run) &&
-      (latest === undefined || runRanAfter(run, latest))
-        ? run
-        : latest,
-    undefined,
-  );
-}
-
 export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -278,6 +261,7 @@ export const make = Effect.gen(function* () {
     ) {
       const now = yield* DateTime.now;
       const projection = yield* rewindUnacceptedRuns(stored);
+      const hadActiveRun = nonterminalRuns(stored).length > 0;
       let runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -589,6 +573,7 @@ export const make = Effect.gen(function* () {
           runs.push(run);
           continue;
         }
+        if (!hadActiveRun && run.delegatedTaskId === undefined) continue;
         if (run.queueHeld === true && retryableRuns.length === 0) continue;
         events.push({
           id: yield* allocateEventId(),
@@ -976,7 +961,7 @@ export const make = Effect.gen(function* () {
         });
       }
       for (const [providerThreadId, work] of cancelledBackgroundWork) {
-        const noteRun = latestStartedRun(projection, providerThreadId);
+        const noteRun = latestStartedRun(projection.runs, providerThreadId);
         if (noteRun === undefined) continue;
         // Use a separate event; stale run snapshots can overwrite intervening lifecycle changes.
         events.push({

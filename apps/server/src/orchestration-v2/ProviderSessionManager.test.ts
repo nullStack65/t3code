@@ -5,6 +5,8 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  EventId,
+  MessageId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -60,6 +62,7 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import { runOutcome } from "./RestartBackgroundNote.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import {
@@ -3667,6 +3670,69 @@ it.effect.each(["a runtime whose tasks can outlive it", "server shutdown"] as co
         ),
       );
     }),
+);
+
+// regression: a delegated child whose process ended under awaited background work settled as completed
+it.effect("ProviderSessionManagerV2 records the background work a released process lost", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const { threadId, providerSessionId, providerThreads, writeProviderThread } =
+        yield* openSessionWithBackgroundCommand("provider-session-manager-lost-awaited-work");
+      const now = yield* DateTime.now;
+      const runId = RunId.make("run:child-awaiting-reviewer");
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:child-run"),
+            type: "run.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: {
+              id: runId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId: modelSelection.instanceId,
+              modelSelection,
+              providerThreadId: providerThreads[0]!.id,
+              userMessageId: MessageId.make("message:child-prompt"),
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "completed",
+              requestedAt: now,
+              startedAt: now,
+              completedAt: now,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+        ],
+      });
+      yield* writeProviderThread({
+        ...providerThreads[0]!,
+        pendingBackgroundTasks: [
+          ...providerThreads[0]!.pendingBackgroundTasks!,
+          { taskId: "reviewer", kind: "subagent", description: "Review the diff" },
+        ],
+      });
+
+      yield* manager.close(providerSessionId);
+
+      const { runs } = yield* projectionStore.getThreadRecords(threadId, ["runs"]);
+      const run = runs.find((candidate) => candidate.id === runId)!;
+      assert.sameMembers(
+        (run.restartCancelledBackgroundWork ?? []).map((work) => work.id),
+        ["dev-server", "reviewer"],
+      );
+      assert.equal(runOutcome(run), "interrupted");
+    });
+
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
 );
 
 // regression: #19355 settled and idle-released threads stayed Waiting

@@ -73,6 +73,7 @@ export function useComposerMenuItems({
   threadPullRequests,
   sideChatAvailable,
   sideChatDisabledReason,
+  noteAvailable,
   freshSessionAvailable,
   compactSlashCommandAvailable,
   selectedProvider,
@@ -93,6 +94,7 @@ export function useComposerMenuItems({
   readonly threadPullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined;
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
+  readonly noteAvailable: boolean;
   readonly freshSessionAvailable: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
@@ -262,6 +264,17 @@ export function useComposerMenuItems({
                 command: "btw",
                 label: "/btw",
                 description: sideChatDisabledReason ?? "Same as /side",
+              },
+            ] as const)
+          : []),
+        ...(noteAvailable
+          ? ([
+              {
+                id: "slash:note",
+                type: "slash-command",
+                command: "note",
+                label: "/note",
+                description: "Leave a note for the other founder. It does not wake the bot.",
               },
             ] as const)
           : []),

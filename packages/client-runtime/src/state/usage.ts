@@ -18,7 +18,29 @@ export function usageSummaryInput(
 }
 
 const limitsRefreshAfter = new Map<EnvironmentId, number>();
-const limitsRefreshes = new Map<EnvironmentId, Promise<unknown>>();
+/** In-flight limits refresh. `live` is a manual reread; automatic refreshes share or skip it. */
+const limitsRefreshes = new Map<
+  EnvironmentId,
+  { readonly live: boolean; readonly promise: Promise<unknown> }
+>();
+
+function beginLimitsRefresh<A>(
+  environmentId: EnvironmentId,
+  refresh: () => Promise<A>,
+  live: boolean,
+): Promise<A> {
+  const current = Promise.resolve()
+    .then(refresh)
+    .finally(() => {
+      if (limitsRefreshes.get(environmentId)?.promise === current) {
+        limitsRefreshes.delete(environmentId);
+      }
+      // @effect-diagnostics-next-line globalDate:off
+      limitsRefreshAfter.set(environmentId, Date.now() + 5 * 60_000);
+    });
+  limitsRefreshes.set(environmentId, { live, promise: current });
+  return current;
+}
 
 export async function refreshUsageLimits<A>(
   environmentId: EnvironmentId,
@@ -26,21 +48,20 @@ export async function refreshUsageLimits<A>(
   automatic = false,
 ): Promise<A | undefined> {
   const pending = limitsRefreshes.get(environmentId);
-  if (pending !== undefined) {
-    return automatic ? undefined : ((await pending) as A);
+  if (automatic) {
+    if (pending !== undefined) return;
+    // @effect-diagnostics-next-line globalDate:off
+    if (Date.now() < (limitsRefreshAfter.get(environmentId) ?? 0)) return;
+    return await beginLimitsRefresh(environmentId, refresh, false);
   }
-  const refreshAfter = limitsRefreshAfter.get(environmentId) ?? 0;
-  // @effect-diagnostics-next-line globalDate:off
-  if (automatic && Date.now() < refreshAfter) return;
-  const current = Promise.resolve()
-    .then(refresh)
-    .finally(() => {
-      limitsRefreshes.delete(environmentId);
-      // @effect-diagnostics-next-line globalDate:off
-      limitsRefreshAfter.set(environmentId, Date.now() + 5 * 60_000);
-    });
-  limitsRefreshes.set(environmentId, current);
-  return await current;
+  // A click during an automatic poll waits, then rereads. It does not keep that poll's result.
+  if (pending?.live) return (await pending.promise) as A;
+  if (pending) {
+    await pending.promise.catch(() => undefined);
+    const started = limitsRefreshes.get(environmentId);
+    if (started?.live) return (await started.promise) as A;
+  }
+  return await beginLimitsRefresh(environmentId, refresh, true);
 }
 
 export async function refreshUsage({

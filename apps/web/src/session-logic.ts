@@ -609,6 +609,8 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
               ...(item.linkedSender !== undefined ? { linkedSender: item.linkedSender } : {}),
               ...(item.sentBy !== undefined ? { sentBy: item.sentBy } : {}),
               ...(item.idleCompaction !== undefined ? { idleCompaction: item.idleCompaction } : {}),
+              ...(item.humanNote === true ? { humanNote: true as const } : {}),
+              ...(item.humanNotePromoted ? { humanNotePromoted: true as const } : {}),
               ...(item.scheduledTaskId !== undefined
                 ? { scheduledTaskId: item.scheduledTaskId }
                 : {}),

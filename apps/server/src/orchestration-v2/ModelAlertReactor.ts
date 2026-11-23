@@ -4,6 +4,7 @@ import {
   isListedThreadLineage,
   MessageId,
   type ModelAlertWatcher,
+  type OrchestrationV2DigestCategory,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
@@ -14,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import { runModelSignals, workerAlert } from "@t3tools/provider-core/server/subagentProjection";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -43,7 +45,10 @@ import * as Orchestrator from "./Orchestrator.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
+  isStrandedQueueSignature,
   judgeThread,
+  keepStrandedQueueReport,
+  type StrandedQueue,
   threadEventAlert,
   launchingThreadId,
   ThreadEventAlert,
@@ -124,6 +129,11 @@ const Delivery = Schema.Struct({
   attempts: Schema.Int,
   nextAttemptAt: Schema.Number,
   createdAt: Schema.Number,
+  /**
+   * When the digest expires, fixed when the alert is queued. A retry must carry the same time,
+   * or the first send and the retry disagree and the retry is not a replay.
+   */
+  digestExpiresAt: Schema.optional(Schema.Number),
 });
 type Delivery = typeof Delivery.Type;
 
@@ -306,6 +316,7 @@ function enqueueAlert(
       attempts: 0,
       nextAttemptAt: nowMs,
       createdAt: nowMs,
+      digestExpiresAt: nowMs + ALERT_DIGEST_TTL_MS,
     }));
   return {
     outbox: [...pruneOutbox(outbox, nowMs), ...added].slice(-MAX_OUTBOX),
@@ -314,6 +325,51 @@ function enqueueAlert(
 }
 
 const reportedKey = (threadId: string, kind: ThreadEventKind) => `${threadId}\n${kind}`;
+const deliveredQueuePrefix = "delivered:";
+const queueReportSignature = (signature: string) =>
+  signature.startsWith(deliveredQueuePrefix)
+    ? signature.slice(deliveredQueuePrefix.length)
+    : signature;
+
+function strandedAlertSignature(alert: WatcherAlert): string | undefined {
+  if (alert.type !== "thread-event" || alert.kind !== "stuck") return undefined;
+  const prefix = `${alert.environmentId}:${alert.threadId}:${alert.kind}:`;
+  const suffix = `:${alert.occurredAt}`;
+  if (!alert.id.startsWith(prefix) || !alert.id.endsWith(suffix)) return undefined;
+  const signature = alert.id.slice(prefix.length, -suffix.length);
+  return isStrandedQueueSignature(signature) ? signature : undefined;
+}
+
+function setReported(
+  reported: ModelAlertState["reported"],
+  key: string,
+  signatures: ReadonlyArray<string>,
+): ModelAlertState["reported"] {
+  const { [key]: _previous, ...rest } = reported;
+  return signatures.length === 0
+    ? rest
+    : {
+        ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
+        [key]: signatures.join("\n"),
+      };
+}
+
+function recordStrandedDelivery(
+  reported: ModelAlertState["reported"],
+  entry: Delivery,
+  delivered: boolean,
+) {
+  if (entry.alert.type !== "thread-event") return reported;
+  const signature = strandedAlertSignature(entry.alert);
+  if (signature === undefined) return reported;
+  const key = reportedKey(entry.alert.threadId, "stuck");
+  const known = (reported[key] ?? "").split("\n").filter(Boolean);
+  if (!delivered && !known.includes(signature)) return reported;
+  const next = known.filter((candidate) => candidate !== signature);
+  const sent = `${deliveredQueuePrefix}${signature}`;
+  if (delivered && !next.includes(sent)) next.push(sent);
+  return setReported(reported, key, next);
+}
 
 /**
  * Records what a trigger found true of a thread. A kind reports once per signature: it stays quiet
@@ -325,6 +381,7 @@ export function recordThreadEvents(
     readonly threadId: string;
     readonly evaluated: ReadonlyArray<ThreadEventKind>;
     readonly findings: ReadonlyArray<ThreadFinding>;
+    readonly strandedQueue?: StrandedQueue | null;
   },
   toAlert: (finding: ThreadFinding) => ThreadEventAlert,
   destinations: ReadonlyArray<Destination>,
@@ -336,20 +393,34 @@ export function recordThreadEvents(
   for (const kind of judged.evaluated) {
     const key = reportedKey(judged.threadId, kind);
     const kindFindings = judged.findings.filter((finding) => finding.kind === kind);
-    if (kindFindings.length === 0) {
-      if (reported[key] !== undefined) {
-        const { [key]: _cleared, ...rest } = reported;
-        reported = rest;
-      }
-      continue;
-    }
     // A kind can hold several findings at once (a question and an inbox flip), so it remembers
     // each signature it reported. One that stops being true is forgotten and can report again.
     const known = (reported[key] ?? "").split("\n").filter((signature) => signature !== "");
-    const delivered: Array<string> = [];
+    const delivered = known.filter(
+      (signature) =>
+        kind === "stuck" &&
+        keepStrandedQueueReport(queueReportSignature(signature), judged.strandedQueue),
+    );
     for (const finding of kindFindings) {
+      if (kind === "stuck" && isStrandedQueueSignature(finding.signature)) {
+        if (
+          delivered.some((signature) => queueReportSignature(signature) === finding.signature) ||
+          outbox.some(
+            (entry) =>
+              entry.alert.type === "thread-event" &&
+              entry.alert.threadId === judged.threadId &&
+              nowMs - entry.createdAt < OUTBOX_TTL_MS &&
+              strandedAlertSignature(entry.alert) === finding.signature,
+          )
+        )
+          continue;
+        const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
+        outbox = queued.outbox;
+        enqueued ||= queued.enqueued;
+        continue;
+      }
       if (known.includes(finding.signature)) {
-        delivered.push(finding.signature);
+        if (!delivered.includes(finding.signature)) delivered.push(finding.signature);
         continue;
       }
       const queued = enqueueAlert(outbox, toAlert(finding), destinations, nowMs);
@@ -359,14 +430,8 @@ export function recordThreadEvents(
     }
     // A finding with nowhere to go stays unreported, so a later launcher or webhook still hears it.
     const stored = delivered.join("\n");
-    if (reported[key] !== stored) {
-      const { [key]: _previous, ...rest } = reported;
-      reported = stored
-        ? {
-            ...Object.fromEntries(Object.entries(rest).slice(-(MAX_REPORTED - 1))),
-            [key]: stored,
-          }
-        : rest;
+    if ((reported[key] ?? "") !== stored) {
+      reported = setReported(reported, key, delivered);
     }
   }
   if (reported === state.reported && outbox === state.outbox) return { state, enqueued };
@@ -480,7 +545,9 @@ export function afterDeliveryAttempt(
   return {
     ...state,
     incidentSentAt,
-    reported: delivered ? markLinkDelivered(state.reported, entry) : state.reported,
+    reported: delivered
+      ? recordStrandedDelivery(markLinkDelivered(state.reported, entry), entry, true)
+      : state.reported,
     outbox: pruneOutbox(state.outbox, nowMs).flatMap((candidate) => {
       if (!sameDelivery(candidate, entry)) return [candidate];
       if (delivered) {
@@ -529,6 +596,11 @@ export const afterDrop = (
   nowMs: number,
 ): ModelAlertState => ({
   ...state,
+  reported: state.outbox.some(
+    (candidate) => candidate.alert.id === entry.alert.id && !sameDelivery(candidate, entry),
+  )
+    ? state.reported
+    : recordStrandedDelivery(state.reported, entry, false),
   outbox: state.outbox.flatMap((candidate) => {
     if (!sameDelivery(candidate, entry)) return [candidate];
     if (
@@ -577,6 +649,8 @@ const BUSY_WATCHER_STATUSES = new Set<string>([
 /** Matches the flush interval, so a held alert is looked at again on the next flush. */
 export const BUSY_WATCHER_RECHECK_MS = 30_000;
 export const BUSY_WATCHER_MAX_HOLD_MS = 10 * 60 * 1000;
+/** How long an undelivered alert stays in the watcher's digest before it is dropped. */
+const ALERT_DIGEST_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * While the watcher is mid-turn, a sent alert only queues behind that turn and is judged stale or
@@ -682,6 +756,7 @@ export function recordUsageLimit(
         attempts: 0,
         nextAttemptAt: notBefore,
         createdAt: nowMs,
+        digestExpiresAt: nowMs + ALERT_DIGEST_TTL_MS,
       },
     ].slice(-MAX_OUTBOX);
   }
@@ -736,6 +811,31 @@ export const watcherAlertMessage = (alert: WatcherAlert) => {
   }
 };
 
+/** Alerts ride in the watcher's next digest; a newer alert on the same subject replaces an older one. */
+function alertDelivery(alert: WatcherAlert): {
+  readonly coalesceKey: string;
+  readonly category: OrchestrationV2DigestCategory;
+} {
+  switch (alert.type) {
+    case "peer-link-renewal":
+      return { coalesceKey: `${alert.type}:${alert.linkedEnvironmentId}`, category: "alert" };
+    case "usage-limit-incident":
+      return { coalesceKey: `${alert.type}:${alert.groupKey}`, category: "alert" };
+    case "model-degraded":
+      return { coalesceKey: `${alert.type}:${alert.threadId}`, category: "alert" };
+    case "thread-event":
+      return {
+        coalesceKey: `${alert.type}:${alert.kind}:${alert.threadId}`,
+        category:
+          alert.kind === "lane-ended"
+            ? "lane_result"
+            : alert.kind === "needs-person"
+              ? "decision_needed"
+              : "alert",
+      };
+  }
+}
+
 /**
  * Puts an alert in the watcher thread, here or on the linked machine that owns it. The retry key is
  * one per alert and watcher, so a retry after a lost answer sends once.
@@ -749,11 +849,16 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   alert: WatcherAlert,
   watcher: ModelAlertWatcher,
   here: EnvironmentId,
+  expiresAtMs?: number,
 ) {
   const message = watcherAlertMessage(alert);
   // Run ids can be long; a retry key must stay under the 256 characters the peer accepts.
   const identity = `${alert.id}\n${watcher.environmentId}\n${watcher.threadId}`;
   const key = `${alert.type === "model-degraded" ? "model-alert" : alert.type}:${yield* deps.sha256Hex(identity)}`;
+  const { coalesceKey, category } = alertDelivery(alert);
+  const expiresAt = DateTime.makeUnsafe(
+    expiresAtMs ?? DateTime.toEpochMillis(yield* DateTime.now) + ALERT_DIGEST_TTL_MS,
+  );
   if (watcher.environmentId === here) {
     yield* deps.dispatch({
       type: "message.dispatch",
@@ -763,6 +868,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
       text: message,
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
+      delivery: { class: "digest", coalesceKey, expiresAt, category },
       createdBy: "agent",
       creationSource: "server",
     });
@@ -771,7 +877,16 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   yield* deps.call({
     environmentId: watcher.environmentId,
     tool: "t3_thread_send",
-    arguments: { threadId: watcher.threadId, message, mode: "queue", clientRequestId: key },
+    arguments: {
+      threadId: watcher.threadId,
+      message,
+      mode: "queue",
+      clientRequestId: key,
+      deliveryClass: "digest",
+      coalesceKey,
+      expiresAt: DateTime.formatIso(expiresAt),
+      digestCategory: category,
+    },
     limits: { runtimeMode: "full-access", interactionMode: "default" },
     success: OrchestratorMcpThreadSendResult,
   });
@@ -851,12 +966,18 @@ export const make = Effect.gen(function* () {
     crypto
       .digest(Digest.sha256, new TextEncoder().encode(identity))
       .pipe(Effect.map(Hex.encode), Effect.orDie);
-  const deliverToWatcher = (alert: WatcherAlert, watcher: ModelAlertWatcher, here: EnvironmentId) =>
+  const deliverToWatcher = (
+    alert: WatcherAlert,
+    watcher: ModelAlertWatcher,
+    here: EnvironmentId,
+    expiresAtMs: number,
+  ) =>
     deliverAlertToWatcher(
       { dispatch: engine.dispatch, call: peers.call, sha256Hex },
       alert,
       watcher,
       here,
+      expiresAtMs,
     );
 
   type WatcherView = {
@@ -951,6 +1072,7 @@ export const make = Effect.gen(function* () {
     shell: OrchestrationV2ThreadShell,
     trigger: ThreadEventTrigger,
     remoteTasks?: ReadonlyMap<string, number>,
+    queuedThreads?: ReadonlySet<ThreadId>,
   ) {
     const remoteTaskCount =
       trigger === "request" || trigger === "inbox"
@@ -982,7 +1104,41 @@ export const make = Effect.gen(function* () {
             )),
           )
         : null;
-    return { remoteTaskCount, childActivityMs };
+    if (trigger !== "sweep" || shell.activeRunId !== null || shell.activityRunStatus != null) {
+      return { remoteTaskCount, childActivityMs };
+    }
+    if (queuedThreads !== undefined && !queuedThreads.has(shell.id)) {
+      return { remoteTaskCount, childActivityMs, strandedQueue: null };
+    }
+    const now = yield* DateTime.now;
+    const { runs } = yield* projections.getThreadRecords(shell.id, ["runs"]);
+    const queued = runs
+      .filter(
+        (run) =>
+          run.status === "queued" &&
+          run.delivery?.class !== "digest" &&
+          (run.delivery?.expiresAt === undefined ||
+            DateTime.isGreaterThan(run.delivery.expiresAt, now)),
+      )
+      .toSorted(
+        (left, right) =>
+          DateTime.toEpochMillis(left.requestedAt) - DateTime.toEpochMillis(right.requestedAt),
+      );
+    const latestRun = latestExecutedRun(runs);
+    const oldest = queued.find((run) => run.queueHeld !== true) ?? queued[0];
+    const strandedQueue =
+      oldest === undefined
+        ? null
+        : {
+            runId: oldest.id,
+            requestedAt: oldest.requestedAt,
+            lastCompletedAt: latestRun?.completedAt ?? null,
+            queueHeld:
+              oldest.queueHeld === true ||
+              (shell.lastErrorClass === "usage_limit" &&
+                latestRun?.providerInstanceId === oldest.providerInstanceId),
+          };
+    return { remoteTaskCount, childActivityMs, strandedQueue };
   });
 
   /** The watcher thread as one delivery needs it, or null when it cannot be read. */
@@ -993,8 +1149,15 @@ export const make = Effect.gen(function* () {
     if (watcher.environmentId === here) {
       const shell = yield* projections.getThreadShell(watcher.threadId);
       if (shell === null) return null;
+      // A queued digest never starts a turn, so the shell hides it and reads idle. It is still a
+      // turn waiting to be judged, and another alert queueing behind it would be judged stale.
+      const digestWaiting =
+        shell.status === "idle" &&
+        (yield* projections.getThreadRecords(watcher.threadId, ["runs"])).runs.some(
+          (run) => run.status === "queued" && run.delivery?.class === "digest",
+        );
       return {
-        status: shell.status as string,
+        status: (digestWaiting ? "queued" : shell.status) as string,
         providerInstanceId: shell.providerInstanceId as string | null,
         usageLimited: shell.lastErrorClass === "usage_limit",
         resetAt: shell.usageLimitResetAt ?? null,
@@ -1067,7 +1230,11 @@ export const make = Effect.gen(function* () {
     }
     if (entry.destination === "webhook") {
       const url = current.modelAlertWebhookUrl.trim();
-      if (url === "") return { _tag: "sent" } satisfies DeliveryResult;
+      if (url === "") {
+        return {
+          _tag: strandedAlertSignature(alert) === undefined ? "sent" : "dropped",
+        } satisfies DeliveryResult;
+      }
       // A webhook URL can embed a credential, so its failure names only the host.
       const host = URL.canParse(url) ? new URL(url).host : "an unparsable URL";
       yield* http
@@ -1088,7 +1255,12 @@ export const make = Effect.gen(function* () {
       holdUntil(view, alert, nowMs) ??
       busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
-    yield* deliverToWatcher(alert, target, here);
+    yield* deliverToWatcher(
+      alert,
+      target,
+      here,
+      entry.digestExpiresAt ?? nowMs + ALERT_DIGEST_TTL_MS,
+    );
     return { _tag: "sent" } satisfies DeliveryResult;
   });
 
@@ -1104,6 +1276,8 @@ export const make = Effect.gen(function* () {
         return yield* readWatcher(watcher, yield* environment.getEnvironmentId);
       }).pipe(Effect.catchCause(() => Effect.succeed(null))),
     );
+    // One at a time: a delivery queues a turn on the watcher, and the next alert in this
+    // flush has to see that turn to hold instead of queueing behind it.
     yield* Effect.forEach(
       due,
       (entry) =>
@@ -1131,7 +1305,7 @@ export const make = Effect.gen(function* () {
                   : afterDeliveryAttempt(current, entry, true, attemptedAt),
           ]);
         }),
-      { concurrency: 4, discard: true },
+      { concurrency: 1, discard: true },
     );
   });
 
@@ -1288,22 +1462,23 @@ export const make = Effect.gen(function* () {
     usageLimitReported: boolean,
     /** Open delegated tasks by parent thread, when the caller read them once for many threads. */
     remoteTasks?: ReadonlyMap<string, number>,
+    queuedThreads?: ReadonlySet<ThreadId>,
   ) {
     const current = yield* settings.getSettings;
     const here = yield* environment.getEnvironmentId;
     const watcher = current.modelAlertWatcher;
     // The watcher's own turns would report to itself forever.
     if (watcher?.environmentId === here && watcher.threadId === threadId) return;
-    if (watcher === null && current.modelAlertWebhookUrl.trim() === "") return;
     const shell = yield* projections.getThreadShell(threadId);
     if (shell === null || shell.deletedAt !== null) return;
     const nowMs = yield* Clock.currentTimeMillis;
+    const context = yield* judgeContext(shell, trigger, remoteTasks, queuedThreads);
     const judged = judgeThread({
       shell,
       trigger,
       nowMs,
       stuckMinutes: current.watcherStuckMinutes,
-      ...(yield* judgeContext(shell, trigger, remoteTasks)),
+      ...context,
       usageLimitReported,
     });
     const label = (yield* environment.getDescriptor).label;
@@ -1319,7 +1494,7 @@ export const make = Effect.gen(function* () {
     const enqueued = yield* update((state) => {
       const result = recordThreadEvents(
         state,
-        { threadId, evaluated: judged.evaluated, findings: judged.findings },
+        { threadId, ...judged, ...context },
         (finding) =>
           threadEventAlert({
             environmentId: here,
@@ -1448,6 +1623,7 @@ export const make = Effect.gen(function* () {
       Effect.catchCause((cause) => Effect.logWarning("resume sweep failed", { cause })),
     );
     const index = yield* projections.listActiveShellIndex();
+    const queuedThreads = new Set(yield* projections.getRecoveryThreadIds("queued-runs"));
     // One scan of the delegated tasks for the whole sweep, not one per thread.
     const remoteTasks = new Map<string, number>();
     for (const task of yield* projections.getOpenRemoteDelegatedTasks) {
@@ -1456,7 +1632,7 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       index.filter((entry) => entry.mayBeLive && isListedThreadLineage(entry.lineage)),
       (entry) =>
-        handleThreadEvents(entry.id, "sweep", false, remoteTasks).pipe(
+        handleThreadEvents(entry.id, "sweep", false, remoteTasks, queuedThreads).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("sweeping a thread for a watcher event failed", {
               threadId: entry.id,

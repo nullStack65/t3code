@@ -200,6 +200,17 @@ export function toggleHiddenEnvironment(
 const sameMembers = <A>(left: ReadonlyArray<A>, right: ReadonlyArray<A>) =>
   left.length === right.length && left.every((value) => right.includes(value));
 
+/**
+ * Class for the filter sliders icon.
+ *
+ * `SidebarMenuButton` sets `[&>svg]:text-[var(--sidebar-icon-color)]` on the
+ * button, and that rule beats a plain `text-primary` on the icon, at rest and
+ * on hover. The important utility is what makes a non-default filter visible.
+ */
+export function sidebarFilterIconClass(changed: boolean): string {
+  return changed ? "size-4 text-primary!" : "size-4";
+}
+
 /** Filter sections that differ from this device's default, ignoring removed environments. */
 export function changedThreadListFilters(
   filter: ThreadListFilter,

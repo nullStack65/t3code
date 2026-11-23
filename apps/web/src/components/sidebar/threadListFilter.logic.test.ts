@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   changedThreadListFilters,
+  sidebarFilterIconClass,
   inboxMenuOrder,
   matchesThreadListFilter,
   olderSettledFilterCounts,
@@ -35,6 +36,16 @@ describe("thread list filter", () => {
       matchesThreadListFilter(candidate, filter);
     expect(visible(thread(laptop, kameron))).toBe(true);
     expect(visible(thread(laptop, bot))).toBe(true);
+    // Shared threads stay visible without opening the filter.
+    expect(
+      visible({
+        environmentId: laptop,
+        source: {
+          inbox: makeThreadInbox({ actor: kameron, routing: { audience: "shared" } }),
+          createdBy: undefined,
+        },
+      }),
+    ).toBe(true);
     // Agent threads from before inbox routing count as Agents.
     expect(visible(thread(laptop, null, "agent"))).toBe(true);
     expect(visible(thread(laptop, jeff))).toBe(false);
@@ -86,6 +97,13 @@ describe("thread list filter", () => {
     ).toBe(true);
   });
 
+  it("tints a changed filter with an important primary color", () => {
+    // SidebarMenuButton's `[&>svg]:text-[var(--sidebar-icon-color)]` beats a
+    // plain text-primary on the icon, so the default class must not claim one.
+    expect(sidebarFilterIconClass(false)).toBe("size-4");
+    expect(sidebarFilterIconClass(true)).toBe("size-4 text-primary!");
+  });
+
   it("reports only sections that differ from this device's default", () => {
     const environments = [laptop, crown];
     const unchanged = threadListFilterOf({ founderInboxOwner: "jeff" });
@@ -94,7 +112,7 @@ describe("thread list filter", () => {
       environments: false,
       from: false,
     });
-    const reordered = { ...unchanged, inboxes: ["agents", "jeff"] as const };
+    const reordered = { ...unchanged, inboxes: ["agents", "jeff", "shared"] as const };
     expect(changedThreadListFilters(reordered, "jeff", environments).inboxes).toBe(false);
     // A hidden environment that was since removed is not a visible filter.
     const removed = { ...unchanged, hiddenEnvironmentIds: [EnvironmentId.make("gone")] };

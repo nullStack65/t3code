@@ -1372,6 +1372,22 @@ function ConnectionsSettingsContent({
                 }
               />
             ) : null}
+            {accessServerConfig ? (
+              <SettingsRow
+                title={searchableSetting("require-founder-identity").title}
+                description="Only clients paired with a founder's code, or assigned to a founder, can send messages, answer approvals, or start threads. Bots are unaffected."
+                control={
+                  <Switch
+                    checked={accessServerConfig.settings.requireFounderIdentity}
+                    disabled={!canWriteAccess}
+                    onCheckedChange={(enabled) =>
+                      updateAccessSettings({ requireFounderIdentity: enabled })
+                    }
+                    aria-label="Require enrolled founders"
+                  />
+                }
+              />
+            ) : null}
             {accessEnvironment ? (
               <details className="group px-3 sm:px-4">
                 <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">

@@ -1,6 +1,9 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import {
   applyOrchestrationV2ThreadVisit,
+  attentionMentionsFromText,
+  ATTENTION_MENTION_TEXT_LIMIT,
+  inboxAfterFounderReply,
   pendingGuestMessageCount,
   projectThreadInbox,
 } from "@t3tools/contracts";
@@ -1073,11 +1076,17 @@ export function applyToProjection(
         ...base,
         runtimeRequests: upsertById(base.runtimeRequests, event.payload),
       };
-    case "message.updated":
+    case "message.updated": {
+      const inbox = inboxAfterFounderReply(base.thread.inbox, event.payload);
       return {
         ...base,
+        thread:
+          inbox === undefined || inbox === base.thread.inbox
+            ? base.thread
+            : { ...base.thread, inbox },
         messages: upsertById(base.messages, event.payload),
       };
+    }
     case "turn-item.updated":
       return withLocalVisibleTurnItems({
         ...base,
@@ -1169,6 +1178,7 @@ type ShellThreadRow = {
   readonly pending_link_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
+  readonly latest_visible_text: string | null;
   readonly has_actionable_proposed_plan: number;
 };
 
@@ -1744,8 +1754,13 @@ const linkCardStillAsks = (
   latestUserAuthoredMessageAt === null ||
   !DateTime.isGreaterThan(latestUserAuthoredMessageAt, item.startedAt ?? item.updatedAt);
 
+const shellAttentionMentions = (text: string | null | undefined) => {
+  const attentionMentions = attentionMentionsFromText(text);
+  return attentionMentions === undefined ? {} : { attentionMentions };
+};
+
 const shellInbox = (
-  inbox: ThreadInbox | undefined,
+  { inbox, standing }: { readonly inbox?: ThreadInbox | undefined; readonly standing?: unknown },
   pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null,
   latestUserAuthoredMessageAt: DateTime.Utc | null,
 ) =>
@@ -1753,6 +1768,7 @@ const shellInbox = (
     ? {}
     : {
         inbox: projectThreadInbox(inbox, {
+          standing: standing != null,
           pendingHumanRequest: pendingRuntimeRequest !== null,
           latestHumanMessageAt:
             latestUserAuthoredMessageAt === null
@@ -1828,6 +1844,14 @@ export function threadShellFromProjection(
     }
   }
   const latestUserMessage = userMessages[0] ?? null;
+  const latestVisibleText =
+    projection.messages
+      .filter((message) => idleCompactionOf(message) === undefined)
+      .toSorted(
+        (left, right) =>
+          DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt) ||
+          right.id.localeCompare(left.id),
+      )[0]?.text ?? null;
   const pendingBackgroundTasks = derivePendingBackgroundWork({
     latestRun,
     providerThreads: projection.providerThreads,
@@ -1838,7 +1862,7 @@ export function threadShellFromProjection(
   });
   return {
     createdBy: projection.thread.createdBy,
-    ...shellInbox(projection.thread.inbox, pendingRuntimeRequest, latestUserAuthoredMessageAt),
+    ...shellInbox(projection.thread, pendingRuntimeRequest, latestUserAuthoredMessageAt),
     creationSource: projection.thread.creationSource,
     id: projection.thread.id,
     projectId: projection.thread.projectId,
@@ -1897,6 +1921,7 @@ export function threadShellFromProjection(
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
     latestVisibleMessage: null,
+    ...shellAttentionMentions(latestVisibleText),
     latestUserMessageAt: latestUserMessage?.updatedAt ?? null,
     latestUserAuthoredMessageAt,
     hasActionableProposedPlan: projection.plans.some(
@@ -1928,6 +1953,12 @@ export function threadShellFromProjection(
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     ...(projection.thread.standing ? { standing: projection.thread.standing } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
+    ...(projection.thread.visitsByFounder === undefined
+      ? {}
+      : { visitsByFounder: projection.thread.visitsByFounder }),
+    ...(projection.thread.seenMessageByFounder === undefined
+      ? {}
+      : { seenMessageByFounder: projection.thread.seenMessageByFounder }),
     opens: projection.thread.opens ?? null,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     lastTitleRegeneration: projection.thread.lastTitleRegeneration ?? null,
@@ -1968,6 +1999,7 @@ function isSilentRunForShell(
   run: OrchestrationV2ThreadProjection["runs"][number],
   projection: Pick<OrchestrationV2ThreadProjection, "messages" | "turnItems">,
 ): boolean {
+  if (run.delivery?.class === "digest" && run.startedAt == null) return true;
   return (
     run.status !== "failed" &&
     projection.messages.some(
@@ -2032,6 +2064,7 @@ type ShellThreadState = {
   readonly pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
+  readonly attentionMentions: OrchestrationV2ThreadShell["attentionMentions"];
   readonly hasActionableProposedPlan: boolean;
   readonly pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
   readonly providerInstanceHistory: OrchestrationV2ThreadShell["providerInstanceHistory"];
@@ -2183,7 +2216,7 @@ function shellFromState(input: {
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),
     ...shellInbox(
-      input.state.thread.inbox,
+      input.state.thread,
       input.state.pendingRuntimeRequest,
       input.state.latestUserAuthoredMessageAt,
     ),
@@ -2211,6 +2244,9 @@ function shellFromState(input: {
     pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     pendingGuestMessageCount: pendingGuestMessageCount(input.state.thread.guestShare),
     latestVisibleMessage: null,
+    ...(input.state.attentionMentions === undefined
+      ? {}
+      : { attentionMentions: input.state.attentionMentions }),
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
     hasActionableProposedPlan: input.state.hasActionableProposedPlan,
@@ -2967,6 +3003,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json = excluded.payload_json,
                 search_text = excluded.search_text
             `;
+              const founder = event.payload.sentBy?.founder;
+              if (
+                event.payload.role === "user" &&
+                event.payload.createdBy === "user" &&
+                event.payload.idleCompaction === undefined &&
+                (founder === "kameron" || founder === "jeff")
+              ) {
+                const threadRows = yield* sql<PayloadRow>`
+                  SELECT payload_json
+                  FROM orchestration_v2_projection_threads
+                  WHERE thread_id = ${event.payload.threadId}
+                  LIMIT 1
+                `;
+                const threadRow = threadRows[0];
+                if (threadRow !== undefined) {
+                  const thread = yield* decodeThreadPayload(threadRow.payload_json);
+                  const inbox = inboxAfterFounderReply(thread.inbox, event.payload);
+                  if (inbox !== undefined && inbox !== thread.inbox) {
+                    const updatedThread = { ...thread, inbox, updatedAt: event.payload.updatedAt };
+                    const updatedThreadPayloadJson = yield* encodeThreadPayload(updatedThread);
+                    yield* sql`
+                      UPDATE orchestration_v2_projection_threads
+                      SET
+                        updated_at = ${updatedAt},
+                        payload_json = ${updatedThreadPayloadJson}
+                      WHERE thread_id = ${event.payload.threadId}
+                    `;
+                  }
+                }
+              }
               break;
             }
             case "plan.updated": {
@@ -4949,6 +5015,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE status = 'queued'
                   AND CASE WHEN json_valid(payload_json)
                     THEN json_extract(payload_json, '$.queueHeld') IS NOT 1
+                      AND json_extract(payload_json, '$.delivery.class') IS NOT 'digest'
                     ELSE 1 END
                 UNION
                 SELECT thread_id FROM orchestration_v2_projection_runtime_requests
@@ -5312,6 +5379,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE thread_id = ${threadId}
             AND type IN ('user_message','assistant_message','command_execution','error',
               'run_interrupt_result','file_change','proposed_plan')
+            AND (
+              type <> 'user_message'
+              OR json_extract(payload_json, '$.humanNote') IS NOT 1
+            )
             AND ${runIds === undefined ? sql`1` : sql`run_id IN ${sql.in(runIds)}`}
           ORDER BY ordinal ASC, turn_item_id ASC
         `;
@@ -6269,7 +6340,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE thread.thread_id = ${threadId} AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
             AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
               WHERE thread_id = ${threadId} AND status = 'queued'
-                AND json_extract(payload_json, '$.queueHeld') IS NOT 1)
+                AND json_extract(payload_json, '$.queueHeld') IS NOT 1
+                AND json_extract(payload_json, '$.delivery.class') IS NOT 'digest')
             AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
               WHERE thread_id = ${threadId}
                 AND status IN ('preparing', 'starting', 'running', 'waiting'))`;
@@ -7926,7 +7998,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     // Mirrors isSilentRunForShell.
     const isSilentShellRun = (alias: string) => {
       const run = sql.literal(alias);
-      return sql`(
+      return sql`((
+        json_extract(${run}.payload_json, '$.delivery.class') IS 'digest'
+        AND json_extract(${run}.payload_json, '$.startedAt') IS NULL
+      ) OR (
         ${run}.status <> 'failed'
         AND EXISTS (
           SELECT 1 FROM orchestration_v2_projection_messages prompt
@@ -7938,7 +8013,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND compaction.type = 'compaction'
             AND compaction.status = 'failed'
         )
-      )`;
+      ))`;
     };
     // The newest run not held or outlived before it started, matching latestUnheldRun.
     const presentedShellRunId = (threadId: Statement.Fragment) => sql`(
@@ -8150,6 +8225,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS latest_user_authored_message_at,
+              (
+                SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ATTENTION_MENTION_TEXT_LIMIT})
+                FROM orchestration_v2_projection_messages message
+                WHERE message.thread_id = t.thread_id
+                  AND NOT ${isIdleCompactionMessage("message")}
+                ORDER BY message.updated_at DESC, message.message_id DESC
+                LIMIT 1
+              ) AS latest_visible_text,
               EXISTS (
                 SELECT 1
                 FROM orchestration_v2_projection_plans plan
@@ -8562,7 +8645,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   pendingRuntimeRequest: null,
                   // The same projected inbox the shell carries, so an answered ask is already gone.
                   ...shellInbox(
-                    thread.inbox,
+                    thread,
                     null,
                     row.latest_user_authored_message_at === null
                       ? null
@@ -8838,6 +8921,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ? null
               : DateTime.makeUnsafe(row.latest_user_message_at),
           latestUserAuthoredMessageAt,
+          attentionMentions: attentionMentionsFromText(row.latest_visible_text),
           hasActionableProposedPlan: row.has_actionable_proposed_plan === 1,
           pendingBackgroundTasks,
           providerInstanceHistory: providerInstanceHistoryForShell({

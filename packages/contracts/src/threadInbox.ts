@@ -36,10 +36,41 @@ export const ThreadInboxRoutingPatch = Schema.Struct({
   reason: Schema.optionalKey(InboxReason),
 });
 export type ThreadInboxRoutingPatch = typeof ThreadInboxRoutingPatch.Type;
+/**
+ * One founder's answer on a call both founders make. `signed` is set once they
+ * reply; an open ask lists both with none signed.
+ */
+export const FounderSignOff = Schema.Struct({
+  founder: Founder,
+  signed: Schema.Boolean,
+});
+export type FounderSignOff = typeof FounderSignOff.Type;
+
+const jointSignOffEntries = Schema.Array(FounderSignOff).check(
+  Schema.isMinLength(2),
+  Schema.isMaxLength(2),
+  Schema.makeFilter((entries) => {
+    const founders = new Set(entries.map((entry) => entry.founder));
+    return founders.size === Founder.literals.length &&
+      Founder.literals.every((founder) => founders.has(founder))
+      ? true
+      : "A joint sign-off lists Kameron and Jeff once each.";
+  }),
+);
+
 export const ThreadDecisionAsk = Schema.Struct({
   founder: Founder,
   kind: Schema.Literals(["decision", "review", "approval"]),
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(2000)),
+  /**
+   * Set only when both founders must answer. Absent, the ask is the one
+   * `founder`'s alone. A stored ask from before this field decodes without it.
+   */
+  signOff: Schema.optional(
+    jointSignOffEntries.annotate({
+      description: "Both founders' answers, when the call needs each of them.",
+    }),
+  ),
 });
 export type ThreadDecisionAsk = typeof ThreadDecisionAsk.Type;
 export const ThreadDecisionRequest = Schema.Struct({
@@ -50,7 +81,10 @@ export type ThreadDecisionRequest = typeof ThreadDecisionRequest.Type;
 export const ThreadInbox = Schema.Struct({
   ...ThreadInboxRouting.fields,
   reason: Schema.optionalKey(InboxReason),
-  /** Open until the founder writes on the thread after `requestedAt`, or it is resolved or settled. */
+  /**
+   * Open until the asked founder writes after `requestedAt`. A joint sign-off stays open until
+   * each founder has written. Resolving or settling the thread also closes it.
+   */
   decisionRequest: Schema.optionalKey(ThreadDecisionRequest),
   /** Set only on projected shells: the thread waits on an approval or user input. Never stored. */
   pendingHumanRequest: Schema.optionalKey(Schema.Boolean),
@@ -60,7 +94,6 @@ export const ThreadInbox = Schema.Struct({
   executorEnvironmentId: Schema.NullOr(EnvironmentId),
 });
 export type ThreadInbox = typeof ThreadInbox.Type;
-export const INBOX_CAPABILITY = "closura-founder-inbox-v2" as const;
 export const InboxView = Schema.Literals(["kameron", "jeff", "shared", "agents", "all"]);
 export type InboxView = typeof InboxView.Type;
 /** An inbox a thread can be filed into: every view except All. */
@@ -223,20 +256,97 @@ export const agentLaunchInboxError = (input: Parameters<typeof agentLaunchInboxR
 };
 
 /**
+ * Both founders, in pill order, when `signOff` lists each of them once. Anything else is not a
+ * joint call, including a duplicate of one founder.
+ */
+export function jointSignOff(
+  signOff: ReadonlyArray<FounderSignOff> | null | undefined,
+): ReadonlyArray<FounderSignOff> | null {
+  if (signOff == null || signOff.length !== Founder.literals.length) return null;
+  const byFounder = new Map(signOff.map((entry) => [entry.founder, entry]));
+  if (byFounder.size !== Founder.literals.length) return null;
+  const ordered: FounderSignOff[] = [];
+  for (const founder of Founder.literals) {
+    const entry = byFounder.get(founder);
+    if (entry === undefined) return null;
+    ordered.push(entry);
+  }
+  return ordered;
+}
+
+type ReplyClock = string | { readonly epochMilliseconds: number };
+
+const replyMillis = (value: ReplyClock): number =>
+  typeof value === "string" ? Date.parse(value) : value.epochMilliseconds;
+
+/**
+ * A founder's own reply signs only that founder on a joint ask. The ask stays until both have
+ * signed. A message that signs nobody returns the same inbox, so a writer can skip the rewrite.
+ */
+export function inboxAfterFounderReply<Inbox extends ThreadInbox | undefined>(
+  inbox: Inbox,
+  message: {
+    readonly role: string;
+    readonly createdBy?: string | undefined;
+    readonly idleCompaction?: unknown;
+    readonly sentBy?: { readonly founder: Founder | null } | undefined;
+    readonly updatedAt: ReplyClock;
+  },
+): Inbox {
+  if (inbox === undefined) return inbox;
+  const request = inbox.decisionRequest;
+  const ordered = jointSignOff(request?.signOff);
+  if (request === undefined || ordered === null) return inbox;
+  const founder = message.sentBy?.founder;
+  if (
+    message.role !== "user" ||
+    message.createdBy !== "user" ||
+    message.idleCompaction != null ||
+    (founder !== "kameron" && founder !== "jeff") ||
+    replyMillis(message.updatedAt) <= replyMillis(request.requestedAt)
+  ) {
+    return inbox;
+  }
+  const entry = ordered.find((item) => item.founder === founder);
+  if (entry === undefined || entry.signed) return inbox;
+  const next = ordered.map((item) => (item.founder === founder ? { ...item, signed: true } : item));
+  if (next.every((item) => item.signed)) {
+    const { decisionRequest: _closed, ...rest } = inbox;
+    return rest as Inbox;
+  }
+  return { ...inbox, decisionRequest: { ...request, signOff: next } };
+}
+
+/**
  * The inbox clients read. A decision request closes once a person writes on the thread after it
- * was asked; a pending approval or user-input request surfaces to the owner.
+ * was asked. A joint sign-off stays open until each founder has signed. A pending approval or
+ * user-input request surfaces to the owner. A standing desk reads as FYI unless one is open.
  */
 export function projectThreadInbox(
   inbox: ThreadInbox,
-  state: { readonly pendingHumanRequest: boolean; readonly latestHumanMessageAt: string | null },
+  state: {
+    readonly pendingHumanRequest: boolean;
+    readonly latestHumanMessageAt: string | null;
+    readonly standing?: boolean;
+  },
 ): ThreadInbox {
   const { decisionRequest, pendingHumanRequest: _stored, ...rest } = inbox;
+  const joint = jointSignOff(decisionRequest?.signOff);
   const open =
     decisionRequest !== undefined &&
-    (state.latestHumanMessageAt === null ||
-      Date.parse(state.latestHumanMessageAt) <= Date.parse(decisionRequest.requestedAt));
+    (joint !== null
+      ? joint.some((entry) => !entry.signed)
+      : state.latestHumanMessageAt === null ||
+        Date.parse(state.latestHumanMessageAt) <= Date.parse(decisionRequest.requestedAt));
+  // A standing desk (CoS, CTO) is somewhere to talk, not an ask: FYI until something is asked.
+  const quietDesk =
+    state.standing === true &&
+    rest.attentionKind === "action" &&
+    !open &&
+    !state.pendingHumanRequest;
   return {
     ...rest,
+    ...(quietDesk ? { attentionKind: "FYI" as const } : {}),
     ...(open ? { decisionRequest } : {}),
     ...(state.pendingHumanRequest ? { pendingHumanRequest: true } : {}),
   };
@@ -250,7 +360,14 @@ export function projectThreadInbox(
  */
 export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder: Founder) {
   if (!inbox) return "unknown";
-  if (inbox.decisionRequest?.founder === founder) return "action";
+  const joint = jointSignOff(inbox.decisionRequest?.signOff);
+  if (joint !== null) {
+    const mine = joint.find((entry) => entry.founder === founder);
+    // A founder who has already signed is no longer waiting, even if the ask names them.
+    if (mine !== undefined && !mine.signed) return "action";
+  } else if (inbox.decisionRequest?.founder === founder) {
+    return "action";
+  }
   if (inbox.pendingHumanRequest === true && inbox.owner === founder) return "action";
   const assigned = inbox.assignee?.kind === "human" ? inbox.assignee.id : inbox.owner;
   if (inbox.audience === "agent-only" && inbox.assignee?.kind !== "human") return "hidden";
@@ -263,8 +380,9 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
 }
 
 /**
- * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents, else
- * every inbox so unclassified history stays visible.
+ * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents and
+ * Shared, else every inbox so unclassified history stays visible. Shared is a default so both
+ * founders see shared bots without opening the filter.
  */
 export const effectiveInboxFilter = (settings: {
   readonly founderInboxFilter?: ReadonlyArray<InboxChoice> | undefined;
@@ -275,7 +393,7 @@ export const effectiveInboxFilter = (settings: {
     ? settings.founderInboxFilter
     : settings.founderInboxOwner === undefined
       ? InboxChoice.literals
-      : [settings.founderInboxOwner, "agents"];
+      : [settings.founderInboxOwner, "agents", "shared"];
 
 /** Choosing every inbox means All, which also keeps unclassified history. */
 const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
@@ -323,6 +441,46 @@ export const inboxOriginFor = (settings: {
   settings.founderInboxOwner === undefined
     ? undefined
     : { kind: "human", id: settings.founderInboxOwner };
+
+/**
+ * Who a person's new thread is filed under. A session assigned to a founder files as that founder
+ * whatever the client claims. An unassigned session keeps the client's choice and is never filed
+ * under a guessed founder.
+ */
+export function creatorInboxOrigin(
+  claimed: InboxActor | undefined,
+  sender: { readonly founder: Founder | null; readonly deviceType: string },
+): InboxActor | undefined {
+  return sender.founder === null || sender.deviceType === "bot"
+    ? claimed
+    : { kind: "human", id: sender.founder };
+}
+
+/** Commands the server records a founder for: what they say, answer, or start. */
+const FOUNDER_ATTRIBUTED_COMMANDS: ReadonlySet<string> = new Set([
+  "message.dispatch",
+  "queued-run.edit",
+  "runtime-request.respond",
+  "thread.create",
+]);
+
+/**
+ * Whether `requireFounderIdentity` refuses this command: a person's session that no pairing code
+ * or approved device enrolled as a founder may not send, answer or start work. Bots act as
+ * themselves, and other commands are unaffected.
+ */
+export function refusesUnenrolledSender(
+  requireFounderIdentity: boolean,
+  commandType: string,
+  sender: { readonly founder: Founder | null; readonly deviceType: string },
+): boolean {
+  return (
+    requireFounderIdentity &&
+    FOUNDER_ATTRIBUTED_COMMANDS.has(commandType) &&
+    sender.deviceType !== "bot" &&
+    sender.founder === null
+  );
+}
 
 /** All deliberately includes every thread, including unclassified history. */
 export function matchesInboxView(inbox: ThreadInbox | null | undefined, view: InboxView) {

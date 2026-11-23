@@ -1,10 +1,12 @@
 import {
   ORCHESTRATION_V2_WS_METHODS,
+  applyTypingSnapshot,
   type EnvironmentId,
   type ThreadId,
   type OrchestrationV2ThreadLinkMetadata,
   type OrchestrationGetTurnDiffResult,
   type OrchestrationV2GetTurnItemInput,
+  type TypingByThread,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -178,6 +180,18 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
         label: "environment-data:orchestration-v2:prompt-suggestion",
         tag: ORCHESTRATION_V2_WS_METHODS.subscribePromptSuggestion,
         idleTtlMs: 0,
+      }),
+      // Every thread's typists. The atom keeps one value, so snapshots fold into a map.
+      typing: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+        label: "environment-data:orchestration-v2:typing",
+        tag: ORCHESTRATION_V2_WS_METHODS.subscribeTyping,
+        idleTtlMs: 0,
+        transform: (events) =>
+          events.pipe(Stream.scan((): TypingByThread => ({}), applyTypingSnapshot)),
+      }),
+      reportTyping: createEnvironmentRpcCommand(runtime, {
+        label: "environment-data:orchestration-v2:report-typing",
+        tag: ORCHESTRATION_V2_WS_METHODS.reportTyping,
       }),
     },
     turnDiff: createEnvironmentRpcQueryAtomFamily(runtime, {

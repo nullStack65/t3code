@@ -1,4 +1,12 @@
 import {
+  type ChatActivityEntry,
+  activityItemNeedsAttention,
+  chatActivityContext,
+  chatActivityGroups,
+  isChatActivityMessage,
+  summarizeChatActivity,
+} from "@t3tools/client-runtime/chat-activity";
+import {
   isCompactionCommandMessage,
   type ThreadGuestMessage,
   type ThreadGuestShare,
@@ -28,6 +36,7 @@ export interface GuestPendingFeedEntry {
 export type PendingThreadFeedEntry = ThreadFeedEntry & {
   readonly pendingMessage?: QueuedThreadMessage;
   readonly acknowledged?: boolean;
+  readonly activityRevealed?: true;
 };
 
 // An acknowledged row stops being pending once the thread catches up to it,
@@ -53,7 +62,113 @@ export function selectPendingAcknowledgedMessages(
 }
 
 /** A row of the thread feed's list. */
-export type ThreadFeedRow = PendingThreadFeedEntry | GuestPendingFeedEntry;
+interface ActivityFoldFeedEntry {
+  readonly type: "activity-fold";
+  readonly id: string;
+  readonly createdAt: string;
+  readonly summary: string;
+  readonly attention: string | null;
+  readonly expanded: boolean;
+}
+
+export type ThreadFeedRow = PendingThreadFeedEntry | GuestPendingFeedEntry | ActivityFoldFeedEntry;
+
+export function foldThreadFeedActivity(
+  feed: ReadonlyArray<ThreadFeedRow>,
+  rawFeed: ReadonlyArray<ThreadFeedEntry>,
+  options: {
+    readonly open: Readonly<Record<string, boolean>>;
+    readonly dismissed: ReadonlyMap<string, string>;
+    readonly revealedMessageId: string | null;
+    readonly latestRun: Parameters<typeof chatActivityContext>[1][number] | null;
+    readonly decisionRequestedAt?: string | undefined;
+  },
+): ReadonlyArray<ThreadFeedRow> {
+  const context = chatActivityContext(
+    rawFeed.flatMap((entry): ChatActivityEntry[] => {
+      if (entry.type === "message") {
+        return [{ createdAt: entry.createdAt, runId: entry.message.runId, message: entry.message }];
+      }
+      if (entry.type !== "activity-group") return [];
+      return entry.activities.map(({ createdAt, projectedItem }) => ({
+        createdAt,
+        runId: projectedItem.item.runId,
+        item: projectedItem.item,
+      }));
+    }),
+    options.latestRun ? [options.latestRun] : [],
+    false,
+    options.decisionRequestedAt,
+  );
+  const folded: ThreadFeedRow[] = [];
+  let hasActivity = false;
+  for (const group of chatActivityGroups(feed, (entry) => {
+    if (entry.type === "message")
+      return !isChatActivityMessage(entry.message, entry.message.runId, context);
+    if (
+      entry.type === "activity-group" &&
+      entry.activities.some(
+        ({ projectedItem: { item } }) =>
+          item.type === "secret_request" || item.type === "link_request",
+      )
+    )
+      return true;
+    return (
+      (entry.type !== "activity-group" &&
+        entry.type !== "work-toggle" &&
+        entry.type !== "run-fold") ||
+      !entry.runId ||
+      !context.agentRuns.has(entry.runId)
+    );
+  })) {
+    if (!("rows" in group)) {
+      folded.push(group);
+      continue;
+    }
+    hasActivity = true;
+    const items = group.rows.flatMap((row) =>
+      row.type === "activity-group"
+        ? row.activities.map(({ projectedItem }) => projectedItem.item)
+        : [],
+    );
+    const messages = group.rows.flatMap((row) => (row.type === "message" ? [row.message] : []));
+    const settledTaskIds = group.rows.flatMap((row) =>
+      row.type === "work-toggle" || row.type === "run-fold" ? (row.settledTaskIds ?? []) : [],
+    );
+    const attentionIds = new Set(
+      items.filter(activityItemNeedsAttention).map(({ id }) => String(id)),
+    );
+    for (const row of group.rows) {
+      const runId = row.type === "message" ? row.message.runId : "runId" in row ? row.runId : null;
+      if (runId) for (const id of context.attentionByRun.get(runId) ?? []) attentionIds.add(id);
+      if (row.type === "work-toggle" && row.hasFailure) attentionIds.add(row.id);
+    }
+    const attention = attentionIds.size > 0 ? JSON.stringify([...attentionIds].sort()) : null;
+    const expanded =
+      options.open[group.id] === true ||
+      (attention !== null && options.dismissed.get(group.id) !== attention) ||
+      (options.revealedMessageId !== null &&
+        group.rows.some((row) => row.id === options.revealedMessageId));
+    folded.push({
+      type: "activity-fold",
+      id: group.id,
+      createdAt: group.rows[0]!.createdAt,
+      summary: summarizeChatActivity(group.rows.length, messages, items, settledTaskIds),
+      attention,
+      expanded,
+    });
+    if (expanded) {
+      for (const row of group.rows) {
+        folded.push(
+          row.type === "message" && resolveMessageSender(row.message).kind === "agent"
+            ? { ...row, activityRevealed: true }
+            : row,
+        );
+      }
+    }
+  }
+  return hasActivity ? folded : feed;
+}
 
 export type GroupedThreadFeedRow = ThreadFeedRow & {
   readonly userMessageGrouping: ReturnType<typeof resolveUserMessageGrouping>;
@@ -95,6 +210,7 @@ export function createThreadFeedGrouping() {
       const entry = feed[index];
       return entry?.type === "message" &&
         entry.message.role === "user" &&
+        !entry.message.humanNote &&
         !isCompactionCommandFeedEntry(entry) &&
         entry.message.id !== options.workflowOpeningMessageId
         ? entry.message

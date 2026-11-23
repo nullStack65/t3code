@@ -30,15 +30,41 @@ const KEY = "t3code:composer-drafts:v1";
 
 const storageFaults = { drops: false };
 
+// Only one test may own the fake clock. A timed-out test keeps running, and its
+// finally used to uninstall the next test's timers.
+let timerScope = 0;
+
+function useScopedFakeTimers() {
+  // setImmediate and performance stay real. The loader and fake-timer clock
+  // both yield through them; faking them before import leaves the import pending
+  // until the 15s test timeout.
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
+}
+
+async function importFresh<T>(load: () => Promise<T>): Promise<T> {
+  const scope = timerScope;
+  const restore = vi.isFakeTimers();
+  if (restore) vi.useRealTimers();
+  vi.resetModules();
+  try {
+    return await load();
+  } finally {
+    if (restore && scope === timerScope) useScopedFakeTimers();
+  }
+}
+
 async function openTab() {
-  return {
+  return importFresh(async () => ({
     store: await import("../../composerDraftStore"),
     placement: await import("./draftPlacement"),
-  };
+  }));
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
 async function withStorage(run: (memory: ReturnType<typeof createMemoryStorage>) => Promise<void>) {
+  const scope = ++timerScope;
   const memory = createMemoryStorage();
   vi.stubGlobal("localStorage", {
     getItem: (name: string) => memory.getItem(name),
@@ -48,15 +74,16 @@ async function withStorage(run: (memory: ReturnType<typeof createMemoryStorage>)
     },
   });
   vi.stubGlobal("window", new EventTarget());
-  vi.useFakeTimers();
-  vi.resetModules();
+  useScopedFakeTimers();
   try {
     await run(memory);
   } finally {
-    storageFaults.drops = false;
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.resetModules();
+    if (scope === timerScope) {
+      storageFaults.drops = false;
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   }
 }
 

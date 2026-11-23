@@ -6,6 +6,13 @@ import * as Context from "effect/Context";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import { makeTypingPresence, type TypingPresence } from "./orchestration-v2/TypingPresence.ts";
+
+/** A socket built without the server-lifetime hub, as the websocket tests do. */
+const idleTypingPresence: TypingPresence = {
+  report: () => Effect.void,
+  subscribe: Stream.empty,
+};
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
@@ -107,6 +114,9 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  type InboxActor,
+  creatorInboxOrigin,
+  refusesUnenrolledSender,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -125,6 +135,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ThreadManagementService from "./orchestration-v2/ThreadManagementService.ts";
 import * as CommandOutputHub from "./orchestration-v2/CommandOutputHub.ts";
 import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
+import * as McpSignIn from "./mcpApps/McpSignIn.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
@@ -1432,6 +1443,18 @@ export const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
+  /**
+   * Placement services captured while `Ws.layer` builds. The socket handler runs later, in the
+   * HTTP server context, which does not include services provided only to the route layer.
+   */
+  placementServices: {
+    readonly remoteDelegation: Option.Option<RemoteDelegation.RemoteDelegation["Service"]>;
+    readonly managedPolicy: Option.Option<ManagedPolicy.ManagedPolicy["Service"]>;
+  } = {
+    remoteDelegation: Option.none(),
+    managedPolicy: Option.none(),
+  },
+  typingPresence: TypingPresence = idleTypingPresence,
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -1457,6 +1480,7 @@ export const layerWsRpc = (
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const mcpAppRequests = yield* McpAppRequests.McpAppRequests;
+      const mcpSignIn = yield* McpSignIn.McpSignIn;
       const analytics = yield* AnalyticsService.AnalyticsService;
       const originProps = clientAnalyticsProps;
       const recordClientCommandAnalytics = (command: OrchestrationV2Command) => {
@@ -1590,8 +1614,8 @@ export const layerWsRpc = (
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
       const hostResources = yield* HostResources.HostResources;
-      const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
-      const managedPolicy = yield* Effect.serviceOption(ManagedPolicy.ManagedPolicy);
+      const remoteDelegation = placementServices.remoteDelegation;
+      const managedPolicy = placementServices.managedPolicy;
       const placementContext = yield* Effect.context<
         | ProviderRegistry.ProviderRegistry
         | ServerSettings.ServerSettingsService
@@ -2030,6 +2054,42 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
+      // A session names a founder only when another client assigned it. An unassigned session
+      // stays unnamed: guessing this machine's owner can credit the wrong founder.
+      const messageSender = serverAuth.messageSenderOf(currentSessionId);
+
+      // A person's new thread files under their session's founder; a failed read keeps the claim.
+      const creatorOrigin = (claimed: InboxActor | undefined) =>
+        messageSender.pipe(
+          Effect.map((sender) => creatorInboxOrigin(claimed, sender)),
+          Effect.orElseSucceed(() => claimed),
+        );
+      // Checked before anything is queued. A settings or sender read that fails refuses too.
+      const refusesUnenrolled = (commandType: string) =>
+        serverSettings.getSettings.pipe(
+          Effect.flatMap((settings) =>
+            settings.requireFounderIdentity
+              ? messageSender.pipe(
+                  Effect.map((sender) => refusesUnenrolledSender(true, commandType, sender)),
+                )
+              : Effect.succeed(false),
+          ),
+          Effect.orElseSucceed(() => true),
+        );
+      const UNENROLLED_SENDER_MESSAGE =
+        "This client is not enrolled as a founder. Pair it with a founder's pairing code, or have another client assign it in Settings → Connections.";
+      const fileUnderCreator = (
+        command: OrchestrationV2Command,
+      ): Effect.Effect<OrchestrationV2Command> => {
+        if (command.type !== "thread.create") return Effect.succeed(command);
+        const { inboxOrigin: claimed, ...rest } = command;
+        return creatorOrigin(claimed).pipe(
+          Effect.map((inboxOrigin) =>
+            inboxOrigin === undefined ? rest : { ...rest, inboxOrigin },
+          ),
+        );
+      };
+
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -2049,20 +2109,36 @@ export const layerWsRpc = (
               ? { "orchestration_v2.source_thread_id": command.sourceThreadId }
               : {}),
           }).pipe(
-            Effect.andThen(
-              startup
+            Effect.andThen(() => refusesUnenrolled(command.type)),
+            Effect.flatMap((refused) => {
+              if (refused) {
+                return Effect.fail(
+                  new OrchestrationV2DispatchCommandError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    message: UNENROLLED_SENDER_MESSAGE,
+                    detail: UNENROLLED_SENDER_MESSAGE,
+                  }),
+                );
+              }
+              const dispatched = startup
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
                     : (command.type === "message.dispatch" ||
                       command.type === "queued-run.edit" ||
                       command.type === "runtime-request.respond"
-                        ? serverAuth.messageSenderOf(currentSessionId).pipe(Effect.asSome)
+                        ? messageSender.pipe(Effect.asSome)
                         : Effect.succeed(Option.none<OrchestrationV2MessageSentBy>())
                       ).pipe(
                         Effect.flatMap((sentBy) =>
+                          fileUnderCreator(command).pipe(
+                            Effect.map((filed) => ({ filed, sentBy })),
+                          ),
+                        ),
+                        Effect.flatMap(({ filed, sentBy }) =>
                           ThreadMessageIntake.dispatchCommand(
-                            ThreadManagementService.withCreationProvenance(command, {
+                            ThreadManagementService.withCreationProvenance(filed, {
                               createdBy: "user",
                               creationSource:
                                 "creationSource" in command ? command.creationSource : "web",
@@ -2091,8 +2167,23 @@ export const layerWsRpc = (
                       cause,
                     });
                   }),
+                );
+              // A bot reading a thread writes no visit. A sender lookup that fails still records
+              // the visit, matching a client the server cannot name.
+              if (command.type !== "thread.visit") return dispatched;
+              return messageSender.pipe(
+                Effect.map((sentBy) => sentBy.deviceType === "bot"),
+                Effect.orElseSucceed(() => false),
+                Effect.flatMap((bot) =>
+                  bot
+                    ? applicationEvents.latestApplicationSequence.pipe(
+                        Effect.map((sequence) => ({ sequence })),
+                        Effect.orElseSucceed(() => ({ sequence: 0 })),
+                      )
+                    : dispatched,
                 ),
-            ),
+              );
+            }),
           ),
         [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
         [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
@@ -2248,6 +2339,18 @@ export const layerWsRpc = (
             "orchestration_v2.command_id": input.commandId,
             "orchestration_v2.project_id": input.projectId,
           }).pipe(
+            Effect.andThen(refusesUnenrolled("thread.create")),
+            Effect.flatMap((refused) =>
+              refused
+                ? Effect.fail(
+                    new OrchestrationV2ThreadLaunchError({
+                      commandId: input.commandId,
+                      projectId: input.projectId,
+                      message: UNENROLLED_SENDER_MESSAGE,
+                    }),
+                  )
+                : Effect.void,
+            ),
             Effect.andThen(
               startup
                 .enqueueCommand(
@@ -2259,16 +2362,15 @@ export const layerWsRpc = (
                     })
                     .pipe(
                       Effect.andThen(
-                        input.initialMessage === undefined
-                          ? Effect.undefined
-                          : serverAuth.messageSenderOf(currentSessionId),
+                        Effect.all([
+                          input.initialMessage === undefined ? Effect.undefined : messageSender,
+                          creatorOrigin(input.inboxOrigin),
+                        ]),
                       ),
-                      Effect.flatMap((sentBy) =>
+                      Effect.flatMap(([sentBy, inboxOrigin]) =>
                         ThreadMessageIntake.launchThread({
                           commandId: input.commandId,
-                          ...(input.inboxOrigin === undefined
-                            ? {}
-                            : { inboxOrigin: input.inboxOrigin }),
+                          ...(inboxOrigin === undefined ? {} : { inboxOrigin }),
                           ...(input.inboxRouting === undefined
                             ? {}
                             : { inboxRouting: input.inboxRouting }),
@@ -2403,6 +2505,18 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribePromptSuggestion]: (input) =>
           providerSessionManager.subscribePromptSuggestion(input.threadId),
+        [ORCHESTRATION_V2_WS_METHODS.reportTyping]: (input) =>
+          serverAuth.messageSenderOf(currentSessionId).pipe(
+            Effect.flatMap((sentBy) =>
+              typingPresence.report({
+                threadId: input.threadId,
+                sessionId: currentSessionId,
+                founder: sentBy.founder,
+                typing: input.typing,
+              }),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.subscribeTyping]: () => typingPresence.subscribe,
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
@@ -2565,7 +2679,9 @@ export const layerWsRpc = (
             }
             // Await refresh; RPC scope closure would interrupt a fork before the hub answered.
             if (input.instanceId === undefined) {
-              yield* usageLimitSources.refresh;
+              yield* input.liveQuotaRefresh === true
+                ? usageLimitSources.refreshLive
+                : usageLimitSources.refresh;
             }
             let providers = yield* input.cwd !== undefined && input.instanceId !== undefined
               ? providerRegistry.refreshWorkspaceSnapshot({
@@ -2647,6 +2763,8 @@ export const layerWsRpc = (
         [WS_METHODS.mcpAppsToolInfo]: (input) => mcpAppRequests.toolInfo(input),
         [WS_METHODS.mcpAppsUpdateModelContext]: (input) => mcpAppRequests.updateModelContext(input),
         [WS_METHODS.mcpAppsReadResource]: (input) => mcpAppRequests.readResource(input),
+        [WS_METHODS.providerMcpSignInStart]: (input) => mcpSignIn.start(input),
+        [WS_METHODS.providerMcpSignInComplete]: (input) => mcpSignIn.complete(input),
         [WS_METHODS.providerUploadFeedback]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(
@@ -3689,11 +3807,17 @@ export const layer = Layer.unwrap(
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const npmRelease = yield* NpmRelease.NpmRelease;
     const pullRequests = yield* PullRequestService.PullRequestService;
+    const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerForwarding = yield* PeerForwarding.PeerForwarding;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
+    const typingPresence = yield* makeTypingPresence;
+    // Read once here. A request-time serviceOption sees the HTTP server context, which never
+    // receives RemoteDelegation.layer, so every server would admit None.
+    const remoteDelegation = yield* Effect.serviceOption(RemoteDelegation.RemoteDelegation);
+    const managedPolicy = yield* Effect.serviceOption(ManagedPolicy.ManagedPolicy);
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3768,13 +3892,21 @@ export const layer = Layer.unwrap(
               serverBrowser,
               reportProfiles,
               readSettingsClient(url.value),
+              { remoteDelegation, managedPolicy },
+              typingPresence,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),
               Layer.provide(AcpRegistrySessions.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
-              Layer.provide(ProviderMaintenanceRunner.layer),
+              // One update lock for the server, so two clients cannot run the same update at once.
+              Layer.provide(
+                Layer.succeed(
+                  ProviderMaintenanceRunner.ProviderMaintenanceRunner,
+                  providerMaintenanceRunner,
+                ),
+              ),
               Layer.provide(Layer.succeed(NpmRelease.NpmRelease, npmRelease)),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // Share server-lifetime PR caches so WS mutations invalidate every client's HTTP diffs.

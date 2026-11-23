@@ -1589,6 +1589,7 @@ type Config = {
   readonly apiKey: string;
   readonly model: Model;
   readonly proxy?: { readonly url: string; readonly headers: Readonly<Record<string, string>> };
+  readonly anthropicGateway?: Config["proxy"];
   readonly effort: string;
   readonly maxSteps: number;
   readonly shellModel: ShellModel;
@@ -1614,7 +1615,11 @@ const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   if (output === undefined) {
     const body = shellRequest(sample, call, config.shellModel);
     const response = isPricedModel(config.shellModel)
-      ? yield* callModel(config.apiKey, body, config.apiKey ? undefined : config.proxy)
+      ? yield* callModel(
+          config.apiKey,
+          body,
+          config.anthropicGateway ?? (config.apiKey ? undefined : config.proxy),
+        )
       : yield* callCodex(config, shellResponsesRequest(body));
     addUsage(sample.shellUsage, response.usage);
     output = shellOutput(response.content);
@@ -2213,7 +2218,11 @@ const runSample = Effect.fn("evaluateMcpToolUse.runSample")(function* (
   for (let step = 0; step < maxSteps; step++) {
     const response = input
       ? yield* callCodex(config, codexRequest(base, input))
-      : yield* callModel(config.apiKey, requestBody(sample, config.effort, messages));
+      : yield* callModel(
+          config.apiKey,
+          requestBody(sample, config.effort, messages),
+          config.anthropicGateway,
+        );
     addUsage(usage, response.usage);
     if ("raw" in response) {
       input?.push(...response.raw);
@@ -2435,6 +2444,7 @@ const Flags = Schema.Struct({
   cases: Schema.optional(Schema.Array(Schema.String)),
   out: Schema.optional(Schema.String),
   baseline: Schema.optional(Schema.String),
+  "anthropic-gateway": Schema.optional(Schema.String),
   case: Schema.optional(Schema.Array(Schema.String)),
   samples: Schema.optional(PositiveInt),
   concurrency: PositiveInt,
@@ -2474,6 +2484,7 @@ const main = Effect.gen(function* () {
       cases: { ...string, multiple: true },
       out: string,
       baseline: string,
+      "anthropic-gateway": string,
       case: { ...string, multiple: true },
       // Unset: 2 samples per case, and a 3rd when those 2 disagree.
       samples: string,
@@ -2626,9 +2637,39 @@ const main = Effect.gen(function* () {
     }
     return;
   }
-  const apiKey = yield* Config.String("ANTHROPIC_API_KEY").pipe(Config.withDefault(""));
+  const gatewayBase = flags["anthropic-gateway"];
+  let anthropicGateway: Config["anthropicGateway"];
+  if (gatewayBase !== undefined) {
+    const endpoint = URL.parse(gatewayBase);
+    if (
+      !endpoint ||
+      !["http:", "https:"].includes(endpoint.protocol) ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash
+    ) {
+      return yield* Effect.die(new Error("--anthropic-gateway needs an HTTP(S) base URL."));
+    }
+    const token = (yield* Config.String("ANTHROPIC_GATEWAY_KEY").pipe(
+      Config.withDefault(""),
+    )).trim();
+    if (!token) {
+      return yield* Effect.die(new Error("--anthropic-gateway requires ANTHROPIC_GATEWAY_KEY."));
+    }
+    anthropicGateway = {
+      url: endpoint.href.replace(/\/+$/, ""),
+      headers: { Authorization: `Bearer ${token}` },
+    };
+  }
+  const apiKey = anthropicGateway
+    ? ""
+    : yield* Config.String("ANTHROPIC_API_KEY").pipe(Config.withDefault(""));
   const out = flags.out;
-  if ((!apiKey && !codex) || out === undefined) {
+  if (out === undefined) {
+    return yield* Effect.die(new Error("Pass --out <directory>."));
+  }
+  if (!apiKey && !codex && !anthropicGateway) {
     const message =
       "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used.";
     return yield* Effect.die(new Error(message));
@@ -2637,6 +2678,7 @@ const main = Effect.gen(function* () {
     apiKey,
     model: flags.model,
     ...(codex || !isPricedModel(flags["shell-model"]) ? { proxy: proxyConfig() } : {}),
+    ...(anthropicGateway ? { anthropicGateway } : {}),
     effort,
     maxSteps: flags["max-steps"] ?? (codex ? 10 : 6),
     shellModel: flags["shell-model"],
@@ -2666,7 +2708,11 @@ const main = Effect.gen(function* () {
     const { id, kind, pattern } = testCase;
     const identity = { id, kind, pattern, role: testCase.setup.role };
     const usage = { usage: emptyUsage(), shellUsage: emptyUsage() };
-    const privateValues = [config.apiKey, ...Object.values(config.proxy?.headers ?? {})]
+    const privateValues = [
+      config.apiKey,
+      ...Object.values(config.proxy?.headers ?? {}),
+      ...Object.values(config.anthropicGateway?.headers ?? {}),
+    ]
       .flatMap((value) => [value, value.replace(/^Bearer /i, "")])
       .filter(Boolean);
     return runSample(testCase, config, baseFor(testCase), usage).pipe(

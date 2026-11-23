@@ -1,19 +1,12 @@
-import * as NodeOs from "node:os";
+import * as NodeOS from "node:os";
 
 import { isDelegatedAppThread, OrchestrationV2AppThread, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 
-export const THREAD_TYPE_POLICY_PATH_ENV = "T3_THREAD_TYPE_POLICY_PATH";
-export const THREAD_TYPES = [
-  "standing",
-  "coding",
-  "review",
-  "research",
-  "ops",
-  "conversational",
-] as const;
+const THREAD_TYPE_POLICY_PATH_ENV = "T3_THREAD_TYPE_POLICY_PATH";
+const THREAD_TYPES = ["standing", "coding", "review", "research", "ops", "conversational"] as const;
 export type ThreadType = (typeof THREAD_TYPES)[number];
 
 const ThreadTypeName = Schema.Literals(THREAD_TYPES);
@@ -78,7 +71,7 @@ export const isThreadTypeModelRefusedError = Schema.is(ThreadTypeModelRefusedErr
 
 const TITLE_TAG = /^\s*\[([a-z]+)\]/i;
 
-export function normalizeModel(model: string): string {
+function normalizeModel(model: string): string {
   let value = model.trim().toLowerCase();
   const slash = value.lastIndexOf("/");
   if (slash >= 0) value = value.slice(slash + 1);
@@ -134,7 +127,7 @@ export function resolveThreadTypeLaunch(
   });
 }
 
-export const SUMMARY_CAP_CHARS_PER_TOKEN = 2;
+const SUMMARY_CAP_CHARS_PER_TOKEN = 2;
 
 export function carriedSummaryWithinCap(summaryCap: number, text: string): boolean {
   return Math.ceil(text.length / SUMMARY_CAP_CHARS_PER_TOKEN) <= summaryCap;
@@ -152,7 +145,7 @@ export function threadTypePolicyPath(environment: NodeJS.ProcessEnv = process.en
   const override = environment[THREAD_TYPE_POLICY_PATH_ENV];
   return override !== undefined && override.length > 0
     ? override
-    : `${NodeOs.homedir()}/.config/closura/thread-type-policy.json`;
+    : `${NodeOS.homedir()}/.config/closura/thread-type-policy.json`;
 }
 
 const decodePolicy = Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadTypePolicyFile));
@@ -162,13 +155,16 @@ const warnPolicyOnce = (path: string, state: string, message: string, detail?: u
   const key = `${state}|${path}`;
   if (policyWarningKeys.has(key)) return Effect.void;
   policyWarningKeys.add(key);
-  return Effect.logWarning(message, detail === undefined ? { path, state } : { path, state, detail });
+  return Effect.logWarning(
+    message,
+    detail === undefined ? { path, state } : { path, state, detail },
+  );
 };
 
 const classifyRulesCompile = (policy: ThreadTypePolicyFile): boolean => {
   for (const rule of policy.classify) {
     try {
-      new RegExp(rule.title, "i");
+      void new RegExp(rule.title, "i");
     } catch {
       return false;
     }

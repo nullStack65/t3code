@@ -1,5 +1,9 @@
 import { toServerClock } from "@t3tools/client-runtime/clock";
-import { type OrchestrationV2ProviderTurn, type RunAttemptId } from "@t3tools/contracts";
+import {
+  type Founder,
+  type OrchestrationV2ProviderTurn,
+  type RunAttemptId,
+} from "@t3tools/contracts";
 import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
@@ -1459,6 +1463,7 @@ export function presentThreadShellFromProjection(
     readonly updatedAt: ThreadProjection["updatedAt"];
     readonly lastVisitedAt: ThreadProjection["thread"]["lastVisitedAt"];
   },
+  viewer: Founder | null = null,
 ) {
   const { updatedAt, lastVisitedAt } = live;
   const latestRun = deriveLatestThreadRun(projection);
@@ -1494,7 +1499,7 @@ export function presentThreadShellFromProjection(
       itemCount: projection.turnItems.length,
       visibleItemCount: projection.visibleTurnItems.length,
       updatedAt,
-    }),
+    }, null, viewer),
     latestRun,
     runtime,
   };

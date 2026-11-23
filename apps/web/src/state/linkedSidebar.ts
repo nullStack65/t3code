@@ -37,6 +37,8 @@ const sameThread = (left: EnvironmentThreadShell, right: EnvironmentThreadShell)
   left.settledOverride === right.settledOverride &&
   left.snoozedUntil === right.snoozedUntil &&
   left.runtime?.status === right.runtime?.status &&
+  left.lastVisitedAt === right.lastVisitedAt &&
+  left.latestRun?.completedAt === right.latestRun?.completedAt &&
   left.source.inbox?.owner === right.source.inbox?.owner &&
   left.source.inbox?.audience === right.source.inbox?.audience &&
   left.source.inbox?.attentionKind === right.source.inbox?.attentionKind;
@@ -66,7 +68,7 @@ const linkedSidebarSupplementAtom = Atom.make((get) => {
   return next;
 }).pipe(Atom.keepAlive, Atom.withLabel("linked-sidebar:supplement"));
 
-export const sidebarEnvironmentIdentitiesAtom = Atom.make((get) => {
+const sidebarEnvironmentIdentitiesAtom = Atom.make((get) => {
   const catalog = get(environmentSummaries.identitiesAtom);
   const extra = get(linkedSidebarSupplementAtom).identities;
   const next = extra.length === 0 ? catalog : [...catalog, ...extra];
@@ -80,7 +82,7 @@ export const sidebarEnvironmentIdentitiesAtom = Atom.make((get) => {
     : next;
 }).pipe(Atom.withLabel("linked-sidebar:identities"));
 
-export const sidebarProjectsAtom = Atom.make((get) => {
+const sidebarProjectsAtom = Atom.make((get) => {
   const local = get(environmentProjects.projectsAtom);
   const extra = get(linkedSidebarSupplementAtom).projects;
   if (extra.length === 0) return local;
@@ -93,7 +95,7 @@ export const sidebarProjectsAtom = Atom.make((get) => {
     : next;
 }).pipe(Atom.withLabel("linked-sidebar:projects"));
 
-export const sidebarThreadShellsAtom = Atom.make((get) => {
+const sidebarThreadShellsAtom = Atom.make((get) => {
   const local = get(environmentThreadShells.quietThreadShellsAtom);
   const extra = get(linkedSidebarSupplementAtom).threads;
   if (extra.length === 0) return local;
@@ -114,6 +116,12 @@ export function readLinkedSidebarThreadShell(ref: ScopedThreadRef): EnvironmentT
         (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,
       ) ?? null
   );
+}
+
+export function linkedSidebarEnvironmentIds(): ReadonlyArray<EnvironmentId> {
+  return appAtomRegistry
+    .get(linkedSidebarSupplementAtom)
+    .identities.map((identity) => identity.environmentId);
 }
 
 export function useLinkedOnlyEnvironment(environmentId: EnvironmentId | null) {

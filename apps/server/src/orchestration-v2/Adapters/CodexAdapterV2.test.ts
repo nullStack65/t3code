@@ -3058,8 +3058,120 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect.each([
+    { result: "completed", redirectHost: "127.0.0.1", state: "s1" },
+    { result: "wrong state", redirectHost: "127.0.0.1", state: "wrong" },
+    { result: "non-loopback", redirectHost: "callback.example", state: "s1" },
+  ])("handles a Codex MCP sign-in callback with $result", ({ result, redirectHost, state }) =>
+    Effect.gen(function* () {
+      const nativeThreadId = "mcp-sign-in-thread";
+      const status = (
+        id: number,
+        runtimeStatus: string,
+      ): Array<CodexReplay.CodexAppServerReplayEntry> => [
+        {
+          type: "expect_outbound",
+          label: "mcpServerStatus/list",
+          frame: {
+            id,
+            method: "mcpServerStatus/list",
+            params: { serverName: "linear", threadId: nativeThreadId, detail: "toolsAndAuthOnly" },
+          },
+        },
+        {
+          type: "emit_inbound",
+          label: "mcpServerStatus/list",
+          frame: {
+            id,
+            result: {
+              data: [
+                {
+                  name: "linear",
+                  runtimeStatus,
+                  authStatus: "oAuth",
+                  tools: {},
+                  resources: [],
+                  resourceTemplates: [],
+                },
+              ],
+            },
+          },
+        },
+      ];
+      const redirectUri = `http://${redirectHost}:50123/callback/abc`;
+      const authorizationUrl = `https://linear.example/authorize?${new URLSearchParams({ redirect_uri: redirectUri, state: "s1" })}`;
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "codex-mcp-sign-in",
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "work",
+            }).slice(0, 5),
+            ...status(3, "connected"),
+            ...status(4, "authenticationRequired"),
+            {
+              type: "expect_outbound",
+              label: "mcpServer/oauth/login",
+              frame: {
+                id: 5,
+                method: "mcpServer/oauth/login",
+                params: { name: "linear", threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "mcpServer/oauth/login",
+              frame: { id: 5, result: { authorizationUrl } },
+            },
+            ...(result === "completed"
+              ? [
+                  {
+                    type: "emit_inbound" as const,
+                    label: "mcpServer/oauthLogin/completed",
+                    frame: {
+                      method: "mcpServer/oauthLogin/completed",
+                      params: { name: "linear", threadId: nativeThreadId, success: true },
+                    },
+                  },
+                ]
+              : []),
+          ],
+        }),
+      );
+      const mcpSignIn = harness.runtime.mcpSignIn;
+      assert.isDefined(mcpSignIn);
+      const input = { providerThread: harness.providerThread, server: "linear" };
+      assert.deepEqual(yield* mcpSignIn.start(input), { authorizationUrl: null });
+      assert.deepEqual(yield* mcpSignIn.start(input), { authorizationUrl });
+      const complete = mcpSignIn.complete({
+        ...input,
+        callbackUrl: `${redirectHost}:50123/callback/abc?code=c1&state=${state}`,
+      });
+      if (result === "completed") {
+        yield* complete;
+      } else {
+        const refusal = yield* Effect.flip(complete);
+        assert.include(
+          refusal.message,
+          result === "wrong state" ? "isn't from this sign-in" : "Finish it in a browser",
+        );
+      }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect.each(["before", "during"] as const)(
-    "surfaces a user MCP server that fails to start %s the turn",
+    "surfaces a user MCP server that fails to start %s the turn, with a sign-in when it needs one",
     (timing) =>
       Effect.gen(function* () {
         const nativeThreadId = "mcp-startup-failed-thread";
@@ -3091,6 +3203,22 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 name: "example_mcp",
                 status: "failed",
                 error: startupError,
+                failureReason: null,
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "mcp-not-logged-in",
+            frame: {
+              method: "mcpServer/startupStatus/updated",
+              params: {
+                threadId: nativeThreadId,
+                name: "login_mcp",
+                status: "failed",
+                // Verbatim from codex-cli 0.171.0, which sets no failureReason for it.
+                error:
+                  "The login_mcp MCP server is not logged in. Run `codex mcp login login_mcp`.",
                 failureReason: null,
               },
             },
@@ -3134,11 +3262,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           }),
         );
         yield* harness.firstTerminal;
-        const surfaced = harness.events.filter((event) => {
-          const serialized = JSON.stringify(event);
-          return serialized.includes("example_mcp") && serialized.includes("failed to start");
-        });
-        assert.isNotEmpty(surfaced);
+        const notices = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [[event.turnItem.title, event.turnItem.mcpSignIn?.server ?? null]]
+            : [],
+        );
+        assert.deepEqual(notices, [
+          ["MCP server example_mcp failed to start", null],
+          ["MCP server login_mcp failed to start", "login_mcp"],
+        ]);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(

@@ -56,6 +56,8 @@ export const CreateAuthSessionInput = Schema.Struct({
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
   proofKeyThumbprint: Schema.optionalKey(Schema.String),
+  /** The founder the session's pairing code enrolled. */
+  founder: Schema.optionalKey(Founder),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
 
@@ -160,9 +162,6 @@ export class AuthSessionRepository extends Context.Service<
   }
 >()("t3/persistence/AuthSessions/AuthSessionRepository") {}
 
-/** The subject of the local desktop app's sessions; there is one such app per server. */
-const DESKTOP_BOOTSTRAP_SUBJECT = "desktop-bootstrap";
-
 const AuthSessionDbRow = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
@@ -261,7 +260,8 @@ export const make = Effect.gen(function* () {
           issued_at,
           expires_at,
           revoked_at,
-          proof_key_thumbprint
+          proof_key_thumbprint,
+          founder
         )
         VALUES (
           ${input.sessionId},
@@ -277,7 +277,8 @@ export const make = Effect.gen(function* () {
           ${input.issuedAt},
           ${input.expiresAt},
           NULL,
-          ${input.proofKeyThumbprint ?? null}
+          ${input.proofKeyThumbprint ?? null},
+          ${input.client.deviceType === "bot" ? null : (input.founder ?? null)}
         )
         ${ignoreExisting ? sql`ON CONFLICT(session_id) DO NOTHING` : sql``}
       `,
@@ -313,7 +314,7 @@ export const make = Effect.gen(function* () {
 
   const revokeActiveSessionsForReplacement = SqlSchema.findAll({
     Request: CreateReplacingActiveAuthSessionInput,
-    Result: Schema.Struct({ sessionId: AuthSessionId, founder: Schema.NullOr(Founder) }),
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
     execute: ({ session, revokedAt, replaceSessionId }) =>
       sql`
         UPDATE auth_sessions
@@ -326,7 +327,7 @@ export const make = Effect.gen(function* () {
           AND method = ${session.method}
           AND revoked_at IS NULL
           AND expires_at > ${revokedAt}
-        RETURNING session_id AS "sessionId", founder AS "founder"
+        RETURNING session_id AS "sessionId"
       `,
   });
 
@@ -384,36 +385,42 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  // A device keeps its person across new sessions only where the server can tell it is the same
-  // device: one proof key (a T3 Connect device renewing hourly) or the local desktop app's
-  // bootstrap. Other subjects can span several devices, so they never inherit a person.
-  const inheritFounderRow = SqlSchema.void({
+  // Assigning a T3 Connect device's session binds the approved device key, so its hourly
+  // sessions keep that founder until the device is revoked.
+  const bindConnectDeviceFounderRow = SqlSchema.void({
+    Request: SetAuthSessionFounderInput,
+    execute: ({ sessionId, founder }) =>
+      sql`
+        UPDATE auth_connect_devices
+        SET founder = ${founder}
+        WHERE proof_key_thumbprint = (
+          SELECT proof_key_thumbprint FROM auth_sessions WHERE session_id = ${sessionId}
+        )
+      `,
+  });
+
+  // A new session's founder comes from its own pairing code or its approved T3 Connect device key.
+  // Earlier sessions never pass one on: a shared desktop bootstrap, a reused key or a replaced
+  // cookie could otherwise hand one founder's identity to someone else.
+  const inheritDeviceFounderRow = SqlSchema.void({
     Request: CreateAuthSessionInput,
     execute: (input) =>
       sql`
         UPDATE auth_sessions
         SET founder = (
-          SELECT prior.founder
-          FROM auth_sessions AS prior
-          WHERE prior.session_id <> ${input.sessionId}
-            AND ${
-              input.proofKeyThumbprint === undefined
-                ? sql`prior.subject = ${DESKTOP_BOOTSTRAP_SUBJECT}
-                    AND prior.proof_key_thumbprint IS NULL`
-                : sql`prior.proof_key_thumbprint = ${input.proofKeyThumbprint}`
-            }
-          ORDER BY prior.issued_at DESC
-          LIMIT 1
+          SELECT device.founder
+          FROM auth_connect_devices AS device
+          WHERE device.proof_key_thumbprint = ${input.proofKeyThumbprint ?? null}
         )
         WHERE session_id = ${input.sessionId}
           AND founder IS NULL
           AND client_device_type IS NOT 'bot'
       `,
   });
-  const inheritFounder = (input: CreateAuthSessionInput) =>
-    input.proofKeyThumbprint !== undefined || input.subject === DESKTOP_BOOTSTRAP_SUBJECT
-      ? inheritFounderRow(input)
-      : Effect.void;
+  const inheritDeviceFounder = (input: CreateAuthSessionInput) =>
+    input.proofKeyThumbprint === undefined || input.founder !== undefined
+      ? Effect.void
+      : inheritDeviceFounderRow(input);
 
   const revokeSessionRows = SqlSchema.findAll({
     Request: RevokeAuthSessionInput,
@@ -482,7 +489,7 @@ export const make = Effect.gen(function* () {
 
   const create: AuthSessionRepository["Service"]["create"] = (input) =>
     sql
-      .withTransaction(createSessionRow(input).pipe(Effect.andThen(inheritFounder(input))))
+      .withTransaction(createSessionRow(input).pipe(Effect.andThen(inheritDeviceFounder(input))))
       .pipe(
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
@@ -501,23 +508,7 @@ export const make = Effect.gen(function* () {
         revokeActiveSessionsForReplacement(input).pipe(
           Effect.flatMap((revokedRows) =>
             createSessionRow(input.session).pipe(
-              Effect.andThen(inheritFounder(input.session)),
-              Effect.andThen(() => {
-                // Re-pairing one named client keeps who uses it. Replacing every session for a
-                // subject could span several devices, so that never carries a person over.
-                const founders = new Set(revokedRows.map((row) => row.founder));
-                const [founder] = founders;
-                return input.replaceSessionId !== undefined &&
-                  founders.size === 1 &&
-                  founder !== null &&
-                  founder !== undefined
-                  ? setFounderRows({
-                      sessionId: input.session.sessionId,
-                      founder,
-                      now: input.revokedAt,
-                    })
-                  : Effect.void;
-              }),
+              Effect.andThen(inheritDeviceFounder(input.session)),
               Effect.as(revokedRows.map((row) => row.sessionId)),
             ),
           ),
@@ -645,16 +636,24 @@ export const make = Effect.gen(function* () {
     );
 
   const setFounder: AuthSessionRepository["Service"]["setFounder"] = (input) =>
-    setFounderRows(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "AuthSessionRepository.setFounder:query",
-          "AuthSessionRepository.setFounder:decodeRows",
-          { sessionId: input.sessionId },
+    sql
+      .withTransaction(
+        setFounderRows(input).pipe(
+          Effect.tap((rows) =>
+            rows.length > 0 ? bindConnectDeviceFounderRow(input) : Effect.void,
+          ),
         ),
-      ),
-      Effect.map((rows) => rows.length > 0),
-    );
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "AuthSessionRepository.setFounder:query",
+            "AuthSessionRepository.setFounder:decodeRows",
+            { sessionId: input.sessionId },
+          ),
+        ),
+        Effect.map((rows) => rows.length > 0),
+      );
 
   const getProofKeyThumbprint: AuthSessionRepository["Service"]["getProofKeyThumbprint"] = (
     input,

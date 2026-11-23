@@ -7,6 +7,10 @@
       "types": "./src/seenMarker.ts",
       "import": "./src/seenMarker.ts"
     },
+    "./messageDigest": {
+      "types": "./src/messageDigest.ts",
+      "import": "./src/messageDigest.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"
@@ -498,6 +502,10 @@
     "./codexAuthHandoff": {
       "types": "./src/codexAuthHandoff.ts",
       "import": "./src/codexAuthHandoff.ts"
+    },
+    "./oauthCallback": {
+      "types": "./src/oauthCallback.ts",
+      "import": "./src/oauthCallback.ts"
     },
     "./codexArtifactTemplates": {
       "types": "./src/codexArtifactTemplates.ts",

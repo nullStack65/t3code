@@ -2,6 +2,14 @@ import * as DateTime from "effect/DateTime";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import {
+  activityItemNeedsAttention,
+  chatActivityContext,
+  chatActivityGroups,
+  isChatActivityMessage,
+  summarizeChatActivity,
+  type ChatActivityContext,
+} from "@t3tools/client-runtime/chat-activity";
+import {
   isLiveSubagentTurnItem,
   waitingOnSubagentsLabel,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -594,6 +602,7 @@ type MessagesTimelineRowContent =
       count: number;
       summary: string;
       expanded: boolean;
+      attention: string | null;
     }
   | {
       kind: "turn-fold";
@@ -645,6 +654,7 @@ type MessagesTimelineRowContent =
       groupedWithPrevious?: boolean;
       /** Set when the message above is a steer too, so the label shows once. */
       continuesSteer?: boolean;
+      activityRevealed?: true;
     }
   | {
       kind: "assistant-meta";
@@ -972,7 +982,10 @@ function timelineEntryIsSteer(entry: TimelineEntry): boolean {
 
 export function timelineEntryStartsResponse(entry: TimelineEntry): boolean {
   return (
-    (entry.kind === "message" && entry.message.role === "user" && !timelineEntryIsSteer(entry)) ||
+    (entry.kind === "message" &&
+      entry.message.role === "user" &&
+      !entry.message.humanNote &&
+      !timelineEntryIsSteer(entry)) ||
     (entry.kind === "work" && entry.entry.itemType === "notification")
   );
 }
@@ -2424,7 +2437,56 @@ const KEPT_ACTIVITY_ROW_KINDS = new Set<MessagesTimelineRow["kind"]>([
   "viewed-images",
 ]);
 
-export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolean {
+export function timelineActivityContext(
+  entries: ReadonlyArray<TimelineEntry>,
+  runs: Parameters<typeof chatActivityContext>[1],
+  includeOtherActivity: boolean,
+  decisionRequestedAt?: string,
+): ChatActivityContext {
+  return chatActivityContext(
+    entries.map((entry) => ({
+      createdAt: entry.createdAt,
+      runId:
+        entry.kind === "message"
+          ? entry.message.runId
+          : entry.kind === "event"
+            ? entry.projectedItem.item.runId
+            : timelineEntryRunId(entry),
+      message: entry.kind === "message" ? entry.message : undefined,
+      item:
+        entry.kind === "work"
+          ? entry.entry.projectedItem?.item
+          : entry.kind === "event" || entry.kind === "message"
+            ? entry.projectedItem?.item
+            : undefined,
+    })),
+    runs,
+    includeOtherActivity,
+    decisionRequestedAt,
+  );
+}
+
+function activityRowRunIds(row: MessagesTimelineRow): readonly RunId[] {
+  switch (row.kind) {
+    case "message":
+    case "assistant-meta":
+      return row.message.runId ? [row.message.runId] : [];
+    case "work":
+    case "work-live":
+      return row.groupedEntries.flatMap((entry) => (entry.runId ? [entry.runId] : []));
+    case "event":
+      return row.projectedItem.item.runId ? [row.projectedItem.item.runId] : [];
+    case "work-toggle":
+      return row.runId ? [row.runId] : [];
+    case "turn-fold":
+    case "attempt-fold":
+      return [row.runId];
+    default:
+      return [];
+  }
+}
+
+function activityRowIsBoundary(row: MessagesTimelineRow, context?: ChatActivityContext): boolean {
   if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return true;
   // A secret or a link is answered only on its own card, so it must not fold away.
   if (
@@ -2434,60 +2496,31 @@ export function timelineRowIsHumanConversation(row: MessagesTimelineRow): boolea
   ) {
     return true;
   }
-  if (row.kind !== "message" && row.kind !== "assistant-meta") return false;
-  const sender = resolveMessageSender(row.message);
-  return sender.kind === "person" || sender.kind === "guest" || sender.kind === "model";
-}
-
-/**
- * The pill's key. Anchored to the human message the run sits after, or to the
- * first row when the thread opens on activity, so the key survives rows
- * streaming in and earlier history loading above it. A live turn's own rows use
- * constant ids that vanish when the turn settles, so they never anchor a pill.
- */
-function activityPillId(anchor: MessagesTimelineRow | undefined, run: MessagesTimelineRow[]): string {
-  return `activity:${anchor?.id ?? run[0]!.id}`;
-}
-
-/**
- * The short word for one kind of collapsed activity, pluralized with a count.
- * Kinds the row does not record stay "update".
- */
-function activityUpdateWord(row: MessagesTimelineRow): string {
-  if (row.kind !== "message" && row.kind !== "assistant-meta") return "update";
-  switch (resolveMessageSender(row.message).kind) {
-    case "agent":
-      return "agent update";
-    case "automation":
-      return "automation";
-    case "system":
-      return "system notice";
-    default:
-      return "update";
+  if (row.kind === "message" || row.kind === "assistant-meta") {
+    return !isChatActivityMessage(row.message, row.message.runId, context);
   }
+  if (row.kind === "working" || row.kind === "thinking" || row.kind === "worktree-setup")
+    return true;
+  if (context === undefined || context.includeOtherActivity) return false;
+  const runIds = activityRowRunIds(row);
+  return runIds.length === 0 || runIds.some((runId) => !context.agentRuns.has(runId));
 }
 
-/** `14 agent updates`, `3 automations and 1 system notice`. */
+function activityRowItems(row: MessagesTimelineRow) {
+  if (row.kind === "work" || row.kind === "work-live") {
+    return row.groupedEntries.flatMap(({ projectedItem }) =>
+      projectedItem ? [projectedItem.item] : [],
+    );
+  }
+  return row.kind === "event" ? (row.subagents ?? [row.projectedItem]).map(({ item }) => item) : [];
+}
+
 export function activityUpdateSummary(rows: ReadonlyArray<MessagesTimelineRow>): string {
-  const counts = new Map<string, number>();
-  const order: string[] = [];
-  for (const row of rows) {
-    if (row.kind !== "message" && row.kind !== "assistant-meta") continue;
-    const word = activityUpdateWord(row);
-    if (!counts.has(word)) order.push(word);
-    counts.set(word, (counts.get(word) ?? 0) + 1);
-  }
-  if (order.length === 0) {
-    return rows.length === 1 ? "1 update" : `${rows.length} updates`;
-  }
-  return order
-    .map((word) => {
-      const count = counts.get(word) ?? 0;
-      const plural =
-        word === "automation" ? (count === 1 ? "automation" : "automations") : `${word}s`;
-      return `${count} ${count === 1 ? word : plural}`;
-    })
-    .join(" and ");
+  return summarizeChatActivity(
+    rows.length,
+    rows.flatMap((row) => (row.kind === "message" ? [row.message] : [])),
+    rows.flatMap(activityRowItems),
+  );
 }
 
 /**
@@ -2498,58 +2531,74 @@ export function activityUpdateSummary(rows: ReadonlyArray<MessagesTimelineRow>):
 export function collapseTimelineActivity(
   rows: MessagesTimelineRow[],
   expandedIds: ReadonlySet<string>,
+  context?: ChatActivityContext,
+  dismissedAttention?: ReadonlyMap<string, string>,
 ): MessagesTimelineRow[] {
   const collapsed: MessagesTimelineRow[] = [];
-  let run: MessagesTimelineRow[] = [];
-  let anchor: MessagesTimelineRow | undefined;
-  const flush = () => {
-    if (run.length === 0) return;
-    const id = activityPillId(anchor, run);
+  let hasActivity = false;
+  for (const group of chatActivityGroups(rows, (row) => activityRowIsBoundary(row, context))) {
+    if (!("rows" in group)) {
+      collapsed.push(group);
+      continue;
+    }
+    hasActivity = true;
+    const { id, rows: run } = group;
+    const attentionIds = new Set<string>();
+    for (const row of run) {
+      for (const runId of activityRowRunIds(row)) {
+        for (const key of context?.attentionByRun.get(runId) ?? []) attentionIds.add(key);
+      }
+      if (
+        (row.kind === "work-toggle" && row.hasFailure) ||
+        (row.kind === "context-compaction" && row.failed) ||
+        (row.kind === "event" &&
+          (row.subagents ?? [row.projectedItem]).some(({ item }) =>
+            activityItemNeedsAttention(item),
+          )) ||
+        ((row.kind === "work" || row.kind === "work-live") &&
+          row.groupedEntries.some((entry) =>
+            entry.projectedItem
+              ? activityItemNeedsAttention(entry.projectedItem.item)
+              : entry.tone === "error",
+          ))
+      )
+        attentionIds.add(row.id);
+    }
+    const attention = attentionIds.size ? JSON.stringify([...attentionIds].sort()) : null;
     const pill: MessagesTimelineRow = {
       kind: "activity",
       id,
       createdAt: run[0]!.createdAt,
       count: run.length,
       summary: activityUpdateSummary(run),
-      expanded: expandedIds.has(id),
+      expanded:
+        expandedIds.has(id) || (attention !== null && dismissedAttention?.get(id) !== attention),
+      attention,
     };
     collapsed.push(pill);
-    if (pill.expanded) for (const row of run) collapsed.push(row);
-    run = [];
-  };
-  for (const row of rows) {
-    if (timelineRowIsHumanConversation(row)) {
-      flush();
-      collapsed.push(row);
-      anchor = row;
-    } else {
-      run.push(row);
+    if (pill.expanded) {
+      for (const row of run) {
+        collapsed.push(
+          row.kind === "message" && resolveMessageSender(row.message).kind === "agent"
+            ? { ...row, activityRevealed: true }
+            : row,
+        );
+      }
     }
   }
-  flush();
-  return collapsed;
+  return hasActivity ? collapsed : rows;
 }
 
 /** The pill hiding `entryId`, if one does, so a search hit or a restored scroll position can open it. */
 export function activityPillIdForEntry(
   rows: MessagesTimelineRow[],
   entryId: string,
+  context?: ChatActivityContext,
 ): string | undefined {
-  let anchor: MessagesTimelineRow | undefined;
-  let run: MessagesTimelineRow[] = [];
-  const match = (): string | undefined =>
-    run.some((row) => row.id === entryId) ? activityPillId(anchor, run) : undefined;
-  for (const row of rows) {
-    if (timelineRowIsHumanConversation(row)) {
-      const found = match();
-      if (found !== undefined) return found;
-      run = [];
-      anchor = row;
-    } else {
-      run.push(row);
-    }
+  for (const group of chatActivityGroups(rows, (row) => activityRowIsBoundary(row, context))) {
+    if ("rows" in group && group.rows.some((row) => row.id === entryId)) return group.id;
   }
-  return match();
+  return undefined;
 }
 
 export function filterTimelineRowsBySender(
@@ -2573,6 +2622,7 @@ function timelineRowIsOwnUserMessage(
   return (
     row?.kind === "message" &&
     row.message.role === "user" &&
+    !row.message.humanNote &&
     resolveUserMessagePresentation(row.message).attribution === null
   );
 }

@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
+import * as NodeAsyncHooks from "node:async_hooks";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createMemoryStorage } from "../../lib/storage";
 
@@ -46,14 +47,49 @@ const modelSelection = {
   model: "claude-sonnet-4-6",
 };
 
+// One test owns the fake clock. setImmediate and performance stay real, or the
+// import waits out the 15s timeout. A timed-out test's continuation stops once a
+// newer test owns the globals.
+const storageRuns = new NodeAsyncHooks.AsyncLocalStorage<number>();
+let timerScope = 0;
+
+class SupersededStorageRun {
+  readonly _tag = "SupersededStorageRun";
+}
+
+function assertStorageOwner() {
+  if (storageRuns.getStore() !== timerScope) throw new SupersededStorageRun();
+}
+
+function useScopedFakeTimers() {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
+  });
+}
+
+async function importFresh<T>(load: () => Promise<T>): Promise<T> {
+  const owner = storageRuns.getStore();
+  if (owner !== undefined && owner !== timerScope) throw new SupersededStorageRun();
+  const restore = vi.isFakeTimers();
+  if (restore) vi.useRealTimers();
+  vi.resetModules();
+  try {
+    const loaded = await load();
+    if (owner !== undefined && owner !== timerScope) throw new SupersededStorageRun();
+    return loaded;
+  } finally {
+    if (restore && owner === timerScope) useScopedFakeTimers();
+  }
+}
+
 async function openTab() {
-  return {
+  return importFresh(async () => ({
     store: await import("../../composerDraftStore"),
     send: await import("./chatViewSend"),
     logic: await import("./composerSend.logic"),
     view: await import("../ChatView.logic"),
     uploads: await import("../../lib/attachmentUploadQueue"),
-  };
+  }));
 }
 type Tab = Awaited<ReturnType<typeof openTab>>;
 
@@ -85,26 +121,33 @@ function faultyStorage() {
 }
 
 async function withReloadableStorage(run: () => Promise<void>) {
-  vi.stubGlobal("localStorage", faultyStorage());
-  vi.stubGlobal("window", new EventTarget());
-  vi.stubGlobal("FileReader", BlobFileReader);
-  vi.useFakeTimers();
-  vi.resetModules();
-  try {
-    await run();
-  } finally {
-    gate = null;
-    resetStorageFaults();
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.resetModules();
-  }
+  const scope = ++timerScope;
+  return storageRuns.run(scope, async () => {
+    vi.stubGlobal("localStorage", faultyStorage());
+    vi.stubGlobal("window", new EventTarget());
+    vi.stubGlobal("FileReader", BlobFileReader);
+    useScopedFakeTimers();
+    try {
+      await run();
+    } catch (error) {
+      if (error instanceof SupersededStorageRun) return;
+      throw error;
+    } finally {
+      if (storageRuns.getStore() === timerScope) {
+        gate = null;
+        resetStorageFaults();
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+        vi.resetModules();
+      }
+    }
+  });
 }
 
 /** The renderer dies: the next tab reads only what storage holds. */
 async function reload() {
+  assertStorageOwner();
   vi.clearAllTimers();
-  vi.resetModules();
   return openTab();
 }
 
@@ -261,6 +304,7 @@ async function sendDraft(
     gate = null;
   }
   const composer = await sentComposer;
+  assertStorageOwner();
   if (options.bindFault) storageFaults[options.bindFault] = true;
   const bound = tab.store.markPromotedDraftThreadByRef(sentRef, { ...operation, composer });
   resetStorageFaults();
@@ -287,6 +331,7 @@ async function sendDraft(
   if (!bound) return { bound, committed: false, cleared: false, failed: cleanUp(false), before };
   if (options.stopAfterBind) return null;
   const attachments = await prepared;
+  assertStorageOwner();
   options.editBeforeCommit?.();
   const turn = {
     environmentId,
@@ -688,6 +733,34 @@ describe("a draft launch whose file's first upload failed", () => {
       expectEdited(tab);
       await vi.advanceTimersByTimeAsync(300);
       expectEdited(await reload());
+    });
+  });
+});
+
+describe("a storage run that the timeout did not cancel", () => {
+  it("leaves the run that replaced it still owning storage and timers", async () => {
+    let release!: () => void;
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const older = withReloadableStorage(async () => {
+      await openTab();
+      reached();
+      await held;
+      await reload();
+    });
+    await ready;
+    await withReloadableStorage(async () => {
+      await openTab();
+      release();
+      await older;
+      expect(vi.isFakeTimers()).toBe(true);
+      expect(typeof localStorage.getItem).toBe("function");
+      expect(localStorage.getItem("t3code:composer-drafts:v1")).toBeNull();
     });
   });
 });

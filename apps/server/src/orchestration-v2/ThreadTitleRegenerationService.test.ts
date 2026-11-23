@@ -550,6 +550,81 @@ describe("ThreadTitleRegenerationService", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("keeps a person's private note out of the title model until it is promoted", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const titleRegeneration = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+        const threadId = yield* createThread({
+          command: "command:title:note:create",
+          thread: "thread:title:note",
+        });
+        yield* dispatchUserMessage({
+          command: "command:title:note:prompt",
+          threadId,
+          text: "Investigate the flaky login test",
+        });
+        yield* threads.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("command:title:note:share"),
+          threadId,
+          inboxRouting: {
+            owner: null,
+            assignee: null,
+            audience: "shared",
+            attentionKind: "FYI",
+            reason: "decision",
+          },
+        });
+        const noteId = MessageId.make("command:title:note:note:message");
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:title:note:note"),
+          threadId,
+          messageId: noteId,
+          text: "Private aside about the board",
+          attachments: [],
+          humanNote: true,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const note = (yield* threads.getThreadRecords(threadId, ["messages"])).messages.find(
+          (message) => message.id === noteId,
+        );
+        assert.equal(note?.humanNote, true);
+
+        const regenerate = yield* armRegeneration({
+          command: "command:title:note:regenerate",
+          threadId,
+        });
+        yield* titleRegeneration.execute({
+          threadId,
+          requestId: regenerate,
+          kind: { type: "regenerate" },
+        });
+        // Even if a note id reaches the initial path, its text stays private.
+        const initial = yield* armRegeneration({
+          command: "command:title:note:initial",
+          threadId,
+        });
+        yield* titleRegeneration.execute({
+          threadId,
+          requestId: initial,
+          kind: { type: "initial", messageId: noteId },
+        });
+
+        const [regenerated, initialCall] = harness.generateThreadTitle.mock.calls.map(
+          ([call]) => call,
+        );
+        assert.include(regenerated?.message, "USER:\nInvestigate the flaky login test");
+        assert.notInclude(regenerated?.message, "Private aside");
+        assert.notInclude(initialCall?.message ?? "", "Private aside");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect.each([
     { name: "its first message", followUp: true },
     { name: "no message of its own yet", followUp: false },

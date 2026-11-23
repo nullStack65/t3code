@@ -41,6 +41,8 @@ import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2DelegatedFrom,
+  OrchestrationV2DeliveryClass,
+  OrchestrationV2DigestCategory,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2WorkerAlert,
@@ -423,6 +425,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
+  /** Absent from linked environments that predate it. */
+  latestRunCompletedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
   runtimeMode: RuntimeMode,
@@ -449,6 +453,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /** Absent from linked environments that predate it. */
+  lastVisitedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
 });
 export type OrchestratorMcpThreadListItem = typeof OrchestratorMcpThreadListItem.Type;
 
@@ -590,6 +596,12 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
     }),
   ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+  deliveryClass: Schema.optional(OrchestrationV2DeliveryClass),
+  coalesceKey: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  expiresAt: Schema.optional(
+    IsoDateTime.annotate({ description: "ISO time; an undelivered message is dropped then." }),
+  ),
+  digestCategory: Schema.optional(OrchestrationV2DigestCategory),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
 
@@ -601,6 +613,7 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   taskId: Schema.optional(NodeId),
   status: OrchestrationV2RunStatus,
   delivery: Schema.Literals(["started", "queued", "steered", "restarted"]),
+  deliveryClass: Schema.optional(OrchestrationV2DeliveryClass),
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 

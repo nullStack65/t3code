@@ -28,6 +28,7 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2CreationSource,
   type OrchestrationV2LinkedSender,
+  type OrchestrationV2MessageDelivery,
   type OrchestrationV2MessageSentBy,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShellSnapshot,
@@ -194,6 +195,8 @@ export interface ThreadManagementSendInput {
   readonly mode: ThreadManagementSendMode;
   /** Start a new provider session; the orchestrator queues it instead of steering. */
   readonly freshContext?: boolean;
+  /** Overrides `mode`: the orchestrator places the message by its class. */
+  readonly delivery?: OrchestrationV2MessageDelivery;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }
@@ -1034,7 +1037,9 @@ const make = Effect.gen(function* () {
       OrchestrationV2Command,
       { readonly type: "message.dispatch" }
     >["dispatchMode"];
-    if (mode === "steer" || mode === "restart") {
+    if (input.delivery !== undefined) {
+      dispatchMode = { type: "queue_after_active" };
+    } else if (mode === "steer" || mode === "restart") {
       if (steerableRun === undefined) {
         return yield* new ThreadManagementNoSteerableRunError({
           threadId: input.threadId,
@@ -1086,7 +1091,8 @@ const make = Effect.gen(function* () {
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       ...(input.freshContext ? { freshContext: true } : {}),
       dispatchMode,
-      ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
+      ...(mode === "auto" && input.delivery === undefined ? { deliveryIntent: "auto" } : {}),
+      ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
       createdBy: input.createdBy,
       creationSource: input.creationSource,
     });

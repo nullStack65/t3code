@@ -37,15 +37,18 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import {
+  currentSession,
   EnvironmentRpcUnavailableError,
   getInitialServerConfig,
   isRpcClientError,
   request,
+  requestInSession,
 } from "../rpc/client.ts";
 
 interface CommandMetadata {
@@ -138,9 +141,16 @@ export interface VisitThreadInput extends ThreadCommandInput {
   /** Counts toward search frecency; `searchQuery` is the palette query that picked it. */
   readonly opened?: boolean;
   readonly searchQuery?: string;
+  /** Whose read cursor this visit moves. Shared threads leave the other founder unread. */
+  readonly founder?: import("@t3tools/contracts").Founder;
+  /** Last message this founder was shown. The visit still does not start a turn. */
+  readonly lastSeenMessageId?: import("@t3tools/contracts").MessageId;
 }
 
-export type MarkThreadUnreadInput = ThreadCommandInput;
+export interface MarkThreadUnreadInput extends ThreadCommandInput {
+  /** On a shared thread, rewind only this founder's cursor. */
+  readonly founder?: import("@t3tools/contracts").Founder;
+}
 
 export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
@@ -184,6 +194,7 @@ interface StartThreadBootstrap {
 
 export interface StartThreadTurnInput extends ThreadCommandInput {
   readonly manualContinuationOfRunId?: RunId;
+  readonly promoteNoteId?: MessageId;
   readonly message: {
     readonly messageId: MessageId;
     readonly role: "user";
@@ -191,6 +202,8 @@ export interface StartThreadTurnInput extends ThreadCommandInput {
     readonly attachments: ReadonlyArray<ChatAttachment | UploadChatAttachment>;
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext;
     readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
+    /** A side note on a shared thread. The server stores it and does not start a turn. */
+    readonly humanNote?: true;
   };
   readonly modelSelection?: ModelSelection;
   readonly titleSeed?: string;
@@ -308,12 +321,28 @@ const MAX_LOST_TRANSPORT_RESENDS = 2;
 // alone would leave the send pending forever.
 const MESSAGE_DISPATCH_TIMEOUT = "60 seconds";
 
+export class HumanNoteUnavailableError extends Schema.TaggedError<HumanNoteUnavailableError>()(
+  "HumanNoteUnavailableError",
+  { message: Schema.String },
+) {}
+
 const dispatchMessage = Effect.fn("EnvironmentCommands.dispatchMessage")(function* (
   command: Extract<OrchestrationV2Command, { type: "message.dispatch" }>,
   resendAfterSocketLoss: boolean,
 ) {
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-  const attempt = dispatch(command).pipe(
+  const attempt = Effect.gen(function* () {
+    if (command.humanNote !== true) return yield* dispatch(command);
+    const session = yield* currentSession();
+    const config = yield* session.initialConfig;
+    if (config.environment.capabilities.humanNote !== true) {
+      return yield* new HumanNoteUnavailableError({
+        message: "This server does not support private notes. Update the server to use /note.",
+      });
+    }
+    // Check each attempt against the same session that will receive the note.
+    return yield* requestInSession(session, ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
+  }).pipe(
     Effect.timeoutOrElse({
       duration: MESSAGE_DISPATCH_TIMEOUT,
       orElse: () =>
@@ -690,6 +719,10 @@ export const visitThread = Effect.fn("EnvironmentCommands.visitThread")(function
     visitedAt: input.visitedAt,
     ...(input.opened ? { opened: true } : {}),
     ...(input.searchQuery ? { searchQuery: input.searchQuery } : {}),
+    ...(input.founder === undefined ? {} : { founder: input.founder }),
+    ...(input.lastSeenMessageId === undefined
+      ? {}
+      : { lastSeenMessageId: input.lastSeenMessageId }),
   });
 });
 
@@ -700,6 +733,7 @@ export const markThreadUnread = Effect.fn("EnvironmentCommands.markThreadUnread"
     type: "thread.mark-unread",
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
+    ...(input.founder === undefined ? {} : { founder: input.founder }),
   });
 });
 
@@ -769,7 +803,33 @@ export const setThreadInteractionMode = Effect.fn("EnvironmentCommands.setThread
 export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(function* (
   input: StartThreadTurnInput,
 ) {
+  const bootstrap = input.bootstrap?.createThread;
+  const prepareWorktree = input.bootstrap?.prepareWorktree;
+  if (
+    input.message.humanNote === true &&
+    (bootstrap !== undefined || prepareWorktree !== undefined)
+  ) {
+    return yield* new HumanNoteUnavailableError({
+      message: "Send a private note from an existing shared thread.",
+    });
+  }
   const commandId = yield* allocateCommandId(input);
+  if (input.promoteNoteId !== undefined) {
+    return yield* dispatchMessage(
+      {
+        type: "message.dispatch",
+        commandId,
+        createdBy: "user",
+        creationSource: input.creationSource ?? "web",
+        threadId: input.threadId,
+        messageId: input.message.messageId,
+        text: "",
+        attachments: [],
+        dispatchMode: { type: "promote_human_note", noteId: input.promoteNoteId },
+      },
+      input.resendAfterSocketLoss ?? true,
+    );
+  }
   const attachments = yield* persistAttachments(
     input.threadId,
     input.message.messageId,
@@ -780,8 +840,6 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     input.message.attachments,
     attachments,
   );
-  const bootstrap = input.bootstrap?.createThread;
-  const prepareWorktree = input.bootstrap?.prepareWorktree;
   if (bootstrap !== undefined || prepareWorktree !== undefined) {
     const existingProjection =
       bootstrap === undefined ? yield* getProjection(input.threadId) : null;
@@ -850,6 +908,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
         ...(input.message.idleCompaction === undefined
           ? {}
           : { idleCompaction: input.message.idleCompaction }),
+        ...(input.message.humanNote === true ? { humanNote: true as const } : {}),
         attachments,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
         ...(input.sourceProposedPlan === undefined
@@ -880,6 +939,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       ...(input.message.idleCompaction === undefined
         ? {}
         : { idleCompaction: input.message.idleCompaction }),
+      ...(input.message.humanNote === true ? { humanNote: true as const } : {}),
       attachments,
       ...(input.titleSeed === undefined ? {} : { titleSeed: input.titleSeed }),
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),

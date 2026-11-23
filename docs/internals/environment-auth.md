@@ -27,6 +27,15 @@ model. DPoP binds a token to a client's proof key; an invalid proof must fail
 rather than fall back to bearer authentication. The OAuth token-exchange
 vocabulary gives these grants a familiar meaning.
 
+### A founder comes from enrollment, not history
+
+The server, not the client, says which founder sent a message. A session's
+founder comes only from its pairing code, its approved T3 Connect device key, or
+an assignment made from another client. It is never inherited from an earlier
+session: a shared desktop bootstrap or a reused proof key would hand one
+founder's name to whoever holds the next session. Revoking a device drops its
+founder with it. Agent sign-in codes and bot sessions never carry one.
+
 ### Guest links are not sessions
 
 A [guest link](../user/guest-links.md) gives one browser read access to one

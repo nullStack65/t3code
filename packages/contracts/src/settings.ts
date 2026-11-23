@@ -1501,6 +1501,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   /**
+   * Refuses messages, answers and new threads from a person's client until a pairing code or an
+   * approved T3 Connect device enrolls it as a founder.
+   */
+  requireFounderIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
    * The founder this machine belongs to, which every client credits its threads without sender
    * details to. Null credits them to no one. A label only; it grants nothing.
    */
@@ -2038,6 +2043,7 @@ export const ServerSettingsPatch = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   keepAwakeWhileAgentsWork: Schema.optionalKey(Schema.Boolean),
   requireConnectDeviceApproval: Schema.optionalKey(Schema.Boolean),
+  requireFounderIdentity: Schema.optionalKey(Schema.Boolean),
   ownerFounder: Schema.optionalKey(Schema.NullOr(Founder)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   cloudSpeechCredentials: Schema.optionalKey(
@@ -2210,7 +2216,7 @@ export function requiredScopesForServerSettingsPatch(
   let changesAccess = false;
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    if (key === "requireConnectDeviceApproval") {
+    if (key === "requireConnectDeviceApproval" || key === "requireFounderIdentity") {
       changesAccess = true;
     } else if (
       key === "providers" ||

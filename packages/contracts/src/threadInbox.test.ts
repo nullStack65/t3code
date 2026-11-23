@@ -3,12 +3,15 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId } from "./baseSchemas.ts";
 import { ClientSettingsSchema } from "./settings.ts";
 import {
+  ThreadDecisionAsk,
   makeThreadInbox,
   routeThreadInbox,
   matchesInboxView,
   matchesInboxFilter,
   effectiveInboxFilter,
   inboxOriginFor,
+  creatorInboxOrigin,
+  refusesUnenrolledSender,
   founderInboxLane,
   staysActiveWhileWorking,
   compositeThreadKey,
@@ -16,6 +19,7 @@ import {
   agentLaunchInboxError,
   agentInboxRoutingError,
   projectThreadInbox,
+  inboxAfterFounderReply,
   inboxRoutingFor,
   primaryInbox,
   withLegacyPeerInboxReason,
@@ -39,7 +43,7 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxView(j, "all")).toBe(true);
     expect(matchesInboxView(k, "all")).toBe(true);
   });
-  it("keeps All until a founder is chosen, then defaults to that founder plus Agents", () => {
+  it("keeps All until a founder is chosen, then defaults to that founder plus Agents and Shared", () => {
     const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
     const encode = Schema.encodeSync(ClientSettingsSchema);
     // Settings saved by the single-choice selector still decode; that choice is not carried over.
@@ -54,10 +58,16 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxFilter(undefined, effectiveInboxFilter(upgraded))).toBe(true);
     const jeffClient = decode(encode({ ...upgraded, founderInboxOwner: "jeff" }));
     const filter = effectiveInboxFilter(jeffClient);
-    expect(filter).toEqual(["jeff", "agents"]);
+    expect(filter).toEqual(["jeff", "agents", "shared"]);
     expect(matchesInboxFilter(makeThreadInbox({ actor: jeff }), filter)).toBe(true);
     expect(matchesInboxFilter(makeThreadInbox({ actor: bot }), filter)).toBe(true);
     expect(matchesInboxFilter(makeThreadInbox({ actor: kameron }), filter)).toBe(false);
+    expect(
+      matchesInboxFilter(
+        makeThreadInbox({ actor: kameron, routing: { audience: "shared" } }),
+        filter,
+      ),
+    ).toBe(true);
     expect(matchesInboxFilter(undefined, filter)).toBe(false);
     const picked = decode(encode({ ...jeffClient, founderInboxFilter: ["kameron", "shared"] }));
     expect([effectiveInboxFilter(picked), picked.founderInboxOwner]).toEqual([
@@ -90,6 +100,7 @@ describe("shared fleet organizational inbox", () => {
     expect(effectiveInboxFilter({ founderInboxOwner: "jeff", founderInboxFilter: [] })).toEqual([
       "jeff",
       "agents",
+      "shared",
     ]);
     // Every inbox is All, which keeps unclassified history.
     const every = ["shared", "jeff", "agents", "kameron"] as const;
@@ -110,6 +121,41 @@ describe("shared fleet organizational inbox", () => {
       true,
       false,
     ]);
+  });
+  it("files a person's new thread under their session's founder, never a guessed one", () => {
+    const phone = { founder: null, deviceType: "mobile" } as const;
+    const jeffPhone = { ...phone, founder: "jeff" } as const;
+    // A session assigned in Connections files as its founder, whatever the client claims.
+    expect(creatorInboxOrigin(undefined, jeffPhone)).toEqual(jeff);
+    expect(creatorInboxOrigin(kameron, jeffPhone)).toEqual(jeff);
+    expect(creatorInboxOrigin(bot, jeffPhone)).toEqual(jeff);
+    // An unassigned session keeps the client's choice and is not filed under a guessed owner.
+    expect(creatorInboxOrigin(kameron, phone)).toEqual(kameron);
+    expect(creatorInboxOrigin(undefined, phone)).toBeUndefined();
+    // A bot's claim is left to agent routing.
+    expect(creatorInboxOrigin(bot, { founder: "kameron", deviceType: "bot" })).toEqual(bot);
+  });
+  it("refuses an unenrolled person's founder actions only when identity is required", () => {
+    const phone = { founder: null, deviceType: "mobile" } as const;
+    const unknown = { founder: null, deviceType: "unknown" } as const;
+    const attributed = [
+      "message.dispatch",
+      "queued-run.edit",
+      "runtime-request.respond",
+      "thread.create",
+    ];
+    for (const command of attributed) {
+      expect(refusesUnenrolledSender(true, command, phone)).toBe(true);
+      // A sender the server could not read is refused, not waved through.
+      expect(refusesUnenrolledSender(true, command, unknown)).toBe(true);
+      expect(refusesUnenrolledSender(true, command, { ...phone, founder: "jeff" })).toBe(false);
+      expect(refusesUnenrolledSender(true, command, { founder: null, deviceType: "bot" })).toBe(
+        false,
+      );
+      expect(refusesUnenrolledSender(false, command, phone)).toBe(false);
+    }
+    expect(refusesUnenrolledSender(true, "thread.visit", phone)).toBe(false);
+    expect(refusesUnenrolledSender(true, "thread.archive", phone)).toBe(false);
   });
   it("files agent launches in Agents unless the agent picks an inbox with a reason", () => {
     // A launch from a thread in Kameron's inbox no longer copies that routing.
@@ -282,6 +328,32 @@ describe("shared fleet organizational inbox", () => {
         }),
       ),
     ).toEqual(["action", "hidden"]);
+    // A standing desk filed to Kameron is FYI until a decision or a runtime request is open.
+    const desk = makeThreadInbox({
+      actor: bot,
+      routing: { ...inboxRoutingFor("kameron"), reason: "conversation" },
+    });
+    const deskNow = (inbox: typeof desk, pendingHumanRequest = false, standing = true) =>
+      projectThreadInbox(inbox, { latestHumanMessageAt: null, pendingHumanRequest, standing });
+    expect([deskNow(desk).attentionKind, ...lanes(deskNow(desk))]).toEqual([
+      "FYI",
+      "FYI",
+      "hidden",
+    ]);
+    expect(matchesInboxView(deskNow(desk), "kameron")).toBe(true);
+    expect(staysActiveWhileWorking(deskNow(desk), ["kameron"])).toBe(false);
+    expect(deskNow(desk, false, false).attentionKind).toBe("action");
+    expect([deskNow(desk, true).attentionKind, ...lanes(deskNow(desk, true))]).toEqual([
+      "action",
+      "action",
+      "hidden",
+    ]);
+    const deskAsk = { ...desk, decisionRequest: asked.decisionRequest };
+    expect([deskNow(deskAsk).attentionKind, ...lanes(deskNow(deskAsk))]).toEqual([
+      "action",
+      "action",
+      "hidden",
+    ]);
   });
   it("hides bot-only work by default while All and Agents retain it", () => {
     const inbox = makeThreadInbox({ actor: bot });
@@ -418,5 +490,99 @@ describe("staysActiveWhileWorking", () => {
     const fyi = routeThreadInbox(actionForKameron, { attentionKind: "FYI", reason: "review" });
     expect(staysActiveWhileWorking(fyi, ["kameron"])).toBe(false);
     expect(staysActiveWhileWorking(makeThreadInbox({ actor: bot }), ["kameron"])).toBe(false);
+  });
+});
+
+describe("joint sign-off", () => {
+  const signOff = [
+    { founder: "jeff" as const, signed: false },
+    { founder: "kameron" as const, signed: false },
+  ];
+  const asked = {
+    ...makeThreadInbox({ actor: bot, routing: inboxRoutingFor("shared") }),
+    decisionRequest: {
+      founder: "kameron" as const,
+      kind: "decision" as const,
+      question: "Ship it?",
+      requestedAt: "2026-11-20T00:00:00.000Z",
+      signOff,
+    },
+  };
+  const reply = (
+    founder: "kameron" | "jeff" | null,
+    updatedAt: string | { epochMilliseconds: number } = "2026-11-20T00:00:01.000Z",
+  ) => ({
+    role: "user",
+    createdBy: "user",
+    sentBy: { founder },
+    updatedAt,
+  });
+
+  it("decodes only a sign-off that lists each founder once", () => {
+    const ask = {
+      founder: "kameron",
+      kind: "decision",
+      question: "Ship it?",
+    } as const;
+    expect(
+      Schema.is(ThreadDecisionAsk)({
+        ...ask,
+        signOff: [
+          { founder: "kameron", signed: false },
+          { founder: "jeff", signed: true },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      Schema.is(ThreadDecisionAsk)({
+        ...ask,
+        signOff: [
+          { founder: "kameron", signed: false },
+          { founder: "kameron", signed: true },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("lets each founder sign only themselves, and closes once both have", () => {
+    const once = inboxAfterFounderReply(asked, reply("kameron"));
+    expect(once).not.toBe(asked);
+    expect(once?.decisionRequest?.signOff).toEqual([
+      { founder: "kameron", signed: true },
+      { founder: "jeff", signed: false },
+    ]);
+    expect(inboxAfterFounderReply(once, reply("kameron", "2026-11-20T00:00:02.000Z"))).toBe(once);
+    expect(inboxAfterFounderReply(asked, reply(null))).toBe(asked);
+    expect(
+      inboxAfterFounderReply(
+        asked,
+        reply("jeff", { epochMilliseconds: Date.parse(asked.decisionRequest.requestedAt) }),
+      ),
+    ).toBe(asked);
+    const both = inboxAfterFounderReply(once, reply("jeff", "2026-11-20T00:00:03.000Z"));
+    expect(both?.decisionRequest).toBeUndefined();
+    const plain = { ...asked, decisionRequest: { ...asked.decisionRequest, signOff: undefined } };
+    const closed = projectThreadInbox(plain, {
+      latestHumanMessageAt: "2026-11-20T00:00:02.000Z",
+      pendingHumanRequest: false,
+    });
+    expect(closed.decisionRequest).toBeUndefined();
+  });
+
+  it("keeps a joint ask open for the founder who has not signed", () => {
+    const signed = inboxAfterFounderReply(asked, reply("kameron"))!;
+    const projected = projectThreadInbox(signed, {
+      latestHumanMessageAt: "2026-11-20T00:00:05.000Z",
+      pendingHumanRequest: false,
+    });
+    expect(projected.decisionRequest?.signOff?.[1]?.signed).toBe(false);
+    expect([founderInboxLane(projected, "kameron"), founderInboxLane(projected, "jeff")]).toEqual([
+      "hidden",
+      "action",
+    ]);
+    expect([founderInboxLane(asked, "kameron"), founderInboxLane(asked, "jeff")]).toEqual([
+      "action",
+      "action",
+    ]);
   });
 });

@@ -30,5 +30,14 @@
   "79b768229c9ef672": "Wartung",
   "54b188d65247e42f": "Labs",
   "f41ea186c275b56e": "Info",
-  "2a546119bf3879ee": "Archiv"
+  "2a546119bf3879ee": "Archiv",
+  "15f32e12fd49533f": "Die Anmeldung konnte nicht fortgesetzt werden. Versuche es erneut.",
+  "54789628a737f557": "Bei {server} anmelden",
+  "f8fde2e549c61546": "Adresse der Seite, die dein Browser geöffnet hat",
+  "d9f6244b252d11f6": "Anmeldung abschließen",
+  "8aecbd38f1facf71": "Erlaube den Zugriff in deinem Browser. Danach öffnet er eine Seite, die vielleicht nicht lädt: Kopiere die Adresse dieser Seite und füge sie hier ein.",
+  "6e5bcc452add4f9b": "Öffnet die Anmeldung. Lange drücken zum Kopieren.",
+  "83be7aade7ff6360": "Angemeldet",
+  "ec21b232e0eacd4a": "Anmelden",
+  "38574c0d1e49b278": "{preview}, angemeldet"
 }

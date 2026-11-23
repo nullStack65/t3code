@@ -1022,6 +1022,29 @@ function ThreadRouteContent(
           feedbackSubmissions={composer.feedbackSubmissions}
           onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}
+          onPromoteNote={
+            canOperateThread && !isProviderNativeSubagentThread(selectedThread.source)
+              ? async (noteId) => {
+                  const result = await continueThreadRun({
+                    environmentId: selectedThread.environmentId,
+                    input: {
+                      threadId: selectedThread.id,
+                      promoteNoteId: noteId,
+                      creationSource: "mobile",
+                      message: {
+                        messageId: MessageId.make(uuidv4()),
+                        role: "user",
+                        text: "",
+                        attachments: [],
+                      },
+                      runtimeMode: composer.runtimeMode ?? selectedThread.runtimeMode,
+                      interactionMode: composer.interactionMode ?? selectedThread.interactionMode,
+                    },
+                  });
+                  if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+                }
+              : undefined
+          }
           pendingHandoff={composer.pendingHandoff}
           activityRun={composer.selectedThreadActivityRun}
           activeWorkStartedAt={

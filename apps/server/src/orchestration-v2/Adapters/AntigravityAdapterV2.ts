@@ -36,6 +36,7 @@ import {
   readAntigravityChildrenAtWork,
 } from "../../provider/acp/AntigravityChildWork.ts";
 import { readAntigravityClientTextFile } from "../../provider/acp/AntigravityClientFiles.ts";
+import { antigravityMcpPermissionDisposition } from "../../provider/acp/AntigravityMcpPermission.ts";
 import { watchAntigravityPromptOutcome } from "../../provider/acp/AntigravityTurnOutcome.ts";
 import {
   antigravityApprovalOptions,
@@ -316,9 +317,18 @@ export const makeAntigravityAdapterV2 = Effect.fn("makeAntigravityAdapterV2")(fu
     path: yield* Path.Path,
     host: yield* ProviderHost.ProviderHost,
   };
+  const flavor = makeAntigravityAcpAdapterFlavor({ ...options, ...services });
   return yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
-    flavor: makeAntigravityAcpAdapterFlavor({ ...options, ...services }),
+    flavor: {
+      ...flavor,
+      permissionDisposition: (policy, request) =>
+        antigravityMcpPermissionDisposition(
+          policy,
+          request,
+          flavor.permissionDisposition?.(policy, request),
+        ),
+    },
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.continuationRequests === undefined

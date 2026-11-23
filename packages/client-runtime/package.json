@@ -79,6 +79,10 @@
       "types": "./src/userMessage.ts",
       "default": "./src/userMessage.ts"
     },
+    "./chat-activity": {
+      "types": "./src/chatActivity.ts",
+      "default": "./src/chatActivity.ts"
+    },
     "./message-sender": {
       "types": "./src/messageSender.ts",
       "default": "./src/messageSender.ts"

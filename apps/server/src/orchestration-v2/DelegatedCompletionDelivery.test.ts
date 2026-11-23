@@ -171,7 +171,11 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(
+    ServerSettings.layerTest({
+      providerInstances: { [modelSelection.instanceId]: { driver: "codex", config: {} } },
+    }),
+  ),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerPlatformTest),
   Layer.provide(ProviderRegistryMock.layer()),

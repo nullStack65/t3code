@@ -549,26 +549,30 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
           {onSetFounder && clientSession.client.deviceType !== "bot" ? (
             // Messages sent from this client show this person's name. The server refuses a client
             // naming itself, so the current one is set from another trusted client.
-            <select
-              aria-label={`Person using ${primaryLabel}`}
-              title={
-                clientSession.current
+            <Tooltip>
+              <TooltipTrigger render={<span />}>
+                <select
+                  aria-label={`Person using ${primaryLabel}`}
+                  data-client-session-founder
+                  className="h-6 rounded-md border border-border/60 bg-transparent px-1 text-xs text-foreground disabled:opacity-60"
+                  disabled={!canRevoke || clientSession.current}
+                  value={clientSession.founder ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    onSetFounder(clientSession.sessionId, value === "" ? null : (value as Founder));
+                  }}
+                >
+                  <option value="">Unknown person</option>
+                  <option value="kameron">Kameron</option>
+                  <option value="jeff">Jeff</option>
+                </select>
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                {clientSession.current
                   ? "Set from another client: a client cannot name the person using it"
-                  : "Messages sent from this client show this person's name"
-              }
-              data-client-session-founder
-              className="h-6 rounded-md border border-border/60 bg-transparent px-1 text-xs text-foreground disabled:opacity-60"
-              disabled={!canRevoke || clientSession.current}
-              value={clientSession.founder ?? ""}
-              onChange={(event) => {
-                const value = event.target.value;
-                onSetFounder(clientSession.sessionId, value === "" ? null : (value as Founder));
-              }}
-            >
-              <option value="">Unknown person</option>
-              <option value="kameron">Kameron</option>
-              <option value="jeff">Jeff</option>
-            </select>
+                  : "Messages sent from this client show this person's name"}
+              </TooltipPopup>
+            </Tooltip>
           ) : null}
           {!clientSession.current ? (
             <Button
@@ -612,6 +616,7 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
   const [pairingScopes, setPairingScopes] = useState<ReadonlyArray<AuthGrantScope>>([
     ...AuthStandardClientScopes,
   ]);
+  const [pairingFounder, setPairingFounder] = useState<Founder | null>(null);
   const selectedScopes = pairingScopes.filter((scope) => delegatableScopes.includes(scope));
   const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
 
@@ -626,11 +631,16 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
     const trimmedLabel = pairingLabel.trim();
     const result = await createPairingCredential({
       environmentId,
-      input: { ...(trimmedLabel ? { label: trimmedLabel } : {}), scopes: selectedScopes },
+      input: {
+        ...(trimmedLabel ? { label: trimmedLabel } : {}),
+        scopes: selectedScopes,
+        ...(pairingFounder === null ? {} : { founder: pairingFounder }),
+      },
     });
     if (result._tag === "Success") {
       onPairingLinkCreated(result.value);
       setPairingLabel("");
+      setPairingFounder(null);
       setPairingScopes(
         AuthStandardClientScopes.filter((scope) => delegatableScopes.includes(scope)),
       );
@@ -681,6 +691,7 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
           setDialogOpen(open);
           if (!open) {
             setPairingLabel("");
+            setPairingFounder(null);
             setPairingScopes(
               AuthStandardClientScopes.filter((scope) => delegatableScopes.includes(scope)),
             );
@@ -717,6 +728,26 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
                 disabled={isCreatingPairingLink}
                 autoFocus
               />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-foreground">Founder</span>
+              <select
+                aria-label="Founder this link enrolls"
+                className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm text-foreground disabled:opacity-60"
+                value={pairingFounder ?? ""}
+                disabled={isCreatingPairingLink}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setPairingFounder(value === "" ? null : (value as Founder));
+                }}
+              >
+                <option value="">Unknown person</option>
+                <option value="kameron">Kameron</option>
+                <option value="jeff">Jeff</option>
+              </select>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                Messages from the paired client name this founder.
+              </span>
             </label>
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-3">

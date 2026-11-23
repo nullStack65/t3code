@@ -488,6 +488,25 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
+/** One read cursor per founder. Absent until a named founder visits a shared thread. */
+export const FounderVisits = Schema.Struct({
+  kameron: Schema.optional(Schema.DateTimeUtc),
+  jeff: Schema.optional(Schema.DateTimeUtc),
+});
+export type FounderVisits = typeof FounderVisits.Type;
+
+const FounderVisitsJson = Schema.Struct({
+  kameron: Schema.optional(Schema.DateTimeUtcFromString),
+  jeff: Schema.optional(Schema.DateTimeUtcFromString),
+});
+
+/** The last message each founder has actually been shown. Absent until they open or scroll. */
+export const FounderSeenMessages = Schema.Struct({
+  kameron: Schema.optional(MessageId),
+  jeff: Schema.optional(MessageId),
+});
+export type FounderSeenMessages = typeof FounderSeenMessages.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   inbox: Schema.optionalKey(ThreadInbox),
@@ -545,6 +564,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /**
+   * Per-founder read cursors. A shared thread keeps these apart so one founder reading does not
+   * move the other's unread mark. Absent on threads that still share `lastVisitedAt`.
+   */
+  visitsByFounder: Schema.optional(FounderVisits),
+  /** Last message each founder was shown. Writing it does not start a turn. */
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -572,6 +598,8 @@ export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 export const OrchestrationV2ThreadVisit = Schema.Struct({
   lastVisitedAt: OrchestrationV2AppThread.fields.lastVisitedAt,
   opens: OrchestrationV2AppThread.fields.opens,
+  visitsByFounder: Schema.optional(FounderVisits),
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
 });
 export type OrchestrationV2ThreadVisit = typeof OrchestrationV2ThreadVisit.Type;
 
@@ -583,7 +611,65 @@ export function applyOrchestrationV2ThreadVisit<Thread extends OrchestrationV2Ap
     ...thread,
     lastVisitedAt: visit.lastVisitedAt,
     ...(visit.opens === undefined ? {} : { opens: visit.opens }),
+    ...(visit.visitsByFounder === undefined ? {} : { visitsByFounder: visit.visitsByFounder }),
+    ...(visit.seenMessageByFounder === undefined
+      ? {}
+      : { seenMessageByFounder: visit.seenMessageByFounder }),
   };
+}
+
+/**
+ * The cursors after `founder` reads a shared thread. The first such visit copies the old shared
+ * cursor onto the other founder, then moves only the reader. A thread nobody has visited marks
+ * both founders read as of this visit, so a later reply is still unread for the founder who was
+ * not here. Leaving that founder unset hides the badge, because a missing stamp is not unread.
+ * A visit that is not newer returns the existing map, so the caller can skip a write.
+ */
+export function nextFounderVisits(
+  thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
+  founder: Founder,
+  visitedAt: DateTime.Utc,
+): FounderVisits {
+  const current = thread.visitsByFounder;
+  const seeded: FounderVisits =
+    current ??
+    (thread.lastVisitedAt === null
+      ? { kameron: visitedAt, jeff: visitedAt }
+      : { kameron: thread.lastVisitedAt, jeff: thread.lastVisitedAt });
+  const previous = seeded[founder];
+  if (
+    previous !== undefined &&
+    DateTime.toEpochMillis(previous) >= DateTime.toEpochMillis(visitedAt)
+  ) {
+    return current ?? seeded;
+  }
+  return { ...seeded, [founder]: visitedAt };
+}
+
+/** Mark-unread rewinds one founder's cursor and leaves the other's where it is. */
+export function rewindFounderVisit(
+  thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
+  founder: Founder,
+  visitedAt: DateTime.Utc,
+): FounderVisits {
+  const current = thread.visitsByFounder;
+  const seeded: FounderVisits =
+    current ??
+    (thread.lastVisitedAt === null
+      ? {}
+      : { kameron: thread.lastVisitedAt, jeff: thread.lastVisitedAt });
+  return { ...seeded, [founder]: visitedAt };
+}
+
+/** The message map after `founder` is shown a message. The same id returns the existing map. */
+export function nextFounderSeenMessage(
+  thread: Pick<OrchestrationV2AppThread, "seenMessageByFounder">,
+  founder: Founder,
+  messageId: MessageId,
+): FounderSeenMessages {
+  const current = thread.seenMessageByFounder;
+  if (current?.[founder] === messageId) return current ?? { [founder]: messageId };
+  return { ...(current ?? {}), [founder]: messageId };
 }
 
 /** A thread another agent drives: a local subagent or a task delegated from a linked environment. */
@@ -749,6 +835,44 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
+/**
+ * How a message reaches a thread. `digest` never starts a turn: it rides along with the next
+ * turn another message starts. `when_idle` starts only after every other queued message.
+ */
+export const OrchestrationV2DeliveryClass = Schema.Literals([
+  "interrupt",
+  "steer_at_tool_boundary",
+  "next_turn",
+  "when_idle",
+  "digest",
+]);
+export type OrchestrationV2DeliveryClass = typeof OrchestrationV2DeliveryClass.Type;
+
+export const OrchestrationV2DigestCategory = Schema.Literals([
+  "alert",
+  "lane_result",
+  "fyi",
+  "decision_needed",
+]);
+export type OrchestrationV2DigestCategory = typeof OrchestrationV2DigestCategory.Type;
+
+export const OrchestrationV2MessageDelivery = Schema.Struct({
+  class: OrchestrationV2DeliveryClass,
+  /** An undelivered message with the same key is replaced by the newer one. */
+  coalesceKey: Schema.optional(TrimmedNonEmptyString),
+  /** Undelivered at this time, the message is dropped. */
+  expiresAt: Schema.optional(Schema.DateTimeUtc),
+  category: Schema.optional(OrchestrationV2DigestCategory),
+});
+export type OrchestrationV2MessageDelivery = typeof OrchestrationV2MessageDelivery.Type;
+
+export const OrchestrationV2DigestEntry = Schema.Struct({
+  messageId: MessageId,
+  category: OrchestrationV2DigestCategory,
+  text: Schema.String,
+});
+export type OrchestrationV2DigestEntry = typeof OrchestrationV2DigestEntry.Type;
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -786,6 +910,9 @@ export const OrchestrationV2Run = Schema.Struct({
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
+  delivery: Schema.optional(OrchestrationV2MessageDelivery),
+  /** Digest messages folded into this run's turn, sent to the provider ahead of its message. */
+  digest: Schema.optional(Schema.Array(OrchestrationV2DigestEntry)),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
@@ -1458,6 +1585,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   linkedSender: Schema.optional(OrchestrationV2LinkedSender),
   sentBy: Schema.optional(OrchestrationV2MessageSentBy),
   idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+  /** A human side note. It is stored and shown, and never sent to the provider. */
+  humanNote: Schema.optional(Schema.Literal(true)),
   seenMarker: Schema.optional(ThreadSeenMarkerSummary),
   /**
    * The message is the script a provider-native workflow run executes, not prose. Clients show
@@ -1657,6 +1786,9 @@ export type OrchestrationV2UserMessageInputIntent =
 /** Notices without a level predate it and are warnings. */
 const OrchestrationV2SystemNoticeLevel = Schema.Literals(["info", "warning", "error"]);
 
+/** A notice about an MCP server that a sign-in from the thread would fix. */
+const OrchestrationV2McpSignIn = Schema.Struct({ server: Schema.String });
+
 /** A same-harness model or effort change that took effect with this message. */
 export const OrchestrationV2ModelSwitch = Schema.Struct({
   from: ModelSelection,
@@ -1784,6 +1916,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    humanNote: Schema.optional(Schema.Literal(true)),
+    humanNotePromoted: Schema.optional(Schema.Literal(true)),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
     inputIntent: OrchestrationV2UserMessageInputIntent,
@@ -1909,6 +2043,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     /** A provider safeguard moved the turn to this model. */
     fallbackModel: Schema.optional(Schema.String),
+    mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2310,6 +2445,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Guest messages waiting for the owner to send or dismiss. Absent from older servers. */
   pendingGuestMessageCount: Schema.optional(NonNegativeInt),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
+  /**
+   * Founders named in the latest visible message. Omitted when nobody is named, so a shell
+   * row never carries message text just to badge a mention.
+   */
+  attentionMentions: Schema.optional(Schema.Array(Founder)),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   /** Excludes wakes and agent messages that advance latestUserMessageAt through the user role. */
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2341,6 +2481,9 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
   standing: Schema.optional(StoredThreadStanding),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Per-founder read cursors. Older servers omit them; clients then keep the shared cursor. */
+  visitsByFounder: Schema.optional(FounderVisits),
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
   opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -2532,6 +2675,7 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  visitsByFounder: Schema.optional(FounderVisitsJson),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -2555,6 +2699,8 @@ export type OrchestrationV2AppThreadJson = typeof OrchestrationV2AppThreadJson.T
 export const OrchestrationV2ThreadVisitJson = Schema.Struct({
   lastVisitedAt: OrchestrationV2AppThreadJson.fields.lastVisitedAt,
   opens: OrchestrationV2AppThreadJson.fields.opens,
+  visitsByFounder: Schema.optional(FounderVisitsJson),
+  seenMessageByFounder: Schema.optional(FounderSeenMessages),
 });
 
 export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => ({
@@ -2563,6 +2709,12 @@ export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => (
   startedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   completedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   workStartedAt: Schema.optional(Schema.DateTimeUtcFromString),
+  delivery: Schema.optional(
+    OrchestrationV2MessageDelivery.mapFields((delivery) => ({
+      ...delivery,
+      expiresAt: Schema.optional(Schema.DateTimeUtcFromString),
+    })),
+  ),
 }));
 export type OrchestrationV2RunJson = typeof OrchestrationV2RunJson.Type;
 
@@ -2704,6 +2856,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    humanNote: Schema.optional(Schema.Literal(true)),
+    humanNotePromoted: Schema.optional(Schema.Literal(true)),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     freshContext: OrchestrationV2Run.fields.freshContext,
     inputIntent: OrchestrationV2UserMessageInputIntent,
@@ -2822,6 +2976,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     /** A provider safeguard moved the turn to this model. */
     fallbackModel: Schema.optional(Schema.String),
+    mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2988,6 +3143,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  visitsByFounder: Schema.optional(FounderVisitsJson),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -3348,11 +3504,23 @@ export const OrchestrationV2Command = Schema.Union([
     // Older servers ignore both fields and only move the read watermark.
     opened: Schema.optional(Schema.Boolean),
     searchQuery: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+    /**
+     * Whose cursor this visit moves. On a shared thread the other founder's cursor stays.
+     * Older servers ignore it and move the one shared watermark.
+     */
+    founder: Schema.optional(Founder),
+    /**
+     * The last message this founder was shown. Recorded with the visit so unread can move.
+     * It never starts a turn.
+     */
+    lastSeenMessageId: Schema.optional(MessageId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.mark-unread"),
     commandId: CommandId,
     threadId: ThreadId,
+    /** On a shared thread, rewind only this founder's cursor. Older servers ignore it. */
+    founder: Schema.optional(Founder),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
@@ -3472,6 +3640,8 @@ export const OrchestrationV2Command = Schema.Union([
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     sentBy: Schema.optional(OrchestrationV2MessageSentBy),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
+    /** Record a human side note on a shared thread. It does not start a provider turn. */
+    humanNote: Schema.optional(Schema.Literal(true)),
     seenMarker: Schema.optional(ThreadSeenMarker),
     /** Start a new provider session without the thread's earlier context. Never steers. */
     freshContext: Schema.optional(Schema.Boolean),
@@ -3491,6 +3661,7 @@ export const OrchestrationV2Command = Schema.Union([
     steerFollowUpAfterRunOrdinal: Schema.optional(NonNegativeInt),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
+    delivery: Schema.optional(OrchestrationV2MessageDelivery),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
         parentRunId: RunId,
@@ -3507,6 +3678,7 @@ export const OrchestrationV2Command = Schema.Union([
       Schema.Struct({ type: Schema.Literal("restart_active"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("queue_after_active") }),
       Schema.Struct({ type: Schema.Literal("start_immediately") }),
+      Schema.Struct({ type: Schema.Literal("promote_human_note"), noteId: MessageId }),
     ]),
   }),
   Schema.Struct({
@@ -3965,6 +4137,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   subscribeThread: "orchestration.subscribeThread",
   subscribeCommandOutput: "orchestration.subscribeCommandOutput",
   subscribePromptSuggestion: "orchestration.subscribePromptSuggestion",
+  reportTyping: "orchestration.reportTyping",
+  subscribeTyping: "orchestration.subscribeTyping",
 } as const;
 
 export const OrchestrationV2SubscribeCommandOutputInput = Schema.Struct({
@@ -3997,6 +4171,21 @@ export class OrchestrationV2CommandOutputError extends Schema.TaggedError<Orches
 export const OrchestrationV2SubscribePromptSuggestionInput = Schema.Struct({
   threadId: ThreadId,
 });
+
+export const OrchestrationV2ReportTypingInput = Schema.Struct({
+  threadId: ThreadId,
+  typing: Schema.Boolean,
+});
+export type OrchestrationV2ReportTypingInput = typeof OrchestrationV2ReportTypingInput.Type;
+
+/** Who is typing on one thread. An empty list means nobody. */
+export const OrchestrationV2TypingSnapshot = Schema.Struct({
+  threadId: ThreadId,
+  founders: Schema.Array(Founder),
+});
+export type OrchestrationV2TypingSnapshot = typeof OrchestrationV2TypingSnapshot.Type;
+
+export const OrchestrationV2SubscribeTypingInput = Schema.Struct({});
 
 /** Unpersisted predicted next prompt for the run that produced it; null when there is none. */
 export const OrchestrationV2PromptSuggestion = Schema.NullOr(
@@ -4751,6 +4940,14 @@ export const OrchestrationV2RpcSchemas = {
   subscribePromptSuggestion: {
     input: OrchestrationV2SubscribePromptSuggestionInput,
     output: OrchestrationV2PromptSuggestion,
+  },
+  reportTyping: {
+    input: OrchestrationV2ReportTypingInput,
+    output: Schema.Void,
+  },
+  subscribeTyping: {
+    input: OrchestrationV2SubscribeTypingInput,
+    output: OrchestrationV2TypingSnapshot,
   },
 } as const;
 

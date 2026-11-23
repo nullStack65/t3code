@@ -1,4 +1,5 @@
 import {
+  type MessageSender,
   messageSenderDetail,
   messageSenderLabel,
   resolveMessageSender,
@@ -232,6 +233,7 @@ import {
   isSecretRequestActivityGroup,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
+  type ThreadFeedMessage,
   messageFoldRunId,
 } from "../../lib/threadActivity";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
@@ -250,6 +252,7 @@ import {
   appendGuestPendingMessages,
   appendPendingThreadMessages,
   createThreadFeedGrouping,
+  foldThreadFeedActivity,
   isCompactionCommandFeedEntry,
   type GroupedThreadFeedRow,
   type ThreadFeedRow,
@@ -384,6 +387,8 @@ export interface ThreadFeedProps {
   readonly onIsAtEndChange?: (isAtEnd: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
+  readonly onPromoteNote?: ((noteId: MessageId) => Promise<void>) | undefined;
+  readonly decisionRequestedAt?: string | undefined;
 }
 
 const USER_MESSAGE_COPY_MENU_ACTIONS = [
@@ -1779,12 +1784,75 @@ function RunFoldButton({
   );
 }
 
+function ThreadPersonHeading({ sender }: { readonly sender: MessageSender }) {
+  if (sender.kind !== "person") return null;
+  const detail = messageSenderDetail(sender);
+  return (
+    <Text className="mb-1 pr-1 text-2xs text-foreground-muted opacity-80" numberOfLines={1}>
+      <Text className="font-t3-medium">{messageSenderLabel(sender)}</Text>
+      {detail === null ? "" : ` · ${detail}`}
+    </Text>
+  );
+}
+
+function ThreadHumanNote({
+  message,
+  onPromote,
+}: {
+  readonly message: ThreadFeedMessage;
+  readonly onPromote?: ThreadFeedProps["onPromoteNote"];
+}) {
+  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+  const promoted = message.humanNotePromoted || status === "sent";
+  return (
+    <View className="max-w-[85%] self-end rounded-[20px] border border-warning-border bg-warning px-3.5 py-2.5">
+      <View className="flex-row flex-wrap items-center gap-x-3">
+        <Text className="font-t3-medium text-xs text-warning-foreground">Model-hidden note</Text>
+        {onPromote && !promoted && message.visibility !== "inherited" ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: status === "sending", busy: status === "sending" }}
+            disabled={status === "sending"}
+            onPress={async () => {
+              setStatus("sending");
+              try {
+                await onPromote(message.id);
+                setStatus("sent");
+              } catch {
+                setStatus("failed");
+              }
+            }}
+            className="min-h-11 justify-center"
+          >
+            <Text className="font-t3-medium text-xs text-foreground">
+              {status === "sending" ? "Sending…" : "Promote to agent"}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+      <Text selectable className="font-sans text-sm text-foreground">
+        {message.text}
+      </Text>
+      {promoted || status === "failed" ? (
+        <Text accessibilityLiveRegion="polite" className="pt-1 text-xs text-foreground-muted">
+          {message.humanNotePromoted
+            ? "Promoted to agent"
+            : promoted
+              ? "Queued for agent"
+              : "Could not promote the note"}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 function renderFeedEntry(
   info: { item: ThreadFeedRow; index: number },
   props: Pick<
     ThreadFeedProps,
     | "environmentId"
     | "onUseArtifactTemplate"
+    | "onPromoteNote"
     | "skills"
     | "dispatchingMessageId"
     | "onEditPendingMessage"
@@ -1803,6 +1871,7 @@ function renderFeedEntry(
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey?: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
+    readonly onToggleActivityFold: (row: Extract<ThreadFeedRow, { type: "activity-fold" }>) => void;
     readonly onToggleTurnFold: (runId: RunId) => void;
     readonly onOpenTurnDiff: (checkpoint: ThreadCheckpointSummary) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
@@ -1830,6 +1899,30 @@ function renderFeedEntry(
 ) {
   const entry = info.item;
   const { markdownStyles, iconSubtleColor, userBubbleColor } = props;
+
+  if (entry.type === "activity-fold") {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: entry.expanded }}
+        onPress={() => props.onToggleActivityFold(entry)}
+        className="min-h-11 flex-row items-center gap-1.5"
+      >
+        <ThreadDisclosureChevron
+          expanded={entry.expanded}
+          collapsedDirection="right"
+          size={15}
+          tintColor={iconSubtleColor}
+        />
+        <Text
+          numberOfLines={1}
+          className="shrink font-t3-medium text-sm tabular-nums text-foreground-muted"
+        >
+          {entry.summary}
+        </Text>
+      </Pressable>
+    );
+  }
 
   if (entry.type === "guest-pending") {
     return (
@@ -2052,6 +2145,15 @@ function renderFeedEntry(
       !assistantTurnStillInProgress &&
       !message.streaming;
 
+    if (isUser && message.humanNote) {
+      return (
+        <View className="items-end">
+          <ThreadPersonHeading sender={resolveMessageSender(message)} />
+          <ThreadHumanNote message={message} onPromote={props.onPromoteNote} />
+        </View>
+      );
+    }
+
     if (isUser && props.workflowOpening?.messageId === message.id) {
       return (
         <ThreadWorkflowOpening
@@ -2113,7 +2215,9 @@ function renderFeedEntry(
         (message.senderThreadId
           ? scopeThreadRef(props.environmentId, message.senderThreadId)
           : null);
-      const foldExpanded = foldRowId !== null && (props.expandedWorkRows[foldRowId] ?? false);
+      const foldExpanded =
+        foldRowId !== null &&
+        (props.expandedWorkRows[foldRowId] ?? entry.activityRevealed === true);
       const bubbleBodyVisible = foldRowId === null || foldExpanded;
       const intentBadge = props.userMessageGrouping.continuesSteer
         ? null
@@ -2171,15 +2275,9 @@ function renderFeedEntry(
           {presentation.guestName !== undefined ? (
             <GuestMessageName name={presentation.guestName} />
           ) : null}
-          {sender.kind === "person" && !props.userMessageGrouping.groupedWithPrevious ? (
-            <Text
-              className="mb-1 pr-1 text-2xs text-foreground-muted opacity-80"
-              numberOfLines={1}
-            >
-              <Text className="font-t3-medium">{messageSenderLabel(sender)}</Text>
-              {messageSenderDetail(sender) === null ? "" : ` · ${messageSenderDetail(sender)}`}
-            </Text>
-          ) : null}
+          {props.userMessageGrouping.groupedWithPrevious ? null : (
+            <ThreadPersonHeading sender={sender} />
+          )}
           {mediaAttachments.length + pendingMedia.length > 0 ? (
             <View
               className={hasBubble ? "mb-2" : undefined}
@@ -2926,6 +3024,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const viewportWidth =
     settledPaneWidth !== null ? Math.round(settledPaneWidth) : measuredViewportWidth;
   const [viewportHeight, setViewportHeight] = useState(() => initialSplitViewport?.height ?? 0);
+  const [dismissedActivity, setDismissedActivity] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
   const [disclosureLayout, setDisclosureLayout] = useState<DisclosureLayout | null>(null);
   const disclosureMotionRef = useRef<DisclosureLayout | null>(null);
   const disclosureMotionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3608,11 +3709,32 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       expandedTurnIds: new Set(current.expandedTurnIds).add(jumpRunId),
     }));
   }
-  const setupAnchorIndex = presentedFeed.findIndex(
+  const visibleFeed = useMemo(
+    () =>
+      foldThreadFeedActivity(presentedFeed, props.feed, {
+        open: expandedWorkRows,
+        dismissed: dismissedActivity,
+        revealedMessageId,
+        latestRun: props.latestRun
+          ? { id: props.latestRun.runId, status: props.latestRun.status }
+          : null,
+        decisionRequestedAt: props.decisionRequestedAt,
+      }),
+    [
+      presentedFeed,
+      props.feed,
+      expandedWorkRows,
+      dismissedActivity,
+      revealedMessageId,
+      props.latestRun,
+      props.decisionRequestedAt,
+    ],
+  );
+  const setupAnchorIndex = visibleFeed.findIndex(
     (entry) => entry.type === "message" && entry.message.role === "user",
   );
   const [groupFeed] = useState(createThreadFeedGrouping);
-  const groupedFeed = groupFeed(presentedFeed, {
+  const groupedFeed = groupFeed(visibleFeed, {
     workflowOpeningMessageId: workflowOpening?.messageId,
     setupAnchorIndex:
       props.worktreeSetup || props.setupWorkingStartedAt || props.preparingWorktree
@@ -3626,7 +3748,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     if (list && bottom > 0) list.reportContentInset({ bottom });
   };
   const jumpIndex = jumpReady
-    ? presentedFeed.findIndex((entry) => entry.type === "message" && entry.id === jumpToMessageId)
+    ? visibleFeed.findIndex((entry) => entry.type === "message" && entry.id === jumpToMessageId)
     : null;
   const landJump = useEffectEvent((index: number) => {
     const list = listRef.current;
@@ -3657,7 +3779,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   };
 
   const anchoredEndSpace = resolveChatListAnchoredEndSpace(
-    presentedFeed,
+    visibleFeed,
     props.anchorMessageId,
     (entry) => (entry.type === "message" ? entry.id : null),
     { anchorOffset: anchorTopInset + CHAT_LIST_ANCHOR_OFFSET },
@@ -3832,6 +3954,21 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     });
   };
 
+  const onToggleActivityFold = (row: Extract<ThreadFeedRow, { type: "activity-fold" }>) => {
+    preserveDisclosurePosition(row.id);
+    setInteractionState((current) => ({
+      ...current,
+      expandedWorkRows: { ...current.expandedWorkRows, [row.id]: !row.expanded },
+      revealedMessageId: null,
+    }));
+    setDismissedActivity((previous) => {
+      const next = new Map(previous);
+      if (row.expanded && row.attention !== null) next.set(row.id, row.attention);
+      else next.delete(row.id);
+      return next;
+    });
+  };
+
   const onToggleTurnFold = (runId: RunId) => {
     preserveDisclosurePosition(`run-fold:${runId}`);
     setInteractionState((current) => {
@@ -3854,7 +3991,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // estimatedItemSize tall, and scrolling up through unmeasured content
   // corrects each row's height as it mounts — the feed visibly jumps.
   const getFixedItemSize = (entry: ThreadFeedRow) => {
-    if (entry.type === "guest-pending") return undefined;
+    if (entry.type === "guest-pending" || entry.type === "activity-fold") return undefined;
     if (entry.type === "html-render") {
       return htmlRenderRowHeight(htmlRenderFrameHeight(entry.render, contentWidth));
     }
@@ -3947,6 +4084,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             dispatchingMessageId: props.dispatchingMessageId,
             onEditPendingMessage: props.onEditPendingMessage,
             onUseArtifactTemplate: props.onUseArtifactTemplate,
+            onPromoteNote: props.onPromoteNote,
+            onToggleActivityFold,
             threadId: props.threadId,
             copiedRowId,
             expandedWorkRows,

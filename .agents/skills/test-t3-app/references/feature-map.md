@@ -37,7 +37,7 @@ Code: apps/web/src/components/sidebar/
 - **sidebar.working-section** — collapsed "Working" section for threads busy with background work. Turn off in **Settings → General → Working section**.
 - **sidebar.snoozed-shelf** — "Snoozed" threads, hidden until their wake time.
 - **sidebar.settled-shelf** — "Settled" finished threads. Drag a thread onto the header to settle it.
-- **sidebar.bots-group** — "Bots" group for standing bot threads.
+- **sidebar.bots-group** — "My Bots" and "Shared Bots" groups for standing bot threads. Shared bots are the ones filed to the Shared inbox.
 - **sidebar.project-folder** — per-project folders when **Settings → Labs → Boring sidebar (group by project)** is on; "Pin project" / "Unpin project", "Project settings".
 - **sidebar.thread-row** — one thread: title, status, PR badge, hover actions. Click opens `/$environmentId/$threadId`. Drop files on it to attach them.
 - **sidebar.thread-status** — row status labels: "Working", "Waiting", "Needs you", "Needs action", "Usage limit reached", "Failed", "Woke", "Unsent draft".
@@ -80,6 +80,8 @@ Code: apps/web/src/components/chat/MessagesTimeline.tsx
 
 - **timeline.user-message** — your messages, with sender line and "Copy message".
 - **timeline.assistant-reply** — agent replies with markdown, code blocks, math, Mermaid, file and thread links.
+- **timeline.agent-activity** — collapsed agent updates. Open the strip to read the original messages and work.
+- **timeline.human-note** — model-hidden note with "Promote to agent" to send its text in a separate turn.
 - **timeline.work-group** — collapsed tool calls and commands; "Show more" / "Show less".
 - **timeline.approval** — "Command approval", "File change approval", "File read approval", "Permission request": "Approve", "Decline", "Always allow this session", "More approval options".
 - **timeline.user-input** — agent questions: "Type your answer", "Previous question" / "Next question", "Submit answer" (one question) or "Submit answers".
@@ -209,7 +211,7 @@ Code:
 Connections:
 
 - **settings.connections** — `/settings/connections`, "Environments": "This machine", "Linked environments", "Network access", "Tailscale HTTPS", "T3 Connect", "Load balancing".
-- **settings.access** — `/settings/access`, "Sharing & access": paired devices, "Guest links", "Require approval for new devices".
+- **settings.access** — `/settings/access`, "Sharing & access": paired devices, "Guest links", "Require approval for new devices", "Require enrolled founders".
 - **settings.secrets** — `/settings/secrets`, "Secrets" (only when secrets are enabled).
 
 More:

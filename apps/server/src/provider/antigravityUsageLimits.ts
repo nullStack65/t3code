@@ -11,6 +11,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   makeUnavailableUsageLimits,
@@ -39,15 +40,6 @@ const TokenFile = Schema.Struct({
   client_secret: Schema.NonEmptyString,
   refresh_token: Schema.NonEmptyString,
   project_id: Schema.optional(Schema.String),
-});
-// The 1.5.x CLI never writes acp_token.json: it keeps its sign-in in the OS keyring, or in
-// antigravity-oauth-token without one or when T3 bypasses the keyring. It stores no OAuth client, so T3 cannot refresh it.
-const CliToken = Schema.Struct({
-  token: Schema.Struct({
-    access_token: Schema.NonEmptyString,
-    refresh_token: Schema.optional(Schema.String),
-    expiry: Schema.optional(Schema.String),
-  }),
 });
 const TokenResponse = Schema.Struct({
   access_token: Schema.NonEmptyString,
@@ -89,7 +81,6 @@ const Models = Schema.Struct({
 });
 
 const decodeTokenFile = Schema.decodeEffect(Schema.fromJsonString(TokenFile));
-const decodeCliToken = Schema.decodeEffect(Schema.fromJsonString(CliToken));
 const decodeTokenResponse = Schema.decodeUnknownEffect(TokenResponse);
 const decodeUserInfo = Schema.decodeUnknownEffect(UserInfo);
 const decodeSummary = Schema.decodeUnknownEffect(Summary);
@@ -136,6 +127,125 @@ function summaryResetTime(
   return untouched ? undefined : bucket.resetTime;
 }
 
+const CLI_ACCESS_CACHE_MS = 5 * 60 * 1000;
+const KEYRING_SERVICE = "gemini";
+const KEYRING_ACCOUNT = "antigravity";
+
+export interface AntigravityCliAccess {
+  readonly accessToken: string;
+  readonly identity: string;
+  readonly expiresAtMs?: number;
+}
+
+/** Google writes nanoseconds. `Date.parse` only has to accept milliseconds. */
+function trimAntigravityTimestamp(value: string) {
+  const normalized = value.endsWith("Z") ? `${value.slice(0, -1)}+00:00` : value;
+  const dot = normalized.indexOf(".");
+  if (dot < 0) return normalized;
+  let index = dot + 1;
+  let digits = "";
+  while (
+    index < normalized.length &&
+    normalized.charCodeAt(index) >= 48 &&
+    normalized.charCodeAt(index) <= 57
+  ) {
+    if (digits.length < 3) digits += normalized[index];
+    index += 1;
+  }
+  return `${normalized.slice(0, dot)}${digits ? `.${digits}` : ""}${normalized.slice(index)}`;
+}
+
+function timestampMillis(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 10_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const parsed = Date.parse(trimAntigravityTimestamp(value));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * `agy` 1.5 stores this JSON in the Secret Service (service `gemini`, account
+ * `antigravity`) and does not write `acp_token.json`. There is no client secret,
+ * so the access token is used as-is.
+ */
+export function parseAntigravityCliCredential(
+  raw: string,
+  nowMs: number,
+): AntigravityCliAccess | "expired" | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const record = parsed as Record<string, unknown>;
+  const token =
+    record.token && typeof record.token === "object"
+      ? (record.token as Record<string, unknown>)
+      : record;
+  const accessToken = typeof token.access_token === "string" ? token.access_token : "";
+  if (!accessToken) return undefined;
+  const refreshToken = typeof token.refresh_token === "string" ? token.refresh_token : "";
+  const expiresAtMs = timestampMillis(token.expiry ?? record.expiry);
+  if (expiresAtMs !== undefined && expiresAtMs <= nowMs) return "expired";
+  return {
+    accessToken,
+    identity: refreshToken || accessToken,
+    ...(expiresAtMs === undefined ? {} : { expiresAtMs }),
+  };
+}
+
+// A single-executable server cannot import() a file-backed package; createRequire resolves it beside the
+// executable, as the other native externals do.
+const requireForKeyring = NodeModule.createRequire(import.meta.url);
+
+// The stored value is the OAuth token. Keep it out of span attributes.
+const readDefaultStoredSecret = Effect.fnUntraced(function* (
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+) {
+  const fromModule = yield* Effect.tryPromise({
+    try: async () => {
+      const keyring = requireForKeyring("@napi-rs/keyring") as {
+        readonly AsyncEntry?: new (
+          service: string,
+          account: string,
+        ) => { getPassword(): Promise<string | null> };
+        readonly Entry?: new (
+          service: string,
+          account: string,
+        ) => { getPassword(): Promise<string | null> | string | null };
+      };
+      const Entry = keyring.AsyncEntry ?? keyring.Entry;
+      if (!Entry) return null;
+      const secret = await new Entry(KEYRING_SERVICE, KEYRING_ACCOUNT).getPassword();
+      return typeof secret === "string" && secret.length > 0 ? secret : null;
+    },
+    catch: () => null,
+  }).pipe(Effect.orElseSucceed(() => null));
+  if (fromModule) return fromModule;
+  const platform = yield* HostProcess.Platform;
+  const command =
+    platform === "linux"
+      ? {
+          command: "secret-tool",
+          args: ["lookup", "service", KEYRING_SERVICE, "username", KEYRING_ACCOUNT],
+        }
+      : platform === "darwin"
+        ? {
+            command: "security",
+            args: ["find-generic-password", "-s", KEYRING_SERVICE, "-a", KEYRING_ACCOUNT, "-w"],
+          }
+        : undefined;
+  if (!command) return null;
+  const output = yield* spawner
+    .string(ChildProcess.make(command.command, command.args, { stderr: "ignore" }))
+    .pipe(Effect.orElseSucceed(() => ""));
+  const secret = output.trim();
+  return secret.length > 0 ? secret : null;
+});
+
 const sha256 = Effect.fnUntraced(function* (text: string) {
   const digest = yield* (yield* Digest.Digest).digest(
     Digest.sha256,
@@ -143,104 +253,6 @@ const sha256 = Effect.fnUntraced(function* (text: string) {
   );
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 });
-
-/** go-keyring stores UTF-8, which it prefixes and encodes on macOS. */
-export function decodeGoKeyringSecret(secret: ArrayLike<number>): string {
-  // The binding resolves a plain number array at runtime despite its Uint8Array type.
-  const text = new TextDecoder().decode(Uint8Array.from(secret));
-  if (text.startsWith("go-keyring-base64:")) {
-    return Buffer.from(text.slice("go-keyring-base64:".length), "base64").toString("utf8");
-  }
-  if (text.startsWith("go-keyring-encoded:")) {
-    return Buffer.from(text.slice("go-keyring-encoded:".length), "hex").toString("utf8");
-  }
-  return text;
-}
-
-class AntigravityKeyringError extends Schema.TaggedError<AntigravityKeyringError>()(
-  "AntigravityKeyringError",
-  { cause: Schema.Defect() },
-) {
-  override get message(): string {
-    return "Could not read the Antigravity sign-in from the system keyring.";
-  }
-}
-
-// A single-executable server resolves packages on disk only through `require`.
-const requireExternal = NodeModule.createRequire(import.meta.url);
-
-/**
- * go-keyring's Windows target is `gemini:antigravity`; @napi-rs/keyring reads `antigravity.gemini`,
- * and its `withTarget` overwrites the target with an empty secret before reading.
- */
-export function readWindowsCliCredential(
-  architecture: NodeJS.Architecture,
-): Uint8Array | undefined {
-  // CREDENTIALW offsets and the pointers below are 64-bit.
-  if (architecture !== "x64" && architecture !== "arm64") {
-    throw new Error(`no credential access on ${architecture}`);
-  }
-  const { DataType, load, open } = requireExternal("ffi-rs") as typeof import("ffi-rs");
-  open({ library: "t3-advapi32", path: "advapi32.dll" });
-  open({ library: "t3-kernel32", path: "kernel32.dll" });
-  const copy = (into: Buffer, from: bigint) =>
-    load({
-      library: "t3-kernel32",
-      funcName: "RtlMoveMemory",
-      retType: DataType.Void,
-      paramsType: [DataType.U8Array, DataType.BigInt, DataType.BigInt],
-      paramsValue: [into, from, BigInt(into.length)],
-    });
-  const out = Buffer.alloc(8);
-  const read = load({
-    library: "t3-advapi32",
-    funcName: "CredReadW",
-    retType: DataType.I32,
-    // CRED_TYPE_GENERIC
-    paramsType: [DataType.WString, DataType.U32, DataType.U32, DataType.U8Array],
-    paramsValue: ["gemini:antigravity", 1, 0, out],
-    errno: true as const,
-  });
-  if (read.value === 0) {
-    // ERROR_NOT_FOUND
-    if (read.errnoCode === 1168) return undefined;
-    throw new Error(`CredReadW failed with Windows error ${read.errnoCode}`);
-  }
-  const credential = out.readBigUInt64LE();
-  try {
-    // CredentialBlobSize is a DWORD at 32 and CredentialBlob a pointer at 40.
-    const header = Buffer.alloc(48);
-    copy(header, credential);
-    const size = header.readUInt32LE(32);
-    if (size === 0) return undefined;
-    const blob = Buffer.alloc(size);
-    copy(blob, header.readBigUInt64LE(40));
-    return blob;
-  } finally {
-    load({
-      library: "t3-advapi32",
-      funcName: "CredFree",
-      retType: DataType.Void,
-      paramsType: [DataType.BigInt],
-      paramsValue: [credential],
-    });
-  }
-}
-
-// Loaded lazily: a native binding that fails to load must not take the provider down.
-const readCliKeyringSecret = (platform: NodeJS.Platform, architecture: NodeJS.Architecture) =>
-  Effect.tryPromise({
-    try: async () => {
-      const secret =
-        platform === "win32"
-          ? readWindowsCliCredential(architecture)
-          : await new (
-              requireExternal("@napi-rs/keyring") as typeof import("@napi-rs/keyring")
-            ).AsyncEntry("gemini", "antigravity").getSecret();
-      return secret ? decodeGoKeyringSecret(secret) : undefined;
-    },
-    catch: (cause) => new AntigravityKeyringError({ cause }),
-  });
 
 /** Keys an account by its Google ID, which matches across machines and hubs; refresh tokens do not. */
 export const antigravityAccountFingerprint = (userInfo: unknown) =>
@@ -317,10 +329,52 @@ function modelWindows(models: typeof Models.Type) {
   return [...windows.values()];
 }
 
+const discoverAntigravityCliAccess = Effect.fn("AntigravityUsageProbe.discoverCliAccess")(
+  function* (input: {
+    readonly fs: FileSystem.FileSystem;
+    readonly path: Path.Path;
+    readonly homeDirectory: string;
+    readonly profileDirectory: string;
+    readonly nowMs: number;
+    readonly readStoredSecret?: Effect.Effect<string | null>;
+    readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  }) {
+    const files = [
+      input.path.join(input.profileDirectory, "antigravity-acp", "antigravity-oauth-token"),
+      input.path.join(input.profileDirectory, "antigravity-oauth-token"),
+      input.path.join(input.homeDirectory, ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+    ];
+    let expired = false;
+    for (const file of files) {
+      if (!(yield* input.fs.exists(file))) continue;
+      const raw = yield* input.fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""));
+      const parsed = parseAntigravityCliCredential(raw, input.nowMs);
+      if (parsed === "expired") {
+        expired = true;
+        continue;
+      }
+      if (parsed) return parsed;
+    }
+    const secret = yield* input.readStoredSecret ?? readDefaultStoredSecret(input.spawner);
+    if (secret) {
+      const parsed = parseAntigravityCliCredential(secret, input.nowMs);
+      if (parsed === "expired") return "expired" as const;
+      if (parsed) return parsed;
+    }
+    return expired ? ("expired" as const) : null;
+  },
+);
+
 export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
   readonly profileDirectory: string;
   readonly authMethod: AntigravitySettings["authMethod"];
-  readonly readKeyringSecret?: Effect.Effect<string | undefined, AntigravityKeyringError>;
+  /**
+   * Present only in tests. `null` is signed out, `"expired"` is a lapsed CLI
+   * token, and an access value is used directly. Omitting it reads the CLI files
+   * and the keyring.
+   */
+  readonly cliAccess?: AntigravityCliAccess | "expired" | null;
+  readonly readStoredSecret?: Effect.Effect<string | null>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -328,13 +382,9 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
   const crypto = yield* Digest.Digest;
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const tokenPath = path.join(input.profileDirectory, "antigravity-acp", "acp_token.json");
-  const cliTokenPath = path.join(
-    input.profileDirectory,
-    "antigravity-acp",
-    "antigravity-oauth-token",
-  );
-  const readKeyringSecret = input.readKeyringSecret ?? readCliKeyringSecret(platform, architecture);
   let cached:
     | { fingerprint: string; account: string; accessToken: string; expiresAt: number }
     | undefined;
@@ -359,43 +409,21 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       });
     }
     const now = yield* Clock.currentTimeMillis;
+    const signedOut = makeUnavailableUsageLimits({
+      checkedAt,
+      reason: "unsupported",
+      message: "Sign in with Google to see limits.",
+    });
+    const lapsed = makeUnavailableUsageLimits({
+      checkedAt,
+      reason: "probeFailed",
+      message:
+        "Antigravity's saved access token has lapsed. A running agy session refreshes it; the Antigravity app does not need to be open.",
+    });
     let accessToken: string;
     let account: string;
     let projectId: string | undefined;
-    if (!(yield* fs.exists(tokenPath))) {
-      cached = undefined;
-      // Google account instances bypass the keyring, whose one entry every profile shares.
-      const stored = (yield* fs.exists(cliTokenPath))
-        ? yield* fs.readFileString(cliTokenPath)
-        : input.authMethod === "oauth-business"
-          ? yield* readKeyringSecret
-          : undefined;
-      if (stored === undefined) {
-        return makeUnavailableUsageLimits({
-          checkedAt,
-          reason: "unsupported",
-          message: "Sign in with Google to see limits.",
-        });
-      }
-      const { token } = yield* decodeCliToken(stored);
-      if (!(Date.parse(token.expiry ?? "") > now + 60_000)) {
-        return makeUnavailableUsageLimits({
-          checkedAt,
-          reason: "probeFailed",
-          message:
-            "Antigravity's saved sign-in has expired. Start an Antigravity turn to renew it, then refresh limits.",
-        });
-      }
-      accessToken = token.access_token;
-      account = yield* request(
-        HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
-          HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
-        ),
-      ).pipe(
-        Effect.flatMap(antigravityAccountFingerprint),
-        Effect.catch(() => sha256(`antigravity-cli\0${token.refresh_token || accessToken}`)),
-      );
-    } else {
+    if (yield* fs.exists(tokenPath)) {
       const token = yield* fs.readFileString(tokenPath).pipe(Effect.flatMap(decodeTokenFile));
       projectId = token.project_id;
       const fingerprint = yield* sha256(
@@ -429,6 +457,51 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
             account,
             accessToken,
             expiresAt: now + refreshed.expires_in * 1000,
+          };
+        }
+      } else {
+        accessToken = cached.accessToken;
+        account = cached.account;
+      }
+    } else {
+      const cli =
+        "cliAccess" in input
+          ? (input.cliAccess ?? null)
+          : yield* discoverAntigravityCliAccess({
+              fs,
+              path,
+              homeDirectory,
+              profileDirectory: input.profileDirectory,
+              nowMs: now,
+              spawner,
+              ...(input.readStoredSecret ? { readStoredSecret: input.readStoredSecret } : {}),
+            });
+      if (cli === null) {
+        cached = undefined;
+        return signedOut;
+      }
+      if (cli === "expired") {
+        cached = undefined;
+        return lapsed;
+      }
+      const fingerprint = yield* sha256(`cli-access\0${cli.identity}`);
+      if (cached?.fingerprint !== fingerprint || cached.expiresAt <= now) {
+        cached = undefined;
+        accessToken = cli.accessToken;
+        account = yield* request(
+          HttpClientRequest.get("https://www.googleapis.com/oauth2/v2/userinfo").pipe(
+            HttpClientRequest.setHeaders({ Authorization: `Bearer ${accessToken}` }),
+          ),
+        ).pipe(
+          Effect.flatMap(antigravityAccountFingerprint),
+          Effect.orElseSucceed(() => fingerprint),
+        );
+        if (generation === startedGeneration) {
+          cached = {
+            fingerprint,
+            account,
+            accessToken,
+            expiresAt: cli.expiresAtMs ?? now + CLI_ACCESS_CACHE_MS,
           };
         }
       } else {
@@ -473,11 +546,16 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       return [...windows.values()];
     });
     const summary = yield* fetchWindows("retrieveUserQuotaSummary", antigravitySummaryWindows);
-    const windows = summary.length
-      ? summary
+    // A summary of only untouched buckets is not a Gemini reading.
+    const metered = summary.some(
+      (window) => window.usedPercent > 0 || window.resetsAt !== undefined,
+    );
+    const models = metered
+      ? []
       : yield* fetchWindows("fetchAvailableModels", (response) =>
           decodeModels(response).pipe(Effect.map(modelWindows)),
         );
+    const windows = models.length > 0 ? models : summary;
     if (windows.length === 0) {
       return makeUnavailableUsageLimits({
         checkedAt,

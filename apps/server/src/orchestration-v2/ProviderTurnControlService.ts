@@ -1,5 +1,5 @@
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
-import { formatSeenMarkerForProvider } from "@t3tools/shared/seenMarker";
+import { formatSeenMarkerForProvider, formatSharedSenderForProvider } from "@t3tools/shared/seenMarker";
 import {
   MessageId,
   type ModelSelection,
@@ -437,6 +437,7 @@ export const layer: Layer.Layer<
           const loaded = yield* load({ ...input, operation: "steer" });
           if (Option.isNone(loaded.session)) return;
           const { message, run } = loaded.context;
+          const { thread } = yield* projections.getThreadRecords(input.threadId, []);
           if (message === undefined || run === undefined) {
             return yield* new ProviderTurnControlError({
               threadId: input.threadId,
@@ -457,11 +458,15 @@ export const layer: Layer.Layer<
               message: {
                 messageId: message.id,
                 text: formatSeenMarkerForProvider(
-                  projectComposerContextForProvider({
-                    text: message.text,
-                    records: message.context?.records ?? [],
-                  }),
+                  formatSharedSenderForProvider(
+                    projectComposerContextForProvider({
+                      text: message.text,
+                      records: message.context?.records ?? [],
+                    }),
+                    thread.inbox?.audience === "shared" ? (message.sentBy?.founder ?? null) : null,
+                  ),
                   message.seenMarker,
+                  thread.inbox?.audience === "shared" ? (message.sentBy?.founder ?? null) : null,
                 ),
                 attachments: message.attachments,
                 createdBy: message.createdBy,

@@ -398,7 +398,7 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
   }),
 );
 
-it.effect("bounds the session handshake, not a tool call that waits longer", () =>
+it.effect("bounds the handshake tightly and a tool call past any wait there", () =>
   Effect.gen(function* () {
     const arrived = yield* Queue.unbounded<number>();
     const answer = yield* Deferred.make<void>();
@@ -408,8 +408,8 @@ it.effect("bounds the session handshake, not a tool call that waits longer", () 
         const index = requests++;
         yield* Queue.offer(arrived, index);
         // The first initialize, then the next initialized notification, never answer;
-        // the third session's tool call answers late.
-        if (index === 0 || index === 2) return yield* Effect.never;
+        // the third session's tool call answers late, and the one after it never does.
+        if (index === 0 || index === 2 || index === 6) return yield* Effect.never;
         if (index === 5) yield* Deferred.await(answer);
         return HttpClientResponse.fromWeb(
           request,
@@ -437,5 +437,13 @@ it.effect("bounds the session handshake, not a tool call that waits longer", () 
     yield* TestClock.adjust(Duration.minutes(1));
     yield* Deferred.succeed(answer, undefined);
     expect(yield* Fiber.join(waiting)).toEqual({ modes: "approval-required/plan" });
+
+    const hung = yield* probe.pipe(Effect.flip, Effect.forkScoped);
+    yield* Queue.takeN(arrived, 1);
+    yield* TestClock.adjust(Duration.minutes(2));
+    expect(yield* Fiber.join(hung)).toMatchObject({
+      code: "orchestration_error",
+      message: "The linked environment stopped answering.",
+    });
   }),
 );

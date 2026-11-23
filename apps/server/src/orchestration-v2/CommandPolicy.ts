@@ -135,8 +135,23 @@ export function followUpOwnerRun(
   );
 }
 
+/** Steering a provider mid-compaction aborts the compaction, so steers into it wait. */
+export function compactionHoldsSteer(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "turnItems" | "providerThreads" | "providerSessions"
+  >,
+  run: OrchestrationV2Run,
+): boolean {
+  return (
+    projection.turnItems.some(
+      (item) => item.runId === run.id && item.type === "compaction" && item.status === "running",
+    ) && providerTurnCapabilities(projection, run)?.activeSteeringDuringCompaction !== true
+  );
+}
+
 function providerTurnCapabilities(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "providerThreads" | "providerSessions">,
   run: OrchestrationV2Run,
 ) {
   const providerThread = projection.providerThreads.find(

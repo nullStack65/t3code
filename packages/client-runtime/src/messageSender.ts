@@ -101,6 +101,12 @@ export function resolveMessageSender(
 
 const FOUNDER_NAMES = { kameron: "Kameron", jeff: "Jeff" } satisfies Record<Founder, string>;
 
+/** The initial and name on a shared-thread message. */
+export function founderSenderBadge(founder: Founder) {
+  const name = FOUNDER_NAMES[founder];
+  return { name, initial: name.slice(0, 1) } as const;
+}
+
 const DEVICE_TYPE_NAMES = {
   desktop: "Desktop",
   mobile: "Phone",
@@ -110,12 +116,12 @@ const DEVICE_TYPE_NAMES = {
 } satisfies Record<OrchestrationV2MessageSentBy["deviceType"], string>;
 
 /** The person's name when someone assigned the client to them, else null. */
-export function messageSenderFounder(sender: MessageSender): Founder | null {
+function messageSenderFounder(sender: MessageSender): Founder | null {
   return sender.kind === "person" ? (sender.sentBy?.founder ?? null) : null;
 }
 
 /** The client a person sent from, by its name in Connections, else by its kind. */
-export function messageSenderDevice(sentBy: OrchestrationV2MessageSentBy): string {
+function messageSenderDevice(sentBy: OrchestrationV2MessageSentBy): string {
   return sentBy.device.trim() || DEVICE_TYPE_NAMES[sentBy.deviceType];
 }
 

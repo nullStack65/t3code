@@ -30,5 +30,14 @@
   "79b768229c9ef672": "Mantenimiento",
   "54b188d65247e42f": "Labs",
   "f41ea186c275b56e": "Acerca de",
-  "2a546119bf3879ee": "Archivados"
+  "2a546119bf3879ee": "Archivados",
+  "15f32e12fd49533f": "No se pudo continuar con el inicio de sesión. Vuelve a intentarlo.",
+  "54789628a737f557": "Iniciar sesión en {server}",
+  "f8fde2e549c61546": "Dirección de la página que abrió tu navegador",
+  "d9f6244b252d11f6": "Terminar de iniciar sesión",
+  "8aecbd38f1facf71": "Aprueba el acceso en tu navegador. Después abrirá una página que puede no cargar: copia la dirección de esa página y pégala aquí.",
+  "6e5bcc452add4f9b": "Abre el inicio de sesión. Mantén pulsado para copiar.",
+  "83be7aade7ff6360": "Sesión iniciada",
+  "ec21b232e0eacd4a": "Iniciar sesión",
+  "38574c0d1e49b278": "{preview}, sesión iniciada"
 }

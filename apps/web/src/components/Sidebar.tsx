@@ -34,7 +34,7 @@ import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import * as Schema from "effect/Schema";
 import {
   DndContext,
@@ -179,7 +179,7 @@ import {
   useSidebarThreadShells,
 } from "../state/linkedSidebar";
 import { environmentPresentations } from "../state/presentation";
-import { primaryServerKeybindingsAtom } from "../state/server";
+import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
@@ -197,8 +197,9 @@ import {
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { runBotMenuAction } from "./bots/botMenuActions";
-import { sortBotThreads, splitStandingThreads } from "./bots/botPresence";
+import { partitionBotGroups, sortBotThreads, splitStandingThreads } from "./bots/botPresence";
 import { SidebarBotsGroup } from "./sidebar/SidebarBotsGroup";
+import { SystemScheduledShelf } from "./sidebar/SystemScheduledShelf";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { ProjectRowActions } from "./ProjectComboboxRow";
@@ -210,7 +211,9 @@ import {
 import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
+  freshSessionThreadKeys,
   groupSidebarThreadsByProject,
+  isSystemScheduledThread,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
@@ -359,6 +362,33 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
   return !changed && previous !== null ? previous : next;
 }).pipe(Atom.withLabel("sidebar-provider-entries"));
 
+const EMPTY_SCHEDULED_THREAD_KEYS: ReadonlySet<string> = new Set();
+
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
+}
+
+// Fresh-session scheduled threads, keyed so a task tick with the same bindings does not rerender.
+const scheduledThreadKeysAtom = Atom.make((get) => {
+  const keys = freshSessionThreadKeys(
+    [...get(environmentPresentations.serverConfigsAtom).keys()].map((environmentId) => ({
+      environmentId,
+      tasks:
+        AsyncResult.getOrElse(
+          get(serverEnvironment.scheduledTasksLive({ environmentId, input: {} })),
+          () => null,
+        )?.tasks ?? [],
+    })),
+  );
+  const previous = Option.getOrNull(get.self<ReadonlySet<string>>());
+  if (previous !== null && sameStringSet(previous, keys)) return previous;
+  return keys.size === 0 ? EMPTY_SCHEDULED_THREAD_KEYS : keys;
+}).pipe(Atom.withLabel("sidebar-scheduled-thread-keys"));
+
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 
@@ -368,6 +398,7 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const WORKING_SHELF_EXPANDED_KEY = "t3code:sidebar:working-expanded";
+const SYSTEM_SHELF_REVEALED_KEY = "t3code:sidebar:system-scheduled";
 
 const inboxReturns = createInboxReturnTracker();
 
@@ -753,8 +784,12 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     : workingShelfEnabled
       ? sortInboxThreadsByReturn(active, inboxObservation.returnedAt)
       : sortThreadsForSidebar(active);
+  const sortedBots = sortBotThreads(bots);
+  const botGroups = partitionBotGroups(sortedBots);
   return {
-    botThreads: sortBotThreads(bots),
+    botThreads: sortedBots,
+    myBotThreads: botGroups.mine,
+    sharedBotThreads: botGroups.shared,
     pinnedThreads:
       optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
         ? sortedPinned
@@ -985,6 +1020,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const scheduledThreadKeys = useAtomValue(scheduledThreadKeysAtom);
+  const [systemShelfRevealed, setSystemShelfRevealed] = useLocalStorage(
+    SYSTEM_SHELF_REVEALED_KEY,
+    false,
+    Schema.Boolean,
+  );
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -1202,10 +1243,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         coverage: (environmentId) => threadListFilterCoverage(environmentId, threadListFilter),
       }
     : null;
+  // Fresh-session scheduled threads and the sys:daemon standing role leave the
+  // founder list. The System shelf is the only place they are drawn.
+  const isSystemThread = (thread: EnvironmentThreadShell) =>
+    isSystemScheduledThread({
+      key: threadShellKey(thread),
+      standingRole: thread.standing?.role ?? null,
+      scheduledThreadKeys,
+    });
+  const conversationThreads = inboxThreads.filter((thread) => !isSystemThread(thread));
   const listedThreads =
     promotingDraftThreadKeys.length === 0
-      ? inboxThreads
-      : inboxThreads.map((thread) =>
+      ? conversationThreads
+      : conversationThreads.map((thread) =>
           promotingDraftThreadKeys.includes(threadShellKey(thread))
             ? asLaunchingThread(thread)
             : thread,
@@ -1285,6 +1335,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const scopedProjectGroups = revealWidensScope ? [] : chosenProjectGroups;
   const scopedProjectRefs = scopedProjectGroups.flatMap((project) => project.memberProjectRefs);
   const scopedProjectKeys = revealWidensScope ? null : chosenScopeProjectKeys;
+  // The shelf ignores the inbox filter, so one click still shows an Agents-filed
+  // run. A hidden machine stays hidden while the list filter applies.
+  const systemThreads = filterSidebarV2VisibleThreads(
+    (listFilterApplies
+      ? threads.filter(
+          (thread) => !threadListFilter.hiddenEnvironmentIds.includes(thread.environmentId),
+        )
+      : threads
+    ).filter(isSystemThread),
+    scopedProjectKeys,
+    delegatedUnderParent,
+  );
   const threadSearch = useThreadSearch(
     connectedEnvironmentIds,
     threadSearchQuery,
@@ -1402,6 +1464,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const {
     workingShelfEnabled,
     botThreads,
+    myBotThreads,
+    sharedBotThreads,
     pinnedThreads,
     draggableThreadKeys,
     activeReorderableThreadKeys,
@@ -1460,11 +1524,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows
   // already shown keep their places while slower environments answer.
+  const searchCorpus = isSearchingThreads
+    ? [...searchableThreads, ...systemThreads]
+    : searchableThreads;
   const threadByMatchKey =
     threadSearch.matches.length === 0
       ? null
       : new Map(
-          searchableThreads.map((thread) => [
+          searchCorpus.map((thread) => [
             threadSearchMatchKey({ environmentId: thread.environmentId, threadId: thread.id }),
             thread,
           ]),
@@ -1496,7 +1563,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
   if (messageOrder !== shownMessageOrder) setShownMessageOrder(messageOrder);
   const { titleMatches: threadTitleResults, contentMatches: threadContentResults } =
-    searchSidebarThreads(searchableThreads, threadSearchQuery, new Set(messageOrder.keys));
+    searchSidebarThreads(searchCorpus, threadSearchQuery, new Set(messageOrder.keys));
   const threadSearchResults = [...threadTitleResults, ...threadContentResults];
   // Only rows listed for their messages show one, and open find on it.
   const threadSearchMatchByKey = new Map(
@@ -3443,6 +3510,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           {!isSearchingThreads &&
           !hasProjectFolders &&
           visibleDraftSessionCount === 0 &&
+          systemThreads.length === 0 &&
           botThreads.length +
             pinnedThreads.length +
             activeThreads.length +
@@ -3486,13 +3554,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             </div>
           ) : null}
           {!isSearchingThreads ? (
-            <SidebarBotsGroup
-              threads={botThreads}
-              activeThreadKey={routeRowThreadKey}
-              onThreadClick={handleThreadClick}
-              onThreadActivate={navigateToThread}
-              onContextMenu={handleThreadContextMenu}
-            />
+            <>
+              <SidebarBotsGroup
+                label="My Bots"
+                threads={myBotThreads}
+                activeThreadKey={routeRowThreadKey}
+                onThreadClick={handleThreadClick}
+                onThreadActivate={navigateToThread}
+                onContextMenu={handleThreadContextMenu}
+              />
+              <SidebarBotsGroup
+                label="Shared Bots"
+                testId="sidebar-shared-bots-group"
+                threads={sharedBotThreads}
+                activeThreadKey={routeRowThreadKey}
+                onThreadClick={handleThreadClick}
+                onThreadActivate={navigateToThread}
+                onContextMenu={handleThreadContextMenu}
+              />
+            </>
           ) : null}
           {!isSearchingThreads ? (
             <TooltipProvider
@@ -3836,6 +3916,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   </ul>
                 </SortableContext>
               </DndContext>
+              <SystemScheduledShelf
+                threads={systemThreads}
+                revealed={systemShelfRevealed}
+                activeThreadKey={routeRowThreadKey}
+                onToggle={() => setSystemShelfRevealed((value) => !value)}
+                onOpen={navigateToThread}
+              />
             </TooltipProvider>
           ) : null}
         </SidebarGroup>

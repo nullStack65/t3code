@@ -360,6 +360,8 @@ export const AuthPairingLink = Schema.Struct({
   ...authScopeResponseFields,
   subject: TrimmedNonEmptyString,
   label: Schema.optionalKey(TrimmedNonEmptyString),
+  /** The founder whose client this code enrolls. Older servers never send it. */
+  founder: Schema.optionalKey(Founder),
   createdAt: Schema.DateTimeUtc,
   expiresAt: Schema.DateTimeUtc,
   /** Set while a T3 Connect device waits for approval. Older servers never send it. */
@@ -518,6 +520,8 @@ export const AuthCreatePairingCredentialInput = Schema.Struct({
   scopes: Schema.optionalKey(AuthGrantScopes),
   /** Binds the code to one agent sign-in at this level. The server derives the scopes from it. */
   access: Schema.optionalKey(AuthMcpClientAccess),
+  /** Enrolls the paired client as this founder, so what it sends names them. */
+  founder: Schema.optionalKey(Founder),
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;
 
