@@ -253,7 +253,7 @@ const ThreadListTool = Tool.make("t3_thread_list", {
 
 const ThreadReadTool = Tool.make("t3_thread_read", {
   description:
-    "Read any thread by id. View `messages` (default) or `activity` (all items). Newest first; older: `beforePosition=earlierPosition`; from the start: `afterPosition=-1`, then `nextPosition`. Cut-off text: `itemId`, `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. In your reply, name it as its `link` verbatim.",
+    "Read latest first: `messages` (default) or `activity` (all). Older: `beforePosition=earlierPosition`. From start: `afterPosition=-1`, then `nextPosition`. Resume text: `itemId`, `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. Cite its exact `link`.",
   parameters: OrchestratorMcpThreadReadInput,
   success: OrchestratorMcpThreadReadResult,
   failure: OrchestratorMcpFailure,
@@ -268,7 +268,7 @@ const ThreadReadTool = Tool.make("t3_thread_read", {
 
 const ThreadUpdateTool = Tool.make("t3_thread_update", {
   description:
-    "Update a thread; omit `threadId` for this one. When a founder must decide, review or approve, use `action:'request_decision'` with `decision`: the thread shows in their inbox until they reply there, `resolve_decision`, or settle. `action:'route'` refiles it with `inboxRouting`; a founder's or the shared inbox needs `inboxRouting.reason`. `rename` takes `title`; `regenerate_title`. `set_standing` takes `standing` (bot persona, or null for an ordinary thread). Workspace and branch cannot change here.",
+    "Default: this thread. `request_decision` with `decision` opens the founder inbox item until reply, `resolve_decision` or settle. `route` takes `inboxRouting` with `reason` for founder/shared. `rename` takes `title`; `set_standing` takes `standing`. Workspace and branch are fixed.",
   // Keeps the input's action/field check, which rebuilding the struct would drop.
   parameters: ThreadMetadataMcpUpdateInput.mapFields(
     Struct.assign({ environmentId: OrchestratorMcpEnvironmentTarget }),
@@ -285,7 +285,7 @@ const ThreadUpdateTool = Tool.make("t3_thread_update", {
 
 const ThreadSendTool = Tool.make("t3_thread_send", {
   description:
-    "Send a message to any thread. The target cannot run with broader modes than yours. `mode:'auto'` starts an idle thread, steers a running turn, or queues. `queue`: new turn. `steer`: mid-turn update. `restart`: interrupt and restart. `deliveryClass` overrides `mode`: `interrupt`, `steer_at_tool_boundary` (after the next tool result), `next_turn`, `when_idle` (once nothing runs), or `digest` (never starts a turn; rides with the next one, grouped by `digestCategory`). `coalesceKey` replaces an undelivered message with the same key; past `expiresAt` an undelivered one is dropped. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
+    "Send within your modes. `auto` starts an idle thread, steers or queues. `queue`: new turn. `steer`: mid-turn. `restart`: interrupt and restart. `deliveryClass` overrides `mode`: `steer_at_tool_boundary` after the next tool result, `when_idle` when idle, `digest` with the next turn (never starts one), grouped by `digestCategory`. `coalesceKey` replaces undelivered matches. A finished child gets a new task and returns `taskId`. Cite its exact `link`.",
   parameters: OrchestratorMcpThreadSendInput,
   success: OrchestratorMcpThreadSendResult,
   failure: OrchestratorMcpFailure,
