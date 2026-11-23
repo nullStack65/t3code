@@ -4787,7 +4787,6 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                 },
               },
             ],
-            effects: [],
           });
         });
         yield* roster("pending", true);
