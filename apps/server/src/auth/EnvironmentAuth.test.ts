@@ -369,7 +369,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
             );
         yield* pairWithKey();
         const [keyed] = (yield* serverAuth.listClientSessions(admin.sessionId)).filter(
-          (session) => session.subject !== "desktop-bootstrap" && session.founder === undefined,
+          (session) =>
+            session.sessionId !== admin.sessionId &&
+            session.subject !== "desktop-bootstrap" &&
+            session.founder === undefined,
         );
         yield* serverAuth.setClientSessionFounder(admin.sessionId, keyed!.sessionId, "jeff");
         yield* pairWithKey();
