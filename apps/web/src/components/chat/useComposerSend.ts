@@ -33,7 +33,10 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
 } from "@t3tools/contracts";
-import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
+import {
+  deriveThreadTitleSeed,
+  HumanNoteUnavailableError,
+} from "@t3tools/client-runtime/operations";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   declinePendingApprovals,
@@ -619,11 +622,12 @@ export function useComposerSend(input: ComposerSendInput) {
         },
       });
       if (noted._tag === "Failure") {
+        const error = squashAtomCommandFailure(noted);
         toastManager.add(
           stackedThreadToast({
             type: "warning",
             title: "Note not saved",
-            description: "Try again.",
+            description: error instanceof HumanNoteUnavailableError ? error.message : "Try again.",
           }),
         );
         return;
