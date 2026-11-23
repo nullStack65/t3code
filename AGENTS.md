@@ -40,6 +40,14 @@ The rest of this document is meant to help you navigate the codebase and make ch
 
 Of note: Most T3 Code contributions will come from T3 Code itself, often controlled remotely. This means you should be careful about accessing data, killing dev servers, and other things that may damage the T3 Code instance that the contributor is using.
 
+## Inverse Trust Pyramid
+
+Kameron, 2026-11-21: a recurring bug or quality bar is a scaffold, schema, linter, CI check, or Browser Run gate. This file names the checks.
+
+Lint: `t3code/no-low-value-comments`, `t3code/no-test-timeout-or-unreasoned-skip`, `t3code/no-wall-clock-in-tests`, `t3code/no-real-time-wait-in-tests`, `t3code/no-polling-loop-in-tests`, `t3code/no-frame-waits-in-browser-tests`, `t3code/require-disposable-render`, `shadcn/no-restyle`.
+
+CI: `scripts/feature-map.test.ts`, `.github/workflows/closura-deploy-line.yml`.
+
 ## A small glossary
 
 We need to be on the same page with terminology. When communicating, use this language:
@@ -66,7 +74,7 @@ We need to be on the same page with terminology. When communicating, use this la
 
 The most common defect in this repo is a change that works on the path you tested and is missing everywhere else. Before calling frontend work done, walk this list and say which entries applied:
 
-- **Feature map.** [The feature map](.agents/skills/test-t3-app/references/feature-map.md) names every surface the way users see it. Use its names when you talk about UI, and add a new route or keybinding command to it; `scripts/feature-map.test.ts` fails until you do.
+- **Feature map.** [The feature map](.agents/skills/test-t3-app/references/feature-map.md) names every surface the way users see it. Use its names when you talk about UI.
 - **Entry points.** A behavior reachable from the chat view is usually also reachable from Settings, the command palette, and a keybinding. Fixing one is not fixing the feature.
 - **Clients.** Web, desktop (wraps web, adds Electron shell/IPC), and mobile (React Native, separate navigation). Shared logic lives in `packages/client-runtime`
 - **Providers.** Codex, Claude, Cursor, Grok, OpenCode, Antigravity, Kiro, Pi, Muse Code, fx, and ACP Registry each have an adapter. Provider-shaped features need a decision per adapter, even if the decision is "not supported here".
@@ -112,20 +120,13 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
 - Proof for a bug fix depends on the bug. Logic, data, state, and protocol bugs get a failing test first (the fewest that fail on `main` for that reason, in an existing case of the module's test file where one fits), then the fix. Purely visual bugs (spacing, colour, alignment, a layout shift) get before/after captures as their proof and no test: do not add UI tests for nitpicks, and do not ask for one in review when a capture already shows it. A server-only fix with no visible surface ships the test plus a short runtime transcript. For a bug a user can reproduce in the web client, `vp run scenarios:prove` shows it failing on base and passing on the fix in the real app; see [Scenarios](docs/operations/scenarios.md).
-- The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong. Concretely:
-  - `it.effect` runs on a `TestClock`; `Effect.sleep` only advances through `TestClock.adjust`. `it.live` is wall-clock and only for subprocess or network fixtures.
-  - No `yieldNow` or `sleep` polling loops. Await the `Deferred`, take from the `Queue`, or drain the worker.
-  - No per-test timeout argument or `retry`. The project timeout is the ceiling, and flaky tests are fixed, not retried.
-  - No `performance.now()` or `Date.now()` deltas. Assert on events and counts, not elapsed time.
-  - Browser tests assert through `expect.element` or `vi.waitFor`, never `requestAnimationFrame` or `transitionend`.
-  - `vi.mock` factories must not spread a real module that pulls in Shiki or the diff workers.
-  - `it.skip` and friends need a tracking issue on the line above: `// quarantine: #1234 <why>`.
-  - Lint enforces this: `t3code/no-test-timeout-or-unreasoned-skip`, `t3code/no-frame-waits-in-browser-tests`, `t3code/no-wall-clock-in-tests`, `t3code/no-real-time-wait-in-tests`, `t3code/no-polling-loop-in-tests`.
-- Web browser tests are `*.browser.test.tsx` or `*.browser.test.ts` and render with `await using screen = await render(...)` from `apps/web/test/render.tsx`. `t3code/require-disposable-render` errors on the old patterns.
+- The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone.
+- `vi.mock` factories must not spread a real module that pulls in Shiki or the diff workers.
+- Web browser tests (`*.browser.test.tsx`, `*.browser.test.ts`):
   - Acquire what the test drives after mounting (fake timers it advances, spies it sets up after mounting) after the render, so it disposes before the unmount. Anything the first render reads comes before it.
   - A helper that renders and then waits or clicks puts the screen in an `AsyncDisposableStack` and `move()`s it out only on success, so a failed wait still unmounts.
   - `rerender` needs a fresh element on every call.
-  - No lifecycle hooks and no module-level mutable state. Shared mock state that `vi.mock` factories read is reset by a `setup()` call at the top of the test.
+  - No module-level mutable state. Shared mock state that `vi.mock` factories read is reset by a `setup()` call at the top of the test.
   - `router` is on by default. Pass `router: false` only with a one-line comment saying why.
 
   ```tsx
@@ -197,7 +198,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 - Complexity belongs at the adapter boundary. Orchestration stays pure, UI stays dumb.
 - Client mutations use `createEnvironmentRpcCommand`. Add protected methods to `CLIENT_GUARDED_RPC_SCOPES` in contracts and use the command's `permissionAtom` for UI availability. Grants are checked at execution against the destination environment; the server remains authoritative. Keep raw RPC clients inside `rpc/`, and extend the permission behavior tests when adding a protected method.
 - Server features are services; transports stay thin. A `ws.ts` RPC handler, HTTP route, or MCP tool decodes input, calls one service method, and maps errors. See [Effect services](docs/internals/effect-services.md).
-- `apps/web/src/components/ui` exports own their look. Pick a `variant` or `size`; do not restyle one with `className`. If none fits and the look is a generic concept, add a variant to the component; a look that belongs to one feature stays in that feature's own component, not in `components/ui`. Layout classes (width, flex, margin, position) belong on the parent. `shadcn/no-restyle` fails lint on violations. See [Web UI](docs/internals/web-ui.md).
+- `apps/web/src/components/ui` exports own their look. Pick a `variant` or `size`. If none fits and the look is a generic concept, add a variant to the component; a look that belongs to one feature stays in that feature's own component, not in `components/ui`. Layout classes (width, flex, margin, position) belong on the parent. See [Web UI](docs/internals/web-ui.md).
 - Reusable Effect functions use `Effect.fn("Service.operation")` with a stable span name, not a
   function wrapping `Effect.gen`. Keep `Effect.gen` for inline programs and layer construction.
   Use `Effect.fnUntraced` only when spans would be too frequent (stream chunks, per-event
@@ -205,7 +206,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
   Named `Effect.fn` creates a span; the unnamed form does not. Preserve existing span names and
   options, and pass combinators as additional function-builder arguments.
 - Inferred types over annotations. `any` is the enemy.
-- Default to no comment. Write one only for a constraint, an external quirk, or an invariant the code can't show, in one line where you can and four at most. Don't restate names or signatures, narrate steps, record history, or explain the fix you just made; the PR carries that. `t3code/no-low-value-comments` enforces the length cap and the mechanical cases.
+- Default to no comment. Write one only for a constraint, an external quirk, or an invariant the code can't show. Don't narrate steps or explain the fix you just made; the PR carries that.
 - React effects are for synchronizing with something outside React. Derive in render and act in handlers instead of syncing state, but don't hide real lifecycle work in refs or stores to dodge one. The `t3code/no-unreasoned-state-sync` lint rule reports every effect; one that stays states its reason with `// oxlint-disable-next-line t3code/no-unreasoned-state-sync -- <why>`.
 - Our users drive agents all day and notice a dropped frame, a lying spinner, and a stale label. No continuously repainting animations; they peg the GPU on high-refresh displays.
 - If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
