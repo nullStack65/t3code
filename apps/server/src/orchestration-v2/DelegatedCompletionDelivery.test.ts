@@ -5211,6 +5211,110 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     }),
   );
 
+  it.effect.each(["usage limit", "self"] as const)(
+    "a failed thread with no launcher wakes the watcher once, except for its %s",
+    (exception) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const key = exception === "self" ? "failure-self" : "failure-limit";
+        const projectId = ProjectId.make(`project:${key}`);
+        yield* ProjectService.ProjectService.pipe(
+          Effect.flatMap((projects) =>
+            projects.create({
+              commandId: CommandId.make(`command:${key}-project`),
+              projectId,
+              title: key,
+              workspaceRoot: `/workspace/${key}`,
+            }),
+          ),
+        );
+        const createThread = (name: string) =>
+          orchestrator
+            .dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:${key}:${name}`),
+              threadId: ThreadId.make(`thread:${key}:${name}`),
+              projectId,
+              title: name,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            })
+            .pipe(Effect.as(ThreadId.make(`thread:${key}:${name}`)));
+        const lead = yield* createThread("lead");
+        const failing = exception === "self" ? [lead] : [];
+        const limited =
+          exception === "usage limit"
+            ? [
+                yield* createThread("lane-1"),
+                yield* createThread("lane-2"),
+                yield* createThread("lane-3"),
+              ]
+            : [];
+        const plain = yield* createThread("plain");
+        const { reactor } = yield* makeModelAlertReactor({
+          watcher: { environmentId: hereEnvironmentId, threadId: lead },
+        });
+        for (const threadId of [...failing, ...limited, plain]) {
+          const runId = RunId.make(`run:${threadId}`);
+          const failed = runEvent({ threadId, runId, ordinal: 1, status: "failed", now });
+          const limitError = {
+            id: EventId.make(`event:${threadId}:limit`),
+            type: "turn-item.updated" as const,
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`turn-item:${threadId}:limit`),
+              type: "error" as const,
+              threadId,
+              runId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "failed" as const,
+              title: "Usage limit reached",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              failure: {
+                class: "usage_limit" as const,
+                message: "Plan limit reached.",
+                code: "usageLimitExceeded",
+                retryable: null,
+                resetAt: null,
+              },
+            },
+          };
+          yield* eventSink.write({
+            commandId: CommandId.make(`command:${threadId}:failed`),
+            events: limited.includes(threadId) ? [failed, limitError] : [failed],
+          });
+          yield* reactor.handle(failed);
+        }
+        yield* reactor.flush;
+        yield* TestClock.adjust("11 minutes");
+        yield* reactor.flush;
+        const messages = (yield* orchestrator.getThreadProjection(lead)).messages;
+        const wakes = messages.filter((message) => message.text.startsWith("Thread event from"));
+        assert.equal(wakes.length, 1);
+        assert.include(wakes[0]?.text, `/${plain})`);
+        const incidents = messages.filter((message) =>
+          message.text.includes("Usage limit incident"),
+        );
+        assert.equal(incidents.length, limited.length === 0 ? 0 : 1);
+        for (const lane of limited) assert.include(incidents[0]?.text, `/${lane})`);
+      }),
+  );
+
   it.effect("sends a model alert over the link to the watcher's machine and retries it", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

@@ -32,7 +32,6 @@ import { mutateProjectWithClone } from "../../../project/ProjectMutation.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
-import { providerReadinessConstraints } from "../../../provider/servedModel.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as DateTime from "effect/DateTime";
@@ -401,6 +400,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
+        if (!replaying && input.modelSelection !== undefined) {
+          const { instanceId, model } = input.modelSelection;
+          const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
+          const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+          if (provider !== undefined)
+            yield* OrchestrationMcp.requireAdvertisedModel(provider, model);
+        }
         // Reject unresolved base refs and blocked branch names before accepting a launch; worktree provisioning happens later.
         if (!replaying && strategy?.type === "worktree")
           yield* ThreadLaunch.ThreadLaunchService.pipe(
@@ -441,23 +447,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         let startedRuntimeMode = defaultRuntimeMode;
         if (!replaying) {
           const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
-          const provider = providers.find(
-            (candidate) => candidate.instanceId === modelSelection.instanceId,
-          );
-          const constraints =
-            provider === undefined
-              ? ["Provider instance is not registered."]
-              : providerReadinessConstraints(provider);
-          if (provider === undefined || constraints.length > 0) {
-            return yield* new OrchestratorMcpFailure({
-              code: "provider_unavailable",
-              message: `Provider ${modelSelection.instanceId} cannot launch a thread: ${constraints.join(" ")}`,
-            });
-          }
-          yield* OrchestrationMcp.requireAdvertisedModel(provider, modelSelection.model);
           startedRuntimeMode = yield* resolveRuntimeMode(startedRuntimeMode, input.runtimeMode, {
             modelSelection,
-            supportedRuntimeModes: provider.supportedRuntimeModes,
+            supportedRuntimeModes: providers.find(
+              (provider) => provider.instanceId === modelSelection.instanceId,
+            )?.supportedRuntimeModes,
           });
         }
         const result = yield* ThreadMessageIntake.launchThread({

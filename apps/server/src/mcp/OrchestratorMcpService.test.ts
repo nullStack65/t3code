@@ -2011,19 +2011,6 @@ describe("OrchestratorMcpService provider resolution", () => {
             assert.deepEqual(entry!.constraints, []);
           }
 
-          providers = providers.map((provider) =>
-            provider.instanceId === antigravityInstanceId
-              ? { ...provider, models: [], auth: { status: "unauthenticated" } }
-              : provider,
-          );
-          const signedOut = (yield* service.capabilities(scope)).providers.find(
-            (provider) => provider.providerInstanceId === antigravityInstanceId,
-          );
-          assert.isFalse(signedOut?.canRunChildTask);
-          assert.isFalse(signedOut?.canRunCrossProviderChildTask);
-          assert.include(signedOut?.constraints ?? [], "No models available.");
-          assert.include(signedOut?.constraints ?? [], "Provider is not authenticated.");
-
           const disabled = byId.get(disabledAntigravityInstanceId);
           assert.isDefined(disabled);
           assert.isFalse(disabled!.canRunChildTask);
@@ -2252,111 +2239,94 @@ describe("OrchestratorMcpService provider resolution", () => {
     );
   });
 
-  it.effect.each([
-    "already advertised",
-    "newly advertised",
-    "still unavailable",
-    "empty catalog",
-    "unauthenticated",
-  ] as const)("rechecks a delegated model that is %s", (availability) =>
-    Effect.gen(function* () {
-      const museInstanceId = ProviderInstanceId.make("muse");
-      const model = "muse-wonder-1.0";
-      const provider = (advertisedModel: string): ServerProvider => {
-        const snapshot = providerSnapshot({
-          instanceId: museInstanceId,
-          driver: ProviderDriverKind.make("muse"),
-          model: advertisedModel,
-        });
-        if (availability === "empty catalog") return { ...snapshot, models: [] };
-        if (availability === "unauthenticated")
-          return { ...snapshot, auth: { status: "unauthenticated" } };
-        return snapshot;
-      };
-      const commands: Array<unknown> = [];
-      const refreshedInstances: Array<ProviderInstanceId> = [];
-      const task = {
-        id: taskId,
-        threadId: parentThreadId,
-        origin: "app_owned",
-        childThreadId,
-        providerInstanceId: museInstanceId,
-        model,
-        status: "running",
-        result: null,
-      };
-      const dependencies = Layer.mergeAll(
-        NodeServices.layer,
-        NodeCrypto.layer,
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          hasReceipt: () => Effect.succeed(false),
-          getThreadRecords: (threadId) =>
-            Effect.succeed(
-              threadId === parentThreadId
-                ? parentProjection(commands.length > 0 ? [task] : [])
-                : childProjection,
-            ),
-          dispatch: (command) =>
-            Effect.sync(() => {
-              commands.push(command);
-              return {
-                sequence: 1,
-                storedEvents: [{ event: { type: "subagent.updated", payload: task } }],
-              } as never;
-            }),
-        }),
-        ServerSettings.layerTest(),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([
-            provider(availability === "already advertised" ? model : "muse-spark-1.3"),
-          ]),
-          refreshInstance: (instanceId) =>
-            Effect.sync(() => {
-              refreshedInstances.push(instanceId);
-              return [provider(availability === "still unavailable" ? "muse-spark-1.3" : model)];
-            }),
-        }),
-        adapterRegistryLayer([museInstanceId]),
-        Layer.mock(ProjectService.ProjectService)({}),
-        Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-      );
-      yield* Effect.gen(function* () {
-        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const delegation = service.delegateTask(scope, {
-          task: "Review the change.",
-          target: { providerInstanceId: museInstanceId, model },
-          mode: "async",
-          clientRequestId: availability,
-        });
-        if (availability === "empty catalog" || availability === "unauthenticated") {
-          const error = yield* delegation.pipe(Effect.flip);
-          assert.equal(error.code, "provider_unavailable");
-          assert.include(
-            error.message,
-            availability === "empty catalog" ? "No models available" : "not authenticated",
-          );
-          assert.deepEqual(commands, []);
-        } else if (availability === "still unavailable") {
-          const error = yield* delegation.pipe(Effect.flip);
-          assert.equal(error.code, "model_unavailable");
-          assert.deepEqual(commands, []);
-        } else {
-          const result = yield* delegation;
-          assert.equal(result.model, model);
-          assert.equal(commands.length, 1);
-          assert.deepEqual((commands[0] as { modelSelection: unknown }).modelSelection, {
+  it.effect.each(["already advertised", "newly advertised", "still unavailable"] as const)(
+    "rechecks a delegated model that is %s",
+    (availability) =>
+      Effect.gen(function* () {
+        const museInstanceId = ProviderInstanceId.make("muse");
+        const model = "muse-wonder-1.0";
+        const provider = (advertisedModel: string) =>
+          providerSnapshot({
             instanceId: museInstanceId,
-            model,
+            driver: ProviderDriverKind.make("muse"),
+            model: advertisedModel,
           });
-        }
-        assert.deepEqual(
-          refreshedInstances,
-          availability === "already advertised" ? [] : [museInstanceId],
+        const commands: Array<unknown> = [];
+        const refreshedInstances: Array<ProviderInstanceId> = [];
+        const task = {
+          id: taskId,
+          threadId: parentThreadId,
+          origin: "app_owned",
+          childThreadId,
+          providerInstanceId: museInstanceId,
+          model,
+          status: "running",
+          result: null,
+        };
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            getThreadRecords: (threadId) =>
+              Effect.succeed(
+                threadId === parentThreadId
+                  ? parentProjection(commands.length > 0 ? [task] : [])
+                  : childProjection,
+              ),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
+                return {
+                  sequence: 1,
+                  storedEvents: [{ event: { type: "subagent.updated", payload: task } }],
+                } as never;
+              }),
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              provider(availability === "already advertised" ? model : "muse-spark-1.3"),
+            ]),
+            refreshInstance: (instanceId) =>
+              Effect.sync(() => {
+                refreshedInstances.push(instanceId);
+                return [provider(availability === "still unavailable" ? "muse-spark-1.3" : model)];
+              }),
+          }),
+          adapterRegistryLayer([museInstanceId]),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
-    }),
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const delegation = service.delegateTask(scope, {
+            task: "Review the change.",
+            target: { providerInstanceId: museInstanceId, model },
+            mode: "async",
+            clientRequestId: availability,
+          });
+          if (availability === "still unavailable") {
+            const error = yield* delegation.pipe(Effect.flip);
+            assert.equal(error.code, "model_unavailable");
+            assert.deepEqual(commands, []);
+          } else {
+            const result = yield* delegation;
+            assert.equal(result.model, model);
+            assert.equal(commands.length, 1);
+            assert.deepEqual((commands[0] as { modelSelection: unknown }).modelSelection, {
+              instanceId: museInstanceId,
+              model,
+            });
+          }
+          assert.deepEqual(
+            refreshedInstances,
+            availability === "already advertised" ? [] : [museInstanceId],
+          );
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+      }),
   );
 
   it.effect("rejects delegation to a provider without a registered adapter", () =>

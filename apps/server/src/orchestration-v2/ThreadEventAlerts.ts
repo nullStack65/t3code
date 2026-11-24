@@ -227,6 +227,8 @@ export function judgeThread(input: {
   if (
     evaluated.includes("thread-failed") &&
     shell.status === "failed" &&
+    input.usageLimitReported !== true &&
+    launchingThreadId(shell.inbox) === null &&
     shell.latestRunId !== null &&
     !isLive(shell) &&
     shell.lineage.parentThreadId === null &&

@@ -28,6 +28,7 @@ import {
   recordThreadEvents,
   threadEventDestinations,
   watcherAlertMessage,
+  watcherLimitHold,
 } from "./ModelAlertReactor.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import { withRedirectLedger } from "./testkit/RedirectLedger.ts";
@@ -233,6 +234,26 @@ it("rate-limits subsequent failure wakes per thread after successful delivery", 
     );
   assert.isFalse(rerun(sent, "run:1").enqueued);
   assert.isTrue(rerun(sent, "run:2").enqueued);
+});
+
+it("holds a failure wake while the watcher is stopped at its own usage limit", () => {
+  const wake = eventAlert(finding("thread-failed", "run:1"));
+  const nowMs = Date.parse("2026-11-19T04:00:00.000Z");
+  const limited = {
+    status: "failed",
+    providerInstanceId: "codex",
+    usageLimited: true,
+    resetAt: "2026-11-19T04:02:00.000Z",
+  };
+  assert.equal(watcherLimitHold(limited, wake, nowMs), Date.parse(limited.resetAt));
+  assert.isNull(watcherLimitHold(limited, wake, Date.parse(limited.resetAt)));
+  assert.isNull(watcherLimitHold({ ...limited, usageLimited: false }, wake, nowMs));
+  assert.isNull(watcherLimitHold({ ...limited, status: "idle" }, wake, nowMs));
+  assert.isNull(watcherLimitHold({ ...limited, usageLimited: null, resetAt: null }, wake, nowMs));
+  assert.isNull(watcherLimitHold(null, wake, nowMs));
+  assert.isNull(
+    watcherLimitHold(limited, eventAlert(finding("promise-without-wake", "message:1")), nowMs),
+  );
 });
 
 it("reports a thread event once per kind and signature until its state changes", () => {

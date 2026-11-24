@@ -700,6 +700,40 @@ export function busyWatcherHold(
   return Math.min(nowMs + BUSY_WATCHER_RECHECK_MS, deadline);
 }
 
+export type WatcherView = {
+  readonly status: string;
+  readonly providerInstanceId: string | null;
+  /** Null when unknown, as for a remote watcher. */
+  readonly usageLimited: boolean | null;
+  readonly resetAt: string | null;
+};
+
+/**
+ * When the watcher's own thread is stopped at the same account limit, the time to look again.
+ * Anything sent now would only queue a turn that fails the same way.
+ */
+export function watcherLimitHold(view: WatcherView | null, alert: WatcherAlert, nowMs: number) {
+  const providerInstanceId =
+    alert.type === "usage-limit-incident" ||
+    (alert.type === "model-degraded" && alert.reasons.includes("usage_limit"))
+      ? alert.providerInstanceId
+      : isFailureWake(alert)
+        ? (view?.providerInstanceId ?? null)
+        : null;
+  if (providerInstanceId === null || view === null) return null;
+  // A remote watcher counts as down only while the reset this alert reports is still ahead.
+  const down =
+    view.status === "failed" &&
+    view.providerInstanceId === providerInstanceId &&
+    view.usageLimited !== false;
+  const resetAt = view.resetAt ?? (alert.type === "usage-limit-incident" ? alert.resetAt : null);
+  if (!down) return null;
+  // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
+  const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
+  return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
+}
+
 /**
  * Records a thread that stopped at a usage limit. The server resumes it at the reset, so Lead
  * hears nothing unless it does not come back; otherwise every thread of one provider account
@@ -1045,13 +1079,6 @@ export const make = Effect.gen(function* () {
       expiresAtMs,
     );
 
-  type WatcherView = {
-    readonly status: string;
-    readonly providerInstanceId: string | null;
-    /** Null when unknown, as for a remote watcher. */
-    readonly usageLimited: boolean | null;
-    readonly resetAt: string | null;
-  };
   const WatcherThreadStatus = Schema.Struct({
     thread: Schema.Struct({ status: Schema.String, providerInstanceId: Schema.String }),
   });
@@ -1267,30 +1294,6 @@ export const make = Effect.gen(function* () {
       );
   });
 
-  /**
-   * When the watcher's own thread is stopped at the same account limit, the time to look again.
-   * Anything sent now would only queue a turn that fails the same way.
-   */
-  const holdUntil = (view: WatcherView | null, alert: WatcherAlert, nowMs: number) => {
-    const providerInstanceId =
-      alert.type === "usage-limit-incident" ||
-      (alert.type === "model-degraded" && alert.reasons.includes("usage_limit"))
-        ? alert.providerInstanceId
-        : null;
-    if (providerInstanceId === null || view === null) return null;
-    // A remote watcher counts as down only while the reset this alert reports is still ahead.
-    const down =
-      view.status === "failed" &&
-      view.providerInstanceId === providerInstanceId &&
-      view.usageLimited !== false;
-    const resetAt = view.resetAt ?? (alert.type === "usage-limit-incident" ? alert.resetAt : null);
-    if (!down) return null;
-    // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
-    const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
-    if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
-    return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
-  };
-
   type DeliveryResult =
     | { readonly _tag: "sent" }
     | { readonly _tag: "dropped" }
@@ -1348,7 +1351,7 @@ export const make = Effect.gen(function* () {
         ? yield* watcherView
         : yield* readWatcher(target, here).pipe(Effect.catchCause(() => Effect.succeed(null)));
     const until =
-      holdUntil(view, alert, nowMs) ??
+      watcherLimitHold(view, alert, nowMs) ??
       busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
     yield* deliverToWatcher(
@@ -1751,11 +1754,6 @@ export const make = Effect.gen(function* () {
     const label = (yield* environment.getDescriptor).label;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
     const launcher = yield* launchingThread(shell, here);
-    const hasFailure = judged.findings.some((finding) => finding.kind === "thread-failed");
-    const launcherIsWatcher =
-      launcher !== null &&
-      launcher.environmentId === watcher?.environmentId &&
-      launcher.threadId === watcher.threadId;
     if (
       !selfWatch &&
       !noGlobalDestination &&
@@ -1775,13 +1773,7 @@ export const make = Effect.gen(function* () {
             let state = initial;
             let queued = false;
             for (const kind of judged.evaluated) {
-              const overlapping = kind === "lane-ended" && hasFailure;
-              const recipient =
-                kind === "thread-failed"
-                  ? watcher
-                  : overlapping && launcherIsWatcher
-                    ? null
-                    : launcher;
+              const recipient = kind === "thread-failed" ? watcher : launcher;
               const destinations = threadEventDestinations(
                 recipient,
                 kind === "thread-failed" ? "" : current.modelAlertWebhookUrl,

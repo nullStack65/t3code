@@ -1,4 +1,5 @@
 import {
+  isProviderAvailable,
   type ModelSelection,
   type ProjectId,
   resolveProjectProviderInstanceEnabled,
@@ -8,7 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
-import { findServedModel, providerReadinessConstraints } from "../provider/servedModel.ts";
+import { findServedModel } from "../provider/servedModel.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -31,7 +32,8 @@ export const hereEvidence = Effect.fn("placement.hereEvidence")(function* (input
     resources: Option.isSome(hostResources) ? yield* hostResources.value.read : null,
     modelAvailable:
       provider !== undefined &&
-      providerReadinessConstraints(provider).length === 0 &&
+      provider.enabled &&
+      isProviderAvailable(provider) &&
       resolveProjectProviderInstanceEnabled(settings, input.projectId, provider.instanceId) &&
       findServedModel(provider.models, input.modelSelection.model) !== undefined &&
       (provider.supportedRuntimeModes === undefined ||

@@ -1657,8 +1657,9 @@ export const ServerSettings = Schema.Struct({
   ),
   /**
    * The watcher thread. It hears a run that ran another model than selected, hit a provider
-   * safeguard fallback or a usage limit. A failed unsettled top-level thread wakes it for
-   * triage. Other lane events go to the launching thread. Null disables watcher delivery.
+   * safeguard fallback or a usage limit. A failed unsettled top-level thread with no launcher
+   * wakes it for triage. Other lane events go to the launching thread. Null disables watcher
+   * delivery.
    */
   modelAlertWatcher: Schema.NullOr(ModelAlertWatcher).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_MODEL_ALERT_WATCHER)),

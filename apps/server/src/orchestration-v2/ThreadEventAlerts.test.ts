@@ -127,10 +127,7 @@ it("lane-ended stays quiet for a failure the model alert already reported as a u
   const { findings } = judge(shellWith({ status: "failed" } as never), "run-ended", {
     usageLimitReported: true,
   });
-  assert.deepEqual(
-    findings.map((finding) => finding.kind),
-    ["thread-failed"],
-  );
+  assert.deepEqual(findings, []);
 });
 
 it.each([
@@ -141,6 +138,8 @@ it.each([
   { lineage: { parentThreadId: null, sideChat: true } },
   { status: "interrupted" },
   { activeRunId: "next" },
+  { inbox: { origin: { kind: "agent", id: "thread:launcher" } } },
+  { inbox: { requestedBy: { kind: "agent", id: "thread:archived-launcher" } } },
 ])("excludes ineligible failed threads from watcher wakes: %j", (override) => {
   const shell = shellWith({ status: "failed", ...override } as never);
   assert.isFalse(

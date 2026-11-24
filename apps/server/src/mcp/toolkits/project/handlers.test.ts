@@ -73,30 +73,7 @@ const clientLaunchHarness = (input: {
   };
   const layerDependencies = Layer.mergeAll(
     Layer.mock(ProviderRegistry.ProviderRegistry)({
-      getProviders: Effect.succeed(
-        input.providers ?? [
-          {
-            instanceId: (input.overrideModel ?? modelSelection).instanceId,
-            driver: ProviderDriverKind.make((input.overrideModel ?? modelSelection).instanceId),
-            enabled: true,
-            installed: true,
-            status: "ready",
-            version: null,
-            auth: { status: "authenticated" },
-            checkedAt: "2026-01-01T00:00:00Z",
-            models: [
-              {
-                slug: (input.overrideModel ?? modelSelection).model,
-                name: "Default",
-                capabilities: null,
-                isCustom: false,
-              },
-            ],
-            slashCommands: [],
-            skills: [],
-          },
-        ],
-      ),
+      getProviders: Effect.succeed(input.providers ?? []),
     }),
     ServerSettings.layerTest({
       fallbackModelSelection: input.fallbackModel ?? null,
@@ -332,7 +309,7 @@ it.effect("a launch steps an inherited mode down to the provider's, and refuses 
             version: null,
             auth: { status: "authenticated" },
             checkedAt: "2026-01-01T00:00:00Z",
-            models: [{ slug: "pi-model", name: "Pi", capabilities: null, isCustom: false }],
+            models: [],
             slashCommands: [],
             skills: [],
             supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
@@ -429,24 +406,6 @@ it.effect("a launch with a model its provider does not advertise creates no thre
         message: expect.stringContaining(
           `Model ${model} is not advertised by provider ${instanceId}. Advertised models: `,
         ),
-      });
-    }
-    providers.push(
-      { ...providers[0]!, instanceId: ProviderInstanceId.make("empty"), models: [] },
-      {
-        ...providers[0]!,
-        instanceId: ProviderInstanceId.make("signed-out"),
-        auth: { status: "unauthenticated" },
-      },
-    );
-    for (const [instance, reason] of [
-      ["missing", "not registered"],
-      ["empty", "No models available"],
-      ["signed-out", "not authenticated"],
-    ] as const) {
-      expect(yield* launchWith(instance, "claude-opus")).toMatchObject({
-        code: "provider_unavailable",
-        message: expect.stringContaining(reason),
       });
     }
     expect(launched).toHaveLength(0);
@@ -877,14 +836,7 @@ it.effect("a client launches with the fallback for an exhausted default", () =>
       version: null,
       auth: { status: "authenticated" },
       checkedAt: "2026-01-01T00:00:00Z",
-      models: [
-        {
-          slug: driver === "codex" ? fallbackModel.model : "claude-opus",
-          name: "Default",
-          capabilities: null,
-          isCustom: false,
-        },
-      ],
+      models: [],
       slashCommands: [],
       skills: [],
       ...(driver === "claudeAgent"

@@ -8,6 +8,7 @@ import {
   CommandId,
   EnvironmentId,
   type RunId,
+  isProviderAvailable,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -134,11 +135,7 @@ import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
-import {
-  findServedModel,
-  providerReadinessConstraints,
-  unservedModelMessage,
-} from "../provider/servedModel.ts";
+import { findServedModel, unservedModelMessage } from "../provider/servedModel.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -407,8 +404,9 @@ function antigravitySuffixedModel(provider: ServerProvider, model: string) {
 
 const withV = (version: string) => (version.startsWith("v") ? version : `v${version}`);
 
+/** A provider that lists no models accepts any slug. */
 export const requireAdvertisedModel = (provider: ServerProvider, model: string) => {
-  if (advertisedModel(provider, model) !== undefined) {
+  if (provider.models.length === 0 || advertisedModel(provider, model) !== undefined) {
     return Effect.void;
   }
   const updateRequired = provider.updateRequiredModels?.find(
@@ -437,11 +435,31 @@ function capabilityModelOption(descriptor: ProviderOptionDescriptor): Orchestrat
   };
 }
 
-function providerConstraints(provider: ServerProvider, supportsOrchestrationV2: boolean) {
-  const readiness = providerReadinessConstraints(provider);
-  return supportsOrchestrationV2
-    ? readiness
-    : ["No V2 provider adapter is registered.", ...readiness];
+function providerConstraints(
+  provider: ServerProvider | undefined,
+  supportsOrchestrationV2: boolean,
+): ReadonlyArray<string> {
+  const constraints: Array<string> = [];
+  if (!supportsOrchestrationV2) {
+    constraints.push("No V2 provider adapter is registered.");
+  }
+  if (provider === undefined) return constraints;
+  if (!isProviderAvailable(provider)) {
+    constraints.push(provider.unavailableReason ?? "Provider driver is unavailable.");
+  }
+  if (!provider.enabled) {
+    constraints.push("Provider instance is disabled.");
+    // Disabled snapshots contain placeholders for installation, health, and auth.
+    return constraints;
+  }
+  if (!provider.installed) constraints.push("Provider executable is not installed.");
+  if (provider.status === "error" || provider.status === "disabled") {
+    constraints.push(provider.message ?? `Provider status is ${provider.status}.`);
+  }
+  if (provider.auth.status === "unauthenticated") {
+    constraints.push("Provider is not authenticated.");
+  }
+  return constraints;
 }
 
 /** t3_thread_launch keeps a selection as given, so it can hold options its model does not have. */
@@ -1660,7 +1678,7 @@ const make = Effect.gen(function* () {
         `Provider ${instanceId} has no model available for inheritance.`,
       );
     }
-    yield* requireAdvertisedModel(provider, model);
+    if (requestedModel !== undefined) yield* requireAdvertisedModel(provider, model);
     const advertised = advertisedModel(provider, model);
     const descriptors = advertised?.capabilities?.optionDescriptors;
     const requestedOptions = withLegacyUltracodeEffort(descriptors, input.target?.options);
