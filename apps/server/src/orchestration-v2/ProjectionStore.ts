@@ -2295,6 +2295,9 @@ function shellFromState(input: {
     ...(input.state.thread.delegationNudge
       ? { delegationNudge: input.state.thread.delegationNudge }
       : {}),
+    ...(input.state.thread.collaboration
+      ? { collaboration: input.state.thread.collaboration }
+      : {}),
     lastVisitedAt: input.state.thread.lastVisitedAt,
     opens: input.state.thread.opens ?? null,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,

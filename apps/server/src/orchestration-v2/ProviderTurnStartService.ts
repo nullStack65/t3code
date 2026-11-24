@@ -8,6 +8,7 @@ import {
 import {
   CommandId,
   latestProviderTurnForAttempt,
+  roomFacilitatorNote,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ExecutionNode,
@@ -981,7 +982,11 @@ export const layer: Layer.Layer<
         .filter((source) => source.ordinal < run.ordinal)
         .toSorted((left, right) => right.ordinal - left.ordinal)[0];
       const deferredNudge = previousRun?.delegationNudge?.deferredNote ?? "";
-      const runNote = [restartNote, deferredNudge].filter((part) => part !== "").join("\n\n");
+      const room = projection.thread.collaboration?.room;
+      const roomNote = room === undefined ? "" : roomFacilitatorNote(room);
+      const runNote = [restartNote, deferredNudge, roomNote]
+        .filter((part) => part !== "")
+        .join("\n\n");
       const tokenCap = yield* handoffTokenCapConfig.pipe(
         Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
       );

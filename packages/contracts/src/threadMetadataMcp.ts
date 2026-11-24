@@ -12,6 +12,7 @@ import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
 import { DelegationNudgeUpdate, StoredThreadDelegationNudge } from "./delegationNudge.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
+import { ThreadCollaboration, ThreadCollaborationUpdate } from "./threadCollaboration.ts";
 
 export function hasOnlyPairedSurrogates(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -51,6 +52,7 @@ export const ThreadMetadataMcpAction = Schema.Literals([
   "resolve_decision",
   "set_standing",
   "set_delegation_nudge",
+  "collaborate",
 ]);
 export type ThreadMetadataMcpAction = typeof ThreadMetadataMcpAction.Type;
 
@@ -72,6 +74,13 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
         "Required only when action is set_delegation_nudge: {enabled, thresholds?}. When on, the thread is reminded to delegate after that many of its own tool calls in one request (default [5, 10]). A thread cannot change its own setting.",
     }),
   ),
+  // The schema shows each update's fields; its description says only what they cannot.
+  collaboration: Schema.optional(
+    ThreadCollaborationUpdate.annotate({
+      description:
+        "Only with collaborate. Room members are thread ids; open_room again to change them.",
+    }),
+  ),
   clientRequestId: Schema.optional(ThreadMetadataClientRequestId),
 }).check(
   Schema.makeFilter((input) =>
@@ -79,9 +88,10 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
     (input.action === "route") === (input.inboxRouting !== undefined) &&
     (input.action === "request_decision") === (input.decision !== undefined) &&
     (input.action === "set_standing") === (input.standing !== undefined) &&
-    (input.action === "set_delegation_nudge") === (input.delegationNudge !== undefined)
+    (input.action === "set_delegation_nudge") === (input.delegationNudge !== undefined) &&
+    (input.action === "collaborate") === (input.collaboration !== undefined)
       ? true
-      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; set_delegation_nudge requires delegationNudge; other actions reject those fields.",
+      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; set_delegation_nudge requires delegationNudge; collaborate requires collaboration; other actions reject those fields.",
   ),
 );
 export type ThreadMetadataMcpUpdateInput = typeof ThreadMetadataMcpUpdateInput.Type;
@@ -97,6 +107,15 @@ export const ThreadMetadataMcpUpdateResult = Schema.Struct({
   inbox: Schema.optionalKey(ThreadInbox),
   standing: Schema.optionalKey(StoredThreadStanding),
   delegationNudge: Schema.optionalKey(StoredThreadDelegationNudge),
+  collaboration: Schema.optionalKey(ThreadCollaboration),
+  /** Set when close_room lands: the text to post on Linear and save to memory. */
+  roomRecord: Schema.optionalKey(
+    Schema.Struct({
+      linearIssue: Schema.NullOr(Schema.String),
+      linearComment: Schema.String,
+      memoryEntry: Schema.String,
+    }),
+  ),
   updatedAt: IsoDateTime,
 });
 export type ThreadMetadataMcpUpdateResult = typeof ThreadMetadataMcpUpdateResult.Type;

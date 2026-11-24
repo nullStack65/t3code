@@ -57,6 +57,7 @@ import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
 import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
+import { StoredThreadCollaboration, ThreadCollaborationUpdate } from "./threadCollaboration.ts";
 import {
   DelegationNudgeChangedBy,
   DelegationNudgeUpdate,
@@ -571,6 +572,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   standing: Schema.optional(StoredThreadStanding),
   /** Opt-in reminder to delegate once the thread does work itself; absent or null is off. */
   delegationNudge: Schema.optional(StoredThreadDelegationNudge),
+  /** Room, promises and handoff; absent on ordinary threads. */
+  collaboration: Schema.optional(StoredThreadCollaboration),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2613,6 +2616,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   standing: Schema.optional(StoredThreadStanding),
   /** Opt-in reminder to delegate; absent or null is off. */
   delegationNudge: Schema.optional(StoredThreadDelegationNudge),
+  /** Room, promises and handoff; absent on ordinary threads. */
+  collaboration: Schema.optional(StoredThreadCollaboration),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   /** Per-founder read cursors. Older servers omit them; clients then keep the shared cursor. */
   visitsByFounder: Schema.optional(FounderVisits),
@@ -3689,6 +3694,8 @@ export const OrchestrationV2Command = Schema.Union([
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request; absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+    /** Open or close a room, set or keep a promise, or set the handoff. */
+    collaboration: Schema.optionalKey(ThreadCollaborationUpdate),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),

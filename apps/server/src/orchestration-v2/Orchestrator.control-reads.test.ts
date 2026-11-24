@@ -19,6 +19,7 @@ import {
   RunAttemptId,
   RunId,
   RuntimeRequestId,
+  type ThreadCollaborationUpdate,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -592,6 +593,68 @@ const completeAndSnoozeThread = Effect.fn("test.completeAndSnoozeThread")(functi
   });
   return { threadId, completedAt, snoozedUntil };
 });
+
+it.effect("a room opens, closes once, and reaches the thread shell", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:room");
+    const members = [ThreadId.make("thread:room-growth"), ThreadId.make("thread:room-cfo")];
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-room"),
+      threadId,
+      projectId: ProjectId.make("project:room"),
+      title: "Room",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    let step = 0;
+    const collaborate = (collaboration: ThreadCollaborationUpdate) =>
+      Effect.gen(function* () {
+        yield* TestClock.adjust("1 minute");
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`room-${++step}`),
+          threadId,
+          collaboration,
+        });
+        return (yield* projections.getThreadShell(threadId))?.collaboration;
+      });
+
+    const opened = yield* collaborate({
+      type: "open_room",
+      room: { topic: "Who owns outbound", members, linearIssue: "CLO-1" },
+    });
+    assert.deepEqual(opened?.room?.members, members);
+    const promised = yield* collaborate({
+      type: "set_promise",
+      promise: { id: "list", text: "Send the outbound list", dueAt: "2026-11-25T22:00:00Z" },
+    });
+    assert.equal(promised?.room?.openedAt, opened?.room?.openedAt);
+    assert.deepEqual(
+      promised?.promises?.map((promise) => promise.id),
+      ["list"],
+    );
+
+    const closed = yield* collaborate({
+      type: "close_room",
+      close: { summary: "Growth owns outbound.", decisions: [{ text: "Growth runs it" }] },
+    });
+    assert.isDefined(closed?.room?.closedAt);
+    const replayed = yield* collaborate({
+      type: "close_room",
+      close: { summary: "A second close.", decisions: [] },
+    });
+    assert.deepEqual(replayed?.room, closed?.room);
+    assert.deepEqual(replayed?.promises, promised?.promises);
+  }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect("mark unread retires an expired snooze so a dismissed wake stays dismissed", () =>
   Effect.gen(function* () {

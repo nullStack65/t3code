@@ -58,10 +58,31 @@ const jointSignOffEntries = Schema.Array(FounderSignOff).check(
   }),
 );
 
+/** One choice on a decision card, with what picking it does. */
+export const ThreadDecisionOption = Schema.Struct({
+  label: TrimmedNonEmptyString.check(Schema.isMaxLength(120)),
+  effect: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+});
+export type ThreadDecisionOption = typeof ThreadDecisionOption.Type;
+
+const decisionOptions = Schema.Array(ThreadDecisionOption).check(
+  Schema.isMinLength(2),
+  Schema.isMaxLength(5),
+  Schema.makeFilter((options) =>
+    new Set(options.map((option) => option.label)).size === options.length
+      ? true
+      : "Each option label is used once.",
+  ),
+);
+
 export const ThreadDecisionAsk = Schema.Struct({
   founder: Founder,
   kind: Schema.Literals(["decision", "review", "approval"]),
   question: TrimmedNonEmptyString.check(Schema.isMaxLength(2000)),
+  /** The choices a decision card shows. The founder picks one by replying on the thread. */
+  options: Schema.optional(decisionOptions),
+  /** The label of the option the asker recommends. Requires options. */
+  recommendation: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(120))),
   /**
    * Set only when both founders must answer. Absent, the ask is the one
    * `founder`'s alone. A stored ask from before this field decodes without it.
@@ -71,7 +92,14 @@ export const ThreadDecisionAsk = Schema.Struct({
       description: "Both founders' answers, when the call needs each of them.",
     }),
   ),
-});
+}).check(
+  Schema.makeFilter((ask) =>
+    ask.recommendation === undefined ||
+    ask.options?.some((option) => option.label === ask.recommendation) === true
+      ? true
+      : "recommendation must be the label of one of the options.",
+  ),
+);
 export type ThreadDecisionAsk = typeof ThreadDecisionAsk.Type;
 export const ThreadDecisionRequest = Schema.Struct({
   ...ThreadDecisionAsk.fields,
