@@ -1,5 +1,6 @@
 import {
   agentInboxRoutingError,
+  collaborationUpdateError,
   CommandId,
   makeThreadInbox,
   OrchestratorMcpFailure,
@@ -9,6 +10,7 @@ import {
   type ThreadMetadataMcpUpdateInput,
   type ThreadMetadataMcpUpdateResult,
   ThreadId,
+  roomCloseRecord,
   routeThreadInbox,
   withLegacyPeerInboxReason,
 } from "@t3tools/contracts";
@@ -47,7 +49,8 @@ function stablePart(value: string): string {
 function commandId(input: {
   readonly scope: McpInvocationScope;
   readonly threadId: ThreadId;
-  readonly action: ThreadMetadataMcpAction;
+  /** The action, with collaborate's sub-action, so one clientRequestId can open then close a room. */
+  readonly operation: string;
   readonly requestKey: string;
 }): CommandId {
   return CommandId.make(
@@ -57,7 +60,7 @@ function commandId(input: {
       stablePart(input.scope.requestNamespace),
       "thread-update",
       stablePart(input.threadId),
-      stablePart(input.action),
+      stablePart(input.operation),
       stablePart(input.requestKey),
     ].join(":"),
   );
@@ -129,19 +132,42 @@ function metadataCommand(input: {
         threadId: input.threadId,
         decisionRequest: null,
       };
+    case "collaborate":
+      return {
+        type: "thread.metadata.update",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        collaboration: input.update.collaboration!,
+      };
   }
 }
 
 function resultFromThread(input: {
   readonly action: ThreadMetadataMcpAction;
+  /** close_room answers with the record the facilitator writes to Linear and memory. */
+  readonly closedRoom: boolean;
   readonly commandId: CommandId;
   readonly sequence: number;
   readonly thread: Pick<
     OrchestrationV2AppThread,
-    "id" | "title" | "titleRegeneration" | "linkedPullRequest" | "updatedAt" | "inbox" | "standing" | "delegationNudge"
+    | "id"
+    | "title"
+    | "titleRegeneration"
+    | "linkedPullRequest"
+    | "updatedAt"
+    | "inbox"
+    | "standing"
+    | "delegationNudge"
+    | "collaboration"
   >;
 }): ThreadMetadataMcpUpdateResult {
+  const room = input.thread.collaboration?.room;
+  const roomRecord = input.closedRoom && room !== undefined ? roomCloseRecord(room) : null;
   return {
+    ...(input.action !== "collaborate" || input.thread.collaboration === undefined
+      ? {}
+      : { collaboration: input.thread.collaboration }),
+    ...(roomRecord === null ? {} : { roomRecord }),
     ...(input.thread.inbox === undefined ? {} : { inbox: input.thread.inbox }),
     ...(input.thread.standing === undefined ? {} : { standing: input.thread.standing }),
     ...(input.thread.delegationNudge === undefined
@@ -214,6 +240,28 @@ const make = Effect.gen(function* () {
             input.inboxRouting,
           );
     if (inboxError !== null) return yield* failure("invalid_request", inboxError);
+    if (input.collaboration !== undefined) {
+      const collaborationError = collaborationUpdateError(shell.collaboration, input.collaboration);
+      if (collaborationError !== null) return yield* failure("invalid_request", collaborationError);
+      if (input.collaboration.type === "open_room") {
+        const members = input.collaboration.room.members;
+        if (members.includes(threadId)) {
+          return yield* failure(
+            "invalid_request",
+            "A room's members are other threads; the room thread itself facilitates.",
+          );
+        }
+        // Only existence is checked here; t3_thread_send applies the mode and link checks per message.
+        for (const member of members) {
+          const memberShell = yield* threadManagement
+            .getThreadShell(member)
+            .pipe(Effect.mapError((error) => failure("orchestration_error", errorMessage(error))));
+          if (memberShell === null || memberShell.deletedAt !== null) {
+            return yield* failure("invalid_request", `Room member ${member} was not found.`);
+          }
+        }
+      }
+    }
     if (
       input.action === "set_delegation_nudge" &&
       scope.thread?.threadId === threadId
@@ -228,7 +276,10 @@ const make = Effect.gen(function* () {
     const updateCommandId = commandId({
       scope,
       threadId,
-      action: input.action,
+      operation:
+        input.collaboration === undefined
+          ? input.action
+          : `${input.action}.${input.collaboration.type}`,
       requestKey,
     });
     const dispatched = yield* threadManagement
@@ -271,6 +322,7 @@ const make = Effect.gen(function* () {
     }
     return resultFromThread({
       action: input.action,
+      closedRoom: input.collaboration?.type === "close_room",
       commandId: updateCommandId,
       sequence: dispatched.sequence,
       thread,

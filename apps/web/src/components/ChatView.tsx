@@ -289,6 +289,7 @@ import {
 } from "../state/entities";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
 import { CatchMeUpControl } from "./chat/CatchMeUpControl";
+import { useCollaborationBannerItems } from "./chat/ComposerCollaboration";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialogHost, openExpandedImagePreview } from "./chat/ExpandedImageDialog";
@@ -1377,6 +1378,16 @@ export default function ChatView(props: ChatViewProps) {
     hasMultipleRegisteredEnvironments: environments.length > 1,
     automaticEnvironment,
     autoUpdateEnvironments,
+  });
+  const collaborationBannerItems = useCollaborationBannerItems({
+    environmentId,
+    shell: activeThreadShell?.source ?? null,
+    viewerFounder,
+    timestampFormat,
+    onCompose: (text) => {
+      composerRef.current?.insertTextAtEnd(text, { ensureLeadingBoundary: true });
+      composerRef.current?.focusAtEnd();
+    },
   });
   const providerInstanceEntries = providerInstanceEntriesFor(
     providerStatuses,
@@ -2819,6 +2830,7 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...freshSessionItems,
+        ...collaborationBannerItems,
         ...systemComposerBannerItems,
       ];
     }
@@ -2830,6 +2842,7 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...freshSessionItems,
+      ...collaborationBannerItems,
       ...systemComposerBannerItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,

@@ -21,3 +21,20 @@ export function useNowAfter(deadlineMs: number | null): number {
   if (snapshot.deadlineMs !== deadlineMs || snapshot.passed !== passed) setSnapshot(readNow);
   return snapshot.nowMs;
 }
+
+/**
+ * `Date.now()` re-read as each of `deadlinesMs` passes, one timer at a time, so every
+ * comparison against any of them flips exactly once.
+ */
+export function useNowAcross(deadlinesMs: ReadonlyArray<number>): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const next = deadlinesMs.reduce<number | null>(
+    (soonest, deadline) =>
+      deadline > nowMs && (soonest === null || deadline < soonest) ? deadline : soonest,
+    null,
+  );
+  const passed = useDeadlinePassed(next);
+  // As in useNowAfter, the clock is read inside the updater.
+  if (passed) setNowMs(() => Date.now());
+  return nowMs;
+}

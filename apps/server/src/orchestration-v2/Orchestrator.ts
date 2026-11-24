@@ -8,6 +8,7 @@ import type {
   ProjectId,
 } from "@t3tools/contracts";
 import {
+  applyCollaborationUpdate,
   inboxAfterStandingSet,
   makeThreadInbox,
   nextFounderSeenMessage,
@@ -5744,6 +5745,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {}
               : { inbox: askedInbox(thread.inbox, command, now) }),
             ...(command.title === undefined ? {} : { title: command.title }),
+            ...(command.collaboration === undefined
+              ? {}
+              : {
+                  collaboration: applyCollaborationUpdate(
+                    thread.collaboration,
+                    command.collaboration,
+                    DateTime.formatIso(now),
+                  ),
+                }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
