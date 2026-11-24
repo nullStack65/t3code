@@ -19,6 +19,15 @@ class ReplayFixtureGitCommandError extends Schema.TaggedError<ReplayFixtureGitCo
   }
 }
 
+const INHERITED_REPOSITORY_ENV = {
+  GIT_DIR: undefined,
+  GIT_WORK_TREE: undefined,
+  GIT_COMMON_DIR: undefined,
+  GIT_INDEX_FILE: undefined,
+  GIT_OBJECT_DIRECTORY: undefined,
+  GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+};
+
 function runGit(
   cwd: string,
   args: ReadonlyArray<string>,
@@ -29,7 +38,9 @@ function runGit(
 > {
   return Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
+    const exitCode = yield* spawner.exitCode(
+      ChildProcess.make("git", args, { cwd, env: INHERITED_REPOSITORY_ENV, extendEnv: true }),
+    );
     if (Number(exitCode) !== 0) {
       return yield* new ReplayFixtureGitCommandError({
         command: `git ${args.join(" ")}`,
