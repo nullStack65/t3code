@@ -20,12 +20,6 @@ runs:
         prefix="$RUNNER_TEMP/t3-ci-tools"
         npm install --prefix "$prefix" --no-audit --no-fund "$pnpm_package"
         echo "$prefix/node_modules/.bin" >> "$GITHUB_PATH"
-    - name: Install native build dependencies
-      if: inputs.filter == ''
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential python3 libsecret-1-dev pkg-config
     - name: Install locked dependencies and expose workspace Vite+
       shell: bash
       env:

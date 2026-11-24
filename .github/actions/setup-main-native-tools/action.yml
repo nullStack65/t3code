@@ -1,0 +1,107 @@
+name: Set up job-local native build tools
+description: Verify and unpack the Ubuntu native build closure into this ARC job.
+runs:
+  using: composite
+  steps:
+    - name: Prepare and verify job-local native tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(id -u)" != 0
+        . /etc/os-release
+        test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
+        test "$(dpkg --print-architecture)" = amd64
+        test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        # Adapted from Closura's setup-race-compiler (69421cf91). All APT
+        # state and extracted tools stay in the job's temporary directory.
+        apt_root=$(mktemp -d "$RUNNER_TEMP/t3-apt.XXXXXX")
+        compiler_root="$RUNNER_TEMP/t3-native-tools"
+        mkdir -p "$apt_root/lists/partial" "$apt_root/archives/partial" "$apt_root/empty" "$apt_root/log" "$compiler_root"
+        : > "$apt_root/status"
+        # APT_CONFIG is loaded before host configuration fragments and hooks.
+        cat > "$apt_root/bootstrap.conf" <<CONFIG
+        Dir::Etc "$apt_root/empty";
+        Dir::Etc::main "/dev/null";
+        Dir::Etc::parts "$apt_root/empty";
+        Dir::Log "$apt_root/log";
+        Dir::Log::Terminal "$apt_root/log/term.log";
+        Dir::Log::History "$apt_root/log/history.log";
+        Dir::Log::Planner "$apt_root/log/eipp.log";
+        CONFIG
+        cat > "$apt_root/sources.list" <<'SOURCES'
+        deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe
+        deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe
+        deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe
+        SOURCES
+        apt_options=(
+          -o Dir::Etc::main=/dev/null -o "Dir::Etc::parts=$apt_root/empty"
+          -o "Dir::Etc::sourcelist=$apt_root/sources.list" -o Dir::Etc::sourceparts=-
+          -o "Dir::State::status=$apt_root/status" -o "Dir::State::lists=$apt_root/lists"
+          -o "Dir::State::extended_states=$apt_root/extended_states"
+          -o "Dir::Cache::archives=$apt_root/archives" -o "Dir::Cache::pkgcache=$apt_root/pkgcache.bin"
+          -o "Dir::Cache::srcpkgcache=$apt_root/srcpkgcache.bin" -o Debug::NoLocking=1
+          -o APT::Get::List-Cleanup=0
+        )
+        # Download the signed package closure into the job only; never install on the runner.
+        APT_CONFIG="$apt_root/bootstrap.conf" apt-get "${apt_options[@]}" update
+        APT_CONFIG="$apt_root/bootstrap.conf" apt-get "${apt_options[@]}" --download-only --yes --no-install-recommends install gcc g++ libc6-dev make libsecret-1-dev pkg-config
+        shopt -s nullglob
+        archives=("$apt_root"/archives/*.deb)
+        test "${#archives[@]}" -gt 0
+        for archive in "${archives[@]}"; do dpkg-deb --extract "$archive" "$compiler_root"; done
+        # Noble packages use merged /usr; the aliases exist only in this sysroot.
+        test -f "$compiler_root/usr/lib/x86_64-linux-gnu/libc.so.6"
+        test -f "$compiler_root/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+        test -L "$compiler_root/usr/lib64/ld-linux-x86-64.so.2"
+        test "$(readlink "$compiler_root/usr/lib64/ld-linux-x86-64.so.2")" = '../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'
+        if [[ ! -e "$compiler_root/lib" && ! -L "$compiler_root/lib" ]]; then ln -s usr/lib "$compiler_root/lib"; fi
+        if [[ ! -e "$compiler_root/lib64" && ! -L "$compiler_root/lib64" ]]; then ln -s usr/lib64 "$compiler_root/lib64"; fi
+        compiler_real_root=$(realpath -e "$compiler_root")
+        test "$(realpath -e "$compiler_root/lib/x86_64-linux-gnu/libc.so.6")" = "$compiler_real_root/usr/lib/x86_64-linux-gnu/libc.so.6"
+        test "$(realpath -e "$compiler_root/lib64/ld-linux-x86-64.so.2")" = "$compiler_real_root/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+        versions=("$compiler_root"/usr/lib/gcc/x86_64-linux-gnu/*)
+        test "${#versions[@]}" -eq 1 && test -x "$compiler_root/usr/bin/gcc"
+        # Use staged compiler libraries without replacing the runner's glibc or loader.
+        mkdir "$compiler_root/compiler-libs"
+        for lib in "$compiler_root"/usr/lib/x86_64-linux-gnu/lib*.so*; do
+          case "${lib##*/}" in libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*) continue ;; esac
+          ln -s "$lib" "$compiler_root/compiler-libs/${lib##*/}"
+        done
+        tools="$compiler_root/tools"
+        mkdir "$tools"
+        export T3_NATIVE_ROOT="$compiler_root" T3_GCC_LIB="${versions[0]}"
+        # Do not add the sysroot's libc or loader to the runner's search path.
+        export LD_LIBRARY_PATH="$compiler_root/compiler-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        cat > "$tools/compiler" <<'COMPILER'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        driver=gcc
+        case "${0##*/}" in c++|g++) driver=g++ ;; esac
+        exec "$T3_NATIVE_ROOT/usr/bin/$driver" --sysroot="$T3_NATIVE_ROOT" \
+          -B"$T3_NATIVE_ROOT/usr/bin/" -B"$T3_GCC_LIB/" \
+          -Wl,-rpath-link,"$T3_NATIVE_ROOT/usr/lib/x86_64-linux-gnu" "$@"
+        COMPILER
+        cat > "$tools/pkg-config" <<'PKG_CONFIG'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export PKG_CONFIG_SYSROOT_DIR="$T3_NATIVE_ROOT"
+        export PKG_CONFIG_LIBDIR="$T3_NATIVE_ROOT/usr/lib/x86_64-linux-gnu/pkgconfig:$T3_NATIVE_ROOT/usr/share/pkgconfig"
+        exec "$T3_NATIVE_ROOT/usr/bin/pkg-config" "$@"
+        PKG_CONFIG
+        chmod 755 "$tools/compiler" "$tools/pkg-config"
+        for tool in cc gcc c++ g++; do ln -s compiler "$tools/$tool"; done
+        ln -s "$compiler_root/usr/bin/make" "$tools/make"
+        export PATH="$tools:$PATH" CC="$tools/cc" CXX="$tools/c++"
+        make --version
+        python3 --version
+        printf 'int main() { return 0; }\n' > "$RUNNER_TEMP/t3-native-smoke.cpp"
+        "$CXX" "$RUNNER_TEMP/t3-native-smoke.cpp" -o "$RUNNER_TEMP/t3-native-smoke"
+        "$RUNNER_TEMP/t3-native-smoke"
+        read -r -a secret_flags <<< "$(pkg-config --cflags --libs libsecret-1)"
+        "$CC" -std=c11 -Wall -Wextra -Werror native/browser-secret/main.c -o "$RUNNER_TEMP/t3-browser-secret-smoke" "${secret_flags[@]}"
+        result=0
+        "$RUNNER_TEMP/t3-browser-secret-smoke" || result=$?
+        test "$result" = 64
+        printf 'T3_NATIVE_ROOT=%s\nT3_GCC_LIB=%s\nLD_LIBRARY_PATH=%s\nCC=%s\nCXX=%s\n' \
+          "$T3_NATIVE_ROOT" "$T3_GCC_LIB" "$LD_LIBRARY_PATH" "$CC" "$CXX" >> "$GITHUB_ENV"
+        echo "$tools" >> "$GITHUB_PATH"
