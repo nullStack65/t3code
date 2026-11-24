@@ -1063,7 +1063,9 @@ it.effect("a coalesced window dispatches the prompt saved after it opened", () =
           id: task.id,
           deliveryId: owner.id,
         });
-        assert.isTrue(delivery.renderedPrompt?.startsWith("Use the updated instructions.") === true);
+        assert.isTrue(
+          delivery.renderedPrompt?.startsWith("Use the updated instructions.") === true,
+        );
       }),
     { workers },
   );

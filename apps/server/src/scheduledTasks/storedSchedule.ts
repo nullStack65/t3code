@@ -12,8 +12,8 @@ import * as Schema from "effect/Schema";
  * `format`, never a legacy schedule `type`: a reader that predates it fails to decode the row and
  * skips it, rather than reading the inner schedule as local work and dropping the policy.
  */
-export const OWNED_SCHEDULE_FORMAT = "t3.scheduled-task.placement";
-export const OWNED_SCHEDULE_VERSION = 1;
+const OWNED_SCHEDULE_FORMAT = "t3.scheduled-task.placement";
+const OWNED_SCHEDULE_VERSION = 1;
 
 const OwnedScheduleEnvelopeV1 = Schema.Struct({
   format: Schema.Literal(OWNED_SCHEDULE_FORMAT),
