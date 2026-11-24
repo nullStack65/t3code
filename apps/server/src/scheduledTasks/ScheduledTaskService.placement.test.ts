@@ -13,6 +13,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
@@ -144,6 +145,7 @@ const makeService = (input: {
   ScheduledTaskService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        ProviderRegistryMock.layer(),
         ManagedPolicy.layerTest(),
         Layer.mock(ThreadLaunchService.ThreadLaunchService)({
           launch: () =>

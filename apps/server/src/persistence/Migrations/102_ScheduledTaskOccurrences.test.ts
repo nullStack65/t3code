@@ -13,7 +13,7 @@ layer("102_ScheduledTaskOccurrences", (it) => {
   it.effect("keeps one occurrence per trigger identity, independent of the task row", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 97 });
+      yield* runMigrations({ toMigrationInclusive: 102 });
       const occurrence = (id: string, overrides: Record<string, unknown> = {}) =>
         sql`INSERT INTO scheduled_task_occurrences ${sql.insert({
           occurrence_id: id,
