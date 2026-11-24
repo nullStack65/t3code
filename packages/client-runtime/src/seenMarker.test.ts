@@ -7,6 +7,7 @@ import {
   createSeenMarkerSession,
   pickNewestMessageId,
   resetSeenMarkersForTest,
+  resolveUnseenDivider,
   type SeenTimers,
 } from "./seenMarker.ts";
 
@@ -189,6 +190,33 @@ describe("catch-up offer", () => {
         seenAt,
       }),
     ).toEqual({ lastSeenMessageId: MessageId.make("missing"), seenAt });
+  });
+});
+
+describe("unseen divider", () => {
+  const at = (minute: number) => `2026-11-24T12:0${minute}:00.000Z`;
+  const thread = [
+    { id: MessageId.make("m1"), role: "user", createdAt: at(0) },
+    { id: MessageId.make("m2"), role: "assistant", createdAt: at(1) },
+    { id: MessageId.make("m3"), role: "user", createdAt: at(2) },
+    { id: MessageId.make("m4"), role: "assistant", createdAt: at(3) },
+    { id: MessageId.make("m5"), role: "assistant", createdAt: at(4), streaming: true },
+  ];
+
+  it("counts settled replies after the stored place and anchors on its time", () => {
+    expect(
+      resolveUnseenDivider({ messages: thread, lastSeenMessageId: MessageId.make("m2") }),
+    ).toEqual({ afterCreatedAt: at(1), count: 1 });
+  });
+
+  it("draws nothing when nothing is new or the place is unknown", () => {
+    expect(
+      resolveUnseenDivider({ messages: thread, lastSeenMessageId: MessageId.make("m4") }),
+    ).toBeNull();
+    expect(
+      resolveUnseenDivider({ messages: thread, lastSeenMessageId: MessageId.make("gone") }),
+    ).toBeNull();
+    expect(resolveUnseenDivider({ messages: thread, lastSeenMessageId: null })).toBeNull();
   });
 });
 
