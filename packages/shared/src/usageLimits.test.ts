@@ -1640,7 +1640,6 @@ describe("/usage-limits", () => {
             id: "grok:a-signed-out",
             driver: grok,
             email: "a@example.com",
-            displayName: null,
             status: "signed-out" as const,
             statusDetail: "Sign-in required.",
             usageLimits: limits,
