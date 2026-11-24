@@ -45,6 +45,12 @@ jobs:
     # This is a public fork. Never run untrusted PR code on the private ARC LAN.
     # Same-repo PR + trusted human author/actor only; push and manual runs
     # require an authorized actor and one of the two exact branches above.
+    # The one non-human author is the Closura upstream-sync GitHub App
+    # (CLO-1110), admitted only by its exact login and numeric id, on a
+    # same-repo `sync/upstream-` branch into the release line, with a
+    # `Deploy: none` line in the body. A login ending in `[bot]` cannot be
+    # registered by a person. The same clause gates all three workers;
+    # .github/scripts/arc-ci-trust-gate.test.cjs keeps them identical.
     if: >-
       ${{
         github.repository_id == '1372173214' &&
@@ -55,6 +61,19 @@ jobs:
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
+          ||
+          (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.base.ref == 'release/native-0.1.10' &&
+           startsWith(github.event.pull_request.head.ref, 'sync/upstream-') &&
+           github.event.pull_request.user.login == 'closura-t3code-upstream-sync[bot]' &&
+           github.event.pull_request.user.id == 360477638 &&
+           github.actor == 'closura-t3code-upstream-sync[bot]' &&
+           github.actor_id == '360477638' &&
+           github.triggering_actor == 'closura-t3code-upstream-sync[bot]' &&
+           contains(format(fromJSON('"\n{0}\n"'), github.event.pull_request.body), fromJSON('"\nDeploy: none\n"')) &&
+           !contains(github.event.pull_request.body, 'Deploy: fleet'))
           ||
           (github.event_name != 'pull_request' &&
            (github.ref == 'refs/heads/feat/assemblyai-current' ||
@@ -71,6 +90,26 @@ jobs:
       NODE_OPTIONS: "--max-old-space-size=3072"
       GOMAXPROCS: "2"
     steps:
+      # The App's `if:` clause above is only a prefilter. Before any checkout,
+      # parse its Deploy line exactly as closura-deploy-line.yml does (one
+      # unfenced `^Deploy:` line, whitespace stripped) and require `none`. Reads
+      # only the event payload; runs no PR code.
+      - name: Require Deploy none from the upstream-sync App
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.id == 360477638 }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$count" -ne 1 || test "$value" != none; then
+            echo "::error::The upstream-sync App runs on ARC only with exactly one 'Deploy: none' line."
+            exit 1
+          fi
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -217,6 +256,19 @@ jobs:
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
           ||
+          (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.base.ref == 'release/native-0.1.10' &&
+           startsWith(github.event.pull_request.head.ref, 'sync/upstream-') &&
+           github.event.pull_request.user.login == 'closura-t3code-upstream-sync[bot]' &&
+           github.event.pull_request.user.id == 360477638 &&
+           github.actor == 'closura-t3code-upstream-sync[bot]' &&
+           github.actor_id == '360477638' &&
+           github.triggering_actor == 'closura-t3code-upstream-sync[bot]' &&
+           contains(format(fromJSON('"\n{0}\n"'), github.event.pull_request.body), fromJSON('"\nDeploy: none\n"')) &&
+           !contains(github.event.pull_request.body, 'Deploy: fleet'))
+          ||
           (github.event_name != 'pull_request' &&
            (github.ref == 'refs/heads/feat/assemblyai-current' ||
             github.ref == 'refs/heads/release/native-0.1.10') &&
@@ -232,6 +284,26 @@ jobs:
       NODE_OPTIONS: "--max-old-space-size=3072"
       GOMAXPROCS: "2"
     steps:
+      # The App's `if:` clause above is only a prefilter. Before any checkout,
+      # parse its Deploy line exactly as closura-deploy-line.yml does (one
+      # unfenced `^Deploy:` line, whitespace stripped) and require `none`. Reads
+      # only the event payload; runs no PR code.
+      - name: Require Deploy none from the upstream-sync App
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.id == 360477638 }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$count" -ne 1 || test "$value" != none; then
+            echo "::error::The upstream-sync App runs on ARC only with exactly one 'Deploy: none' line."
+            exit 1
+          fi
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -294,6 +366,19 @@ jobs:
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
            contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
+          ||
+          (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.base.ref == 'release/native-0.1.10' &&
+           startsWith(github.event.pull_request.head.ref, 'sync/upstream-') &&
+           github.event.pull_request.user.login == 'closura-t3code-upstream-sync[bot]' &&
+           github.event.pull_request.user.id == 360477638 &&
+           github.actor == 'closura-t3code-upstream-sync[bot]' &&
+           github.actor_id == '360477638' &&
+           github.triggering_actor == 'closura-t3code-upstream-sync[bot]' &&
+           contains(format(fromJSON('"\n{0}\n"'), github.event.pull_request.body), fromJSON('"\nDeploy: none\n"')) &&
+           !contains(github.event.pull_request.body, 'Deploy: fleet'))
         )
         ||
         (
@@ -312,6 +397,26 @@ jobs:
       NODE_OPTIONS: "--max-old-space-size=3072"
       GOMAXPROCS: "2"
     steps:
+      # The App's `if:` clause above is only a prefilter. Before any checkout,
+      # parse its Deploy line exactly as closura-deploy-line.yml does (one
+      # unfenced `^Deploy:` line, whitespace stripped) and require `none`. Reads
+      # only the event payload; runs no PR code.
+      - name: Require Deploy none from the upstream-sync App
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.id == 360477638 }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$count" -ne 1 || test "$value" != none; then
+            echo "::error::The upstream-sync App runs on ARC only with exactly one 'Deploy: none' line."
+            exit 1
+          fi
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -530,3 +635,9 @@ jobs:
       - name: Guard the parallel coverage
         shell: bash
         run: node .github/scripts/arc-ci-coverage.cjs
+
+      # Proves the worker gates still admit only the founders and the exact
+      # upstream-sync App shape, and that all three workers share one gate.
+      - name: Test the ARC trust gate
+        shell: bash
+        run: node --test .github/scripts/arc-ci-trust-gate.test.cjs
