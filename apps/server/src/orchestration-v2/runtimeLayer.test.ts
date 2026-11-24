@@ -4545,15 +4545,19 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           return;
         }
         assert.isDefined(thread?.pullRequests?.[0]?.watch);
-        assert.deepEqual(yield* summaries, []);
+        // The host stayed unreadable for the whole stale window, so the watch wakes the thread
+        // once about the missing progress while it keeps watching.
+        const stale = "#8: no observed progress for 30 minutes";
+        assert.deepEqual(yield* summaries, [stale]);
         disconnected = false;
         genericFailure = false;
         passed = true;
         yield* sweep;
-        assert.deepEqual(yield* summaries, ["#8: checks passed"]);
+        const settled = [stale, "#8: checks passed"].toSorted();
+        assert.deepEqual((yield* summaries).toSorted(), settled);
         yield* TestClock.adjust("10 minutes");
         yield* sweep;
-        assert.deepEqual(yield* summaries, ["#8: checks passed"]);
+        assert.deepEqual((yield* summaries).toSorted(), settled);
         yield* orchestrator.dispatch({
           type: "thread.pull-request.watch",
           commandId: CommandId.make(`pr-watch-unreadable-stop-${reason}-${activityFails}`),
