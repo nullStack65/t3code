@@ -1063,7 +1063,7 @@ it.effect("a coalesced window dispatches the prompt saved after it opened", () =
           id: task.id,
           deliveryId: owner.id,
         });
-        assert.isTrue(delivery.renderedPrompt.startsWith("Use the updated instructions."));
+        assert.isTrue(delivery.renderedPrompt?.startsWith("Use the updated instructions.") === true);
       }),
     { workers },
   );
@@ -1098,7 +1098,7 @@ it.effect("retrying a running window keeps the prompt it was dispatched with", (
           id: task.id,
           deliveryId: owner.id,
         });
-        assert.isTrue(delivery.renderedPrompt.startsWith("Prompt at dispatch"));
+        assert.isTrue(delivery.renderedPrompt?.startsWith("Prompt at dispatch") === true);
       }),
     { workers },
   );
