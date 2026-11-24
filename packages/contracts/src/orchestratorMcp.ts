@@ -37,6 +37,7 @@ import {
 import { secretRequestPageUrl } from "./secretRequest.ts";
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { LastThreadTitleRegeneration, ThreadTitleRegeneration } from "./threadTitle.ts";
+import { StaleTimeoutMinutes } from "./waitStaleness.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
@@ -202,6 +203,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   timeoutMs: Schema.optional(Schema.Finite).annotate({
     description: "Mode 'wait' only. At most 45 s. A timeout does not cancel the child.",
   }),
+  staleTimeoutMinutes: StaleTimeoutMinutes,
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   runtimeMode: Schema.optional(
     OrchestratorMcpRuntimeMode.annotate({
@@ -637,6 +639,8 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
+  progressAtMs: Schema.optional(Schema.Finite),
+  intentionallyHeld: Schema.optional(Schema.Boolean),
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,

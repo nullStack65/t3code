@@ -1929,6 +1929,9 @@ export const make = Effect.gen(function* () {
             observedAt,
             mergedAt: changeRequest.mergedAt,
             closedAt: changeRequest.closedAt,
+            ...(changeRequest.reviewDecision === undefined
+              ? {}
+              : { reviewDecision: changeRequest.reviewDecision }),
             reviewers: changeRequest.reviewers,
             labels: changeRequest.labels,
             checks: changeRequest.checks,

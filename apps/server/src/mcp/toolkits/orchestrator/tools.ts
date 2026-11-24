@@ -1,4 +1,5 @@
 import {
+  StaleTimeoutMinutes,
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
@@ -90,7 +91,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
+    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. In `mode:'wait'`, T3 wakes the parent once per quiet period after 45 minutes without child activity. Change this with `staleTimeoutMinutes`. The separate `timeoutMs` limits only the tool call. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -147,13 +148,14 @@ const WorkflowStopTool = Tool.make("t3_workflow_stop", {
 
 const BackgroundWaitTool = Tool.make("t3_background_wait", {
   description:
-    "Keep this thread in Working while background work runs. Pass its task ID once started. Not for work left running (dev server, watcher). `waiting=false` clears. Doesn't stop tasks. Claude/OpenCode only.",
+    "Keep this thread in Working while background work runs. Pass its task ID once started. Not for work left running (dev server, watcher). `waiting=false` clears. Doesn't stop tasks. T3 wakes you once per quiet period after 45 minutes without progress. Set `staleTimeoutMinutes` to change the deadline. Claude/OpenCode only.",
   parameters: Schema.Struct({
     taskIds: Schema.Array(TrimmedNonEmptyString).check(
       Schema.isMinLength(1),
       Schema.isMaxLength(20),
     ),
     waiting: Schema.optional(Schema.Boolean),
+    staleTimeoutMinutes: StaleTimeoutMinutes,
   }),
   success: Schema.Struct({
     matched: Schema.Array(Schema.String),

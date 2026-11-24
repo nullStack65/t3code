@@ -42,6 +42,8 @@ import {
   evaluatePullRequestWatch,
   PULL_REQUEST_WATCH_NO_CHECKS_MS,
   pullRequestWatchMessage,
+  stalePullRequestWatch,
+  pullRequestWatchStaleness,
 } from "./pullRequestWatch.ts";
 
 /** Checks take minutes; faster sweeps waste the account's shared host quota. */
@@ -103,6 +105,7 @@ interface Wake {
   readonly text: string;
   readonly notification: OrchestrationV2Notification;
   readonly includesRemarks?: boolean;
+  readonly staleProgressAt?: string;
 }
 
 /** A wake a pass holds back so each thread gets one for everything the pass found. */
@@ -204,6 +207,7 @@ const checksPendingBeforeOf = ({ watch }: WatchTarget) =>
 function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatch): boolean {
   return (
     left.startedAt === right.startedAt &&
+    JSON.stringify(left.staleness) === JSON.stringify(right.staleness) &&
     left.headSha === right.headSha &&
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     left.passed === right.passed &&
@@ -321,7 +325,7 @@ export const make = Effect.gen(function* () {
     endedWatch?: ThreadPullRequestWatch,
   ) {
     const uuid = yield* random.uuidV4();
-    yield* engine.dispatch({
+    return yield* engine.dispatch({
       type: "thread.pull-request-watch.sync",
       commandId: CommandId.make(`server:pr-watch:${target.thread.id}:${uuid}`),
       threadId: target.thread.id,
@@ -332,7 +336,19 @@ export const make = Effect.gen(function* () {
       ...(endedWatch === undefined ? {} : { endedWatch }),
       ...(wake === undefined
         ? {}
-        : { wake: { ...wake, messageId: MessageId.make(`message:pr-watch:${uuid}`) } }),
+        : {
+            ...(wake.staleProgressAt === undefined
+              ? {}
+              : { staleProgressAt: wake.staleProgressAt }),
+            wake: {
+              text: wake.text,
+              notification: wake.notification,
+              ...(wake.includesRemarks === undefined
+                ? {}
+                : { includesRemarks: wake.includesRemarks }),
+              messageId: MessageId.make(`message:pr-watch:${uuid}`),
+            },
+          }),
     });
   });
 
@@ -470,12 +486,18 @@ export const make = Effect.gen(function* () {
       ...identityOf(first.target.link),
       startedAt: first.target.watch.startedAt,
       watch: first.next,
+      ...(first.wake.staleProgressAt === undefined
+        ? {}
+        : { staleProgressAt: first.wake.staleProgressAt }),
       ...checksPendingBeforeOf(first.target),
       ...(first.endedWatch === undefined ? {} : { endedWatch: first.endedWatch }),
       others: rest.map((item) => ({
         ...identityOf(item.target.link),
         startedAt: item.target.watch.startedAt,
         watch: item.next,
+        ...(item.wake.staleProgressAt === undefined
+          ? {}
+          : { staleProgressAt: item.wake.staleProgressAt }),
         ...checksPendingBeforeOf(item.target),
         ...(item.endedWatch === undefined ? {} : { endedWatch: item.endedWatch }),
         ...(item.wake.includesRemarks === true ? { includesRemarks: true } : {}),
@@ -586,6 +608,42 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const sendStale = (
+    target: WatchTarget,
+    watch: ThreadPullRequestWatch,
+    now: number,
+    hostObservation: "current" | "unavailable",
+  ) => {
+    if (target.link.snapshot?.state === "closed") return Effect.succeed(false);
+    const stale = stalePullRequestWatch(
+      watch,
+      target.link.url,
+      target.link.number,
+      now,
+      hostObservation,
+    );
+    return stale === undefined
+      ? Effect.succeed(false)
+      : record(target, stale.next, {
+          ...stale.wake,
+          staleProgressAt: pullRequestWatchStaleness(stale.next).lastProgressAt,
+        }).pipe(
+          Effect.tap(({ storedEvents }) =>
+            storedEvents.some(
+              ({ event }) => event.type === "message.updated" || event.type === "turn-item.updated",
+            )
+              ? woke(target)
+              : Effect.void,
+          ),
+          Effect.as(true),
+        );
+  };
+
+  const checkStaleness = (group: WatchGroup, now: number, observation: "current" | "unavailable") =>
+    eachTarget(group, (target) =>
+      sendStale(target, target.watch, now, observation).pipe(Effect.asVoid),
+    );
+
   const readGroup = Effect.fn("PullRequestWatchReactor.readGroup")(function* (
     group: WatchGroup,
     fingerprint: ProviderChangeRequestWatchFingerprint | null,
@@ -593,7 +651,7 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const last = lastReads.get(group.key);
     const plan = planRead(group, last, fingerprint, now);
-    if (!plan.detail) return;
+    if (!plan.detail) return yield* checkStaleness(group, now, "current");
     if (
       last === undefined ||
       group.targets.some((target) => !last.watches.has(watchKey(target))) ||
@@ -621,7 +679,7 @@ export const make = Effect.gen(function* () {
         return yield* Effect.failCause(detailRead.cause);
       lastReads.delete(group.key);
       const reason = providerFailureReason(detailRead.cause);
-      if (reason === "rate-limited") return;
+      if (reason === "rate-limited") return yield* checkStaleness(group, now, "unavailable");
       // Transport and host failures can outlast the failure limit; keep the watch for recovery.
       if (reason === "failed") {
         readFailures.delete(group.key);
@@ -697,7 +755,15 @@ export const make = Effect.gen(function* () {
       remarks: fingerprint?.remarks ?? null,
     });
     yield* eachTarget(group, (target) => {
-      const report = evaluatePullRequestWatch(target.watch, detail, remarks, now);
+      const report = evaluatePullRequestWatch(
+        target.watch,
+        detail,
+        remarks,
+        now,
+        detail.reviewDecision === undefined
+          ? target.link.snapshot?.reviewDecision
+          : detail.reviewDecision,
+      );
       if (report.changes.length > 0) {
         const wake = {
           ...pullRequestWatchMessage({
@@ -723,7 +789,13 @@ export const make = Effect.gen(function* () {
             : { groupKey: group.key, target, next: report.next, wake },
         );
       }
-      return watchesEqual(report.next, target.watch) ? Effect.void : record(target, report.next);
+      return sendStale(target, report.next, now, "current").pipe(
+        Effect.flatMap((held) =>
+          held || watchesEqual(report.next, target.watch)
+            ? Effect.void
+            : record(target, report.next).pipe(Effect.asVoid),
+        ),
+      );
     });
   });
 
@@ -797,7 +869,12 @@ export const make = Effect.gen(function* () {
           ? Effect.void
           : pullRequests.invalidate({ reference: referenceOf(group) })
         ).pipe(
-          Effect.andThen(fingerprintOf(group)),
+          Effect.andThen(
+            fingerprintOf(group).pipe(
+              Effect.timeoutOption("30 seconds"),
+              Effect.map(Option.getOrElse(() => "paused" as const)),
+            ),
+          ),
           Effect.tap((fingerprint) => {
             const last = lastReads.get(group.key);
             // Open pull request views refresh only when the host state moved.
@@ -812,11 +889,19 @@ export const make = Effect.gen(function* () {
           }),
           Effect.flatMap((fingerprint) =>
             fingerprint === "paused"
-              ? Effect.void
+              ? Clock.currentTimeMillis.pipe(
+                  Effect.flatMap((now) => checkStaleness(group, now, "unavailable")),
+                )
               : reads.withPermit(
                   readGroup(group, fingerprint).pipe(
-                    Effect.catchCause(
-                      logFailure("pull request watch check failed", { pullRequest: group.key }),
+                    Effect.timeout("60 seconds"),
+                    Effect.catchCause((cause) =>
+                      logFailure("pull request watch check failed", { pullRequest: group.key })(
+                        cause,
+                      ).pipe(
+                        Effect.andThen(Clock.currentTimeMillis),
+                        Effect.flatMap((now) => checkStaleness(group, now, "unavailable")),
+                      ),
                     ),
                   ),
                 ),

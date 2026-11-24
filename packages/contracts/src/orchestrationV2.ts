@@ -1,3 +1,4 @@
+import { ThreadStalenessWait } from "./waitStaleness.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -521,6 +522,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
+  stalenessWaits: Schema.optional(Schema.Array(ThreadStalenessWait)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
@@ -1108,6 +1110,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   /** Set from the run that produced `result`; informs the parent and takes no action. */
   workerAlert: Schema.optional(OrchestrationV2WorkerAlert),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  waitedBeforeRecovery: Schema.optional(Schema.Literal(true)),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   // The run whose unfinished task was cancelled, committed with its Stop.
   cancelledRunId: Schema.optional(RunId),
@@ -1226,6 +1229,7 @@ const PendingBackgroundTaskFields = {
   itemId: Schema.optional(TurnItemId),
   sourceThreadId: Schema.optional(ThreadId),
   taskId: TrimmedNonEmptyString,
+  progressAtMs: Schema.optional(Schema.Finite),
   description: Schema.optional(TrimmedNonEmptyString),
   /** The subagent task that started this work and waits on it. */
   parentTaskId: Schema.optional(TrimmedNonEmptyString),
@@ -1503,6 +1507,7 @@ const MonitorPullRequestStamp = Schema.Struct({
   /** Null when the wake is not about one head, so a newer push does not outdate it. */
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   watchEnded: Schema.optional(Schema.Boolean),
+  staleProgressAt: Schema.optional(IsoDateTime),
   /** Set on a wake covering several pull requests. */
   section: Schema.optional(PullRequestWakeSection),
 });
@@ -1539,6 +1544,15 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
     Schema.Struct({
       kind: Schema.Literal("monitor"),
       pullRequest: Schema.optional(MonitorPullRequestStamp),
+      staleWaits: Schema.optional(
+        Schema.Array(
+          Schema.Struct({
+            kind: ThreadStalenessWait.fields.kind,
+            taskId: ThreadStalenessWait.fields.taskId,
+            lastProgressAtMs: ThreadStalenessWait.fields.lastProgressAtMs,
+          }),
+        ),
+      ),
       /** The other pull requests one wake covers; outdated ones leave it before it starts. */
       otherPullRequests: Schema.optional(Schema.Array(MonitorPullRequestStamp)),
     }),
@@ -3666,6 +3680,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     watching: Schema.Boolean,
+    staleTimeoutMs: Schema.optional(PositiveInt),
     link: Schema.optional(
       Schema.Struct({
         url: TrimmedNonEmptyString,
@@ -3935,6 +3950,7 @@ export const OrchestrationV2Command = Schema.Union([
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+    staleTimeoutMs: Schema.optional(PositiveInt),
     // Defaults to settled_only; fire-and-forget wakes require always.
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
     createdAt: Schema.optional(Schema.DateTimeUtc),
@@ -3980,6 +3996,34 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("thread.wait-staleness.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    operation: Schema.Union([
+      Schema.Struct({
+        type: Schema.Literal("register"),
+        kind: ThreadStalenessWait.fields.kind,
+        taskIds: Schema.Array(Schema.String),
+        staleTimeoutMs: PositiveInt,
+        providerThreadId: Schema.optional(ProviderThreadId),
+        onlyIfMissing: Schema.optional(Schema.Literal(true)),
+      }),
+      Schema.Struct({
+        type: Schema.Literal("clear"),
+        kind: ThreadStalenessWait.fields.kind,
+        taskIds: Schema.Array(Schema.String),
+        registeredBy: Schema.optional(CommandId),
+      }),
+      Schema.Struct({
+        type: Schema.Literal("remote-progress"),
+        taskId: NodeId,
+        progressAtMs: Schema.Finite,
+        held: Schema.optional(Schema.Boolean),
+      }),
+      Schema.Struct({ type: Schema.Literal("sweep") }),
+    ]),
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
@@ -4033,6 +4077,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
      * makes the read's answer describe the old head, so the cleared answer stays.
      */
     checksPendingBefore: Schema.optional(Schema.Boolean),
+    staleProgressAt: Schema.optional(IsoDateTime),
     /** With `watch: null`, the state the ended watch keeps instead of its last saved one. */
     endedWatch: Schema.optional(ThreadPullRequestWatch),
     /** More watches of this thread recorded together, which `wake` also reports on. */
@@ -4043,6 +4088,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
           startedAt: IsoDateTime,
           watch: Schema.NullOr(ThreadPullRequestWatch),
           checksPendingBefore: Schema.optional(Schema.Boolean),
+          staleProgressAt: Schema.optional(IsoDateTime),
           endedWatch: Schema.optional(ThreadPullRequestWatch),
           includesRemarks: Schema.optional(Schema.Boolean),
         }),
@@ -4077,6 +4123,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     driver: ProviderDriverKind,
     modelSelection: ModelSelection,
     remoteChild: OrchestrationV2RemoteTaskChild,
+    staleTimeoutMs: Schema.optional(PositiveInt),
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   }),
   /**

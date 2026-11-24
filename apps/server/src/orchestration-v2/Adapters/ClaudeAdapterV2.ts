@@ -6936,13 +6936,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId: string,
             task: OrchestrationV2PendingBackgroundTask,
           ) {
+            const now = yield* Clock.currentTimeMillis;
             const startedMonitor = yield* Ref.modify(
               pendingBackgroundTasksByNativeThread,
               (current) => {
                 const roster = new Map(rosterForNativeThread(current, nativeThreadId));
                 const startedMonitor =
                   task.kind === "monitor" && roster.get(task.taskId)?.kind !== "monitor";
-                roster.set(task.taskId, task);
+                roster.set(task.taskId, startedMonitor ? { ...task, progressAtMs: now } : task);
                 return [startedMonitor, new Map(current).set(nativeThreadId, roster)] as const;
               },
             );
@@ -10633,6 +10634,40 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           return subagent?.task.status === "running" ? settled : null;
         });
 
+        const backgroundTaskProgress = new Map<string, string>();
+        const recordBackgroundTaskProgress = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+          message: Extract<SDKMessage, { type: "system"; subtype: "task_progress" }>,
+        ) {
+          const signature = `${message.run_id ?? ""}:${message.usage.total_tokens}:${message.usage.tool_uses}:${message.summary ?? ""}`;
+          if (backgroundTaskProgress.get(message.task_id) === signature) return;
+          const now = DateTime.toEpochMillis(yield* DateTime.now);
+          const changed = yield* Ref.modify(pendingBackgroundTasksByNativeThread, (current) => {
+            const roster = current.get(nativeThreadId);
+            const task = roster?.get(message.task_id);
+            if (task === undefined) return [false, current] as const;
+            return [
+              true,
+              new Map(current).set(
+                nativeThreadId,
+                new Map(roster).set(message.task_id, { ...task, progressAtMs: now }),
+              ),
+            ] as const;
+          });
+          if (!changed) return;
+          backgroundTaskProgress.delete(message.task_id);
+          backgroundTaskProgress.set(message.task_id, signature);
+          for (const oldest of backgroundTaskProgress.keys()) {
+            if (backgroundTaskProgress.size <= 64) break;
+            backgroundTaskProgress.delete(oldest);
+          }
+          const active = yield* Ref.get(activeTurn);
+          yield* emitRosterUpdate(
+            nativeThreadId,
+            active?.nativeThreadId === nativeThreadId ? active : null,
+          );
+        });
+
         const handleSdkMessageFrame = Effect.fnUntraced(function* (input: {
           readonly query: ClaudeAgentSdkQuerySession;
           readonly message: SDKMessage;
@@ -10664,6 +10699,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
             }
             return;
+          }
+          if (
+            message.type === "system" &&
+            message.subtype === "task_progress" &&
+            input.replayed !== true
+          ) {
+            yield* recordBackgroundTaskProgress(liveQuery.nativeThreadId, message);
           }
           // Track before routing: idle-wake Monitors report tasks before replaying their tool calls.
           yield* trackClaudeMonitorCalls(message);

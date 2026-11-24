@@ -113,6 +113,7 @@ export type PullRequestCheckStatus = typeof PullRequestCheckStatus.Type;
 export const PullRequestCheck = Schema.Struct({
   name: TrimmedNonEmptyString,
   status: PullRequestCheckStatus,
+  pendingPhase: Schema.optional(Schema.Literals(["queued", "in-progress"])),
   description: Schema.NullOr(Schema.String),
   url: Schema.NullOr(Schema.String),
   required: Schema.optional(Schema.Boolean),
@@ -668,6 +669,7 @@ export const PullRequestDetail = Schema.Struct({
   observedAt: Schema.optional(Schema.Finite),
   mergedAt: Schema.NullOr(IsoDateTime),
   closedAt: Schema.NullOr(IsoDateTime),
+  reviewDecision: Schema.optional(Schema.NullOr(PullRequestReviewDecision)),
   reviewers: Schema.Array(PullRequestActor),
   labels: Schema.Array(PullRequestLabel),
   checks: Schema.Array(PullRequestCheck),
