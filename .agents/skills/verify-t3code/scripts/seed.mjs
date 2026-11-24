@@ -2,7 +2,7 @@
 // first-run wizard -> add the fixture project -> send one message with the mock Cursor
 // provider. Each step logs its sub-feature ID and asserts the end state.
 //   node seed.mjs RUN_DIR
-import { execFileSync } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import { start, check } from "./lib.mjs";
 
 const { run, t, p, step, finish } = await start("seed.mjs", 90000);
@@ -80,9 +80,13 @@ await step("composer.send", "choose Auto, type a prompt, Send message", async ()
   return `reply "verify-t3code mock reply" visible at ${new URL(p.url()).pathname}`;
 });
 await step("composer.worktree", "git worktree list in the fixture repo", async () => {
-  const out = execFileSync("git", ["-C", `${run}/fixture/demo-app`, "worktree", "list"], {
-    encoding: "utf8",
-  });
+  const out = NodeChildProcess.execFileSync(
+    "git",
+    ["-C", `${run}/fixture/demo-app`, "worktree", "list"],
+    {
+      encoding: "utf8",
+    },
+  );
   check(
     /\[t3code\/[0-9a-f]+\]/.test(out) && out.includes(`${run}/home/worktrees/`),
     "no t3code/<id> worktree under $RUN/home/worktrees",

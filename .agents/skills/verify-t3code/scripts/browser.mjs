@@ -13,55 +13,49 @@
 // ~/.cache/ms-playwright, with a throwaway profile under RUN_DIR. It never touches a
 // person's browser profile. cleanup.sh kills the browser by the PID recorded in
 // RUN_DIR/browser.env.
-import { createRequire } from "node:module";
-import { spawn } from "node:child_process";
-import { createServer } from "node:net";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
+import * as NodeModule from "node:module";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeNet from "node:net";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 
 function readEnvFile(path) {
   return Object.fromEntries(
-    readFileSync(path, "utf8")
+    NodeFS.readFileSync(path, "utf8")
       .split("\n")
       .filter((l) => l.includes("="))
       .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
   );
 }
 
-export const readInstance = (runDir) => readEnvFile(join(runDir, "instance.env"));
+export const readInstance = (runDir) => readEnvFile(NodePath.join(runDir, "instance.env"));
 
 function loadPlaywright(repo) {
-  const store = join(repo, "node_modules/.pnpm");
-  const dir = readdirSync(store).find((d) => d.startsWith("playwright-core@"));
+  const store = NodePath.join(repo, "node_modules/.pnpm");
+  const dir = NodeFS.readdirSync(store).find((d) => d.startsWith("playwright-core@"));
   if (!dir) throw new Error("playwright-core not found in " + store);
-  return createRequire(join(store, dir, "node_modules/playwright-core/"))("playwright-core");
+  return NodeModule.createRequire(NodePath.join(store, dir, "node_modules/playwright-core/"))(
+    "playwright-core",
+  );
 }
 
 function chromiumPath() {
-  const root = join(homedir(), ".cache/ms-playwright");
+  const root = NodePath.join(NodeOS.homedir(), ".cache/ms-playwright");
   // chromium-<revision> only: chromium_headless_shell-* and chromium-headless-shell-* have no chrome-linux64/chrome.
-  const dirs = readdirSync(root)
+  const dirs = NodeFS.readdirSync(root)
     .filter((d) => /^chromium-\d+$/.test(d))
     .sort((a, b) => Number(a.slice(9)) - Number(b.slice(9)));
   if (!dirs.length) throw new Error("no chromium-<revision> in " + root);
-  const p = join(root, dirs.at(-1), "chrome-linux64/chrome");
-  if (!existsSync(p)) throw new Error("no Chromium at " + p);
+  const p = NodePath.join(root, dirs.at(-1), "chrome-linux64/chrome");
+  if (!NodeFS.existsSync(p)) throw new Error("no Chromium at " + p);
   return p;
 }
 
 const freePort = () =>
   new Promise((resolve, reject) => {
-    const s = createServer();
+    const s = NodeNet.createServer();
     s.listen(0, "127.0.0.1", () => {
       const { port } = s.address();
       s.close(() => resolve(port));
@@ -72,10 +66,10 @@ const freePort = () =>
 export async function up(runDir, { width = 1440, height = 900 } = {}) {
   const inst = readInstance(runDir);
   const port = await freePort();
-  const profile = join(runDir, "profile");
-  mkdirSync(profile, { recursive: true });
-  const log = openSync(join(runDir, "browser.log"), "a");
-  const child = spawn(
+  const profile = NodePath.join(runDir, "profile");
+  NodeFS.mkdirSync(profile, { recursive: true });
+  const log = NodeFS.openSync(NodePath.join(runDir, "browser.log"), "a");
+  const child = NodeChildProcess.spawn(
     chromiumPath(),
     [
       "--headless=new",
@@ -94,9 +88,13 @@ export async function up(runDir, { width = 1440, height = 900 } = {}) {
     { detached: true, stdio: ["ignore", log, log] },
   );
   child.unref();
-  writeFileSync(join(runDir, "browser.env"), `BROWSER_PID=${child.pid}\nCDP_PORT=${port}\n`, {
-    mode: 0o600,
-  });
+  NodeFS.writeFileSync(
+    NodePath.join(runDir, "browser.env"),
+    `BROWSER_PID=${child.pid}\nCDP_PORT=${port}\n`,
+    {
+      mode: 0o600,
+    },
+  );
   const t = await connect(runDir, { retries: 40 });
   // Dev mode serves hundreds of modules, so "domcontentloaded" can exceed 30 s on a busy
   // host. Return at "commit" and let callers wait for real UI.
@@ -107,7 +105,7 @@ export async function up(runDir, { width = 1440, height = 900 } = {}) {
 
 export async function connect(runDir, { retries = 1 } = {}) {
   const inst = readInstance(runDir);
-  const { CDP_PORT } = readEnvFile(join(runDir, "browser.env"));
+  const { CDP_PORT } = readEnvFile(NodePath.join(runDir, "browser.env"));
   const { chromium } = loadPlaywright(inst.REPO);
   let browser;
   for (let i = 0; ; i++) {
@@ -122,8 +120,8 @@ export async function connect(runDir, { retries = 1 } = {}) {
   const context = browser.contexts()[0];
   const page = context.pages()[0] ?? (await context.newPage());
   page.setDefaultTimeout(60000);
-  const evidence = join(runDir, "evidence");
-  mkdirSync(evidence, { recursive: true });
+  const evidence = NodePath.join(runDir, "evidence");
+  NodeFS.mkdirSync(evidence, { recursive: true });
   const consoleErrors = [];
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   page.on("console", (m) => {
@@ -136,7 +134,7 @@ export async function connect(runDir, { retries = 1 } = {}) {
     consoleErrors,
     base: `http://localhost:${inst.WEB_PORT}`,
     async shot(name) {
-      const path = join(evidence, `${name}.png`);
+      const path = NodePath.join(evidence, `${name}.png`);
       // A saturated host can stall a screenshot; a missing image is reported, never fatal.
       return page.screenshot({ path, timeout: 90000 }).then(
         () => path,
@@ -144,7 +142,7 @@ export async function connect(runDir, { retries = 1 } = {}) {
       );
     },
     note(line) {
-      appendFileSync(join(evidence, "observed.log"), line + "\n");
+      NodeFS.appendFileSync(NodePath.join(evidence, "observed.log"), line + "\n");
     },
     // Drop this script's connection; the browser keeps running for the next script.
     async detach() {
@@ -153,7 +151,7 @@ export async function connect(runDir, { retries = 1 } = {}) {
   };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "up") {
+if (process.argv[1] === NodeURL.fileURLToPath(import.meta.url) && process.argv[2] === "up") {
   const r = await up(process.argv[3]);
   console.log(`browser pid=${r.pid} cdp=127.0.0.1:${r.port}`);
   process.exit(0);
