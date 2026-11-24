@@ -1873,7 +1873,7 @@ describe("standing bots bound by a scheduled task", () => {
   it("keeps every standing bot listed when a scheduled task binds its thread after the snapshot", () => {
     const snapshot = listedBots(new Set());
     expect(snapshot.mine.map((thread) => thread.id)).toEqual([cosId]);
-    expect(snapshot.shared.map((thread) => thread.id)).toEqual([ctoId]);
+    expect(snapshot.closura.map((thread) => thread.id)).toEqual([ctoId]);
 
     // A running scheduled task now reports these threads as its fresh-session threads.
     const updated = listedBots(

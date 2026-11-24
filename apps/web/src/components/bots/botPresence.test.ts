@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  botPresenceInput,
   partitionBotGroups,
   resolveBotPresence,
   sortBotThreads,
@@ -37,7 +38,7 @@ describe("resolveBotPresence", () => {
     });
     expect(resolveBotPresence({ label: "Failed", errorClass: "usage_limit" }, "Ops")).toEqual({
       avatarState: "waiting",
-      line: "Limited",
+      line: "Blocked · quota",
       badge: null,
     });
     expect(
@@ -87,25 +88,36 @@ describe("splitStandingThreads", () => {
   });
 });
 
+describe("botPresenceInput", () => {
+  it("keeps a quota block on the bot after its failure is seen", () => {
+    const blocked = { status: "failed", lastErrorClass: "usage_limit" } as const;
+    expect(resolveBotPresence(botPresenceInput(null, blocked), "Ops").line).toBe("Blocked · quota");
+    expect(
+      botPresenceInput(null, { status: "failed", lastErrorClass: "provider_error" }),
+    ).toBeNull();
+    expect(botPresenceInput({ label: "Working" }, blocked)?.label).toBe("Working");
+  });
+});
+
 describe("partitionBotGroups", () => {
+  const thread = (id: string, audience?: string, name = "Ops", machine?: "kameron" | "jeff") => ({
+    id,
+    machine,
+    standing: { name },
+    source: { inbox: audience === undefined ? null : { audience } },
+  });
+
   it("puts shared-inbox bots in their own group and leaves the rest as mine", () => {
-    const thread = (id: string, audience?: string) => ({
-      id,
-      source: { inbox: audience === undefined ? null : { audience } },
-    });
     expect(
       partitionBotGroups([thread("shared", "shared"), thread("jeff", "jeff"), thread("open")]),
     ).toEqual({
-      shared: [thread("shared", "shared")],
+      closura: [thread("shared", "shared")],
       mine: [thread("jeff", "jeff"), thread("open")],
+      teammates: [],
     });
   });
 
-  it("shows every standing bot to both founders", () => {
-    const thread = (id: string, audience?: string) => ({
-      id,
-      source: { inbox: audience === undefined ? null : { audience } },
-    });
+  it("splits Closura bots from the other founder's bots", () => {
     const threads = [
       thread("shared", "shared"),
       thread("mine", "kameron"),
@@ -115,21 +127,35 @@ describe("partitionBotGroups", () => {
     ];
     expect(partitionBotGroups(threads, "kameron")).toEqual({
       mine: [thread("mine", "kameron")],
-      shared: [
-        thread("shared", "shared"),
-        thread("other", "jeff"),
-        thread("agents", "agent-only"),
-        thread("open"),
-      ],
+      closura: [thread("shared", "shared"), thread("agents", "agent-only"), thread("open")],
+      teammates: [thread("other", "jeff")],
     });
     expect(partitionBotGroups(threads, "jeff")).toEqual({
       mine: [thread("other", "jeff")],
-      shared: [
-        thread("shared", "shared"),
-        thread("mine", "kameron"),
-        thread("agents", "agent-only"),
-        thread("open"),
-      ],
+      closura: [thread("shared", "shared"), thread("agents", "agent-only"), thread("open")],
+      teammates: [thread("mine", "kameron")],
     });
+  });
+
+  it("lists a founder's CoS only when that founder's inbox is shown", () => {
+    const jeffsCos = thread("jeff-cos", "shared", "CoS", "jeff");
+    const filedCos = thread("filed-cos", "jeff", "Chief of Staff");
+    const kameronsCos = thread("kameron-cos", "shared", "CoS", "kameron");
+    const threads = [jeffsCos, filedCos, kameronsCos, thread("cto", "shared", "CTO", "jeff")];
+    const ids = (viewer: "kameron" | "jeff", shownInboxes: string[]) => {
+      const groups = partitionBotGroups(threads, viewer, {
+        shownInboxes,
+        machineOwnerOf: (bot) => bot.machine,
+      });
+      return [...groups.mine, ...groups.closura, ...groups.teammates].map((bot) => bot.id);
+    };
+    expect(ids("kameron", ["kameron", "agents", "shared"])).toEqual(["kameron-cos", "cto"]);
+    expect(ids("kameron", ["kameron", "jeff", "agents", "shared"])).toEqual([
+      "jeff-cos",
+      "kameron-cos",
+      "cto",
+      "filed-cos",
+    ]);
+    expect(ids("jeff", ["jeff", "agents", "shared"])).toEqual(["filed-cos", "jeff-cos", "cto"]);
   });
 });

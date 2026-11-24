@@ -37,7 +37,7 @@ Code: apps/web/src/components/sidebar/
 - **sidebar.working-section** — collapsed "Working" section for threads busy with background work. Turn off in **Settings → General → Working section**.
 - **sidebar.snoozed-shelf** — "Snoozed" threads, hidden until their wake time.
 - **sidebar.settled-shelf** — "Settled" finished threads. Drag a thread onto the header to settle it.
-- **sidebar.bots-group** — "My Bots" and "Shared Bots" groups for standing bot threads. Shared bots are the ones filed to the Shared inbox.
+- **sidebar.bots-group** — "My bots", "Closura bots" and "Teammate bots" groups for standing bot threads. My and Teammate bots are filed to the viewer's or the other founder's inbox; Closura bots are Shared, Agents or unfiled. A founder's CoS lists only when that founder's inbox is shown.
 - **sidebar.project-folder** — per-project folders when **Settings → Labs → Boring sidebar (group by project)** is on; "Pin project" / "Unpin project", "Project settings".
 - **sidebar.thread-row** — one thread: title, status, PR badge, hover actions. Click opens `/$environmentId/$threadId`. Drop files on it to attach them.
 - **sidebar.thread-status** — row status labels: "Working", "Waiting", "Needs you", "Needs action", "Usage limit reached", "Failed", "Woke", "Unsent draft".

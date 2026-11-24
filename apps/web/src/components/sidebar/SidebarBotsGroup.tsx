@@ -25,8 +25,8 @@ import { contextMenuSourceOf } from "../../contextMenuSource";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { BotAvatar, BOT_ACCENT_CLASSES } from "../bots/BotAvatar";
-import { orderBotTree, visibleBotRows } from "../bots/botOrgTree";
-import { resolveBotPresence } from "../bots/botPresence";
+import { botDisplayName, orderBotTree, visibleBotRows } from "../bots/botOrgTree";
+import { botPresenceInput, resolveBotPresence } from "../bots/botPresence";
 import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "../Sidebar.logic";
 import { useClientSettings } from "../../hooks/useSettings";
 
@@ -163,6 +163,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
 ) {
   const { thread, threadKey } = props;
   const standing = thread.standing!;
+  const name = botDisplayName(standing.name);
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
@@ -179,10 +180,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
     : typingLabel(
         (props.typing?.[thread.id] ?? []).filter((founder) => founder !== viewingFounder),
       );
-  const presence = resolveBotPresence(
-    pill === null ? null : { ...pill, errorClass: thread.runtime?.lastErrorClass },
-    standing.role,
-  );
+  const presence = resolveBotPresence(botPresenceInput(pill, thread.runtime), standing.role);
   const accent = BOT_ACCENT_CLASSES[standing.accent];
   const handleKeyDown = (event: KeyboardEvent) => {
     if (event.target !== event.currentTarget) return;
@@ -204,7 +202,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
           data-testid="sidebar-bot-row"
           data-bot-state={presence.avatarState}
           aria-current={props.isActive ? "page" : undefined}
-          aria-label={`${standing.name}${typingText ? `, ${typingText}` : presence.line ? `, ${presence.line}` : ""}${attentionLabel(
+          aria-label={`${name}${typingText ? `, ${typingText}` : presence.line ? `, ${presence.line}` : ""}${attentionLabel(
             attention,
           )}${
             presence.badge === "needs-you"
@@ -245,7 +243,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
             state={presence.avatarState}
           />
           <span className="shrink-0 truncate text-sm font-medium" dir="auto">
-            {standing.name}
+            {name}
           </span>
           {typingText ? (
             <span
@@ -287,7 +285,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
           <button
             type="button"
             aria-expanded={!props.collapsed}
-            aria-label={`${props.collapsed ? "Expand" : "Collapse"} ${standing.name}'s reports`}
+            aria-label={`${props.collapsed ? "Expand" : "Collapse"} ${name}'s reports`}
             data-testid="sidebar-bot-toggle"
             className="absolute inset-y-0 left-0 z-10 flex w-6 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             onClick={(event) => {

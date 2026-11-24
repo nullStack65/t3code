@@ -5,6 +5,7 @@ import {
   threadListFilterOf,
 } from "./sidebar/threadListFilter.logic";
 import {
+  type FounderByEnvironmentId,
   launchingThreadIdOf,
   resolveMachineOwners,
   resolveThreadAttributions,
@@ -424,6 +425,7 @@ interface SidebarThreadPartitionInput {
   readonly workingShelfEnabled: boolean;
   readonly inboxFilter: ReadonlyArray<InboxChoice>;
   readonly founderInboxOwner: "kameron" | "jeff" | undefined;
+  readonly machineOwners: FounderByEnvironmentId;
   /** Boring mode: folders list active threads by the user's latest message. */
   readonly sortActiveBySend: boolean;
   // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
@@ -516,6 +518,7 @@ function useSidebarThreads(input: {
     useClientSettings((s) => s.sidebarWorkingShelfEnabled) && folderGroups === null;
   const inboxFilter = useClientSettings(effectiveInboxFilter);
   const founderInboxOwner = useClientSettings((settings) => settings.founderInboxOwner);
+  const founderByEnvironmentId = useClientSettings((settings) => settings.founderByEnvironmentId);
   const inboxReturnsVersion = useSyncExternalStore(
     inboxReturns.subscribe,
     inboxReturns.getSnapshot,
@@ -561,6 +564,7 @@ function useSidebarThreads(input: {
     workingShelfEnabled,
     inboxFilter,
     founderInboxOwner,
+    machineOwners: resolveMachineOwners(serverConfigs, founderByEnvironmentId),
     sortActiveBySend: folderGroups !== null,
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
@@ -655,7 +659,8 @@ function useSidebarThreads(input: {
     threads,
     workingShelfEnabled,
     searchableThreads: [
-      ...botThreads,
+      // Search looks across every inbox, so it includes a CoS the bot groups leave out.
+      ...partition.allBotThreads,
       ...pinnedThreads,
       ...activeThreads,
       ...workingThreads,
@@ -716,6 +721,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     workingShelfEnabled,
     sortActiveBySend,
     founderInboxOwner,
+    machineOwners,
   } = input;
   const preciseNow = new Date().toISOString();
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
@@ -789,11 +795,16 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
       ? sortInboxThreadsByReturn(active, inboxObservation.returnedAt)
       : sortThreadsForSidebar(active);
   const sortedBots = sortBotThreads(bots);
-  const botGroups = partitionBotGroups(sortedBots, founderInboxOwner);
+  const botGroups = partitionBotGroups(sortedBots, founderInboxOwner, {
+    shownInboxes: input.inboxFilter,
+    machineOwnerOf: (thread) => machineOwners[thread.environmentId],
+  });
   return {
-    botThreads: sortedBots,
+    botThreads: [...botGroups.mine, ...botGroups.closura, ...botGroups.teammates],
+    allBotThreads: sortedBots,
     myBotThreads: botGroups.mine,
-    sharedBotThreads: botGroups.shared,
+    closuraBotThreads: botGroups.closura,
+    teammateBotThreads: botGroups.teammates,
     pinnedThreads:
       optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
         ? sortedPinned
@@ -1470,7 +1481,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     workingShelfEnabled,
     botThreads,
     myBotThreads,
-    sharedBotThreads,
+    closuraBotThreads,
+    teammateBotThreads,
     pinnedThreads,
     draggableThreadKeys,
     activeReorderableThreadKeys,
@@ -3561,7 +3573,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           {!isSearchingThreads ? (
             <>
               <SidebarBotsGroup
-                label="My Bots"
+                label="My bots"
                 threads={myBotThreads}
                 activeThreadKey={routeRowThreadKey}
                 onThreadClick={handleThreadClick}
@@ -3569,9 +3581,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 onContextMenu={handleThreadContextMenu}
               />
               <SidebarBotsGroup
-                label="Shared Bots"
-                testId="sidebar-shared-bots-group"
-                threads={sharedBotThreads}
+                label="Closura bots"
+                testId="sidebar-closura-bots-group"
+                threads={closuraBotThreads}
+                activeThreadKey={routeRowThreadKey}
+                onThreadClick={handleThreadClick}
+                onThreadActivate={navigateToThread}
+                onContextMenu={handleThreadContextMenu}
+              />
+              <SidebarBotsGroup
+                label="Teammate bots"
+                testId="sidebar-teammate-bots-group"
+                threads={teammateBotThreads}
                 activeThreadKey={routeRowThreadKey}
                 onThreadClick={handleThreadClick}
                 onThreadActivate={navigateToThread}

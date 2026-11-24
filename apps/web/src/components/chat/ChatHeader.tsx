@@ -45,6 +45,7 @@ import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
 import { BotAvatar, type BotAvatarState } from "../bots/BotAvatar";
+import { botDisplayName } from "../bots/botOrgTree";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -277,13 +278,13 @@ export const ChatHeader = memo(function ChatHeader({
         />
         <button
           type="button"
-          aria-label={`Bot actions for ${standing.name}`}
+          aria-label={`Bot actions for ${botDisplayName(standing.name)}`}
           aria-haspopup="menu"
           onClick={openMenuFromTitle}
           className="group/thread-title inline-flex min-w-0 shrink cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         >
           <h2 className="truncate text-sm font-medium text-foreground" dir="auto">
-            {standing.name}
+            {botDisplayName(standing.name)}
           </h2>
           <ChevronDownIcon
             aria-hidden
@@ -478,12 +479,7 @@ function ActivityViewToggle({
             type="button"
             aria-pressed={collapsed.on}
             onClick={collapsed.onToggle}
-            className={cn(
-              "shrink-0 cursor-pointer rounded-full border px-2 py-0.5 text-xs transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-              collapsed.on
-                ? "border-border bg-muted/60 text-foreground hover:bg-muted"
-                : "border-transparent text-muted-foreground hover:text-foreground",
-            )}
+            className="shrink-0 cursor-pointer rounded-full px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
           />
         }
       >

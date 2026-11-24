@@ -96,6 +96,7 @@ import {
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   collapseTimelineActivity,
+  expandedActivityPillAbove,
   activityPillIdForEntry,
   timelineActivityContext,
   type MessagesTimelineRow,
@@ -1021,6 +1022,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
         };
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
   const [minimapCurrentIndex, setMinimapCurrentIndex] = useState<number | null>(null);
+  const [stickyActivityId, setStickyActivityId] = useState<string | null>(null);
+  const stickyActivityIndex =
+    stickyActivityId === null ? -1 : rows.findIndex((row) => row.id === stickyActivityId);
+  const stickyActivityRow = rows[stickyActivityIndex];
+  const stickyActivity =
+    stickyActivityRow?.kind === "activity" && stickyActivityRow.expanded
+      ? { row: stickyActivityRow, index: stickyActivityIndex }
+      : null;
   const [minimapAtEnd, setMinimapAtEnd] = useState(false);
   const handleAnchorReady = (info: { anchorIndex: number | undefined }) => {
     if (anchorMessageId !== null && info.anchorIndex !== undefined) {
@@ -1052,10 +1061,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
 
   const refreshMinimap = useStableCallback(() => {
     const state = listRef.current?.getState?.();
-    if (restoringThreadPosition || state?.data !== rows) return;
-    if (!state || minimapItems.length === 0) {
-      return;
-    }
+    if (restoringThreadPosition || state?.data !== rows || !state) return;
 
     const firstBufferedIndex = state.startBuffered;
     const firstBufferedRow: HTMLElement | undefined =
@@ -1071,6 +1077,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
           firstBufferedRow.getBoundingClientRect().top
         : state.scroll;
     const visibleRange = resolveTimelineMinimapVisibleRange({ ...state, scroll });
+    const nextStickyActivityId =
+      visibleRange.start === null
+        ? null
+        : (expandedActivityPillAbove(rows, visibleRange.start)?.row.id ?? null);
+    setStickyActivityId((current) =>
+      current === nextStickyActivityId ? current : nextStickyActivityId,
+    );
+    if (minimapItems.length === 0) return;
     for (const [index, item] of minimapItems.entries()) {
       const strip = minimapStripMap.get(item.id);
       const inView = isTimelineMinimapTurnVisible(
@@ -1621,6 +1635,21 @@ const ConversationTimeline = memo(function ConversationTimeline({
               ListHeaderComponent={listHeader}
               ListFooterComponent={timelineListFooter}
             />
+            {stickyActivity ? (
+              <StickyActivityCollapse
+                row={stickyActivity.row}
+                belowTitlebarFade={topFadeEnabled}
+                onCollapse={() => {
+                  // Bring the pill back first, so the collapse keeps it in place on screen.
+                  void listRef.current?.scrollToIndex({
+                    index: stickyActivity.index,
+                    animated: false,
+                    viewOffset: TIMELINE_MINIMAP_TARGET_OFFSET,
+                  });
+                  onToggleActivity(stickyActivity.row);
+                }}
+              />
+            ) : null}
             <TimelineMinimap
               items={minimapItems}
               hasPersistentGutter={minimapHasPersistentGutter}
@@ -1960,27 +1989,72 @@ function WorkHistorySkeleton() {
   );
 }
 
+function ActivityPillButton({
+  row,
+  onClick,
+  className,
+}: {
+  row: Extract<TimelineRow, { kind: "activity" }>;
+  onClick: () => void;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={row.expanded}
+      data-scroll-anchor-ignore
+      onClick={onClick}
+      className={cn(
+        "flex min-w-0 max-w-full cursor-pointer select-none items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 text-xs leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+        className,
+      )}
+    >
+      <ChevronRightIcon
+        aria-hidden
+        className={cn(
+          "size-3.5 shrink-0 motion-safe:transition-transform",
+          row.expanded && "rotate-90",
+        )}
+      />
+      <span className="truncate">{row.summary}</span>
+    </button>
+  );
+}
+
+/** An expanded run's collapse control, pinned to the top while the run's own pill is scrolled away. */
+function StickyActivityCollapse({
+  row,
+  belowTitlebarFade,
+  onCollapse,
+}: {
+  row: Extract<TimelineRow, { kind: "activity" }>;
+  belowTitlebarFade: boolean;
+  onCollapse: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "chat-banner-lane pointer-events-none absolute z-20 px-3 pt-1 sm:px-12",
+        belowTitlebarFade ? "top-(--workspace-titlebar-scroll-fade-height)" : "top-0",
+      )}
+    >
+      <div className="chat-content-lane">
+        <ActivityPillButton
+          row={row}
+          onClick={onCollapse}
+          className="pointer-events-auto bg-background shadow-xs"
+        />
+      </div>
+    </div>
+  );
+}
+
 function ActivityTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "activity" }> }) {
   const ctx = use(TimelineRowCtx);
+  const pill = <ActivityPillButton row={row} onClick={() => ctx.onToggleActivity(row)} />;
+  if (row.working) return <WorkingTimelineRow row={row.working} trailing={pill} />;
   return (
-    <div className="group/timeline-row border-b border-border/60 pb-2 pe-0.5 pt-1">
-      <button
-        type="button"
-        aria-expanded={row.expanded}
-        data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleActivity(row)}
-        className="flex max-w-full cursor-pointer select-none items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 text-xs leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-      >
-        <ChevronRightIcon
-          aria-hidden
-          className={cn(
-            "size-3.5 shrink-0 motion-safe:transition-transform",
-            row.expanded && "rotate-90",
-          )}
-        />
-        <span className="truncate">{row.summary}</span>
-      </button>
-    </div>
+    <div className="group/timeline-row border-b border-border/60 pb-2 pe-0.5 pt-1">{pill}</div>
   );
 }
 

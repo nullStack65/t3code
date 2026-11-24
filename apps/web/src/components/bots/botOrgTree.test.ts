@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { isFounderName, orderBotTree, visibleBotRows } from "./botOrgTree";
+import { botDisplayName, isFounderName, orderBotTree, visibleBotRows } from "./botOrgTree";
 import { splitStandingThreads } from "./botPresence";
 
 const bot = (name: string) => ({ id: name, standing: { name } });
@@ -23,8 +23,8 @@ describe("orderBotTree", () => {
         "CoS",
       ]),
     ).toEqual([
-      "0:CoS",
       "0:CEO",
+      "1:CoS",
       "1:CTO",
       "2:Platform",
       "2:Infra / ARC Ops",
@@ -33,6 +33,16 @@ describe("orderBotTree", () => {
       "1:CFO",
       "1:Product",
       "1:Growth",
+    ]);
+  });
+
+  it("puts Product Designer under Product and Daemon under CTO", () => {
+    expect(shape(["Daemon", "Product Designer", "Product / Site", "CTO", "CEO"])).toEqual([
+      "0:CEO",
+      "1:CTO",
+      "2:Daemon",
+      "1:Product / Site",
+      "2:Product Designer",
     ]);
   });
 
@@ -54,6 +64,15 @@ describe("orderBotTree", () => {
 
   it("never drops a bot, even with duplicate seats", () => {
     expect(shape(["CEO", "CTO", "CTO"]).length).toBe(3);
+  });
+});
+
+describe("botDisplayName", () => {
+  it("shows Platform and ARC Ops under their short names and leaves other names alone", () => {
+    expect(botDisplayName("Platform / CTO")).toBe("Platform");
+    expect(botDisplayName("Infra / ARC Ops")).toBe("ARC Ops");
+    expect(botDisplayName("infra/arc ops")).toBe("ARC Ops");
+    expect(botDisplayName("CTO")).toBe("CTO");
   });
 });
 
@@ -83,12 +102,12 @@ describe("visibleBotRows", () => {
     );
 
   it("marks bots with reports and lists everything when nothing is collapsed", () => {
-    expect(shown([])).toEqual(["0:CoS", "0:CEO-", "1:CTO-", "2:Platform", "1:CFO"]);
+    expect(shown([])).toEqual(["0:CEO-", "1:CoS", "1:CTO-", "2:Platform", "1:CFO"]);
   });
 
   it("hides a collapsed bot's whole subtree but not its siblings", () => {
-    expect(shown(["CTO"])).toEqual(["0:CoS", "0:CEO-", "1:CTO+", "1:CFO"]);
-    expect(shown(["CEO"])).toEqual(["0:CoS", "0:CEO+"]);
+    expect(shown(["CTO"])).toEqual(["0:CEO-", "1:CoS", "1:CTO+", "1:CFO"]);
+    expect(shown(["CEO"])).toEqual(["0:CEO+"]);
   });
 
   it("ignores a collapse flag on a bot with no reports", () => {

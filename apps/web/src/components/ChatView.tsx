@@ -1,4 +1,4 @@
-import { resolveBotPresence } from "./bots/botPresence";
+import { botPresenceInput, resolveBotPresence } from "./bots/botPresence";
 import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "./Sidebar.logic";
 import { useUiStateStore } from "../uiStateStore";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
@@ -1862,7 +1862,7 @@ export default function ChatView(props: ChatViewProps) {
       },
     });
     return resolveBotPresence(
-      pill === null ? null : { ...pill, errorClass: activeThreadShell.runtime?.lastErrorClass },
+      botPresenceInput(pill, activeThreadShell.runtime),
       activeStanding.role,
     ).avatarState;
   })();

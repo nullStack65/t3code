@@ -600,9 +600,13 @@ type MessagesTimelineRowContent =
       id: string;
       createdAt: string | null;
       count: number;
+      /** Rows listed after the pill while it is expanded. */
+      span: number;
       summary: string;
       expanded: boolean;
       attention: string | null;
+      /** The live working row this collapsed run swallowed; the pill shows its status. */
+      working?: Extract<MessagesTimelineRow, { kind: "working" }>;
     }
   | {
       kind: "turn-fold";
@@ -2499,8 +2503,9 @@ function activityRowIsBoundary(row: MessagesTimelineRow, context?: ChatActivityC
   if (row.kind === "message" || row.kind === "assistant-meta") {
     return !isChatActivityMessage(row.message, row.message.runId, context);
   }
-  if (row.kind === "working" || row.kind === "thinking" || row.kind === "worktree-setup")
-    return true;
+  // The working status joins the activity around it, so one row shows both.
+  if (row.kind === "working") return row.compacting === true;
+  if (row.kind === "thinking" || row.kind === "worktree-setup") return true;
   if (context === undefined || context.includeOtherActivity) return false;
   const runIds = activityRowRunIds(row);
   return runIds.length === 0 || runIds.some((runId) => !context.agentRuns.has(runId));
@@ -2543,8 +2548,19 @@ export function collapseTimelineActivity(
     }
     hasActivity = true;
     const { id, rows: run } = group;
+    const reveal = (row: MessagesTimelineRow): MessagesTimelineRow =>
+      row.kind === "message" && resolveMessageSender(row.message).kind === "agent"
+        ? { ...row, activityRevealed: true }
+        : row;
+    const working = run.find((row) => row.kind === "working");
+    const updates = working === undefined ? run : run.filter((row) => row !== working);
+    // A toggle that hides one update costs as much room as the update itself.
+    if (updates.length <= 1) {
+      for (const row of run) collapsed.push(reveal(row));
+      continue;
+    }
     const attentionIds = new Set<string>();
-    for (const row of run) {
+    for (const row of updates) {
       for (const runId of activityRowRunIds(row)) {
         for (const key of context?.attentionByRun.get(runId) ?? []) attentionIds.add(key);
       }
@@ -2565,28 +2581,41 @@ export function collapseTimelineActivity(
         attentionIds.add(row.id);
     }
     const attention = attentionIds.size ? JSON.stringify([...attentionIds].sort()) : null;
-    const pill: MessagesTimelineRow = {
+    const expanded =
+      expandedIds.has(id) || (attention !== null && dismissedAttention?.get(id) !== attention);
+    collapsed.push({
       kind: "activity",
       id,
       createdAt: run[0]!.createdAt,
-      count: run.length,
-      summary: activityUpdateSummary(run),
-      expanded:
-        expandedIds.has(id) || (attention !== null && dismissedAttention?.get(id) !== attention),
+      count: updates.length,
+      span: run.length,
+      summary: activityUpdateSummary(updates),
+      expanded,
       attention,
-    };
-    collapsed.push(pill);
-    if (pill.expanded) {
-      for (const row of run) {
-        collapsed.push(
-          row.kind === "message" && resolveMessageSender(row.message).kind === "agent"
-            ? { ...row, activityRevealed: true }
-            : row,
-        );
-      }
-    }
+      ...(working !== undefined && !expanded ? { working } : {}),
+    });
+    if (expanded) for (const row of run) collapsed.push(reveal(row));
   }
   return hasActivity ? collapsed : rows;
+}
+
+/**
+ * The expanded pill whose revealed rows include `index` while the pill itself sits above it,
+ * so its collapse control can stay in reach.
+ */
+export function expandedActivityPillAbove(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  index: number,
+): {
+  readonly row: Extract<MessagesTimelineRow, { kind: "activity" }>;
+  readonly index: number;
+} | null {
+  for (let at = Math.min(index, rows.length) - 1; at >= 0; at -= 1) {
+    const row = rows[at]!;
+    if (row.kind !== "activity") continue;
+    return row.expanded && at + row.span >= index ? { row, index: at } : null;
+  }
+  return null;
 }
 
 /** The pill hiding `entryId`, if one does, so a search hit or a restored scroll position can open it. */
@@ -3082,8 +3111,11 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return (
         a.createdAt === ba.createdAt &&
         a.count === ba.count &&
+        a.span === ba.span &&
         a.summary === ba.summary &&
-        a.expanded === ba.expanded
+        a.expanded === ba.expanded &&
+        a.working?.createdAt === ba.working?.createdAt &&
+        (a.working === undefined) === (ba.working === undefined)
       );
     }
 

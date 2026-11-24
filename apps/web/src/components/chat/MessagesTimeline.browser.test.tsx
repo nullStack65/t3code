@@ -243,12 +243,10 @@ it("keeps a model-hidden note visible and only promotes it after an explicit cli
 
   expect(screen.text()).toContain("Model-hidden note");
   expect(screen.text()).toContain(note);
-  const folds = screen.buttons("1 agent update");
-  expect(folds).toHaveLength(2);
-  expect(folds[0]?.getAttribute("aria-expanded")).toBe("false");
-  await click(folds[0]!);
-  expect(folds[0]?.getAttribute("aria-expanded")).toBe("true");
+  // A lone relay shows in place rather than behind a one-row toggle.
+  expect(screen.buttons(/agent update/)).toHaveLength(0);
   expect(screen.text()).toContain("relay before");
+  expect(screen.text()).toContain("relay after");
   expect(screen.text()).toContain(note);
   expect(promote).not.toHaveBeenCalled();
 
