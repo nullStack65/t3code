@@ -333,7 +333,7 @@ export interface LimitAccount {
   readonly displayName: string | null;
   readonly email: string | undefined;
   readonly plan: string | undefined;
-  readonly status: UsageLimitSourceAccount["status"] | null;
+  readonly status: NonNullable<UsageLimitSourceAccount["status"]> | null;
   readonly statusDetail: string | null;
   readonly accentColor: string | undefined;
   readonly environments: ReadonlyArray<{
