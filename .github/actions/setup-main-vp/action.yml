@@ -1,0 +1,33 @@
+name: Set up main CI toolchain
+description: Install the workspace-pinned Node, Vite+ and pnpm on an ARC worker.
+inputs:
+  filter:
+    description: Optional pnpm workspace filter.
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v6
+      with:
+        node-version-file: package.json
+        package-manager-cache: false
+    - name: Install pinned pnpm
+      shell: bash
+      run: |
+        set -euo pipefail
+        pnpm_package=$(node --print "require('./package.json').packageManager")
+        [[ "$pnpm_package" =~ ^pnpm@[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        prefix="$RUNNER_TEMP/t3-ci-tools"
+        npm install --prefix "$prefix" --no-audit --no-fund "$pnpm_package"
+        echo "$prefix/node_modules/.bin" >> "$GITHUB_PATH"
+    - name: Install locked dependencies and expose workspace Vite+
+      shell: bash
+      env:
+        WORKSPACE_FILTER: ${{ inputs.filter }}
+      run: |
+        args=(--frozen-lockfile)
+        if [[ -n "$WORKSPACE_FILTER" ]]; then
+          args+=(--filter=@t3tools/monorepo "--filter=$WORKSPACE_FILTER")
+        fi
+        pnpm install "${args[@]}"
+        echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
