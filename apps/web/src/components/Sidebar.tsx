@@ -1249,6 +1249,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     isSystemScheduledThread({
       key: threadShellKey(thread),
       standingRole: thread.standing?.role ?? null,
+      standing: thread.standing != null,
       scheduledThreadKeys,
     });
   const conversationThreads = inboxThreads.filter((thread) => !isSystemThread(thread));
