@@ -1492,11 +1492,15 @@ export function sortScopedProjectsForSidebar<
 export function isSystemScheduledThread(input: {
   readonly key: string;
   readonly standingRole: string | null;
+  /** A standing bot has a persona; it is the founder's conversation, never a task's output. */
+  readonly standing?: boolean;
   readonly scheduledThreadKeys: ReadonlySet<string>;
 }): boolean {
-  return (
-    input.standingRole === SYS_DAEMON_STANDING_ROLE || input.scheduledThreadKeys.has(input.key)
-  );
+  if (input.standingRole === SYS_DAEMON_STANDING_ROLE) return true;
+  // A scheduled task can bind a standing bot's own thread; that must not pull the bot off
+  // the Bots shelf and out of the sidebar's lists.
+  if (input.standing === true || input.standingRole !== null) return false;
+  return input.scheduledThreadKeys.has(input.key);
 }
 
 /** Scoped keys of fresh-session scheduled tasks. Unbound and continue-mode tasks are left out. */
@@ -1530,6 +1534,7 @@ export function placeSystemScheduledThreads<T>(input: {
   readonly scheduledThreadKeys: ReadonlySet<string>;
   readonly keyOf: (thread: T) => string;
   readonly standingRoleOf: (thread: T) => string | null;
+  readonly isStandingOf?: (thread: T) => boolean;
 }): {
   readonly rest: T[];
   readonly system: T[];
@@ -1542,6 +1547,7 @@ export function placeSystemScheduledThreads<T>(input: {
       isSystemScheduledThread({
         key: input.keyOf(thread),
         standingRole: input.standingRoleOf(thread),
+        standing: input.isStandingOf?.(thread) ?? false,
         scheduledThreadKeys: input.scheduledThreadKeys,
       })
     ) {

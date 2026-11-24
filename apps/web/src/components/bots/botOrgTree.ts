@@ -91,3 +91,32 @@ export function orderBotTree<T extends Named>(threads: readonly T[]): BotTreeRow
   for (const root of roots.toSorted(compare)) visit(root, 0);
   return rows;
 }
+
+export interface VisibleBotRow<T> extends BotTreeRow<T> {
+  /** Whether this bot has reports, so it gets a chevron. */
+  readonly hasReports: boolean;
+  readonly collapsed: boolean;
+}
+
+/**
+ * Drops the rows under a collapsed bot. `rows` is `orderBotTree` output (depth-first), so a bot's
+ * reports are the rows right after it that sit deeper. A collapsed bot still shows its own row.
+ */
+export function visibleBotRows<T>(
+  rows: readonly BotTreeRow<T>[],
+  isCollapsed: (thread: T) => boolean,
+): VisibleBotRow<T>[] {
+  const visible: VisibleBotRow<T>[] = [];
+  let hideBelowDepth: number | null = null;
+  rows.forEach((row, index) => {
+    if (hideBelowDepth !== null) {
+      if (row.depth > hideBelowDepth) return;
+      hideBelowDepth = null;
+    }
+    const hasReports = (rows[index + 1]?.depth ?? 0) > row.depth;
+    const collapsed = hasReports && isCollapsed(row.thread);
+    visible.push({ ...row, hasReports, collapsed });
+    if (collapsed) hideBelowDepth = row.depth;
+  });
+  return visible;
+}
