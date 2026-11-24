@@ -16,7 +16,7 @@ import { DEFAULT_THREAD_TITLE } from "./threadTitles.ts";
 
 export const SPEND_GUARD_FLAGGED_KIND = "spend-guard.flagged";
 export const SPEND_GUARD_STOPPED_KIND = "spend-guard.stopped";
-export const SPEND_GUARD_RELEASED_KIND = "spend-guard.released";
+const SPEND_GUARD_RELEASED_KIND = "spend-guard.released";
 export const CONTEXT_WINDOW_KIND = "context-window.updated";
 
 export const SPEND_GUARD_ACTIVITY_KINDS = [

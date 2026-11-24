@@ -40,11 +40,7 @@ export function expandHomePathWith(value: string, path: Path.Path): string {
   return expandHomePathFromWith(value, effectiveHomeDirectory(process.env, []), path);
 }
 
-export function expandHomePathFromWith(
-  value: string,
-  homeDirectory: string,
-  path: Path.Path,
-): string {
+function expandHomePathFromWith(value: string, homeDirectory: string, path: Path.Path): string {
   if (value === "~") return homeDirectory;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
     return path.join(homeDirectory, value.slice(2));

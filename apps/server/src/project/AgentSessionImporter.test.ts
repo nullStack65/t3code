@@ -969,21 +969,25 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           expect(importedThread.session).toBeNull();
           expect(importedThread.latestTurn).toBeNull();
 
-          yield* engine.dispatch({
-            type: "thread.turn.start",
-            commandId: CommandId.make(`resume-imported-${source}`),
-            threadId,
-            message: {
-              messageId: MessageId.make(`resume-imported-message-${source}`),
-              role: "user",
-              text: "Continue this session",
-              attachments: [],
+          // Imported sessions are resumed from an interactive client.
+          yield* engine.dispatch(
+            {
+              type: "thread.turn.start",
+              commandId: CommandId.make(`resume-imported-${source}`),
+              threadId,
+              message: {
+                messageId: MessageId.make(`resume-imported-message-${source}`),
+                role: "user",
+                text: "Continue this session",
+                attachments: [],
+              },
+              modelSelection: importedThread.modelSelection,
+              runtimeMode: importedThread.runtimeMode,
+              interactionMode: importedThread.interactionMode,
+              createdAt: "2026-08-24T10:02:00.000Z",
             },
-            modelSelection: importedThread.modelSelection,
-            runtimeMode: importedThread.runtimeMode,
-            interactionMode: importedThread.interactionMode,
-            createdAt: "2026-08-24T10:02:00.000Z",
-          });
+            { origin: { surface: "web" } },
+          );
           yield* Deferred.await(turnSent);
           yield* reactor.drain;
           expect(startSession).toHaveBeenCalledExactlyOnceWith(

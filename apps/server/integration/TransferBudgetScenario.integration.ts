@@ -100,21 +100,25 @@ export const seedTransferBudgetHistory = Effect.fn("TransferBudget.seedHistory")
       yield* harness.adapterHarness.queueTurnResponse(TRANSFER_THREAD_ID, response);
     }
 
-    yield* harness.engine.dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make(`transfer:${provider}:turn:${turnIndex + 1}`),
-      threadId: TRANSFER_THREAD_ID,
-      message: {
-        messageId: MessageId.make(`transfer-user-${turnIndex + 1}`),
-        role: "user",
-        text: `Inspect transfer behavior for historical turn ${turnIndex + 1}.`,
-        attachments: [],
+    // Replay the prompts as interactive turns on the imported thread.
+    yield* harness.engine.dispatch(
+      {
+        type: "thread.turn.start",
+        commandId: CommandId.make(`transfer:${provider}:turn:${turnIndex + 1}`),
+        threadId: TRANSFER_THREAD_ID,
+        message: {
+          messageId: MessageId.make(`transfer-user-${turnIndex + 1}`),
+          role: "user",
+          text: `Inspect transfer behavior for historical turn ${turnIndex + 1}.`,
+          attachments: [],
+        },
+        modelSelection,
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: turnTimestamp(turnIndex),
       },
-      modelSelection,
-      runtimeMode: "approval-required",
-      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-      createdAt: turnTimestamp(turnIndex),
-    });
+      { origin: { surface: "web" } },
+    );
     yield* waitForTurnQuiesced(harness, turnIndex + 1);
   }
 });

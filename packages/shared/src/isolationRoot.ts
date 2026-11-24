@@ -166,7 +166,7 @@ function claimProfile(root: string, accountHomes: ReadonlyArray<string>): void {
   }
 }
 
-export function assertClaimedIsolationProfile(root: string): void {
+function assertClaimedIsolationProfile(root: string): void {
   if (!NodePath.isAbsolute(root) || root.includes("\0")) {
     throw new IsolationRootError("The isolation profile path must be absolute.");
   }
@@ -200,7 +200,7 @@ export function assertClaimedIsolationProfile(root: string): void {
   }
 }
 
-export function isolationRootFromEnvironment(
+function isolationRootFromEnvironment(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string | undefined {
   const root = parseIsolationRoot([], environment);

@@ -143,7 +143,7 @@ export const make = Effect.gen(function* () {
 export const layer = Layer.effect(SourceControlDiscovery, make);
 
 /** Isolation profiles report no external account discovery or host tool probes. */
-export const layerDisabled = Layer.succeed(
+const layerDisabled = Layer.succeed(
   SourceControlDiscovery,
   SourceControlDiscovery.of({
     discover: Effect.succeed({

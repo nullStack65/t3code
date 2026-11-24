@@ -9,7 +9,8 @@ import {
 
 export const isolationProfile = resolveDesktopIsolationProfile({
   argv: process.argv,
-  isPackaged: Electron.app.isPackaged,
+  // The Electron npm module exposes no app API when imported by Node.
+  isPackaged: Electron.app?.isPackaged ?? false,
   // oxlint-disable-next-line t3code/no-global-process-runtime -- The synchronous pre-ready bootstrap must reject unsupported OS targets before Effect services can start.
   platform: NodeOS.platform(),
 });

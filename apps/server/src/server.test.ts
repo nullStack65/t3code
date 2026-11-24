@@ -12691,7 +12691,7 @@ it.live(
 
                 const baseUrl = yield* getHttpServerUrl();
                 const cookie = yield* getAuthenticatedSessionCookieHeader();
-                const wsUrl = baseUrl.replace(/^http:/, "ws:") + "/ws";
+                const wsUrl = baseUrl.replace(/^http:/, "ws:") + "/ws?clientSurface=web";
 
                 return yield* Effect.scoped(
                   Effect.gen(function* () {
