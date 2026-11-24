@@ -835,7 +835,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 }
               : status === "limited"
                 ? {
-                    label: "Limited",
+                    label: "Blocked · quota",
                     icon: "failed" as const,
                     className: "text-warning-foreground",
                   }

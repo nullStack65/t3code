@@ -31,6 +31,7 @@ import {
   deriveMessagesTimelineRows,
   filterTimelineRowsBySender,
   collapseTimelineActivity,
+  expandedActivityPillAbove,
   activityUpdateSummary,
   activityPillIdForEntry,
   timelineActivityContext,
@@ -5278,22 +5279,22 @@ describe("collapsing non-human activity", () => {
     messageRow("system-1", 6, { createdBy: "system" }),
   ];
 
-  it("collapses the activity between human turns into one pill", () => {
+  it("collapses the activity between human turns into one pill and shows a lone update in place", () => {
     const collapsed = collapseTimelineActivity(rows, new Set());
     expect(collapsed.map((row) => row.id)).toEqual([
       "kameron",
       "reply",
       "activity:reply",
       "jeff",
-      "activity:jeff",
+      "system-1",
     ]);
     expect(collapsed[2]).toMatchObject({
       kind: "activity",
       count: 3,
+      span: 3,
       summary: "2 agent updates",
       expanded: false,
     });
-    expect(collapsed[4]).toMatchObject({ kind: "activity", count: 1, summary: "1 system notice" });
   });
 
   it("puts the collapsed rows back exactly when the pill expands", () => {
@@ -5306,9 +5307,39 @@ describe("collapsing non-human activity", () => {
       "work-1",
       "agent-2",
       "jeff",
-      "activity:jeff",
+      "system-1",
     ]);
     expect(expanded[2]).toMatchObject({ expanded: true });
+    // Its collapse control stays in reach while a revealed row is the top one.
+    expect(expandedActivityPillAbove(expanded, 5)).toMatchObject({
+      index: 2,
+      row: { id: "activity:reply" },
+    });
+    expect(expandedActivityPillAbove(expanded, 2)).toBeNull();
+    expect(expandedActivityPillAbove(expanded, 6)).toBeNull();
+    expect(expandedActivityPillAbove(collapseTimelineActivity(rows, new Set()), 3)).toBeNull();
+  });
+
+  it("folds the working status into the pill beside it until the pill opens", () => {
+    const working = { kind: "working", id: "working-indicator-row", createdAt: time(9) } as const;
+    const live = [rows[0]!, rows[2]!, working, rows[3]!, rows[4]!];
+    const collapsed = collapseTimelineActivity(live, new Set());
+    expect(collapsed.map((row) => row.id)).toEqual(["kameron", "activity:kameron"]);
+    expect(collapsed[1]).toMatchObject({ count: 3, span: 4, summary: "2 agent updates", working });
+    const expanded = collapseTimelineActivity(live, new Set(["activity:kameron"]));
+    expect(expanded.map((row) => row.id)).toEqual([
+      "kameron",
+      "activity:kameron",
+      "agent-1",
+      "working-indicator-row",
+      "work-1",
+      "agent-2",
+    ]);
+    expect(expanded[1]).not.toHaveProperty("working");
+    const compacting = { ...working, compacting: true } as const;
+    expect(
+      collapseTimelineActivity([rows[0]!, rows[2]!, compacting], new Set()).map(({ id }) => id),
+    ).toEqual(["kameron", "agent-1", "working-indicator-row"]);
   });
 
   it("keeps a thread of only activity as one pill", () => {
@@ -5351,7 +5382,7 @@ describe("collapsing non-human activity", () => {
       "direct-reply",
       "activity:direct-reply",
       "note",
-      "activity:note",
+      "wake",
       "sent",
       "mention",
       "next-prompt",
@@ -5438,10 +5469,9 @@ describe("collapsing non-human activity", () => {
     });
 
     const pending = timelineActivityContext(entries, [], false, time(1));
-    expect(collapseTimelineActivity(entries, new Set(), pending).map(({ id }) => id)).toEqual([
-      "activity:relay",
-      "relay",
-      "reply",
+    expect(collapseTimelineActivity(entries, new Set(), pending)).toMatchObject([
+      { id: "relay", activityRevealed: true },
+      { id: "reply" },
     ]);
   });
 
@@ -5534,7 +5564,7 @@ describe("collapsing non-human activity", () => {
     expect(collapseTimelineActivity(withCards, new Set()).map((row) => row.id)).toEqual([
       "kameron",
       "plan-1",
-      "activity:plan-1",
+      "agent-1",
       "images-1",
       "jeff",
     ]);
@@ -5556,7 +5586,7 @@ describe("collapsing non-human activity", () => {
     ];
     expect(collapseTimelineActivity(withRequests, new Set()).map((row) => row.id)).toEqual([
       "kameron",
-      "activity:kameron",
+      "agent-1",
       "secret-1",
       "link-1",
       "jeff",

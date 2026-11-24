@@ -124,6 +124,12 @@ function sanitizeTimestampRecord(value: unknown): Record<string, string> {
   );
 }
 
+/** Bot groups were keyed by their labels before they had stable ids. */
+const LEGACY_BOT_GROUP_KEYS: Readonly<Record<string, string>> = {
+  "group:My Bots": "group:mine",
+  "group:Shared Bots": "group:closura",
+};
+
 export function parsePersistedState(parsed: PersistedUiState): UiState {
   const projectExpandedById =
     parsed.projectExpandedById === undefined
@@ -150,7 +156,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
 
   return {
     botCollapsedById: Object.fromEntries(
-      Object.entries(sanitizeBooleanRecord(parsed.botCollapsedById)).filter(([, value]) => value),
+      Object.entries(sanitizeBooleanRecord(parsed.botCollapsedById))
+        .filter(([, value]) => value)
+        .map(([key, value]) => [LEGACY_BOT_GROUP_KEYS[key] ?? key, value]),
     ),
     projectExpandedById,
     projectOrder,

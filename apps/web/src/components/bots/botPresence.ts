@@ -2,7 +2,7 @@ import type { OrchestrationV2ProviderFailureClass } from "@t3tools/contracts";
 
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { BotAvatarState } from "./BotAvatar";
-import { isFounderName } from "./botOrgTree";
+import { isChiefOfStaff, isFounderName } from "./botOrgTree";
 
 function isFounderStanding(standing: unknown): boolean {
   const name = (standing as { name?: unknown } | null)?.name;
@@ -24,6 +24,25 @@ export type BotPresenceInput = Pick<ThreadStatusPill, "label"> & {
   readonly errorClass?: OrchestrationV2ProviderFailureClass | null | undefined;
 };
 
+/**
+ * The bot's pill, or a quota block when its runtime is out of provider quota. Like a thread row's
+ * Limited status, a quota block stays after the failure is seen: the bot cannot work until it ends.
+ */
+export function botPresenceInput(
+  pill: Pick<ThreadStatusPill, "label"> | null,
+  runtime:
+    | {
+        readonly status: string;
+        readonly lastErrorClass?: OrchestrationV2ProviderFailureClass | null | undefined;
+      }
+    | null
+    | undefined,
+): BotPresenceInput | null {
+  if (runtime?.status === "failed" && runtime.lastErrorClass === "usage_limit" && pill === null)
+    return { label: "Failed", errorClass: "usage_limit" };
+  return pill === null ? null : { ...pill, errorClass: runtime?.lastErrorClass };
+}
+
 /** Maps the thread's status pill onto a bot's quieter vocabulary. */
 export function resolveBotPresence(
   pill: BotPresenceInput | null,
@@ -36,7 +55,7 @@ export function resolveBotPresence(
     return { avatarState: "running", line: label, badge: null };
   // A usage limit is the bot waiting, not a failure: a calm glow, no failure ring.
   if (label === "Failed" && pill?.errorClass === "usage_limit")
-    return { avatarState: "waiting", line: "Limited", badge: null };
+    return { avatarState: "waiting", line: "Blocked · quota", badge: null };
   if (label === "Failed") return { avatarState: "failed", line: "Failed", badge: null };
   if (label === "Completed")
     return { avatarState: "idle", line: role ?? "New reply", badge: "unread" };
@@ -73,35 +92,52 @@ export function splitStandingThreads<T extends { readonly standing: unknown }>(
   return { bots, rest };
 }
 
-/** A shared bot belongs to both founders; every other standing bot is one's own. */
-function isSharedBotThread(thread: {
-  readonly source: { readonly inbox?: { readonly audience?: string } | null | undefined };
-}): boolean {
-  return thread.source.inbox?.audience === "shared";
+type Founder = "kameron" | "jeff";
+
+interface GroupableBot {
+  readonly standing: { readonly name: string } | null;
+  readonly source: {
+    readonly inbox?: {
+      readonly audience?: string;
+      readonly owner?: string | null;
+    } | null;
+  };
 }
 
+const asFounder = (value: string | null | undefined): Founder | undefined =>
+  value === "kameron" || value === "jeff" ? value : undefined;
+
 /**
- * The two bot groups. Shared audience is Shared Bots. With a viewer, an Agents inbox, a missing
- * inbox, or the other founder's bot is Shared Bots too, so both founders see every standing bot.
- * The viewer's own founder-audience bots stay in My Bots. A shared bot is never also listed there.
+ * The three bot groups. My bots are filed to the viewer's own inbox, Teammate bots to the other
+ * founder's, and Closura bots are everything else (Shared, Agents or no inbox). Without a viewer
+ * every non-shared bot is My bots. A founder's CoS is personal: it lists only for that founder or
+ * when their inbox is among `shownInboxes`. Its founder is its inbox, else the machine it runs on.
  */
-export function partitionBotGroups<
-  T extends { readonly source: { readonly inbox?: { readonly audience?: string } | null } },
->(
+export function partitionBotGroups<T extends GroupableBot>(
   threads: readonly T[],
-  viewer?: "kameron" | "jeff",
-): { readonly mine: T[]; readonly shared: T[] } {
+  viewer?: Founder,
+  scope?: {
+    readonly shownInboxes: ReadonlyArray<string>;
+    readonly machineOwnerOf: (thread: T) => Founder | undefined;
+  },
+): { readonly mine: T[]; readonly closura: T[]; readonly teammates: T[] } {
   const mine: T[] = [];
-  const shared: T[] = [];
+  const closura: T[] = [];
+  const teammates: T[] = [];
   for (const thread of threads) {
-    const audience = thread.source.inbox?.audience;
-    const sharedWithBoth =
-      isSharedBotThread(thread) ||
-      (viewer !== undefined &&
-        (audience === "agent-only" ||
-          audience == null ||
-          ((audience === "kameron" || audience === "jeff") && audience !== viewer)));
-    (sharedWithBoth ? shared : mine).push(thread);
+    const inbox = thread.source.inbox;
+    const audience = inbox?.audience;
+    if (scope !== undefined && isChiefOfStaff(thread.standing?.name)) {
+      const founder =
+        asFounder(audience) ?? asFounder(inbox?.owner) ?? scope.machineOwnerOf(thread);
+      // A CoS with no known founder stays listed for everyone rather than vanish.
+      if (founder !== undefined && founder !== viewer && !scope.shownInboxes.includes(founder))
+        continue;
+    }
+    if (audience === "shared") closura.push(thread);
+    else if (viewer === undefined || audience === viewer) mine.push(thread);
+    else if (asFounder(audience) !== undefined) teammates.push(thread);
+    else closura.push(thread);
   }
-  return { mine, shared };
+  return { mine, closura, teammates };
 }

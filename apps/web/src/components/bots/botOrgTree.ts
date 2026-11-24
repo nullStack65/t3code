@@ -1,30 +1,40 @@
 /**
- * The Bots shelf as an org tree. The chain of command mirrors closura-agent-config
- * `config/standing-threads.json` (`reportsTo`): CoS and CEO at the root, the executive team under
- * CEO, and the engineering team under CTO. Founders are humans, never bots, so they have no
- * place here and never list in the Bots shelf.
+ * The Bots shelf as an org tree. The chain of command lives here; closura-agent-config
+ * `config/standing-threads.json` names the seats but carries no reporting lines. CEO is the root,
+ * with CoS and the executive team under it and the engineering team under CTO. Founders are
+ * humans, never bots, so they have no place here and never list in the Bots shelf.
  */
 
 /** Normalized bot name -> the normalized name it reports to; `null` is a root. */
 const REPORTS_TO: Readonly<Record<string, string | null>> = {
-  cos: null,
   ceo: null,
+  cos: "ceo",
   cto: "ceo",
   cfo: "ceo",
   product: "ceo",
   growth: "ceo",
+  "product designer": "product",
   platform: "cto",
   "infra / arc ops": "cto",
   "release engineer": "cto",
   "pr reviewer": "cto",
+  daemon: "cto",
 };
 
 /** Existing persona names that are the same seat under a longer title. */
 const ALIASES: Readonly<Record<string, string>> = {
+  "chief of staff": "cos",
   "product / site": "product",
+  designer: "product designer",
   "platform / cto": "platform",
   "infra/arc ops": "infra / arc ops",
   "arc ops": "infra / arc ops",
+};
+
+/** Seats shown under a shorter name than the persona's; the stored name is unchanged. */
+const DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  platform: "Platform",
+  "infra / arc ops": "ARC Ops",
 };
 
 /** Root order and sibling order follow the chart, not the alphabet. */
@@ -36,6 +46,15 @@ const FOUNDER_NAMES = new Set(["kameron", "kameron smith", "jeff", "jeffrey", "j
 function botSeat(name: string | null | undefined): string {
   const key = (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
   return ALIASES[key] ?? key;
+}
+
+/** The name a bot is shown under. */
+export function botDisplayName(name: string): string {
+  return DISPLAY_NAMES[botSeat(name)] ?? name;
+}
+
+export function isChiefOfStaff(name: string | null | undefined): boolean {
+  return botSeat(name) === "cos";
 }
 
 export function isFounderName(name: string | null | undefined): boolean {
