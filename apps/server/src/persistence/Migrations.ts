@@ -109,6 +109,7 @@ import Migration0098 from "./Migrations/098_FounderEnrollmentBindings.ts";
 import Migration0099 from "./Migrations/099_FounderEnrollmentCorrections.ts";
 import Migration0100 from "./Migrations/100_MessagesLatestVisibleIndex.ts";
 import Migration0101 from "./Migrations/101_EventSubscriptions.ts";
+import Migration0102 from "./Migrations/102_ScheduledTaskOccurrences.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -213,6 +214,7 @@ const migrationEntries = [
   [99, "FounderEnrollmentCorrections", Migration0099],
   [100, "MessagesLatestVisibleIndex", Migration0100],
   [101, "EventSubscriptions", Migration0101],
+  [102, "ScheduledTaskOccurrences", Migration0102],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
