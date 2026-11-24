@@ -104,19 +104,19 @@ screenshots.
 
 Stable handles (verified against this head):
 
-| What | Handle |
-| --- | --- |
-| Thread row | `[data-testid="sidebar-row-card"]` (slim: `sidebar-row-slim`); right-click opens its menu |
-| Row menu items | text: `Pin thread`, `Settle thread`, `Snooze` > `In 1 hour`…, `Rename thread`, `Regenerate title`, `Mark unread`, `Filter by <project>`, `Copy`, `Project settings`, `Archive thread`, `Delete` |
-| Pinned / unpin | `button[aria-label="Unpin thread"]` (or `[aria-label="Pinned"]` while dragging) |
-| Settled / snoozed shelves | `[data-testid="sidebar-settled-shelf-toggle"]`, `[data-testid="sidebar-snoozed-shelf-toggle"]` |
-| Wake | `[aria-label="Wake thread now"]` |
-| Thread title in header | `button[aria-label^="Thread actions for"]` |
-| New thread / new project | `[data-testid="new-thread-button"]` / `button[aria-label="New project"]` |
-| Command palette | `Control+K`; `[data-testid="command-palette"]`, results are `[role="option"]` |
-| Composer | `[data-testid="composer-editor"]`, button `Send message` |
-| Settings | footer gear, then a button per section: General, Appearance, Keybindings, SnapShots, Providers, Integrations, Source Control, Storage, Connections, Archive, and Back |
-| Terminal | `button[aria-label="Toggle terminal drawer"]` |
+| What                      | Handle                                                                                                                                                                                          |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Thread row                | `[data-testid="sidebar-row-card"]` (slim: `sidebar-row-slim`); right-click opens its menu                                                                                                       |
+| Row menu items            | text: `Pin thread`, `Settle thread`, `Snooze` > `In 1 hour`…, `Rename thread`, `Regenerate title`, `Mark unread`, `Filter by <project>`, `Copy`, `Project settings`, `Archive thread`, `Delete` |
+| Pinned / unpin            | `button[aria-label="Unpin thread"]` (or `[aria-label="Pinned"]` while dragging)                                                                                                                 |
+| Settled / snoozed shelves | `[data-testid="sidebar-settled-shelf-toggle"]`, `[data-testid="sidebar-snoozed-shelf-toggle"]`                                                                                                  |
+| Wake                      | `[aria-label="Wake thread now"]`                                                                                                                                                                |
+| Thread title in header    | `button[aria-label^="Thread actions for"]`                                                                                                                                                      |
+| New thread / new project  | `[data-testid="new-thread-button"]` / `button[aria-label="New project"]`                                                                                                                        |
+| Command palette           | `Control+K`; `[data-testid="command-palette"]`, results are `[role="option"]`                                                                                                                   |
+| Composer                  | `[data-testid="composer-editor"]`, button `Send message`                                                                                                                                        |
+| Settings                  | footer gear, then a button per section: General, Appearance, Keybindings, SnapShots, Providers, Integrations, Source Control, Storage, Connections, Archive, and Back                           |
+| Terminal                  | `button[aria-label="Toggle terminal drawer"]`                                                                                                                                                   |
 
 `getByRole(..., { name })` with a regex can stall for a minute on a saturated host; prefer
 the CSS handles above and give clicks 45 s.

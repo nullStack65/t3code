@@ -1073,12 +1073,12 @@ describe("ProviderCommandReactor", () => {
         expect(refusal).toMatchObject({
           summary: "Turn refused by the session spend guard",
         });
-        expect(String(refusal?.payload && (refusal.payload as { detail?: string }).detail)).toContain(
-          "session ceiling",
-        );
-        expect(String(refusal?.payload && (refusal.payload as { detail?: string }).detail)).not.toContain(
-          "idle limit",
-        );
+        expect(
+          String(refusal?.payload && (refusal.payload as { detail?: string }).detail),
+        ).toContain("session ceiling");
+        expect(
+          String(refusal?.payload && (refusal.payload as { detail?: string }).detail),
+        ).not.toContain("idle limit");
         expect(harness.sendTurn).toHaveBeenCalledTimes(2);
         NodeFS.rmSync(workspacePath, { recursive: true, force: true });
       }),
@@ -1144,9 +1144,11 @@ describe("ProviderCommandReactor", () => {
                       'info',
                       'context-window.updated',
                       'Context window updated',
-                      ${costly
-                        ? '{"totalProcessedTokens":1,"lastInputTokens":1,"lastOutputTokens":0}'
-                        : '{"totalProcessedTokens":0,"lastInputTokens":0,"lastOutputTokens":0}'},
+                      ${
+                        costly
+                          ? '{"totalProcessedTokens":1,"lastInputTokens":1,"lastOutputTokens":0}'
+                          : '{"totalProcessedTokens":0,"lastInputTokens":0,"lastOutputTokens":0}'
+                      },
                       ${sequence},
                       '2099-01-01T00:00:00.000Z'
                     )

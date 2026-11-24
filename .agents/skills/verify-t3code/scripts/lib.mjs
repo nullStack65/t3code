@@ -17,7 +17,9 @@ export async function start(usage, timeout = 45000) {
       console.log("OK  ", id, "|", seen);
     } catch (e) {
       failed++;
-      const why = String(e.message ?? e).split("\n")[0].slice(0, 200);
+      const why = String(e.message ?? e)
+        .split("\n")[0]
+        .slice(0, 200);
       t.note(`${id}: ${action} -> FAIL ${why}`);
       console.log("FAIL", id, "|", why);
     }
@@ -28,7 +30,14 @@ export async function start(usage, timeout = 45000) {
 }
 
 export const mainText = (p, n = 220) =>
-  p.evaluate((len) => (document.querySelector("main")?.innerText ?? document.body.innerText).replace(/\s+/g, " ").trim().slice(0, len), n);
+  p.evaluate(
+    (len) =>
+      (document.querySelector("main")?.innerText ?? document.body.innerText)
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, len),
+    n,
+  );
 
 export const rowTitles = (p) =>
   p.locator(ROW).evaluateAll((els) => els.map((e) => e.innerText.replace(/\s+/g, " ").trim()));
@@ -48,7 +57,9 @@ export async function searchPalette(p, query) {
     await p.waitForTimeout(1000);
     if (await p.locator('[role="option"]').count()) break;
   }
-  const opts = (await p.locator('[role="option"]').allInnerTexts()).map((s) => s.replace(/\s+/g, " "));
+  const opts = (await p.locator('[role="option"]').allInnerTexts()).map((s) =>
+    s.replace(/\s+/g, " "),
+  );
   await p.keyboard.press("Escape");
   return opts;
 }

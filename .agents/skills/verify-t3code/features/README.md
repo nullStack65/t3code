@@ -4,20 +4,20 @@ Each feature file lists sub-features by stable ID. The ID is also the step name 
 drive scripts write to `$RUN/evidence/observed.log`, so an evidence line maps straight
 to a sub-feature.
 
-| ID | Feature | Primary proof |
-| --- | --- | --- |
-| onboarding | First-run setup wizard | `scripts/seed.mjs` |
-| projects | Add and filter projects | `scripts/seed.mjs`, `scripts/drive-surfaces.mjs` (`projects.filter`) |
-| composer | Model picker, send, agent reply | `scripts/seed.mjs` |
-| threads | New, rename, mark unread, list | `scripts/drive-threads.mjs`, `scripts/drive-surfaces.mjs` (`threads.new`) |
-| sidebar-lifecycle | Pin, settle, snooze, wake | `scripts/drive-threads.mjs` |
-| archive | Archive, Archive page, unarchive | `scripts/drive-threads.mjs` (`archive.thread`), `scripts/drive-surfaces.mjs` |
-| search | Command palette thread search | `scripts/drive-threads.mjs` (`search.snoozed`), `scripts/drive-surfaces.mjs` (`search.palette`) |
-| terminal | Terminal drawer | `scripts/drive-surfaces.mjs` (`terminal.drawer`) |
-| settings | Settings sections | `scripts/drive-surfaces.mjs` (`settings.<section>`) |
-| connections | Environments and network access | `scripts/drive-surfaces.mjs` (`connections.page`) |
-| usage | Usage page | `scripts/drive-surfaces.mjs` (`usage.page`) |
-| pull-requests | Pull Requests page | `scripts/drive-surfaces.mjs` (`pull-requests.page`) |
+| ID                | Feature                          | Primary proof                                                                                   |
+| ----------------- | -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| onboarding        | First-run setup wizard           | `scripts/seed.mjs`                                                                              |
+| projects          | Add and filter projects          | `scripts/seed.mjs`, `scripts/drive-surfaces.mjs` (`projects.filter`)                            |
+| composer          | Model picker, send, agent reply  | `scripts/seed.mjs`                                                                              |
+| threads           | New, rename, mark unread, list   | `scripts/drive-threads.mjs`, `scripts/drive-surfaces.mjs` (`threads.new`)                       |
+| sidebar-lifecycle | Pin, settle, snooze, wake        | `scripts/drive-threads.mjs`                                                                     |
+| archive           | Archive, Archive page, unarchive | `scripts/drive-threads.mjs` (`archive.thread`), `scripts/drive-surfaces.mjs`                    |
+| search            | Command palette thread search    | `scripts/drive-threads.mjs` (`search.snoozed`), `scripts/drive-surfaces.mjs` (`search.palette`) |
+| terminal          | Terminal drawer                  | `scripts/drive-surfaces.mjs` (`terminal.drawer`)                                                |
+| settings          | Settings sections                | `scripts/drive-surfaces.mjs` (`settings.<section>`)                                             |
+| connections       | Environments and network access  | `scripts/drive-surfaces.mjs` (`connections.page`)                                               |
+| usage             | Usage page                       | `scripts/drive-surfaces.mjs` (`usage.page`)                                                     |
+| pull-requests     | Pull Requests page               | `scripts/drive-surfaces.mjs` (`pull-requests.page`)                                             |
 
 ## Baseline preconditions
 

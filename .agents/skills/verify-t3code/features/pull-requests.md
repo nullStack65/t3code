@@ -35,7 +35,7 @@ Preconditions: baseline from [README.md](README.md); the host's `gh` is logged i
   read the loading skeleton). When it fails the page shows "Could not load pull requests" with the internal text "All fibers
   interrupted without error" and a Retry button. Retry lists the PRs, and later visits in
   the same instance list them at once. `drive-surfaces.mjs` records this as `FAIL
-  pull-requests.page`. Do not click Retry to make the step pass or wait it out. The
+pull-requests.page`. Do not click Retry to make the step pass or wait it out. The
   nullStack65/t3code repo has issues disabled, so the report lives here and in the PR that
   added this file.
 
