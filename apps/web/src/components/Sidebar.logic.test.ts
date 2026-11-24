@@ -2,6 +2,7 @@ import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { isThreadWorking as isSidebarThreadWorking } from "@t3tools/client-runtime/state/thread-inbox";
 import * as DateTime from "effect/DateTime";
+import { partitionBotGroups, splitStandingThreads } from "./bots/botPresence";
 import { deriveActiveWorkStartedAt } from "../session-logic.ts";
 import { describe, expect, it } from "vite-plus/test";
 import * as Cause from "effect/Cause";
@@ -1808,5 +1809,71 @@ describe("placeSystemScheduledThreads", () => {
     expect(revealed.section?.some((thread) => thread.failed)).toBe(true);
 
     expect(place(false).section).toBeNull();
+  });
+});
+
+describe("standing bots bound by a scheduled task", () => {
+  const cosId = ThreadId.make("cos");
+  const ctoId = ThreadId.make("cto");
+  const ordinaryId = ThreadId.make("digest");
+  const keyOf = (id: ThreadId) => scopedThreadKey(scopeThreadRef(localEnvironmentId, id));
+  const shell = (
+    id: ThreadId,
+    standing: { name: string; role: string } | null,
+    audience: string,
+  ) => ({
+    id,
+    standing,
+    source: { inbox: { audience } },
+  });
+  const threads = [
+    shell(cosId, { name: "CoS", role: "Chief of Staff" }, "kameron"),
+    shell(ctoId, { name: "CTO", role: "Engineering & Architecture" }, "shared"),
+    shell(ordinaryId, null, "kameron"),
+  ];
+  const listedBots = (scheduledThreadKeys: ReadonlySet<string>) => {
+    const { rest } = placeSystemScheduledThreads({
+      threads,
+      revealed: false,
+      scheduledThreadKeys,
+      keyOf: (thread) => keyOf(thread.id),
+      standingRoleOf: (thread) => thread.standing?.role ?? null,
+      isStandingOf: (thread) => thread.standing !== null,
+    });
+    return partitionBotGroups(splitStandingThreads(rest).bots);
+  };
+
+  it("keeps every standing bot listed when a scheduled task binds its thread after the snapshot", () => {
+    const snapshot = listedBots(new Set());
+    expect(snapshot.mine.map((thread) => thread.id)).toEqual([cosId]);
+    expect(snapshot.shared.map((thread) => thread.id)).toEqual([ctoId]);
+
+    // A running scheduled task now reports these threads as its fresh-session threads.
+    const updated = listedBots(
+      freshSessionThreadKeys([
+        {
+          environmentId: localEnvironmentId,
+          tasks: [
+            { threadId: cosId, threadMode: "fresh_session" as const },
+            { threadId: ctoId, threadMode: "fresh_session" as const },
+            { threadId: ordinaryId, threadMode: "fresh_session" as const },
+          ],
+        },
+      ]),
+    );
+    expect(updated).toEqual(snapshot);
+  });
+
+  it("still sends an ordinary scheduled thread to the System shelf", () => {
+    const keys = new Set([keyOf(ordinaryId)]);
+    const { system } = placeSystemScheduledThreads({
+      threads,
+      revealed: true,
+      scheduledThreadKeys: keys,
+      keyOf: (thread) => keyOf(thread.id),
+      standingRoleOf: (thread) => thread.standing?.role ?? null,
+      isStandingOf: (thread) => thread.standing !== null,
+    });
+    expect(system.map((thread) => thread.id)).toEqual([ordinaryId]);
   });
 });

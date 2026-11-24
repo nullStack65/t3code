@@ -106,6 +106,8 @@ import Migration0095 from "./Migrations/095_TurnItemInlineWorkOutput.ts";
 import Migration0096 from "./Migrations/096_RepairStaleTitleRegeneration.ts";
 import Migration0097 from "./Migrations/097_AuthSessionFounder.ts";
 import Migration0098 from "./Migrations/098_FounderEnrollmentBindings.ts";
+import Migration0099 from "./Migrations/099_FounderEnrollmentCorrections.ts";
+import Migration0100 from "./Migrations/100_MessagesLatestVisibleIndex.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -207,6 +209,8 @@ const migrationEntries = [
   [96, "RepairStaleTitleRegeneration", Migration0096],
   [97, "AuthSessionFounder", Migration0097],
   [98, "FounderEnrollmentBindings", Migration0098],
+  [99, "FounderEnrollmentCorrections", Migration0099],
+  [100, "MessagesLatestVisibleIndex", Migration0100],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

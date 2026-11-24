@@ -34,7 +34,13 @@ founder comes only from its pairing code, its approved T3 Connect device key, or
 an assignment made from another client. It is never inherited from an earlier
 session: a shared desktop bootstrap or a reused proof key would hand one
 founder's name to whoever holds the next session. Revoking a device drops its
-founder with it. Agent sign-in codes and bot sessions never carry one.
+founder with it, and reassigning one moves all of its live sessions. Agent
+sign-in codes and bot sessions never carry one.
+
+Requiring enrolled founders exempts bots, so the bot device type is server
+provenance: only CLI-issued tokens and MCP client sessions get it. A client's
+presented device type or user agent never yields it, unlike the rest of its
+display metadata.
 
 ### Guest links are not sessions
 

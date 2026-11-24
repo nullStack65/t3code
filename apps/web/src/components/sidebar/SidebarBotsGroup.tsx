@@ -9,9 +9,9 @@ import {
 } from "@t3tools/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+import { ChevronRightIcon } from "lucide-react";
 import {
   memo,
-  useCallback,
   useEffect,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -25,9 +25,13 @@ import { contextMenuSourceOf } from "../../contextMenuSource";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { BotAvatar, BOT_ACCENT_CLASSES } from "../bots/BotAvatar";
+import { orderBotTree, visibleBotRows } from "../bots/botOrgTree";
 import { resolveBotPresence } from "../bots/botPresence";
 import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "../Sidebar.logic";
 import { useClientSettings } from "../../hooks/useSettings";
+
+// One shared empty value, so an idle environment never looks like a change.
+const NO_TYPING: TypingByThread = {};
 
 interface BotRowHandlers {
   readonly onThreadClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
@@ -56,13 +60,22 @@ export function SidebarBotsGroup(
   const [typingByEnvironment, setTypingByEnvironment] = useState<
     Readonly<Record<string, TypingByThread>>
   >({});
-  const onTyping = useCallback((environmentId: string, next: TypingByThread) => {
+  const onTyping = (environmentId: string, next: TypingByThread) => {
     setTypingByEnvironment((current) =>
       current[environmentId] === next ? current : { ...current, [environmentId]: next },
     );
-  }, []);
-  if (props.threads.length === 0) return null;
+  };
+  const botCollapsedById = useUiStateStore((state) => state.botCollapsedById);
+  const setBotCollapsed = useUiStateStore((state) => state.setBotCollapsed);
   const label = props.label ?? "Bots";
+  const groupKey = `group:${label}`;
+  const groupCollapsed = botCollapsedById[groupKey] === true;
+  const rows = visibleBotRows(
+    orderBotTree(props.threads),
+    (thread) =>
+      botCollapsedById[scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))] === true,
+  );
+  if (props.threads.length === 0) return null;
   const environmentIds = [...new Set(props.threads.map((thread) => thread.environmentId))];
   return (
     <section
@@ -73,17 +86,34 @@ export function SidebarBotsGroup(
       {environmentIds.map((environmentId) => (
         <TypingFeed key={environmentId} environmentId={environmentId} onTyping={onTyping} />
       ))}
-      <div className="flex h-6 items-center gap-2 px-2">
+      <button
+        type="button"
+        aria-expanded={!groupCollapsed}
+        data-testid="sidebar-bots-group-toggle"
+        className="flex h-6 w-full items-center gap-1 rounded-md px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        onClick={() => setBotCollapsed(groupKey, !groupCollapsed)}
+      >
+        <ChevronRightIcon
+          aria-hidden
+          className={cn(
+            "size-3 shrink-0 text-sidebar-foreground/60 transition-transform",
+            !groupCollapsed && "rotate-90",
+          )}
+        />
         <span className="shrink-0 text-xs font-medium text-sidebar-foreground/80">{label}</span>
-        <span aria-hidden className="h-px flex-1 bg-sidebar-foreground/15" />
-      </div>
-      <ul role="list" className="flex flex-col gap-px">
-        {props.threads.map((thread) => {
+        <span aria-hidden className="ml-1 h-px flex-1 bg-sidebar-foreground/15" />
+      </button>
+      <ul role="list" className="flex flex-col gap-px" hidden={groupCollapsed}>
+        {(groupCollapsed ? [] : rows).map(({ thread, depth, hasReports, collapsed }) => {
           const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
             <SidebarBotRow
               key={key}
               thread={thread}
+              depth={depth}
+              hasReports={hasReports}
+              collapsed={collapsed}
+              onToggleCollapsed={() => setBotCollapsed(key, !collapsed)}
               threadKey={key}
               isActive={props.activeThreadKey === key}
               typing={typingByEnvironment[thread.environmentId]}
@@ -110,8 +140,9 @@ function TypingFeed(props: {
       input: {},
     }),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors one environment's typing query result into the group's per-environment map until unmount
   useEffect(() => {
-    onTyping(environmentId, data ?? {});
+    onTyping(environmentId, data ?? NO_TYPING);
   }, [data, environmentId, onTyping]);
   return null;
 }
@@ -119,6 +150,12 @@ function TypingFeed(props: {
 const SidebarBotRow = memo(function SidebarBotRow(
   props: BotRowHandlers & {
     readonly thread: EnvironmentThreadShell;
+    /** Reporting-line depth: 0 is a root; each level indents one step. */
+    readonly depth: number;
+    /** A bot with reports shows a chevron that folds them away. */
+    readonly hasReports: boolean;
+    readonly collapsed: boolean;
+    readonly onToggleCollapsed: () => void;
     readonly threadKey: string;
     readonly isActive: boolean;
     readonly typing: TypingByThread | undefined;
@@ -154,90 +191,115 @@ const SidebarBotRow = memo(function SidebarBotRow(
     props.onThreadActivate(threadRef);
   };
   return (
-    <li className="list-none">
-      <div
-        role="button"
-        tabIndex={0}
-        data-sidebar-row={threadKey}
-        data-testid="sidebar-bot-row"
-        data-bot-state={presence.avatarState}
-        aria-current={props.isActive ? "page" : undefined}
-        aria-label={`${standing.name}${typingText ? `, ${typingText}` : presence.line ? `, ${presence.line}` : ""}${attentionLabel(
-          attention,
-        )}${
-          presence.badge === "needs-you"
-            ? ", needs you"
-            : presence.badge === "unread"
-              ? ", unread"
-              : ""
-        }`}
-        className={cn(
-          "group/sidebar-row relative flex h-8 w-full cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-          presence.avatarState === "running" &&
-            cn(
-              "before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:content-[''] motion-safe:before:animate-status-pulse",
-              accent.text,
-              "before:bg-current",
-            ),
-          props.isActive
-            ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
-            : isSelected
-              ? "bg-sidebar-row-selected text-sidebar-foreground"
-              : "text-sidebar-foreground hover:bg-sidebar-row-hover",
-        )}
-        onClick={(event) => props.onThreadClick(event, threadRef)}
-        onKeyDown={handleKeyDown}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          props.onContextMenu(
-            threadRef,
-            { x: event.clientX, y: event.clientY },
-            contextMenuSourceOf(event),
-          );
-        }}
-      >
-        <BotAvatar
-          avatarId={standing.avatarId}
-          accent={standing.accent}
-          state={presence.avatarState}
-        />
-        <span className="shrink-0 truncate text-sm font-medium" dir="auto">
-          {standing.name}
-        </span>
-        {typingText ? (
-          <span
-            className="min-w-0 flex-1 truncate text-xs text-sidebar-muted-foreground"
-            data-bot-typing=""
-            dir="auto"
-          >
-            {typingText}
-          </span>
-        ) : presence.line ? (
-          <span
-            className={cn(
-              "min-w-0 flex-1 truncate text-xs",
-              presence.avatarState === "failed"
-                ? "text-destructive-foreground"
-                : presence.badge === "needs-you" || presence.avatarState === "running"
-                  ? accent.text
-                  : "text-sidebar-muted-foreground",
-            )}
-            dir="auto"
-          >
-            {presence.line}
-          </span>
-        ) : (
-          <span className="flex-1" />
-        )}
-        <BotAttentionMark attention={attention} accentClass={accent.swatch} />
-        {presence.badge ? (
-          <span
-            aria-hidden
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              presence.badge === "needs-you" ? accent.swatch : "bg-sidebar-foreground/60",
-            )}
+    <li
+      className="list-none"
+      data-bot-depth={props.depth}
+      style={props.depth > 0 ? { paddingLeft: `${props.depth * 14}px` } : undefined}
+    >
+      <div className="relative">
+        <div
+          role="button"
+          tabIndex={0}
+          data-sidebar-row={threadKey}
+          data-testid="sidebar-bot-row"
+          data-bot-state={presence.avatarState}
+          aria-current={props.isActive ? "page" : undefined}
+          aria-label={`${standing.name}${typingText ? `, ${typingText}` : presence.line ? `, ${presence.line}` : ""}${attentionLabel(
+            attention,
+          )}${
+            presence.badge === "needs-you"
+              ? ", needs you"
+              : presence.badge === "unread"
+                ? ", unread"
+                : ""
+          }`}
+          className={cn(
+            "group/sidebar-row relative flex h-8 w-full cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+            presence.avatarState === "running" &&
+              cn(
+                "before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:content-[''] motion-safe:before:animate-status-pulse",
+                accent.text,
+                "before:bg-current",
+              ),
+            props.isActive
+              ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
+              : isSelected
+                ? "bg-sidebar-row-selected text-sidebar-foreground"
+                : "text-sidebar-foreground hover:bg-sidebar-row-hover",
+          )}
+          onClick={(event) => props.onThreadClick(event, threadRef)}
+          onKeyDown={handleKeyDown}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            props.onContextMenu(
+              threadRef,
+              { x: event.clientX, y: event.clientY },
+              contextMenuSourceOf(event),
+            );
+          }}
+        >
+          <span aria-hidden className="size-4 shrink-0" />
+          <BotAvatar
+            avatarId={standing.avatarId}
+            accent={standing.accent}
+            state={presence.avatarState}
           />
+          <span className="shrink-0 truncate text-sm font-medium" dir="auto">
+            {standing.name}
+          </span>
+          {typingText ? (
+            <span
+              className="min-w-0 flex-1 truncate text-xs text-sidebar-muted-foreground"
+              data-bot-typing=""
+              dir="auto"
+            >
+              {typingText}
+            </span>
+          ) : presence.line ? (
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-xs",
+                presence.avatarState === "failed"
+                  ? "text-destructive-foreground"
+                  : presence.badge === "needs-you" || presence.avatarState === "running"
+                    ? accent.text
+                    : "text-sidebar-muted-foreground",
+              )}
+              dir="auto"
+            >
+              {presence.line}
+            </span>
+          ) : (
+            <span className="flex-1" />
+          )}
+          <BotAttentionMark attention={attention} accentClass={accent.swatch} />
+          {presence.badge ? (
+            <span
+              aria-hidden
+              className={cn(
+                "size-2 shrink-0 rounded-full",
+                presence.badge === "needs-you" ? accent.swatch : "bg-sidebar-foreground/60",
+              )}
+            />
+          ) : null}
+        </div>
+        {props.hasReports ? (
+          <button
+            type="button"
+            aria-expanded={!props.collapsed}
+            aria-label={`${props.collapsed ? "Expand" : "Collapse"} ${standing.name}'s reports`}
+            data-testid="sidebar-bot-toggle"
+            className="absolute inset-y-0 left-0 z-10 flex w-6 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onToggleCollapsed();
+            }}
+          >
+            <ChevronRightIcon
+              aria-hidden
+              className={cn("size-3 transition-transform", !props.collapsed && "rotate-90")}
+            />
+          </button>
         ) : null}
       </div>
     </li>

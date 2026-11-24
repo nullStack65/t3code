@@ -8228,6 +8228,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               (
                 SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ATTENTION_MENTION_TEXT_LIMIT})
                 FROM orchestration_v2_projection_messages message
+                  INDEXED BY orchestration_v2_projection_messages_thread_updated_idx
                 WHERE message.thread_id = t.thread_id
                   AND NOT ${isIdleCompactionMessage("message")}
                 ORDER BY message.updated_at DESC, message.message_id DESC

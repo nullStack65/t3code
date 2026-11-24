@@ -147,6 +147,12 @@ export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>)
     () => Effect.void,
   );
 
+export const refuses = (failure: OrchestratorMcpFailure) =>
+  declare(
+    () => Effect.fail(failure),
+    () => Effect.fail(failure),
+  );
+
 /** Apply the caller check before local execution or forwarding loses the child identity. */
 export const withoutSubagents = <P, A, E, R>(
   declaration: Declaration<(params: P) => Effect.Effect<A, E, R>>,

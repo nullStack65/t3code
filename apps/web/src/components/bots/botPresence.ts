@@ -2,6 +2,12 @@ import type { OrchestrationV2ProviderFailureClass } from "@t3tools/contracts";
 
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { BotAvatarState } from "./BotAvatar";
+import { isFounderName } from "./botOrgTree";
+
+function isFounderStanding(standing: unknown): boolean {
+  const name = (standing as { name?: unknown } | null)?.name;
+  return typeof name === "string" && isFounderName(name);
+}
 
 export interface BotPresence {
   readonly avatarState: BotAvatarState;
@@ -59,7 +65,11 @@ export function splitStandingThreads<T extends { readonly standing: unknown }>(
 ): { readonly bots: T[]; readonly rest: T[] } {
   const bots: T[] = [];
   const rest: T[] = [];
-  for (const thread of threads) (thread.standing != null ? bots : rest).push(thread);
+  for (const thread of threads) {
+    // A founder is a human, not a bot: founder-to-founder threads stay out of the Bots shelf.
+    const isBot = thread.standing != null && !isFounderStanding(thread.standing);
+    (isBot ? bots : rest).push(thread);
+  }
   return { bots, rest };
 }
 
