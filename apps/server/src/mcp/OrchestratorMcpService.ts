@@ -373,6 +373,23 @@ function listCapabilityModels(input: {
 const advertisedModel = (provider: ServerProvider, model: string) =>
   findServedModel(provider.models, model);
 
+/** Antigravity 1.3 IDs append the thinking level (`gemini-3.8-flash-high`); the agent still accepts them. */
+function antigravitySuffixedModel(provider: ServerProvider, model: string) {
+  if (provider.driver !== "antigravity" || advertisedModel(provider, model)) return;
+  const separator = model.lastIndexOf("-");
+  if (separator === -1) return;
+  const family = model.slice(0, separator);
+  const value = model.slice(separator + 1);
+  const thinking = provider.models
+    .find((candidate) => candidate.slug === family)
+    ?.capabilities?.optionDescriptors?.find(
+      (descriptor) => descriptor.type === "select" && descriptor.role === "reasoning",
+    );
+  if (thinking?.type === "select" && thinking.options.some((choice) => choice.id === value)) {
+    return { model: family, thinking: { id: thinking.id, value } };
+  }
+}
+
 const withV = (version: string) => (version.startsWith("v") ? version : `v${version}`);
 
 /** A provider that lists no models accepts any slug. */
@@ -1619,7 +1636,10 @@ const make = Effect.gen(function* () {
 
     const inheritedSelection = input.parent.thread.modelSelection;
     const requestedModel = input.target?.model;
+    const antigravityTarget =
+      requestedModel === undefined ? undefined : antigravitySuffixedModel(provider, requestedModel);
     const model =
+      antigravityTarget?.model ??
       requestedModel ??
       (instanceId === inheritedSelection.instanceId
         ? inheritedSelection.model
@@ -1630,7 +1650,7 @@ const make = Effect.gen(function* () {
         `Provider ${instanceId} has no model available for inheritance.`,
       );
     }
-    if (requestedModel !== undefined) yield* requireAdvertisedModel(provider, requestedModel);
+    if (requestedModel !== undefined) yield* requireAdvertisedModel(provider, model);
     const advertised = advertisedModel(provider, model);
     const descriptors = advertised?.capabilities?.optionDescriptors;
     const requestedOptions = withLegacyUltracodeEffort(descriptors, input.target?.options);
@@ -1654,14 +1674,17 @@ const make = Effect.gen(function* () {
           descriptors,
         )
       : undefined;
-    if (requestedOptions !== undefined) {
+    if (requestedOptions !== undefined || antigravityTarget !== undefined) {
       const selections = new Map(
-        (requestedOptions.length === 0 ? [] : (options ?? [])).map((selection) => [
+        (requestedOptions?.length === 0 ? [] : (options ?? [])).map((selection) => [
           selection.id,
           selection,
         ]),
       );
-      for (const selection of requestedOptions) {
+      if (antigravityTarget !== undefined && requestedOptions?.length !== 0) {
+        selections.set(antigravityTarget.thinking.id, antigravityTarget.thinking);
+      }
+      for (const selection of requestedOptions ?? []) {
         selections.set(selection.id, selection);
       }
       options = [...selections.values()];
