@@ -253,7 +253,15 @@ describe("production relay admission", () => {
 
   it("rejects unqualified runner admission before using the read-only GitHub token", () => {
     expect(admit.if.replace(/\s+/g, " ").trim()).toBe(
-      "github.event_name == 'workflow_dispatch' && github.repository == 'nullStack65/t3code' && github.repository_owner_id == '112618179' && github.event.repository.default_branch == 'main' && github.ref == 'refs/heads/main' && github.actor == 'nullStack65' && github.actor_id == '112618179' && github.triggering_actor == 'nullStack65' && github.run_attempt == '1'",
+      [
+        "github.event_name == 'workflow_dispatch'",
+        "((github.repository == 'nullStack65/t3code' && github.repository_owner_id == '112618179') || (github.repository == 'kameron-smith-closura/t3code' && github.repository_owner_id == '274969253'))",
+        "github.event.repository.default_branch == 'main'",
+        "github.ref == 'refs/heads/main'",
+        "((github.actor == 'nullStack65' && github.actor_id == '112618179') || (github.actor == 'kameron-smith-closura' && github.actor_id == '274969253'))",
+        "(github.triggering_actor == 'nullStack65' || github.triggering_actor == 'kameron-smith-closura')",
+        "github.run_attempt == '1'",
+      ].join(" && "),
     );
   });
 });

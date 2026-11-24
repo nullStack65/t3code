@@ -24,7 +24,14 @@ concurrency:
 jobs:
   fingerprint:
     name: Native fingerprint diff
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login)))
+    runs-on: t3code-ci-arc
     permissions:
       contents: read
       issues: write

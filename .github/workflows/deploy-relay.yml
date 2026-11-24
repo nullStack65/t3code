@@ -22,14 +22,14 @@ jobs:
     # Reject before assigning a runner; the script also checks the exact values.
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      (github.repository == 'nullStack65/t3code' || github.repository == 'kameron-smith-closura/t3code') &&
-      (github.repository_owner_id == '112618179' || github.repository_owner_id == '274969253') &&
+      ((github.repository == 'nullStack65/t3code' && github.repository_owner_id == '112618179') ||
+       (github.repository == 'kameron-smith-closura/t3code' && github.repository_owner_id == '274969253')) &&
       github.event.repository.default_branch == 'main' &&
       github.ref == 'refs/heads/main' &&
       ((github.actor == 'nullStack65' && github.actor_id == '112618179') || (github.actor == 'kameron-smith-closura' && github.actor_id == '274969253')) &&
       (github.triggering_actor == 'nullStack65' || github.triggering_actor == 'kameron-smith-closura') &&
       github.run_attempt == '1'
-    runs-on: ubuntu-24.04
+    runs-on: t3code-ci-arc
     timeout-minutes: 5
     outputs:
       source_sha: ${{ steps.validate.outputs.source_sha }}
@@ -77,7 +77,7 @@ jobs:
       contents: read
       id-token: none
       statuses: write
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: t3code-ci-arc
     timeout-minutes: 15
     environment:
       name: production

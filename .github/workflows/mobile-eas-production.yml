@@ -86,7 +86,16 @@ concurrency:
 jobs:
   production:
     name: EAS ${{ inputs.profile || 'production' }} ${{ github.event_name == 'push' && 'auto' || inputs.mode }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # Only the upstream-style main-default repository auto-publishes from main.
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name == 'workflow_dispatch' || github.event.repository.default_branch == 'main')
+    runs-on: t3code-ci-arc
     permissions:
       contents: read
     env:

@@ -10,7 +10,14 @@ permissions:
 jobs:
   prepare-config:
     name: Prepare PR size config
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login)))
+    runs-on: t3code-ci-arc
     outputs:
       labels_json: ${{ steps.config.outputs.labels_json }}
     steps:
@@ -57,8 +64,15 @@ jobs:
   sync-label-definitions:
     name: Sync PR size label definitions
     needs: prepare-config
-    if: github.event_name != 'pull_request_target'
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name != 'pull_request_target')
+    runs-on: t3code-ci-arc
     permissions:
       contents: read
       issues: write
@@ -114,8 +128,15 @@ jobs:
   label:
     name: Label PR size
     needs: prepare-config
-    if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name == 'pull_request_target')
+    runs-on: t3code-ci-arc
     permissions:
       contents: read
       issues: read

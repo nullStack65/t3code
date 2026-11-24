@@ -30,13 +30,20 @@ permissions:
 jobs:
   resolve:
     name: Verify preview eligibility
-    if: >-
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
     # The build workflow completes for every PR push (its label gate is on the
     # job), so this runs often and usually finds nothing. Keep it cheap.
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
+      && (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: t3code-ci-arc
     timeout-minutes: 10
     permissions:
       actions: read
@@ -280,10 +287,18 @@ jobs:
   build:
     name: Package and sign macOS arm64 preview
     needs: resolve
-    if: needs.resolve.outputs.eligible == 'true'
     concurrency:
       group: desktop-macos-preview-${{ needs.resolve.outputs.pr_number }}-build
       cancel-in-progress: true
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
+      && (needs.resolve.outputs.eligible == 'true')
     uses: ./.github/workflows/release-desktop.yml
     secrets:
       CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -302,7 +317,6 @@ jobs:
       clerk_cli_oauth_client_id: ${{ needs.resolve.outputs.clerk_cli_oauth_client_id }}
       relay_url: ${{ needs.resolve.outputs.relay_url }}
       label: macOS arm64 preview
-      runner: blacksmith-12vcpu-macos-26
       platform: mac
       target: dmg
       arch: arm64
@@ -317,8 +331,16 @@ jobs:
   publish:
     name: Publish anonymous download
     needs: [resolve, build]
-    if: needs.resolve.outputs.eligible == 'true' && needs.build.result == 'success'
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
+      && (needs.resolve.outputs.eligible == 'true' && needs.build.result == 'success')
+    runs-on: t3code-ci-arc
     timeout-minutes: 10
     # Its own group, so a publish never cancels a newer commit's signing job
     # (they would share the build group) and is never cancelled mid-upload.
@@ -491,12 +513,19 @@ jobs:
     # that a cheap no-op for PRs that never had one. A manual unlabel before
     # the build consumed it withdraws the request and drops any older
     # download too.
-    if: >-
-      github.event_name == 'pull_request_target' &&
-      (github.event.action == 'closed' ||
-      (github.event.action == 'unlabeled' && github.event.label.name == 'preview:mac'))
     # Runs on every PR close and usually finds nothing. Keep it cheap.
-    runs-on: ubuntu-24.04
+    if: >-
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
+      && (github.event_name == 'pull_request_target' &&
+       (github.event.action == 'closed' ||
+       (github.event.action == 'unlabeled' && github.event.label.name == 'preview:mac')))
+    runs-on: t3code-ci-arc
     timeout-minutes: 10
     # Cleanup runs must complete: a close event right after an unlabel queues
     # behind the running cleanup instead of canceling it mid-delete.

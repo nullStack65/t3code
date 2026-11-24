@@ -34,10 +34,16 @@ jobs:
     # workflow should skip rather than fail for them. On `labeled` events, only
     # the preview label itself triggers a deploy.
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(github.event.pull_request.labels.*.name, 'preview:web') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'preview:web')
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+      github.repository_id == '1372173214' &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+      contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor) &&
+      (github.event.pull_request == null ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login))) &&
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'preview:web') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'preview:web'))
+    runs-on: t3code-ci-arc
     timeout-minutes: 10
     env:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
