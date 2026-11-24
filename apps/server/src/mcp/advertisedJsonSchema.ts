@@ -71,7 +71,22 @@ const mergeTaggedObjects = (branches: ReadonlyArray<Json>): JsonObject | undefin
   return { type: "object", properties, required: [tag, ...requiredByAll] };
 };
 
+// Effect encodes `Schema.Struct({})` as "not null". MCP requires `type: object`.
+const isEmptyObjectSchema = (value: Json) =>
+  Predicate.isObject(value) &&
+  isNullSchema(value.not) &&
+  (value.allOf === undefined ||
+    (Array.isArray(value.allOf) &&
+      value.allOf.every(
+        (part) =>
+          Predicate.isObject(part) &&
+          part.type === "object" &&
+          Predicate.isObject(part.properties) &&
+          Object.keys(part.properties).length === 0,
+      )));
+
 const compact = (schema: Json, optional: boolean): Json => {
+  if (isEmptyObjectSchema(schema)) return { type: "object", properties: {} };
   if (Array.isArray(schema)) return schema.map((item) => compact(item, false));
   if (!Predicate.isObject(schema)) return schema;
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);

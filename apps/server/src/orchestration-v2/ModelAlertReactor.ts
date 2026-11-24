@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type EventSubscription,
   type EnvironmentId,
   isListedThreadLineage,
   MessageId,
@@ -19,6 +20,7 @@ import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Option from "effect/Option";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -36,6 +38,7 @@ import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 
+import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
@@ -44,6 +47,12 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  cursorOf,
+  planThreadSubscription,
+  threadSelectorKey,
+  withCursor,
+} from "./eventSubscription.ts";
 import {
   isStrandedQueueSignature,
   judgeThread,
@@ -923,6 +932,10 @@ const TERMINAL_RUN_STATUSES: ReadonlyArray<OrchestrationV2Run["status"]> = [
 
 export const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
+  const subscriptionStore = yield* Effect.serviceOption(
+    EventSubscriptionStore.EventSubscriptionStore,
+  );
+  let eventWakeSeq = 0;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const settings = yield* ServerSettings.ServerSettingsService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
@@ -1282,7 +1295,158 @@ export const make = Effect.gen(function* () {
     return { _tag: "sent" } satisfies DeliveryResult;
   });
 
+  const cursorUnchanged = (current: EventSubscription, next: EventSubscription) =>
+    current.coalesceUntilMs === next.coalesceUntilMs &&
+    current.pendingSummaries.join("\0") === next.pendingSummaries.join("\0") &&
+    current.wakeTimesMs.join(",") === next.wakeTimesMs.join(",") &&
+    JSON.stringify(current.deliveredSignatures) === JSON.stringify(next.deliveredSignatures);
+
+  const subscriberIsIdle = Effect.fnUntraced(function* (subscription: EventSubscription) {
+    if (!subscription.delivery.onlyWhenIdle) return true;
+    const shell = yield* projections
+      .getThreadShell(subscription.subscriberThreadId)
+      .pipe(Effect.catchCause(() => Effect.succeed(null)));
+    return (
+      shell !== null &&
+      shell.deletedAt === null &&
+      shell.activeRunId === null &&
+      (shell.activityRunStatus ?? null) === null
+    );
+  });
+
+  const applyThreadPlan = Effect.fnUntraced(function* (
+    subscription: EventSubscription,
+    watchedThreadId: ThreadId,
+    title: string,
+    findings: ReadonlyArray<{
+      readonly kind: string;
+      readonly detail: string;
+      readonly signature: string;
+    }>,
+    settled: boolean,
+  ) {
+    if (Option.isNone(subscriptionStore)) return;
+    const store = subscriptionStore.value;
+    const decision = planThreadSubscription({
+      findings,
+      events: subscription.events ?? [],
+      delivery: subscription.delivery,
+      idle: yield* subscriberIsIdle(subscription),
+      nowMs: yield* Clock.currentTimeMillis,
+      state: cursorOf(subscription),
+      settled,
+    });
+    if (decision.action === "wake") {
+      eventWakeSeq += 1;
+      const seq = eventWakeSeq;
+      yield* engine
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`server:event-sub:${subscription.id}:${seq}`),
+          threadId: subscription.subscriberThreadId,
+          messageId: MessageId.make(`message:event-sub:${subscription.id}:${seq}`),
+          text: [
+            `Update on thread ${title} (${watchedThreadId}), which you subscribed to:`,
+            ...decision.summaries,
+          ].join("\n"),
+          notification: {
+            source: { kind: "monitor" },
+            outcome: "updated",
+            summary: decision.summaries[0] ?? "thread event",
+          },
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("event subscription wake failed", {
+              id: subscription.id,
+              threadId: subscription.subscriberThreadId,
+              cause,
+            }),
+          ),
+        );
+    }
+    if (decision.expire) {
+      yield* store.remove(subscription.subscriberThreadId, subscription.id).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription removal failed", {
+            id: subscription.id,
+            cause,
+          }),
+        ),
+        Effect.asVoid,
+      );
+      return;
+    }
+    const next = withCursor(subscription, decision.state);
+    if (cursorUnchanged(subscription, next)) return;
+    yield* store
+      .put(next)
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription update failed", { id: subscription.id, cause }),
+        ),
+      );
+  });
+
+  const subscriptionsForThread = (threadId: ThreadId) =>
+    Option.isNone(subscriptionStore)
+      ? Effect.succeed<ReadonlyArray<EventSubscription>>([])
+      : subscriptionStore.value
+          .listForSelector(threadSelectorKey(threadId))
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("event subscription read failed", { threadId, cause }).pipe(
+                Effect.as<ReadonlyArray<EventSubscription>>([]),
+              ),
+            ),
+          );
+
+  const flushPendingThreadSubscriptions = Effect.gen(function* () {
+    if (Option.isNone(subscriptionStore)) return;
+    const rows = yield* subscriptionStore.value
+      .listAll()
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription flush failed", { cause }).pipe(
+            Effect.as<ReadonlyArray<EventSubscription>>([]),
+          ),
+        ),
+      );
+    yield* Effect.forEach(
+      rows.filter((row) => row.selector.entity === "thread" && row.pendingSummaries.length > 0),
+      (subscription) =>
+        Effect.gen(function* () {
+          if (
+            subscription.selector.entity !== "thread" ||
+            subscription.selector.by !== "thread_id"
+          ) {
+            return;
+          }
+          const shell = yield* projections
+            .getThreadShell(subscription.selector.threadId)
+            .pipe(Effect.catchCause(() => Effect.succeed(null)));
+          yield* applyThreadPlan(
+            subscription,
+            subscription.selector.threadId,
+            shell?.title ?? subscription.selector.threadId,
+            [],
+            false,
+          );
+        }),
+      { discard: true },
+    );
+  });
+
   const flush: ModelAlertReactor["Service"]["flush"] = Effect.gen(function* () {
+    yield* flushPendingThreadSubscriptions.pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("flushing thread event subscriptions failed", { cause }),
+      ),
+    );
     const nowMs = yield* Clock.currentTimeMillis;
     const due = (yield* Ref.get(state)).outbox.filter((entry) => entry.nextAttemptAt <= nowMs);
     if (due.length === 0) return;
@@ -1485,8 +1649,12 @@ export const make = Effect.gen(function* () {
     const current = yield* settings.getSettings;
     const here = yield* environment.getEnvironmentId;
     const watcher = current.modelAlertWatcher;
-    // The watcher's own turns would report to itself forever.
-    if (watcher?.environmentId === here && watcher.threadId === threadId) return;
+    // The watcher's own turns would report to itself forever. A subscription on that
+    // thread still delivers to its subscriber.
+    const selfWatch = watcher?.environmentId === here && watcher.threadId === threadId;
+    const noGlobalDestination = watcher === null && current.modelAlertWebhookUrl.trim() === "";
+    const subscribed = yield* subscriptionsForThread(threadId);
+    if ((selfWatch || noGlobalDestination) && subscribed.length === 0) return;
     const shell = yield* projections.getThreadShell(threadId);
     if (shell === null || shell.deletedAt !== null) return;
     const nowMs = yield* Clock.currentTimeMillis;
@@ -1504,31 +1672,52 @@ export const make = Effect.gen(function* () {
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
     const recipient = yield* launchingThread(shell, here);
     const destinations = threadEventDestinations(recipient, current.modelAlertWebhookUrl);
-    if (recipient === null && destinations.length === 0 && judged.findings.length > 0) {
+    if (
+      !selfWatch &&
+      !noGlobalDestination &&
+      recipient === null &&
+      destinations.length === 0 &&
+      judged.findings.length > 0
+    ) {
       yield* Effect.logWarning("a thread event has no launching thread and no webhook", {
         threadId,
         kinds: judged.findings.map((finding) => finding.kind),
       });
     }
-    const enqueued = yield* update((state) => {
-      const result = recordThreadEvents(
-        state,
-        { threadId, ...judged, ...context },
-        (finding) =>
-          threadEventAlert({
-            environmentId: here,
-            environmentLabel: label,
-            shell,
-            finding,
-            occurredAt,
-            recipient,
-          }),
-        destinations,
-        nowMs,
-      );
-      return [result.enqueued, result.state];
-    });
+    const enqueued =
+      selfWatch || noGlobalDestination
+        ? false
+        : yield* update((state) => {
+            const result = recordThreadEvents(
+              state,
+              { threadId, ...judged, ...context },
+              (finding) =>
+                threadEventAlert({
+                  environmentId: here,
+                  environmentLabel: label,
+                  shell,
+                  finding,
+                  occurredAt,
+                  recipient,
+                }),
+              destinations,
+              nowMs,
+            );
+            return [result.enqueued, result.state];
+          });
     if (enqueued) yield* Queue.offer(wake, undefined);
+    yield* Effect.forEach(
+      subscribed,
+      (subscription) =>
+        applyThreadPlan(
+          subscription,
+          threadId,
+          shell.title,
+          judged.findings,
+          trigger === "settled",
+        ),
+      { discard: true },
+    );
   });
 
   const threadTrigger = (event: OrchestrationV2DomainEvent): ThreadEventTrigger | undefined => {
@@ -1730,4 +1919,6 @@ export const make = Effect.gen(function* () {
   return ModelAlertReactor.of({ start, handle, flush, sweep, linkRenewal });
 });
 
-export const layer = Layer.effect(ModelAlertReactor, make);
+export const layer = Layer.effect(ModelAlertReactor, make).pipe(
+  Layer.provide(EventSubscriptionStore.layer),
+);

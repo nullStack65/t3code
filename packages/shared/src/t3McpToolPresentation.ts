@@ -65,6 +65,9 @@ export type T3McpToolSummaryAction =
   | "list-prs"
   | "watch-pr"
   | "unwatch-pr"
+  | "event-subscribe"
+  | "event-unsubscribe"
+  | "event-list"
   | "write-pr-guides"
   | "read-pr-guide"
   | "browser"
@@ -133,6 +136,21 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   unwatch_pull_request: tool(
     ["Stop watching", "Unwatching", "Stopped watching", "a pull request"],
     "unwatch-pr",
+    "pull-request",
+  ),
+  t3_event_subscribe: tool(
+    ["Subscribe", "Subscribing", "Subscribed", "to events"],
+    "event-subscribe",
+    "pull-request",
+  ),
+  t3_event_unsubscribe: tool(
+    ["Unsubscribe", "Unsubscribing", "Unsubscribed", "from events"],
+    "event-unsubscribe",
+    "pull-request",
+  ),
+  t3_event_list: tool(
+    ["List", "Listing", "Listed", "event subscriptions"],
+    "event-list",
     "pull-request",
   ),
   write_pull_request_guides: tool(
