@@ -20,6 +20,8 @@ import {
   persistClientSettingsPatch,
   persistClientSettingsUpdate,
   prepareModelPreferencesPatch,
+  subscribeClientSettings,
+  subscribeClientSettingsHydration,
 } from "./useSettings";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
@@ -41,6 +43,31 @@ describe("client settings hydration", () => {
   };
   const onboardingCompletedAt = "2026-09-05T12:00:00.000Z";
   const complete = (current: ClientSettings) => ({ ...current, onboardingCompletedAt });
+
+  it.each([
+    ["settings", subscribeClientSettings],
+    ["hydration", subscribeClientSettingsHydration],
+  ] as const)("visits a re-subscribing %s listener once per update", async (_, subscribe) => {
+    persistenceMocks.getClientSettings.mockResolvedValueOnce(savedSettings);
+    let unsubscribe = () => {};
+    let calls = 0;
+
+    const register = () =>
+      subscribe(() => {
+        unsubscribe();
+        // Bound the test on the old implementation, which would otherwise loop forever.
+        if (++calls === 1) unsubscribe = register();
+      });
+
+    try {
+      unsubscribe = register();
+      await ensureClientSettingsHydrated();
+      expect(calls).toBe(1);
+      expect(getClientSettings()).toEqual(savedSettings);
+    } finally {
+      unsubscribe();
+    }
+  });
 
   it("waits for saved model preferences before applying the first server edit", async () => {
     const provider = ProviderInstanceId.make("codex_work");
