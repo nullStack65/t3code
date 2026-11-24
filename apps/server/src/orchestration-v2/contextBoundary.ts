@@ -3,7 +3,7 @@ import type { OrchestrationV2Run, OrchestrationV2ThreadProjection } from "@t3too
 import { cancelledBeforeStart } from "./RestartBackgroundNote.ts";
 
 /** A fresh-session schedule run starts a side conversation; the thread's own one continues past it. */
-export function isScheduledFreshRun(
+function isScheduledFreshRun(
   run: Pick<OrchestrationV2Run, "freshContext" | "userMessageId">,
   turnItems: OrchestrationV2ThreadProjection["turnItems"],
 ): boolean {
