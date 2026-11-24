@@ -81,14 +81,27 @@ function isSharedBotThread(thread: {
 }
 
 /**
- * The two bot groups the sidebar shows without an inbox filter: the viewer's own bots, then the
- * bots both founders share. A shared bot is never also listed as one's own.
+ * The two bot groups. Shared audience is Shared Bots. With a viewer, an Agents inbox, a missing
+ * inbox, or the other founder's bot is Shared Bots too, so both founders see every standing bot.
+ * The viewer's own founder-audience bots stay in My Bots. A shared bot is never also listed there.
  */
 export function partitionBotGroups<
   T extends { readonly source: { readonly inbox?: { readonly audience?: string } | null } },
->(threads: readonly T[]): { readonly mine: T[]; readonly shared: T[] } {
+>(
+  threads: readonly T[],
+  viewer?: "kameron" | "jeff",
+): { readonly mine: T[]; readonly shared: T[] } {
   const mine: T[] = [];
   const shared: T[] = [];
-  for (const thread of threads) (isSharedBotThread(thread) ? shared : mine).push(thread);
+  for (const thread of threads) {
+    const audience = thread.source.inbox?.audience;
+    const sharedWithBoth =
+      isSharedBotThread(thread) ||
+      (viewer !== undefined &&
+        (audience === "agent-only" ||
+          audience == null ||
+          ((audience === "kameron" || audience === "jeff") && audience !== viewer)));
+    (sharedWithBoth ? shared : mine).push(thread);
+  }
   return { mine, shared };
 }

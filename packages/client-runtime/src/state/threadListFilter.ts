@@ -20,6 +20,9 @@ export interface ThreadListFilter {
 
 interface FilterableThread {
   readonly environmentId: EnvironmentId;
+  /** Set on a standing bot. Those stay listed for both founders. */
+  readonly standing?: unknown;
+  readonly archivedAt?: unknown;
   readonly source: {
     readonly inbox?: ThreadInbox | null | undefined;
     readonly createdBy?: string | undefined;
@@ -50,19 +53,31 @@ export const matchesListedInboxes = (
   // Agent-created threads from before inbox routing carry no Agents routing.
   (inboxes.includes("agents") && agentCreated && inbox === null);
 
+/** A non-archived standing bot stays in the list for both founders. */
+export const standingBotBypassesListFilters = (thread: {
+  readonly standing?: unknown;
+  readonly archivedAt?: unknown;
+}) => thread.standing != null && thread.archivedAt == null;
+
 /** Without an attribution (notifications), the From section does not apply. */
 export const matchesThreadListFilter = (
   thread: FilterableThread,
   filter: ThreadListFilter,
   attribution?: ThreadAttribution,
-) =>
-  !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&
-  (attribution === undefined || !filter.hiddenAttributions.includes(attribution)) &&
-  matchesListedInboxes(
-    primaryInbox(thread.source.inbox),
-    thread.source.createdBy === "agent",
-    filter.inboxes,
+) => {
+  if (filter.hiddenEnvironmentIds.includes(thread.environmentId)) return false;
+  // Inbox and From checkboxes hide ordinary threads. A standing bot is hidden only by
+  // archiving it or by hiding its environment. Background attention must not drop it.
+  if (standingBotBypassesListFilters(thread)) return true;
+  return (
+    (attribution === undefined || !filter.hiddenAttributions.includes(attribution)) &&
+    matchesListedInboxes(
+      primaryInbox(thread.source.inbox),
+      thread.source.createdBy === "agent",
+      filter.inboxes,
+    )
   );
+};
 
 /** `matchesThreadListFilter` for older settled threads a server counted but did not send. */
 export const matchesOlderSettledGroup = (

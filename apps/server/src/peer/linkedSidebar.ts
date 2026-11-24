@@ -73,6 +73,7 @@ const slimThread = (
   thread: (typeof OrchestratorMcpThreadListResult.Type.threads)[number],
 ): LinkedSidebarThread => ({
   ...(thread.inbox === undefined ? {} : { inbox: thread.inbox }),
+  ...(thread.standing == null ? {} : { standing: thread.standing }),
   threadId: thread.threadId,
   projectId: thread.projectId,
   title: thread.title,
