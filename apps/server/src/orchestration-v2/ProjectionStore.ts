@@ -1975,6 +1975,7 @@ export function threadShellFromProjection(
     ...(projection.thread.delegationNudge
       ? { delegationNudge: projection.thread.delegationNudge }
       : {}),
+    ...(projection.thread.collaboration ? { collaboration: projection.thread.collaboration } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
     ...(projection.thread.visitsByFounder === undefined
       ? {}

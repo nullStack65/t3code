@@ -982,8 +982,7 @@ export const layer: Layer.Layer<
         .filter((source) => source.ordinal < run.ordinal)
         .toSorted((left, right) => right.ordinal - left.ordinal)[0];
       const deferredNudge = previousRun?.delegationNudge?.deferredNote ?? "";
-      const room = projection.thread.collaboration?.room;
-      const roomNote = room === undefined ? "" : roomFacilitatorNote(room);
+      const roomNote = roomFacilitatorNote(projection.thread.collaboration?.room);
       const runNote = [restartNote, deferredNudge, roomNote]
         .filter((part) => part !== "")
         .join("\n\n");

@@ -28,7 +28,7 @@ const openRoom = applyCollaborationUpdate(
   undefined,
   {
     type: "open_room",
-    room: { topic: "How we set up Growth", members: [cos, growth], linearIssue: "CLO-1200" },
+    room: { topic: "How we set up Growth", members: [cos, growth], linearIssue: "ENG-123" },
   },
   T0,
 );
@@ -82,6 +82,21 @@ describe("rooms", () => {
     expect(roomFacilitatorNote(closed.room!)).toBe("");
   });
 
+  it("refuses to reopen a closed room so its close record stays intact", () => {
+    const closed = applyCollaborationUpdate(
+      openRoom,
+      { type: "close_room", close: { summary: "Growth owns outbound.", decisions: [] } },
+      T1,
+    );
+    const reopen = {
+      type: "open_room" as const,
+      room: { topic: "Another topic", members: [cos, growth] },
+    };
+    expect(collaborationUpdateError(closed, reopen)).toMatch(/room is closed/);
+    expect(applyCollaborationUpdate(closed, reopen, T1)).toEqual(closed);
+    expect(closed.room?.close?.summary).toBe("Growth owns outbound.");
+  });
+
   it("writes the close record for Linear and memory", () => {
     const closed = applyCollaborationUpdate(
       openRoom,
@@ -98,7 +113,7 @@ describe("rooms", () => {
       T1,
     );
     const record = roomCloseRecord(closed.room!);
-    expect(record?.linearIssue).toBe("CLO-1200");
+    expect(record?.linearIssue).toBe("ENG-123");
     expect(record?.linearComment).toContain("## Room closed: How we set up Growth");
     expect(record?.linearComment).toContain(
       "- Growth runs the weekly list (owner: Growth, due 2026-11-28T17:00:00Z)",
@@ -110,7 +125,7 @@ describe("rooms", () => {
   it("tells an open room's facilitator who to fan out to", () => {
     const note = roomFacilitatorNote(openRoom.room!);
     expect(note).toContain(`${cos}, ${growth}`);
-    expect(note).toContain("on CLO-1200");
+    expect(note).toContain("on ENG-123");
   });
 });
 
@@ -181,7 +196,7 @@ describe("decision cards", () => {
     question: "Who owns outbound?",
     options: [
       { label: "Growth", effect: "Growth runs the list weekly." },
-      { label: "CD bot", effect: "Customer Discovery keeps it." },
+      { label: "Sales", effect: "Sales keeps it." },
     ],
   };
 
@@ -190,6 +205,11 @@ describe("decision cards", () => {
     expect(isDecisionAsk({ ...ask, recommendation: "Lead" })).toBe(false);
     expect(isDecisionAsk({ ...ask, options: undefined, recommendation: "Growth" })).toBe(false);
     expect(isDecisionAsk({ ...ask, options: [ask.options[0]] })).toBe(false);
+  });
+
+  it("keeps each option label on one line", () => {
+    const options = [{ label: "Growth\nand Sales", effect: "Both run it." }, ask.options[1]];
+    expect(isDecisionAsk({ ...ask, options })).toBe(false);
   });
 
   it("still accepts a plain question", () => {

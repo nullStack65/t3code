@@ -77,6 +77,8 @@ export function useCollaborationBannerItems({
   return items;
 }
 
+const replyPrefix = { decision: "Decision", review: "Review", approval: "Approval" } as const;
+
 function decisionItem(
   decision: ThreadDecisionRequest,
   onCompose: (text: string) => void,
@@ -96,7 +98,7 @@ function decisionItem(
               <Button
                 size="xs"
                 variant={recommended ? "default" : "outline"}
-                onClick={() => onCompose(`Decision: ${option.label}`)}
+                onClick={() => onCompose(`${replyPrefix[decision.kind]}: ${option.label}`)}
               >
                 {option.label}
               </Button>

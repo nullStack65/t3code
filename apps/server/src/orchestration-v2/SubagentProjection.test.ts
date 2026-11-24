@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
+  applyCollaborationUpdate,
   makeThreadInbox,
+  roomFacilitatorNote,
   matchesInboxView,
   CommandId,
   EnvironmentId,
@@ -90,7 +92,7 @@ function makeParentThread(): OrchestrationV2AppThread {
   };
 }
 
-it("resets a subagent child's snooze, title job and remote delegation but keeps its workspace", () => {
+it("resets a subagent child's snooze, title job, remote delegation and room but keeps its workspace", () => {
   const parentThread: OrchestrationV2AppThread = {
     ...makeParentThread(),
     inbox: makeThreadInbox({ actor: { kind: "human", id: "jeff" } }),
@@ -100,6 +102,17 @@ it("resets a subagent child's snooze, title job and remote delegation but keeps 
       threadId: ThreadId.make("linked-parent"),
       title: "Linked parent",
     },
+    collaboration: applyCollaborationUpdate(
+      undefined,
+      {
+        type: "open_room",
+        room: {
+          topic: "Who owns outbound",
+          members: [ThreadId.make("thread:room-member-a"), ThreadId.make("thread:room-member-b")],
+        },
+      },
+      "2026-07-24T09:00:00.000Z",
+    ),
   };
   const childProviderThreadId = ProviderThreadId.make("provider-thread:subagent-awake-child");
   const parentNodeId = NodeId.make("node:subagent-parent");
@@ -126,6 +139,10 @@ it("resets a subagent child's snooze, title job and remote delegation but keeps 
   assert.isNull(childThread.snoozedAt);
   assert.isNull(childThread.titleRegeneration);
   assert.isUndefined(childThread.delegatedFrom);
+  // The parent facilitates its room; the subagent's turns carry no facilitator note.
+  assert.notEqual(roomFacilitatorNote(parentThread.collaboration?.room), "");
+  assert.equal(roomFacilitatorNote(childThread.collaboration?.room), "");
+  assert.isUndefined(childThread.collaboration);
   assert.equal(childThread.projectId, parentThread.projectId);
   assert.equal(childThread.runtimeMode, parentThread.runtimeMode);
   assert.equal(childThread.interactionMode, parentThread.interactionMode);

@@ -33,11 +33,11 @@ const DueAt = IsoDateTime.check(
 export const LinearIssueKey = singleLine(32)
   .check(
     Schema.makeFilter((value) =>
-      /^[A-Z][A-Z0-9]*-\d+$/.test(value) ? true : "Must be a Linear issue key, such as CLO-123.",
+      /^[A-Z][A-Z0-9]*-\d+$/.test(value) ? true : "Must be a Linear issue key, such as ENG-123.",
     ),
   )
   .annotate({
-    description: "Linear issue key the room records its decisions on, such as CLO-123.",
+    description: "Linear issue key the room records its decisions on, such as ENG-123.",
   });
 
 /** What opening (or re-opening to change members of) a room writes. */
@@ -145,6 +145,10 @@ export function collaborationUpdateError(
         : null;
     }
     case "open_room":
+      // A closed room keeps its close record; only an open room takes new topic or members.
+      return current?.room !== undefined && !isRoomOpen(current.room)
+        ? "This thread's room is closed and keeps its record. Open a new room on another thread."
+        : null;
     case "set_handoff":
       return null;
   }
@@ -221,8 +225,8 @@ export function openPromises(
  * The turn note a room's facilitator reads. The facilitator does the fan-out itself with
  * t3_thread_send / t3_thread_wait / t3_thread_read, so the server never runs member turns.
  */
-export function roomFacilitatorNote(room: ThreadRoom): string {
-  if (!isRoomOpen(room)) return "";
+export function roomFacilitatorNote(room: ThreadRoom | undefined): string {
+  if (room === undefined || !isRoomOpen(room)) return "";
   return [
     `You facilitate the room "${room.topic}" with members ${room.members.join(", ")}.`,
     "For each founder message: t3_thread_send it to every member (say it comes from this room), t3_thread_wait each, t3_thread_read its reply, then answer here with each member's view attributed by name and a short synthesis. Keep turns fair and ask the founder when members disagree.",

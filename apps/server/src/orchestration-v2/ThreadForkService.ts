@@ -99,8 +99,13 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
           cause: forkableSourceRunStatusError(sourceRun),
         });
       }
-      // The remote parent delegated the source thread, not its forks.
-      const { delegatedFrom: _delegatedFrom, ...inherited } = input.sourceProjection.thread;
+      // The remote parent delegated the source thread, not its forks. A room, its promises and
+      // handoff stay with the source too; a fork would facilitate the room a second time.
+      const {
+        delegatedFrom: _delegatedFrom,
+        collaboration: _collaboration,
+        ...inherited
+      } = input.sourceProjection.thread;
       const targetThread: OrchestrationV2AppThread = {
         ...inherited,
         // PR context follows the conversation; watching remains the source thread's responsibility.

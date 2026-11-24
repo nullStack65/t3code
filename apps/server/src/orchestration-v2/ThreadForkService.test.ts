@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  applyCollaborationUpdate,
   CommandId,
   ContextTransferId,
   EnvironmentId,
@@ -11,6 +12,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ProviderThreadId,
+  roomFacilitatorNote,
   RunId,
   ThreadId,
   type ThreadPullRequestLink,
@@ -134,7 +136,7 @@ const planFork = (
     });
   }).pipe(Effect.provide(ThreadForkService.layer));
 
-it.effect("resets a fork's pin, snooze, settle and delegation state but keeps its origin", () =>
+it.effect("resets a fork's pin, snooze, settle, delegation and room but keeps its origin", () =>
   Effect.gen(function* () {
     const linkOrigin = { sessionId: "mcp-session:fork-source", label: "Linked laptop" };
     const sourceThread: OrchestrationV2AppThread = {
@@ -149,6 +151,17 @@ it.effect("resets a fork's pin, snooze, settle and delegation state but keeps it
         threadId: ThreadId.make("linked-parent"),
         title: "Linked parent",
       },
+      collaboration: applyCollaborationUpdate(
+        undefined,
+        {
+          type: "open_room",
+          room: {
+            topic: "Who owns outbound",
+            members: [ThreadId.make("thread:room-member-a"), ThreadId.make("thread:room-member-b")],
+          },
+        },
+        "2026-07-24T09:00:00.000Z",
+      ),
       historyOrigin: "v1_import",
       linkOrigin,
       tags: ["private"],
@@ -167,6 +180,10 @@ it.effect("resets a fork's pin, snooze, settle and delegation state but keeps it
     assert.isNull(result.targetThread.activeOrderKey);
     assert.isNull(result.targetThread.autoSettleDisabledAt);
     assert.isUndefined(result.targetThread.delegatedFrom);
+    // The source facilitates its room; the fork's turns carry no facilitator note.
+    assert.notEqual(roomFacilitatorNote(sourceThread.collaboration?.room), "");
+    assert.equal(roomFacilitatorNote(result.targetThread.collaboration?.room), "");
+    assert.isUndefined(result.targetThread.collaboration);
     assert.equal(result.targetThread.historyOrigin, "v1_import");
     assert.deepEqual(result.targetThread.linkOrigin, linkOrigin);
     assert.deepEqual(result.targetThread.tags, ["private"]);

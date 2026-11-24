@@ -49,7 +49,8 @@ function stablePart(value: string): string {
 function commandId(input: {
   readonly scope: McpInvocationScope;
   readonly threadId: ThreadId;
-  readonly action: ThreadMetadataMcpAction;
+  /** The action, with collaborate's sub-action, so one clientRequestId can open then close a room. */
+  readonly operation: string;
   readonly requestKey: string;
 }): CommandId {
   return CommandId.make(
@@ -59,7 +60,7 @@ function commandId(input: {
       stablePart(input.scope.requestNamespace),
       "thread-update",
       stablePart(input.threadId),
-      stablePart(input.action),
+      stablePart(input.operation),
       stablePart(input.requestKey),
     ].join(":"),
   );
@@ -250,6 +251,7 @@ const make = Effect.gen(function* () {
             "A room's members are other threads; the room thread itself facilitates.",
           );
         }
+        // Only existence is checked here; t3_thread_send applies the mode and link checks per message.
         for (const member of members) {
           const memberShell = yield* threadManagement
             .getThreadShell(member)
@@ -274,7 +276,10 @@ const make = Effect.gen(function* () {
     const updateCommandId = commandId({
       scope,
       threadId,
-      action: input.action,
+      operation:
+        input.collaboration === undefined
+          ? input.action
+          : `${input.action}.${input.collaboration.type}`,
       requestKey,
     });
     const dispatched = yield* threadManagement

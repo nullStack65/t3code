@@ -629,7 +629,7 @@ it.effect("a room opens, closes once, and reaches the thread shell", () =>
 
     const opened = yield* collaborate({
       type: "open_room",
-      room: { topic: "Who owns outbound", members, linearIssue: "CLO-1" },
+      room: { topic: "Who owns outbound", members, linearIssue: "ENG-1" },
     });
     assert.deepEqual(opened?.room?.members, members);
     const promised = yield* collaborate({

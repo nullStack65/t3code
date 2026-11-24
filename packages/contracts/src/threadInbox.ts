@@ -60,7 +60,13 @@ const jointSignOffEntries = Schema.Array(FounderSignOff).check(
 
 /** One choice on a decision card, with what picking it does. */
 export const ThreadDecisionOption = Schema.Struct({
-  label: TrimmedNonEmptyString.check(Schema.isMaxLength(120)),
+  // A label is a button and the drafted reply line, so it stays on one line.
+  label: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(120),
+    Schema.makeFilter((value) =>
+      /[\p{Cc}]/u.test(value) ? "Must be a single line of text." : true,
+    ),
+  ),
   effect: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
 });
 export type ThreadDecisionOption = typeof ThreadDecisionOption.Type;
