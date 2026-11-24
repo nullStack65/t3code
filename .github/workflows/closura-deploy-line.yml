@@ -4,8 +4,8 @@ name: Closura deploy line
 # what runs, so "merged" is never mistaken for "live". The value is opaque on
 # purpose: "fleet" means the private deployment config decides where it runs,
 # and no host names are published here. This job reads only the event payload:
-# no checkout, no token and no repository code, so it runs on a hosted runner
-# and needs no actor guard.
+# no checkout, no token and no repository code. It runs on the repository ARC
+# scale set, so it takes the same same-repo trusted-author gate as the CI workers.
 on:
   pull_request:
     branches: [release/native-0.1.10]
@@ -19,9 +19,16 @@ concurrency:
 
 jobs:
   deploy-line:
-    if: ${{ github.repository_id == '1372173214' }}
+    if: >-
+      ${{
+        github.repository_id == '1372173214' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+        contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor)
+      }}
     name: Deploy line declared
-    runs-on: ubuntu-latest
+    runs-on: t3code-ci-arc
     timeout-minutes: 5
     steps:
       - name: "Require one Deploy line: none or fleet"

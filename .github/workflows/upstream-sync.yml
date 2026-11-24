@@ -3,8 +3,8 @@ name: Upstream fork sync
 # Fetches pingdotgg/t3code main once a day. A clean merge becomes a pull
 # request against release/native-0.1.10. Conflicts are filed for Platform /
 # CTO. This workflow never merges that pull request and never force-pushes.
-# It runs on a hosted runner because it only fetches and merges git history;
-# it does not execute upstream code. The fork's ARC workflow still has to
+# It runs on the repository ARC scale set; it only fetches and merges git
+# history and does not execute upstream code. The fork's ARC workflow still has to
 # pass before anyone merges.
 on:
   schedule:
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   sync:
     if: ${{ github.repository_id == '1372173214' }}
-    runs-on: ubuntu-latest
+    runs-on: t3code-ci-arc
     timeout-minutes: 30
     steps:
       - name: Checkout the release line

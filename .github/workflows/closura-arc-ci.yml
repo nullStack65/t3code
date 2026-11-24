@@ -1,12 +1,10 @@
 name: T3 fork ARC CI
 
 # Self-hosted, repository-scoped ARC only. No paid Blacksmith, macOS/Windows
-# runners, new controller or deployment side effects. The one hosted exception
-# is the CLO-694 emergency burst: when a burst operator sets the repository variable
-# CI_BURST_HOSTED to `on` (any case) during an ARC backlog, these jobs run on
-# ubuntu-latest (free here, since this repository is public). Unset, it is ARC.
-# The toggle and runbook live in closura-agent-config: scripts/ci_burst.py and
-# docs/ci/emergency-burst.md.
+# runners, new controller or deployment side effects. GitHub-hosted runners are
+# forbidden outright, and burst capacity is
+# Hetzner ARC nodes only (closura-agent-config scripts/arc_burst_nodes.py).
+# .github/scripts/no-hosted-runners.test.cjs fails any workflow that says otherwise.
 on:
   push:
     # Every merged head of the native release branch gets a check run on its
@@ -82,7 +80,7 @@ jobs:
         )
       }}
     name: Voice + inbox core (Linux ARC)
-    runs-on: ${{ vars.CI_BURST_HOSTED == 'on' && 'ubuntu-latest' || 't3code-ci-arc' }}
+    runs-on: t3code-ci-arc
     timeout-minutes: 45
     env:
       CI: "true"
@@ -276,7 +274,7 @@ jobs:
         )
       }}
     name: Voice + inbox web (Linux ARC)
-    runs-on: ${{ vars.CI_BURST_HOSTED == 'on' && 'ubuntu-latest' || 't3code-ci-arc' }}
+    runs-on: t3code-ci-arc
     timeout-minutes: 45
     env:
       CI: "true"
@@ -389,7 +387,7 @@ jobs:
         )
       }}
     name: Voice + inbox mobile (Linux ARC)
-    runs-on: ${{ vars.CI_BURST_HOSTED == 'on' && 'ubuntu-latest' || 't3code-ci-arc' }}
+    runs-on: t3code-ci-arc
     timeout-minutes: 45
     env:
       CI: "true"
@@ -578,13 +576,13 @@ jobs:
   #
   # On a draft pull request the workers are skipped and this job fails at its
   # first step, so the required check stays red until the full run passes. It
-  # reads only the event payload there, so it uses a free hosted runner (this
-  # repository is public) and never wakes an ARC runner for a parked draft.
+  # reads only the event payload there. GitHub-hosted runners are forbidden,
+  # so even this draft hold runs on the ARC scale set.
   voice-and-inbox:
     name: Voice + founder inbox (Linux ARC)
     needs: [voice-and-inbox-core, voice-and-inbox-web, voice-and-inbox-mobile]
     if: ${{ !cancelled() }}
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.draft) || vars.CI_BURST_HOSTED == 'on') && 'ubuntu-latest' || 't3code-ci-arc' }}
+    runs-on: t3code-ci-arc
     timeout-minutes: 5
     steps:
       - name: Hold drafts until ready for review
@@ -640,4 +638,4 @@ jobs:
       # upstream-sync App shape, and that all three workers share one gate.
       - name: Test the ARC trust gate
         shell: bash
-        run: node --test .github/scripts/arc-ci-trust-gate.test.cjs
+        run: node --test .github/scripts/arc-ci-trust-gate.test.cjs .github/scripts/no-hosted-runners.test.cjs
