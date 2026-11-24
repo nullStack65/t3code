@@ -18,7 +18,7 @@ on:
     # the concurrency group below keeps it from cancelling the real run.
     # Draft pull requests skip the three ARC workers, so parked drafts use no
     # ARC time. `ready_for_review` starts the full run when a draft is marked ready.
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
     branches: [feat/assemblyai-current, release/native-0.1.10]
   workflow_dispatch:
 
@@ -26,12 +26,18 @@ permissions:
   contents: read
 
 concurrency:
-  # Pushes group by exact commit, so a burst of merges never cancels a queued
-  # head: every merged head keeps its own check run. PR runs also group by the
-  # triggering actor, so a bot's edit-triggered (skipped) run never cancels a
-  # founder's in-progress run.
-  group: t3-fork-arc-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.triggering_actor || 'x' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Release pushes need a result for every commit for fleet rollout. Distinct
+  # run IDs also prevent GitHub from replacing an older pending release run.
+  # PR runs remain isolated by actor so an edit from a bot cannot cancel CI.
+  group: >-
+    t3-fork-arc-${{ github.workflow }}-${{
+      github.event.pull_request.number || github.ref
+    }}-${{
+      github.event_name == 'pull_request' && github.triggering_actor ||
+      (github.event_name != 'push' || github.ref == 'refs/heads/release/native-0.1.10') && github.run_id ||
+      'latest'
+    }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/feat/assemblyai-current') }}
 
 jobs:
   # The former single job ran every step in series, so one runner held the

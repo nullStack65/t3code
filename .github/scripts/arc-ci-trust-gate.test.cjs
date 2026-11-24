@@ -57,7 +57,7 @@ const FUNCTIONS = {
   format: (template, ...args) => template.replace(/\{(\d+)\}/g, (_, n) => asString(args[Number(n)])),
 };
 
-function evaluate(source, context) {
+function evaluate(source, context, asBoolean = true) {
   const tokens = tokenize(source);
   let position = 0;
   const peek = () => tokens[position];
@@ -106,8 +106,34 @@ function evaluate(source, context) {
   };
   const result = or();
   assert.equal(position, tokens.length, "gate expression was not fully parsed");
-  return truthy(result);
+  return asBoolean ? truthy(result) : result;
 }
+
+test("concurrency supersedes PR and feature pushes without discarding release runs", () => {
+  const group = workflow.match(/\n  group: >-\n([\s\S]+?)\n  cancel-in-progress:/)[1]
+    .split("\n").map((line) => line.trim()).join(" ");
+  const cancel = workflow.match(/\n  cancel-in-progress: \$\{\{ (.+) \}\}/)[1];
+  const key = (github) => group.replace(/\$\{\{(.*?)\}\}/g, (_, expression) =>
+    asString(evaluate(expression, { github }, false)));
+  const canCancel = (github) => evaluate(cancel, { github });
+  const push = (branch, run_id) => ({ event_name: "push", ref: `refs/heads/${branch}`, run_id });
+  const release = push("release/native-0.1.10", 1);
+  assert.equal(canCancel(release), false);
+  assert.notEqual(key(release), key({ ...release, run_id: 2 }));
+
+  const feature = push("feat/assemblyai-current", 1);
+  assert.equal(canCancel(feature), true);
+  assert.equal(key(feature), key({ ...feature, run_id: 2 }));
+
+  const pr = {
+    event_name: "pull_request", event: { pull_request: { number: 12 } },
+    triggering_actor: "nullStack65", run_id: 1,
+  };
+  assert.equal(canCancel(pr), true);
+  assert.equal(key(pr), key({ ...pr, run_id: 2 }));
+  assert.notEqual(key(pr), key({ ...pr, triggering_actor: "review-bot[bot]" }));
+  assert.notEqual(key(pr), key({ ...pr, event: { pull_request: { number: 13 } } }));
+});
 
 const BOT = { login: "closura-t3code-upstream-sync[bot]", id: 360477638, type: "Bot" };
 const REPO = "nullStack65/t3code";
