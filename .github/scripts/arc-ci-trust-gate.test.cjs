@@ -209,3 +209,50 @@ test("push and manual runs keep the founder-only release-branch path", () => {
   assert.equal(admitted(push(BOT.login, "refs/heads/release/native-0.1.10")), false);
   assert.equal(admitted(push("nullStack65", "refs/heads/sync/upstream-2026-11-24")), false);
 });
+
+// The `if:` clause is a prefilter; the first step of each worker parses the
+// Deploy line exactly as closura-deploy-line.yml does. Run that real script.
+const { spawnSync } = require("node:child_process");
+const STEP = "Require Deploy none from the upstream-sync App";
+
+function deployStepOf(job) {
+  const start = workflow.indexOf(`\n  ${job}:\n`);
+  const steps = workflow.indexOf("\n    steps:\n", start);
+  const first = workflow.slice(steps).match(/\n      - name: (.*)\n[\s\S]*?\n        run: \|\n((?:          .*\n|\n)*)/);
+  assert.equal(first?.[1], STEP, `${job} must run the Deploy-line step first, before checkout`);
+  return first[2].split("\n").map((line) => line.slice(10)).join("\n");
+}
+
+function stepPasses(body) {
+  const scripts = WORKERS.map(deployStepOf);
+  assert.ok(scripts.every((script) => script === scripts[0]), "workers run different Deploy-line steps");
+  const run = spawnSync("bash", ["-c", scripts[0]], { env: { PATH: process.env.PATH, PR_BODY: body ?? "" } });
+  return run.status === 0;
+}
+
+const admittedEndToEnd = (body) => admitted(prEvent({ pull_request: { body } })) && stepPasses(body);
+
+test("the App's sync body passes the gate and the Deploy-line step", () => {
+  assert.equal(admittedEndToEnd(SYNC_BODY), true);
+  assert.equal(admittedEndToEnd("Deploy: none"), true);
+});
+
+const smuggled = {
+  "a fenced Deploy: none with Deploy:fleet": "```\nDeploy: none\n```\nDeploy:fleet\n",
+  "lowercase deploy: none with Deploy:fleet": "deploy: none\nDeploy:fleet\n",
+  "a tab before fleet": "deploy: none\nDeploy:\tfleet\n",
+  "Deploy: none only inside a fence": "~~~\nDeploy: none\n~~~\n",
+  "two Deploy: none lines": "Deploy: none\nDeploy: none\n",
+};
+for (const [name, body] of Object.entries(smuggled)) {
+  test(`the App is rejected for ${name}`, () => {
+    assert.equal(admittedEndToEnd(body), false);
+  });
+}
+
+test("the Deploy-line step accepts the forms the deploy-line job reads as none", () => {
+  assert.equal(stepPasses("Deploy:none\r\n"), true);
+  assert.equal(stepPasses("Deploy:   none  \n"), true);
+  assert.equal(stepPasses("Deploy: fleet\n"), false);
+  assert.equal(stepPasses(""), false);
+});

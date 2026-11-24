@@ -90,6 +90,26 @@ jobs:
       NODE_OPTIONS: "--max-old-space-size=3072"
       GOMAXPROCS: "2"
     steps:
+      # The App's `if:` clause above is only a prefilter. Before any checkout,
+      # parse its Deploy line exactly as closura-deploy-line.yml does (one
+      # unfenced `^Deploy:` line, whitespace stripped) and require `none`. Reads
+      # only the event payload; runs no PR code.
+      - name: Require Deploy none from the upstream-sync App
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.id == 360477638 }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$count" -ne 1 || test "$value" != none; then
+            echo "::error::The upstream-sync App runs on ARC only with exactly one 'Deploy: none' line."
+            exit 1
+          fi
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -264,6 +284,26 @@ jobs:
       NODE_OPTIONS: "--max-old-space-size=3072"
       GOMAXPROCS: "2"
     steps:
+      # The App's `if:` clause above is only a prefilter. Before any checkout,
+      # parse its Deploy line exactly as closura-deploy-line.yml does (one
+      # unfenced `^Deploy:` line, whitespace stripped) and require `none`. Reads
+      # only the event payload; runs no PR code.
+      - name: Require Deploy none from the upstream-sync App
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.id == 360477638 }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$count" -ne 1 || test "$value" != none; then
+            echo "::error::The upstream-sync App runs on ARC only with exactly one 'Deploy: none' line."
+            exit 1
+          fi
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -357,6 +397,26 @@ jobs:
       NODE_OPTIONS: "--max-old-space-size=3072"
       GOMAXPROCS: "2"
     steps:
+      # The App's `if:` clause above is only a prefilter. Before any checkout,
+      # parse its Deploy line exactly as closura-deploy-line.yml does (one
+      # unfenced `^Deploy:` line, whitespace stripped) and require `none`. Reads
+      # only the event payload; runs no PR code.
+      - name: Require Deploy none from the upstream-sync App
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.id == 360477638 }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          lines="$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
+            | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced && /^Deploy:/' || true)"
+          count="$(printf '%s' "$lines" | grep -c . || true)"
+          value="$(printf '%s' "$lines" | sed -E 's/^Deploy:[[:space:]]*//; s/[[:space:]]+$//')"
+          if test "$count" -ne 1 || test "$value" != none; then
+            echo "::error::The upstream-sync App runs on ARC only with exactly one 'Deploy: none' line."
+            exit 1
+          fi
+
       - name: Checkout trusted source (no persistent credentials)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
