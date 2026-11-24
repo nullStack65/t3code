@@ -11,10 +11,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
-import * as PlatformError from "effect/PlatformError";
-import * as Schema from "effect/Schema";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { ClaudeOrchestratorReplayHarness } from "../Adapters/ClaudeAdapterV2.testkit.ts";
 import { CodexOrchestratorReplayHarness } from "../Adapters/CodexAdapterV2.testkit.ts";
@@ -32,6 +28,7 @@ import {
   decodeProviderReplayNdjson,
   materializeReplayTranscriptWorkspace,
 } from "@t3tools/provider-testing/replayTranscript";
+import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 
 const CODEX_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -53,51 +50,6 @@ const CODEX_READ_ONLY_NEVER_POLICY = {
     networkAccess: false,
   },
 } as const;
-
-class ThreadForkGitCommandError extends Schema.TaggedError<ThreadForkGitCommandError>()(
-  "ThreadForkGitCommandError",
-  {
-    command: Schema.String,
-    exitCode: Schema.Number,
-  },
-) {
-  override get message(): string {
-    return `${this.command} failed with exit ${this.exitCode}.`;
-  }
-}
-
-function runGit(
-  cwd: string,
-  args: ReadonlyArray<string>,
-): Effect.Effect<
-  void,
-  ThreadForkGitCommandError | PlatformError.PlatformError,
-  ChildProcessSpawner.ChildProcessSpawner
-> {
-  return Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
-    if (Number(exitCode) !== 0) {
-      return yield* new ThreadForkGitCommandError({
-        command: `git ${args.join(" ")}`,
-        exitCode: Number(exitCode),
-      });
-    }
-  });
-}
-
-const makeCheckpointWorkspace = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const cwd = yield* fs.makeTempDirectory({ prefix: "t3-orchestrator-v2-thread-fork-" });
-  yield* runGit(cwd, ["init"]);
-  yield* runGit(cwd, ["config", "user.name", "T3 Code Test"]);
-  yield* runGit(cwd, ["config", "user.email", "t3code-test@example.com"]);
-  yield* fs.writeFileString(path.join(cwd, "README.md"), "# thread fork\n");
-  yield* runGit(cwd, ["add", "README.md"]);
-  yield* runGit(cwd, ["commit", "-m", "initial"]);
-  return cwd;
-});
 
 function readTranscript(transcriptPath: string) {
   return Effect.gen(function* () {
@@ -145,12 +97,7 @@ describe("orchestration V2 thread fork", () => {
         const rawTranscript = yield* readTranscript(CLAUDE_TRANSCRIPT_PATH);
         const transcript = yield* ClaudeOrchestratorReplayHarness.decodeTranscript(rawTranscript);
         const forkedNativeSessionId = metadataString(transcript, "forkedNativeSessionId");
-        const cwd = yield* Effect.acquireRelease(makeCheckpointWorkspace, (directory) =>
-          Effect.service(FileSystem.FileSystem).pipe(
-            Effect.flatMap((fs) => fs.remove(directory, { recursive: true, force: true })),
-            Effect.orDie,
-          ),
-        );
+        const cwd = yield* checkpointWorkspace("thread-fork");
 
         const materialized = yield* Effect.gen(function* () {
           const ids = yield* IdAllocator.IdAllocatorV2;
@@ -283,12 +230,7 @@ describe("orchestration V2 thread fork", () => {
   it.effect("forks a Codex native thread at the selected native turn boundary", () =>
     Effect.gen(function* () {
       const rawTranscript = yield* readTranscript(PRIOR_TURN_TRANSCRIPT_PATH);
-      const cwd = yield* Effect.acquireRelease(makeCheckpointWorkspace, (directory) =>
-        Effect.service(FileSystem.FileSystem).pipe(
-          Effect.flatMap((fs) => fs.remove(directory, { recursive: true, force: true })),
-          Effect.orDie,
-        ),
-      );
+      const cwd = yield* checkpointWorkspace("thread-fork");
       const transcript = yield* CodexOrchestratorReplayHarness.decodeTranscript(
         materializeReplayTranscriptWorkspace(rawTranscript, cwd),
       );
@@ -469,12 +411,7 @@ describe("orchestration V2 thread fork", () => {
         transcript,
         "sourceAssistantMessageUuids",
       );
-      const cwd = yield* Effect.acquireRelease(makeCheckpointWorkspace, (directory) =>
-        Effect.service(FileSystem.FileSystem).pipe(
-          Effect.flatMap((fs) => fs.remove(directory, { recursive: true, force: true })),
-          Effect.orDie,
-        ),
-      );
+      const cwd = yield* checkpointWorkspace("thread-fork");
 
       const materialized = yield* Effect.gen(function* () {
         const ids = yield* IdAllocator.IdAllocatorV2;
@@ -678,12 +615,7 @@ describe("orchestration V2 thread fork", () => {
         throw new Error("Claude fork-local rollback transcript is missing expected prompts.");
       }
 
-      const cwd = yield* Effect.acquireRelease(makeCheckpointWorkspace, (directory) =>
-        Effect.service(FileSystem.FileSystem).pipe(
-          Effect.flatMap((fs) => fs.remove(directory, { recursive: true, force: true })),
-          Effect.orDie,
-        ),
-      );
+      const cwd = yield* checkpointWorkspace("thread-fork");
 
       const materialized = yield* Effect.gen(function* () {
         const ids = yield* IdAllocator.IdAllocatorV2;

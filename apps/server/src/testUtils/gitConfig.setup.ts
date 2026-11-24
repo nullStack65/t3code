@@ -1,4 +1,3 @@
-// Override inherited autocrlf, signing and init-branch settings through env so every git child gets stable fixtures.
 const entries: ReadonlyArray<readonly [key: string, value: string]> = [
   ["core.autocrlf", "false"],
   ["core.filemode", "false"],
@@ -8,9 +7,17 @@ const entries: ReadonlyArray<readonly [key: string, value: string]> = [
   ["init.defaultBranch", "main"],
 ];
 
-const existing = Number(process.env.GIT_CONFIG_COUNT ?? "0");
-process.env.GIT_CONFIG_COUNT = String(existing + entries.length);
-entries.forEach(([key, value], index) => {
-  process.env[`GIT_CONFIG_KEY_${existing + index}`] = key;
-  process.env[`GIT_CONFIG_VALUE_${existing + index}`] = value;
-});
+export function configureTestGitEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith("GIT_")) {
+      delete env[key];
+    }
+  }
+  env.GIT_CONFIG_COUNT = String(entries.length);
+  entries.forEach(([key, value], index) => {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+  });
+}
+
+configureTestGitEnv(process.env);

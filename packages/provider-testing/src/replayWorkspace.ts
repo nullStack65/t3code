@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -19,14 +20,29 @@ class ReplayFixtureGitCommandError extends Schema.TaggedError<ReplayFixtureGitCo
   }
 }
 
-const INHERITED_REPOSITORY_ENV = {
-  GIT_DIR: undefined,
-  GIT_WORK_TREE: undefined,
-  GIT_COMMON_DIR: undefined,
-  GIT_INDEX_FILE: undefined,
-  GIT_OBJECT_DIRECTORY: undefined,
-  GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
-};
+const REPLAY_GIT_CONFIG: ReadonlyArray<readonly [key: string, value: string]> = [
+  ["core.autocrlf", "false"],
+  ["core.filemode", "false"],
+  ["core.longpaths", "true"],
+  ["commit.gpgsign", "false"],
+  ["tag.gpgsign", "false"],
+  ["init.defaultBranch", "main"],
+];
+
+function cleanGitEnv(inherited: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  return {
+    ...Object.fromEntries(
+      Object.entries(inherited).filter(([name]) => !name.toUpperCase().startsWith("GIT_")),
+    ),
+    GIT_CONFIG_COUNT: String(REPLAY_GIT_CONFIG.length),
+    ...Object.fromEntries(
+      REPLAY_GIT_CONFIG.flatMap(([key, value], index) => [
+        [`GIT_CONFIG_KEY_${index}`, key],
+        [`GIT_CONFIG_VALUE_${index}`, value],
+      ]),
+    ),
+  };
+}
 
 function runGit(
   cwd: string,
@@ -38,8 +54,9 @@ function runGit(
 > {
   return Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const inherited = yield* HostProcess.Environment;
     const exitCode = yield* spawner.exitCode(
-      ChildProcess.make("git", args, { cwd, env: INHERITED_REPOSITORY_ENV, extendEnv: true }),
+      ChildProcess.make("git", args, { cwd, env: cleanGitEnv(inherited), extendEnv: false }),
     );
     if (Number(exitCode) !== 0) {
       return yield* new ReplayFixtureGitCommandError({
