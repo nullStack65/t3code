@@ -49,6 +49,8 @@ jobs:
             exit 1
           fi
 
+      - uses: ./.github/actions/setup-apt-mirrors
+
       - uses: ./.github/actions/setup-main-vp
 
       - name: Reject hosted runners
@@ -69,12 +71,6 @@ jobs:
 
       - name: Typecheck
         run: vp run typecheck
-
-      - uses: ./.github/actions/setup-apt-mirrors
-
-      - name: Install browser secret helper build libraries
-        run: |
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Build desktop pipeline
         run: vp run build:desktop
@@ -102,16 +98,12 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
 
+      - uses: ./.github/actions/setup-apt-mirrors
+
       - uses: ./.github/actions/setup-main-vp
 
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
-
-      - uses: ./.github/actions/setup-apt-mirrors
-
-      - name: Install browser secret helper build libraries
-        run: |
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Test preview artifact validation
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
@@ -144,6 +136,8 @@ jobs:
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/setup-apt-mirrors
 
       - uses: ./.github/actions/setup-main-vp
 
@@ -204,6 +198,13 @@ jobs:
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install native and Windows cross-compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-mingw-w64-x86-64
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
