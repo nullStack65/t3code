@@ -130,6 +130,7 @@ export function partitionBotGroups<T extends GroupableBot>(
     if (scope !== undefined && isChiefOfStaff(thread.standing?.name)) {
       const founder =
         asFounder(audience) ?? asFounder(inbox?.owner) ?? scope.machineOwnerOf(thread);
+      // A CoS with no known founder stays listed for everyone rather than vanish.
       if (founder !== undefined && founder !== viewer && !scope.shownInboxes.includes(founder))
         continue;
     }

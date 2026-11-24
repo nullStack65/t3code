@@ -157,5 +157,15 @@ describe("partitionBotGroups", () => {
       "filed-cos",
     ]);
     expect(ids("jeff", ["jeff", "agents", "shared"])).toEqual(["filed-cos", "jeff-cos", "cto"]);
+    // A CoS nobody owns stays listed for every viewer.
+    const unowned = thread("unowned-cos", undefined, "CoS");
+    for (const viewer of ["kameron", "jeff"] as const) {
+      expect(
+        partitionBotGroups([unowned], viewer, {
+          shownInboxes: [viewer],
+          machineOwnerOf: () => undefined,
+        }).closura,
+      ).toEqual([unowned]);
+    }
   });
 });

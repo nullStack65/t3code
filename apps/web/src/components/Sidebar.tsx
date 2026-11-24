@@ -3574,6 +3574,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             <>
               <SidebarBotsGroup
                 label="My bots"
+                groupId="mine"
                 threads={myBotThreads}
                 activeThreadKey={routeRowThreadKey}
                 onThreadClick={handleThreadClick}
@@ -3582,6 +3583,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               />
               <SidebarBotsGroup
                 label="Closura bots"
+                groupId="closura"
                 testId="sidebar-closura-bots-group"
                 threads={closuraBotThreads}
                 activeThreadKey={routeRowThreadKey}
@@ -3591,6 +3593,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               />
               <SidebarBotsGroup
                 label="Teammate bots"
+                groupId="teammates"
                 testId="sidebar-teammate-bots-group"
                 threads={teammateBotThreads}
                 activeThreadKey={routeRowThreadKey}

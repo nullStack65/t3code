@@ -110,6 +110,11 @@ describe("bot collapse state", () => {
         .botCollapsedById,
     ).toEqual({ a: true });
     expect(parsePersistedState({}).botCollapsedById).toEqual({});
+    expect(
+      parsePersistedState({
+        botCollapsedById: { "group:My Bots": true, "group:Shared Bots": true },
+      }).botCollapsedById,
+    ).toEqual({ "group:mine": true, "group:closura": true });
   });
 });
 

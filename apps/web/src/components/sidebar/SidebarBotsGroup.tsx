@@ -54,6 +54,8 @@ export function SidebarBotsGroup(
     readonly activeThreadKey: string | null;
     /** The group's heading; "Bots" keeps the single group for a search or an older list. */
     readonly label?: string;
+    /** Keys the saved collapsed state, so renaming the label keeps it. */
+    readonly groupId?: string;
     readonly testId?: string;
   },
 ) {
@@ -68,7 +70,7 @@ export function SidebarBotsGroup(
   const botCollapsedById = useUiStateStore((state) => state.botCollapsedById);
   const setBotCollapsed = useUiStateStore((state) => state.setBotCollapsed);
   const label = props.label ?? "Bots";
-  const groupKey = `group:${label}`;
+  const groupKey = `group:${props.groupId ?? "bots"}`;
   const groupCollapsed = botCollapsedById[groupKey] === true;
   const rows = visibleBotRows(
     orderBotTree(props.threads),
