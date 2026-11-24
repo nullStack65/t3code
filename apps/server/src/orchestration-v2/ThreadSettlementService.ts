@@ -800,6 +800,7 @@ export const make = Effect.gen(function* () {
       case "thread.pull-request-synced":
       case "provider-session.detached":
       case "run.background-work-cancelled":
+      case "run.delegation-nudge-recorded":
         return enqueueThread(event.threadId);
       // Sweep only when the work can have ended: progress updates cannot settle anything.
       case "subagent.updated": {

@@ -1098,6 +1098,7 @@ function threadRun(
     requestedAt: DateTime.formatIso(run.requestedAt),
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
+    ...(run.delegationNudge === undefined ? {} : { delegationNudge: run.delegationNudge }),
   };
 }
 
