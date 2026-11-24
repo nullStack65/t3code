@@ -11,10 +11,12 @@ import {
   BUSY_WATCHER_RECHECK_MS,
   busyWatcherHold,
   deliverAlertToWatcher,
+  failureWakeHold,
   INCIDENT_GROUP_INTERVAL_MS,
   INCIDENT_GROUP_WAIT_MS,
   EMPTY_MODEL_ALERT_STATE,
   type ModelAlert,
+  type ModelAlertState,
   modelAlertDestinations,
   modelAlertFor,
   overdueResumes,
@@ -198,6 +200,39 @@ const finding = (kind: ThreadEventKind, signature: string): ThreadFinding => ({
   kind,
   signature,
   detail: `${kind} detail`,
+});
+
+it("rate-limits subsequent failure wakes per thread after successful delivery", () => {
+  const threadId = "thread:fleet";
+  const { state } = recordThreadEvents(
+    EMPTY_MODEL_ALERT_STATE,
+    {
+      threadId,
+      evaluated: ["thread-failed"],
+      findings: [finding("thread-failed", "run:1")],
+    },
+    eventAlert,
+    ["watcher"],
+    0,
+  );
+  const entry = state.outbox[0]!;
+  const failed = afterDeliveryAttempt(state, entry, false, 10);
+  assert.isNull(failureWakeHold(failed.failureWakeSentAt[threadId], 100));
+  const sent = afterDeliveryAttempt(failed, entry, true, 100);
+  assert.equal(failureWakeHold(sent.failureWakeSentAt[threadId], 101), 300100);
+  assert.isNull(failureWakeHold(sent.failureWakeSentAt[threadId], 300100));
+  assert.isNull(failureWakeHold(sent.failureWakeSentAt["other"], 101));
+
+  const rerun = (state: ModelAlertState, runId: string) =>
+    recordThreadEvents(
+      state,
+      { threadId, evaluated: ["thread-failed"], findings: [finding("thread-failed", runId)] },
+      eventAlert,
+      ["watcher"],
+      200,
+    );
+  assert.isFalse(rerun(sent, "run:1").enqueued);
+  assert.isTrue(rerun(sent, "run:2").enqueued);
 });
 
 it("reports a thread event once per kind and signature until its state changes", () => {
@@ -395,6 +430,8 @@ it.effect("forwards a thread event to a watcher on another environment with one 
     assert.match(String(called[0]!.arguments?.clientRequestId), /^thread-event:/);
     assert.equal(called[0]!.arguments?.clientRequestId, called[1]!.arguments?.clientRequestId);
 
+    assert.equal(called[0]!.arguments?.deliveryClass, "digest");
+
     // The same alert on the watcher's own machine queues into the thread directly.
     yield* deliverAlertToWatcher(deps, alert, laptop, EnvironmentId.make("laptop"));
     assert.equal(called.length, 2);
@@ -403,6 +440,11 @@ it.effect("forwards a thread event to a watcher on another environment with one 
     assert.deepEqual((dispatched[0] as { dispatchMode: unknown }).dispatchMode, {
       type: "queue_after_active",
     });
+    const failure = eventAlert(finding("thread-failed", "run:1"));
+    yield* deliverAlertToWatcher(deps, failure, laptop, EnvironmentId.make("laptop"));
+    yield* deliverAlertToWatcher(deps, failure, laptop, EnvironmentId.make("r720"));
+    assert.equal((dispatched[1] as { delivery: { class: string } }).delivery.class, "next_turn");
+    assert.equal(called[2]?.arguments?.deliveryClass, "next_turn");
   }),
 );
 

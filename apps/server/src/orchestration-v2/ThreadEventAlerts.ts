@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   isListedThreadLineage,
+  isDelegatedAppThread,
   ModelAlertWatcher,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
@@ -16,6 +17,7 @@ import * as Schema from "effect/Schema";
  */
 export const ThreadEventKind = Schema.Literals([
   "lane-ended",
+  "thread-failed",
   "promise-without-wake",
   "stuck",
   "needs-person",
@@ -46,7 +48,7 @@ export type ThreadEventAlert = typeof ThreadEventAlert.Type;
 export type ThreadEventTrigger = "run-ended" | "settled" | "inbox" | "request" | "sweep";
 
 const KINDS_BY_TRIGGER: Record<ThreadEventTrigger, ReadonlyArray<ThreadEventKind>> = {
-  "run-ended": ["lane-ended", "promise-without-wake"],
+  "run-ended": ["lane-ended", "thread-failed", "promise-without-wake"],
   settled: ["promise-without-wake"],
   inbox: ["needs-person"],
   request: ["needs-person"],
@@ -59,6 +61,7 @@ export type WatchedShell = Pick<
   | "title"
   | "createdBy"
   | "lineage"
+  | "delegatedFrom"
   | "inbox"
   | "status"
   | "activeRunId"
@@ -221,6 +224,24 @@ export function judgeThread(input: {
     }
   }
 
+  if (
+    evaluated.includes("thread-failed") &&
+    shell.status === "failed" &&
+    shell.latestRunId !== null &&
+    !isLive(shell) &&
+    shell.lineage.parentThreadId === null &&
+    isListedThreadLineage(shell.lineage) &&
+    !isDelegatedAppThread(shell) &&
+    shell.archivedAt === null &&
+    shell.settledOverride !== "settled"
+  ) {
+    findings.push({
+      kind: "thread-failed",
+      detail: "its last run failed",
+      signature: shell.latestRunId,
+    });
+  }
+
   if (evaluated.includes("promise-without-wake") && watched && !isLive(shell)) {
     const message = shell.latestVisibleMessage;
     const endedMs = timeMs(shell.latestRunCompletedAt);
@@ -366,7 +387,7 @@ export function threadEventAlert(input: {
     kind: finding.kind,
     // The time makes each occurrence its own message: the delivery key hashes this id, and a
     // recurrence of the same state must not be taken for a replay of the first.
-    id: `${input.environmentId}:${shell.id}:${finding.kind}:${finding.signature}:${input.occurredAt}`,
+    id: `${input.environmentId}:${shell.id}:${finding.kind}:${finding.signature}${finding.kind === "thread-failed" ? "" : `:${input.occurredAt}`}`,
     environmentId: input.environmentId,
     environmentLabel: input.environmentLabel,
     threadId: shell.id,
@@ -377,7 +398,10 @@ export function threadEventAlert(input: {
     ),
     runId: shell.activeRunId ?? shell.latestRunId,
     detail: finding.detail,
-    lastAssistantLine: message?.role === "assistant" ? lastLine(message.text) : null,
+    lastAssistantLine:
+      finding.kind !== "thread-failed" && message?.role === "assistant"
+        ? lastLine(message.text)
+        : null,
     lastError:
       shell.lastError === null || shell.lastError === undefined ? null : lastLine(shell.lastError),
     openPullRequests: openPullRequests({ pullRequests: shell.pullRequests } as WatchedShell)
@@ -390,6 +414,7 @@ export function threadEventAlert(input: {
 
 /** The trigger that judges each kind again at delivery: any trigger whose kinds include it. */
 export const REJUDGE_TRIGGER: Record<ThreadEventKind, ThreadEventTrigger> = {
+  "thread-failed": "run-ended",
   "lane-ended": "run-ended",
   "promise-without-wake": "settled",
   stuck: "sweep",
@@ -427,11 +452,14 @@ export function threadEventStillHolds(input: {
   return findings.some(
     (finding) =>
       finding.kind === alert.kind &&
-      alert.id === `${prefix}${finding.signature}:${alert.occurredAt}`,
+      (alert.kind === "thread-failed"
+        ? alert.runId === finding.signature
+        : alert.id === `${prefix}${finding.signature}:${alert.occurredAt}`),
   );
 }
 
 const NEXT_STEP: Record<ThreadEventKind, string> = {
+  "thread-failed": "Triage the failed run. Check its retry history before taking action.",
   "lane-ended":
     "Check the thread: restart, repair or replace it, or settle it if its work is done. It sends no further alert for this run.",
   "promise-without-wake":

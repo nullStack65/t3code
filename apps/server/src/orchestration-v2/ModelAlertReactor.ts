@@ -167,6 +167,9 @@ export const ModelAlertState = Schema.Struct({
   incidentSentAt: Schema.Record(Schema.String, Schema.Number).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  failureWakeSentAt: Schema.Record(Schema.String, Schema.Number).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   outbox: Schema.Array(Delivery),
 });
 export type ModelAlertState = typeof ModelAlertState.Type;
@@ -177,11 +180,13 @@ export const EMPTY_MODEL_ALERT_STATE: ModelAlertState = {
   reported: {},
   resuming: {},
   incidentSentAt: {},
+  failureWakeSentAt: {},
   outbox: [],
 };
 
 const MAX_DEGRADED_THREADS = 1_000;
 const MAX_REPORTED = 2_000;
+const FAILURE_WAKE_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_OUTBOX = 200;
 const MAX_RESUMING = 2_000;
 const MAX_INCIDENT_GROUPS = 200;
@@ -532,6 +537,12 @@ const lateMembers = (stored: UsageLimitIncident, sent: UsageLimitIncident) =>
       ),
   );
 
+export function failureWakeHold(sentAt: number | undefined, nowMs: number) {
+  if (sentAt === undefined) return null;
+  const until = sentAt + FAILURE_WAKE_INTERVAL_MS;
+  return until > nowMs ? until : null;
+}
+
 /**
  * The state after one delivery attempt: a delivered entry leaves, a failed one waits longer. An
  * incident that gained members while it was being sent keeps those for a later digest.
@@ -555,6 +566,17 @@ export function afterDeliveryAttempt(
   return {
     ...state,
     incidentSentAt,
+    failureWakeSentAt:
+      delivered && entry.destination === "watcher" && isFailureWake(entry.alert)
+        ? {
+            ...Object.fromEntries(
+              Object.entries(state.failureWakeSentAt).filter(
+                ([, sentAt]) => sentAt + FAILURE_WAKE_INTERVAL_MS > nowMs,
+              ),
+            ),
+            [entry.alert.threadId]: nowMs,
+          }
+        : state.failureWakeSentAt,
     reported: delivered
       ? recordStrandedDelivery(markLinkDelivered(state.reported, entry), entry, true)
       : state.reported,
@@ -821,6 +843,11 @@ export const watcherAlertMessage = (alert: WatcherAlert) => {
   }
 };
 
+const isFailureWake = (
+  alert: WatcherAlert,
+): alert is ThreadEventAlert & { kind: "thread-failed" } =>
+  alert.type === "thread-event" && alert.kind === "thread-failed";
+
 /** Alerts ride in the watcher's next digest; a newer alert on the same subject replaces an older one. */
 function alertDelivery(alert: WatcherAlert): {
   readonly coalesceKey: string;
@@ -871,6 +898,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   const expiresAt = DateTime.makeUnsafe(
     expiresAtMs ?? DateTime.toEpochMillis(yield* DateTime.now) + ALERT_DIGEST_TTL_MS,
   );
+  const deliveryClass = isFailureWake(alert) ? "next_turn" : "digest";
   if (watcher.environmentId === here) {
     // A retired watcher never takes a turn: the alert follows its redirect, or is dropped with a
     // warning when the chain cannot be resolved.
@@ -896,7 +924,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
       text: message,
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
-      delivery: { class: "digest", coalesceKey, expiresAt, category },
+      delivery: { class: deliveryClass, coalesceKey, expiresAt, category },
       createdBy: "agent",
       creationSource: "server",
     });
@@ -910,7 +938,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
       message,
       mode: "queue",
       clientRequestId: key,
-      deliveryClass: "digest",
+      deliveryClass,
       coalesceKey,
       expiresAt: DateTime.formatIso(expiresAt),
       digestCategory: category,
@@ -1298,10 +1326,23 @@ export const make = Effect.gen(function* () {
       return { _tag: "sent" } satisfies DeliveryResult;
     }
     const watcher = current.modelAlertWatcher;
-    const target = alert.type === "thread-event" ? (alert.recipient ?? null) : watcher;
+    const target =
+      alert.type === "thread-event" && !isFailureWake(alert) ? (alert.recipient ?? null) : watcher;
+    if (
+      isFailureWake(alert) &&
+      (target === null ||
+        (target.environmentId === alert.environmentId && target.threadId === alert.threadId))
+    ) {
+      return { _tag: "dropped" } satisfies DeliveryResult;
+    }
     if (target === null) return { _tag: "sent" } satisfies DeliveryResult;
     const here = yield* environment.getEnvironmentId;
     const nowMs = yield* Clock.currentTimeMillis;
+    if (isFailureWake(alert)) {
+      const sentAt = (yield* Ref.get(state)).failureWakeSentAt[alert.threadId];
+      const until = failureWakeHold(sentAt, nowMs);
+      if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
+    }
     const view =
       target.environmentId === watcher?.environmentId && target.threadId === watcher.threadId
         ? yield* watcherView
@@ -1709,14 +1750,18 @@ export const make = Effect.gen(function* () {
     });
     const label = (yield* environment.getDescriptor).label;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
-    const recipient = yield* launchingThread(shell, here);
-    const destinations = threadEventDestinations(recipient, current.modelAlertWebhookUrl);
+    const launcher = yield* launchingThread(shell, here);
+    const hasFailure = judged.findings.some((finding) => finding.kind === "thread-failed");
+    const launcherIsWatcher =
+      launcher !== null &&
+      launcher.environmentId === watcher?.environmentId &&
+      launcher.threadId === watcher.threadId;
     if (
       !selfWatch &&
       !noGlobalDestination &&
-      recipient === null &&
-      destinations.length === 0 &&
-      judged.findings.length > 0
+      launcher === null &&
+      current.modelAlertWebhookUrl.trim() === "" &&
+      judged.findings.some((finding) => finding.kind !== "thread-failed")
     ) {
       yield* Effect.logWarning("a thread event has no launching thread and no webhook", {
         threadId,
@@ -1726,23 +1771,40 @@ export const make = Effect.gen(function* () {
     const enqueued =
       selfWatch || noGlobalDestination
         ? false
-        : yield* update((state) => {
-            const result = recordThreadEvents(
-              state,
-              { threadId, ...judged, ...context },
-              (finding) =>
-                threadEventAlert({
-                  environmentId: here,
-                  environmentLabel: label,
-                  shell,
-                  finding,
-                  occurredAt,
-                  recipient,
-                }),
-              destinations,
-              nowMs,
-            );
-            return [result.enqueued, result.state];
+        : yield* update((initial) => {
+            let state = initial;
+            let queued = false;
+            for (const kind of judged.evaluated) {
+              const overlapping = kind === "lane-ended" && hasFailure;
+              const recipient =
+                kind === "thread-failed"
+                  ? watcher
+                  : overlapping && launcherIsWatcher
+                    ? null
+                    : launcher;
+              const destinations = threadEventDestinations(
+                recipient,
+                kind === "thread-failed" ? "" : current.modelAlertWebhookUrl,
+              );
+              const result = recordThreadEvents(
+                state,
+                { threadId, evaluated: [kind], findings: judged.findings, ...context },
+                (finding) =>
+                  threadEventAlert({
+                    environmentId: here,
+                    environmentLabel: label,
+                    shell,
+                    finding,
+                    occurredAt,
+                    recipient,
+                  }),
+                destinations,
+                nowMs,
+              );
+              state = result.state;
+              queued ||= result.enqueued;
+            }
+            return [queued, state];
           });
     if (enqueued) yield* Queue.offer(wake, undefined);
     yield* Effect.forEach(

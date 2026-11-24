@@ -1,9 +1,31 @@
-import type {
-  ModelSelection,
-  OrchestrationV2ServerCommand,
-  ServerProvider,
-  ServerProviderModel,
+import {
+  isProviderAvailable,
+  type ModelSelection,
+  type OrchestrationV2ServerCommand,
+  type ServerProvider,
+  type ServerProviderModel,
 } from "@t3tools/contracts";
+
+export function providerReadinessConstraints(provider: ServerProvider): string[] {
+  const constraints: string[] = [];
+  if (!isProviderAvailable(provider)) {
+    constraints.push(provider.unavailableReason ?? "Provider driver is unavailable.");
+  }
+  if (!provider.enabled) {
+    constraints.push("Provider instance is disabled.");
+    // Disabled snapshots contain placeholders for installation, health, and auth.
+    return constraints;
+  }
+  if (!provider.installed) constraints.push("Provider executable is not installed.");
+  if (provider.status === "error" || provider.status === "disabled") {
+    constraints.push(provider.message ?? `Provider status is ${provider.status}.`);
+  }
+  if (provider.auth.status === "unauthenticated") {
+    constraints.push("Provider is not authenticated.");
+  }
+  if (provider.models.length === 0) constraints.push("No models available.");
+  return constraints;
+}
 
 const LISTED_MODEL_LIMIT = 8;
 
@@ -46,7 +68,6 @@ export function unservedModelMessage(
   models: ReadonlyArray<ListedModel>,
 ): string | undefined {
   if (
-    models.length === 0 ||
     models.every((candidate) => candidate.isCustom) ||
     findServedModel(models, model) !== undefined
   )
