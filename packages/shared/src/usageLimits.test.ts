@@ -938,6 +938,114 @@ describe("pools", () => {
     ]);
   });
 
+  it("keeps the emergency route name and still names the other Grok seat", () => {
+    const grok = ProviderDriverKind.make("grok");
+    const weeklyGrok = { ...window, id: "subscription", kind: "weekly" as const, usedPercent: 7 };
+    const emergency = provider({
+      driver: grok,
+      instanceId: ProviderInstanceId.make("grok-direct"),
+      displayName: "Grok · Emergency (direct)",
+      auth: { status: "authenticated", email: "a@example.com" },
+      usageLimits: { checkedAt, windows: [weeklyGrok] },
+    });
+    const hubAccount = (
+      email: string,
+      displayName: string,
+      usedPercent: number,
+      status?: "held" | "signed-out",
+    ) => ({
+      id: `grok:${email}`,
+      driver: grok,
+      email,
+      displayName,
+      ...(status
+        ? { status, statusDetail: status === "held" ? "Held." : "Sign-in required." }
+        : {}),
+      usageLimits: { checkedAt, windows: [{ ...weeklyGrok, usedPercent }] },
+    });
+    const input = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        {
+          ...laptop,
+          serverConfig: {
+            providers: [emergency],
+            usageLimitSources: [
+              {
+                ...source,
+                kind: "magpie" as const,
+                label: "Magpie",
+                accounts: [
+                  hubAccount("a@example.com", "A Person · SuperGrok", 7, "held"),
+                  hubAccount("b@example.com", "B Person · SuperGrok", 65),
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ]);
+    expect(
+      collectLimitAccounts(input).map(({ displayName, email, status }) => ({
+        displayName,
+        email,
+        status,
+      })),
+    ).toEqual([
+      { displayName: "Grok · Emergency (direct)", email: "a@example.com", status: "held" },
+      { displayName: "B Person · SuperGrok", email: "b@example.com", status: null },
+    ]);
+  });
+
+  it("keeps a chosen instance name and a hub alias whichever row arrives first", () => {
+    const grok = ProviderDriverKind.make("grok");
+    const weeklyGrok = { ...window, id: "subscription", kind: "weekly" as const, usedPercent: 7 };
+    const instance = (id: string, displayName: string) =>
+      provider({
+        driver: grok,
+        instanceId: ProviderInstanceId.make(id),
+        displayName,
+        auth: { status: "authenticated", email: "a@example.com" },
+        usageLimits: { checkedAt, windows: [weeklyGrok] },
+      });
+    const hub = (id: string, displayName?: string) => ({
+      id,
+      driver: grok,
+      email: "a@example.com",
+      ...(displayName ? { displayName } : {}),
+      usageLimits: { checkedAt, windows: [weeklyGrok] },
+    });
+    const names = (providers: ReturnType<typeof instance>[], accounts: ReturnType<typeof hub>[]) =>
+      collectLimitAccounts(
+        new Map([
+          [
+            EnvironmentId.make("env-a"),
+            {
+              ...laptop,
+              serverConfig: {
+                providers,
+                usageLimitSources: [{ ...source, accounts }],
+              },
+            },
+          ],
+        ]),
+      ).map((account) => account.displayName);
+
+    const generic = instance("grok", "Grok");
+    const emergency = instance("grok-direct", "Grok · Emergency (direct)");
+    const unnamed = hub("plain");
+    const aliased = hub("named", "A Person · SuperGrok");
+    for (const providers of [
+      [generic, emergency],
+      [emergency, generic],
+    ]) {
+      expect(names(providers, [unnamed, aliased])).toEqual(["Grok · Emergency (direct)"]);
+      expect(names(providers, [aliased, unnamed])).toEqual(["Grok · Emergency (direct)"]);
+    }
+    expect(names([], [unnamed, aliased])).toEqual(["A Person · SuperGrok"]);
+    expect(names([], [aliased, unnamed])).toEqual(["A Person · SuperGrok"]);
+  });
+
   it("pools Codex windows by kind, whichever slot reported them", () => {
     const codexAccount = (id: string, slots: readonly string[]) => ({
       id,
@@ -1119,6 +1227,8 @@ describe("pools", () => {
           displayName: "Go",
           email: undefined,
           plan: undefined,
+          status: null,
+          statusDetail: null,
           accentColor: undefined,
           environments: [],
           sourceLabel: null,
@@ -1170,6 +1280,8 @@ describe("pooled account columns", () => {
     displayName: key,
     email: undefined,
     plan: undefined,
+    status: null,
+    statusDetail: null,
     accentColor: undefined,
     environments: [],
     sourceLabel: "Hub",
@@ -1495,6 +1607,80 @@ describe("/usage-limits", () => {
       creditId: "hub-credit",
     });
     expect(report?.accounts[0]?.limits.resetCredits?.availableCount).toBe(3);
+  });
+
+  it("copies a merged hub alias and held or signed-out state onto the composer row", () => {
+    const grok = ProviderDriverKind.make("grok");
+    const native = provider({
+      driver: grok,
+      instanceId: ProviderInstanceId.make("grok"),
+      displayName: "Grok",
+      auth: { status: "authenticated", email: "a@example.com" },
+      usageLimits: limits,
+    });
+    const emergency = provider({
+      ...native,
+      instanceId: ProviderInstanceId.make("grok-direct"),
+      displayName: "Grok · Emergency (direct)",
+    });
+    const hub = [
+      {
+        ...sources[0]!,
+        accounts: [
+          {
+            id: "grok:a@example.com",
+            driver: grok,
+            email: "a@example.com",
+            displayName: "A Person · SuperGrok",
+            status: "held" as const,
+            statusDetail: "Held.",
+            usageLimits: limits,
+          },
+          {
+            id: "grok:a-signed-out",
+            driver: grok,
+            email: "a@example.com",
+            status: "signed-out" as const,
+            statusDetail: "Sign-in required.",
+            usageLimits: limits,
+          },
+        ],
+      },
+    ];
+    const generic = collectProviderUsageLimits(native.instanceId, [native], hub, now);
+    expect(generic?.accounts).toHaveLength(1);
+    expect(generic?.accounts[0]).toMatchObject({
+      displayName: "A Person · SuperGrok",
+      status: "signed-out",
+      statusDetail: "Sign-in required.",
+    });
+    const named = collectProviderUsageLimits(emergency.instanceId, [emergency], hub, now);
+    expect(named?.accounts[0]).toMatchObject({
+      displayName: "Grok · Emergency (direct)",
+      status: "signed-out",
+      statusDetail: "Sign-in required.",
+    });
+    const fresherGeneric = provider({
+      ...native,
+      usageLimits: { ...limits, checkedAt: "2026-09-03T11:30:00.000Z" },
+    });
+    const olderEmergency = provider({
+      ...emergency,
+      usageLimits: { ...limits, checkedAt: "2026-09-03T10:00:00.000Z" },
+    });
+    for (const providers of [
+      [fresherGeneric, olderEmergency],
+      [olderEmergency, fresherGeneric],
+    ]) {
+      expect(
+        collectProviderUsageLimits(fresherGeneric.instanceId, providers, hub, now)?.accounts[0],
+      ).toMatchObject({
+        displayName: "Grok · Emergency (direct)",
+        status: "signed-out",
+        statusDetail: "Sign-in required.",
+        limits: { checkedAt: "2026-09-03T11:30:00.000Z" },
+      });
+    }
   });
 
   it("labels hub rows by account id without .json", () => {

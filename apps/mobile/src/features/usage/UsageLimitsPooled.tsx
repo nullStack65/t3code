@@ -29,14 +29,20 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { environmentPresentations } from "../../state/presentation";
 import { ResetCredits } from "./UsageLimitsSection";
+import { pooledSegmentCaption } from "./pooledSegmentCaption";
 import { usageProviderKind, useProviderColors } from "./usageProviders";
 
 const PACE_LABEL = { ahead: "Ahead of pace", on: "On pace", under: "Under pace" } as const;
 
 function accountName(account: LimitAccount) {
-  if (account.displayName) return account.displayName;
-  if (!account.email) return providerClients.get(account.driver)?.label ?? account.driver;
-  return emailInitials(account.email) || "Account";
+  const name = account.displayName
+    ? account.displayName
+    : account.email
+      ? emailInitials(account.email) || "Account"
+      : (providerClients.get(account.driver)?.label ?? account.driver);
+  if (account.status === "held") return `${name} · Held`;
+  if (account.status === "signed-out") return `${name} · Sign in`;
+  return name;
 }
 
 function emailInitials(email: string) {
@@ -235,6 +241,7 @@ function PoolWindowCard({
             />
           );
         const { account, window } = member;
+        const segmentCaption = pooledSegmentCaption(account, accountName(account), inlineName);
         const timeLeft = paceRemainingPercent(window, now);
         const credits = account.limits.resetCredits?.availableCount ?? 0;
         const resetsIn = formatResetsIn(window, now)?.replace("resets in ", "");
@@ -264,14 +271,14 @@ function PoolWindowCard({
               >
                 <View className="min-w-0 shrink flex-row items-center gap-1.5">
                   {account.email ? <AccountChip email={account.email} /> : null}
-                  {account.email && !(account.displayName && inlineName) ? null : (
+                  {segmentCaption ? (
                     <Text
                       numberOfLines={1}
                       className="min-w-0 shrink text-xs font-t3-medium text-foreground"
                     >
-                      {accountName(account)}
+                      {segmentCaption}
                     </Text>
-                  )}
+                  ) : null}
                   <Text className="text-sm font-t3-bold tabular-nums text-foreground">
                     {remainingPercent(window)}%
                   </Text>
@@ -589,6 +596,9 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
                 <Text selectable className="text-sm text-foreground-muted">
                   {account.plan}
                 </Text>
+              ) : null}
+              {account.statusDetail ? (
+                <Text className="text-sm text-foreground-muted">{account.statusDetail}</Text>
               ) : null}
             </View>
             <View className="gap-3 rounded-[24px] border-continuous bg-grouped-card p-4">
