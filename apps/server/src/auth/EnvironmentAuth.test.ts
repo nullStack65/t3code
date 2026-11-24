@@ -369,7 +369,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
             );
         yield* pairWithKey();
         const [keyed] = (yield* serverAuth.listClientSessions(admin.sessionId)).filter(
-          (session) => session.subject !== "desktop-bootstrap" && session.founder === undefined,
+          (session) =>
+            session.sessionId !== admin.sessionId &&
+            session.subject !== "desktop-bootstrap" &&
+            session.founder === undefined,
         );
         yield* serverAuth.setClientSessionFounder(admin.sessionId, keyed!.sessionId, "jeff");
         yield* pairWithKey();
@@ -411,6 +414,18 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           "kameron",
           "kameron",
         ]);
+        // Reassigning or clearing the device moves every live session on its key with it.
+        yield* serverAuth.setClientSessionFounder(admin.sessionId, device!.sessionId, "jeff");
+        expect((yield* deviceSessions()).map((session) => session.founder)).toEqual([
+          "jeff",
+          "jeff",
+        ]);
+        yield* serverAuth.setClientSessionFounder(admin.sessionId, device!.sessionId, null);
+        expect((yield* deviceSessions()).map((session) => session.founder)).toEqual([
+          undefined,
+          undefined,
+        ]);
+        yield* serverAuth.setClientSessionFounder(admin.sessionId, device!.sessionId, "kameron");
         yield* serverAuth.revokeClientSession(admin.sessionId, device!.sessionId);
         yield* signIn();
         expect((yield* deviceSessions()).map((session) => session.founder)).toEqual([undefined]);

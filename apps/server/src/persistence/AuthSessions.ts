@@ -149,10 +149,13 @@ export class AuthSessionRepository extends Context.Service<
     readonly setLastConnectedAt: (
       input: SetAuthSessionLastConnectedAtInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
-    /** Records who uses a live session; false when it is revoked or unknown. */
+    /**
+     * Records who uses a live session and its Connect device's other live sessions. Returns the
+     * sessions changed, the given one first; none when it is revoked, expired, a bot or unknown.
+     */
     readonly setFounder: (
       input: SetAuthSessionFounderInput,
-    ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
+    ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
     readonly getProofKeyThumbprint: (
       input: GetAuthSessionByIdInput,
     ) => Effect.Effect<Option.Option<string>, AuthSessionRepositoryError>;
@@ -399,6 +402,29 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  // The device's other live sessions follow its binding, or a renewal would keep the old founder.
+  const setConnectDeviceSiblingFounderRows = SqlSchema.findAll({
+    Request: SetAuthSessionFounderInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ sessionId, founder, now }) =>
+      sql`
+        UPDATE auth_sessions
+        SET founder = ${founder}
+        WHERE proof_key_thumbprint = (
+            SELECT device.proof_key_thumbprint
+            FROM auth_connect_devices AS device
+            JOIN auth_sessions AS target
+              ON target.proof_key_thumbprint = device.proof_key_thumbprint
+            WHERE target.session_id = ${sessionId}
+          )
+          AND session_id IS NOT ${sessionId}
+          AND revoked_at IS NULL
+          AND expires_at > ${now}
+          AND client_device_type IS NOT 'bot'
+        RETURNING session_id AS "sessionId"
+      `,
+  });
+
   // A new session's founder comes from its own pairing code or its approved T3 Connect device key.
   // Earlier sessions never pass one on: a shared desktop bootstrap, a reused key or a replaced
   // cookie could otherwise hand one founder's identity to someone else.
@@ -638,11 +664,13 @@ export const make = Effect.gen(function* () {
   const setFounder: AuthSessionRepository["Service"]["setFounder"] = (input) =>
     sql
       .withTransaction(
-        setFounderRows(input).pipe(
-          Effect.tap((rows) =>
-            rows.length > 0 ? bindConnectDeviceFounderRow(input) : Effect.void,
-          ),
-        ),
+        Effect.gen(function* () {
+          const rows = yield* setFounderRows(input);
+          if (rows.length === 0) return rows;
+          yield* bindConnectDeviceFounderRow(input);
+          const siblings = yield* setConnectDeviceSiblingFounderRows(input);
+          return [...rows, ...siblings];
+        }),
       )
       .pipe(
         Effect.mapError(
@@ -652,7 +680,7 @@ export const make = Effect.gen(function* () {
             { sessionId: input.sessionId },
           ),
         ),
-        Effect.map((rows) => rows.length > 0),
+        Effect.map((rows) => rows.map((row) => row.sessionId)),
       );
 
   const getProofKeyThumbprint: AuthSessionRepository["Service"]["getProofKeyThumbprint"] = (

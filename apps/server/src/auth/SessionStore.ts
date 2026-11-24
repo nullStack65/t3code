@@ -1135,13 +1135,18 @@ const make = Effect.gen(function* () {
       const updated = yield* authSessions
         .setFounder({ sessionId, founder, now })
         .pipe(Effect.mapError((cause) => new SessionFounderUpdateError({ sessionId, cause })));
-      if (updated) {
-        const session = yield* loadActiveSession(sessionId).pipe(
-          Effect.mapError((cause) => new SessionFounderUpdateError({ sessionId, cause })),
-        );
-        if (Option.isSome(session)) yield* emitUpsert(session.value);
-      }
-      return updated;
+      yield* Effect.forEach(
+        updated,
+        (updatedSessionId) =>
+          loadActiveSession(updatedSessionId).pipe(
+            Effect.mapError(
+              (cause) => new SessionFounderUpdateError({ sessionId: updatedSessionId, cause }),
+            ),
+            Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: emitUpsert })),
+          ),
+        { discard: true },
+      );
+      return updated.length > 0;
     },
   );
 
