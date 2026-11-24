@@ -83,6 +83,8 @@ jobs:
         env:
           BASE_SHA: ${{ steps.changes.outputs.base_sha }}
         run: |
+          # Post steps still need the composite action from the merge commit.
+          trap 'git -C "$GITHUB_WORKSPACE" checkout --quiet "$GITHUB_SHA"' EXIT
           git checkout --quiet "$BASE_SHA"
           # Re-sync node_modules to the base commit's lockfile before
           # fingerprinting — a dep-changing PR must not fingerprint the base
