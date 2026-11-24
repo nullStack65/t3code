@@ -79,14 +79,16 @@ let deferredClientSettingsPatchCount = 0;
 let unsubscribeOtherTabClientSettings: (() => void) | null = null;
 
 function emitClientSettingsChange() {
-  for (const listener of clientSettingsListeners) {
-    listener();
+  // Refreshing an atom can synchronously replace its subscription.
+  // Visit only listeners registered when this notification began.
+  for (const listener of [...clientSettingsListeners]) {
+    if (clientSettingsListeners.has(listener)) listener();
   }
 }
 
 function emitClientSettingsHydrationChange() {
-  for (const listener of clientSettingsHydrationListeners) {
-    listener();
+  for (const listener of [...clientSettingsHydrationListeners]) {
+    if (clientSettingsHydrationListeners.has(listener)) listener();
   }
 }
 
