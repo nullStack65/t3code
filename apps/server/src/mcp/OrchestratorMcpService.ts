@@ -69,10 +69,15 @@ import {
   agentLaunchInboxError,
   agentLaunchInboxRouting,
   withLegacyPeerInboxReason,
+  orchestrationV2RunFailure,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { latestExecutedRun, runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import {
+  latestExecutedRun,
+  latestRootProviderFailure,
+  runRanAfter,
+} from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
@@ -1058,11 +1063,25 @@ function runExecutedModel(
     : (latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId)?.model ?? null);
 }
 
+/** A failed run's typed provider error, read from its own error items only. */
+function runFailure(
+  run: OrchestrationV2Run | undefined,
+  turnItems: Parameters<typeof latestRootProviderFailure>[1],
+) {
+  const failure = run === undefined ? null : latestRootProviderFailure(run, turnItems);
+  return run === undefined || failure === null
+    ? undefined
+    : orchestrationV2RunFailure(run, failure);
+}
+
 function threadRun(
   projection: Pick<OrchestrationV2ThreadProjection, "providerTurns">,
   run: OrchestrationV2Run,
 ): OrchestratorMcpThreadRun {
   return {
+    ...(run.providerFailoverOfRunId === undefined
+      ? {}
+      : { providerFailoverOfRunId: run.providerFailoverOfRunId }),
     runId: run.id,
     ordinal: run.ordinal,
     status: run.status,
@@ -1841,6 +1860,7 @@ const make = Effect.gen(function* () {
         instanceId: task.providerInstanceId,
         model: task.model,
       };
+    const latestTerminalFailure = runFailure(terminalRun, childProjection.turnItems);
     const result = {
       taskId: task.id,
       childThreadId: task.childThreadId,
@@ -1864,6 +1884,7 @@ const make = Effect.gen(function* () {
       latestTerminalStatus:
         terminalStatus !== null && isTerminalTaskStatus(terminalStatus) ? terminalStatus : null,
       latestTerminalSummary: latestTerminalSummary === derivedResult ? null : latestTerminalSummary,
+      ...(latestTerminalFailure === undefined ? {} : { latestTerminalFailure }),
       latestTerminalResultContextTransferId:
         latestTerminalResultContextTransferId === resultContextTransferId
           ? null
@@ -3482,30 +3503,34 @@ const make = Effect.gen(function* () {
       const runs = target.runs
         .toSorted((left, right) => right.ordinal - left.ordinal)
         .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT);
-      // Only an agent-created thread's latest run is judged, so a read loads one run's replies and notices.
+      // Only the latest run is judged, and only when it is an agent's or failed, so a read loads
+      // one run's replies and notices.
       const latestRun = runs[0];
-      const latestAlert =
+      const latestRecords =
         latestRun === undefined ||
-        target.thread.createdBy !== "agent" ||
+        (target.thread.createdBy !== "agent" && latestRun.status !== "failed") ||
         !ThreadManagementService.isTerminalRunStatus(latestRun.status)
           ? undefined
-          : subagentResultForRun(
-              {
-                ...target,
-                ...(yield* threadManagement
-                  .getThreadRecords(input.threadId, ["messages", "turnItems"], {
-                    messageRoles: ["assistant"],
-                    messageRunIds: [latestRun.id],
-                    turnItemRunId: latestRun.id,
-                    turnItemTypes: ["assistant_message", "error", "system_notice"],
-                  })
-                  .pipe(Effect.mapError(threadManagementFailure))),
-              },
-              latestRun,
-            ).workerAlert;
+          : yield* threadManagement
+              .getThreadRecords(input.threadId, ["messages", "turnItems"], {
+                messageRoles: ["assistant"],
+                messageRunIds: [latestRun.id],
+                turnItemRunId: latestRun.id,
+                turnItemTypes: ["assistant_message", "error", "system_notice"],
+              })
+              .pipe(Effect.mapError(threadManagementFailure));
+      const latestAlert =
+        latestRun === undefined ||
+        latestRecords === undefined ||
+        target.thread.createdBy !== "agent"
+          ? undefined
+          : subagentResultForRun({ ...target, ...latestRecords }, latestRun).workerAlert;
+      const latestFailure =
+        latestRecords === undefined ? undefined : runFailure(latestRun, latestRecords.turnItems);
       const recentRuns = runs.map((run) => ({
         ...threadRun(target, run),
         ...(run === latestRun && latestAlert !== undefined ? { workerAlert: latestAlert } : {}),
+        ...(run === latestRun && latestFailure !== undefined ? { failure: latestFailure } : {}),
       }));
       const { items, start } = timelineItemsWithinBudget(
         { thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null },
