@@ -282,7 +282,7 @@ describe("MessagesTimeline new since you last looked", () => {
   it("shows a divider and a jump pill while the divider is off screen, and jump clears the pill", async () => {
     setup();
     await using screen = await renderTimeline(thread(), {
-      unseenDivider: { afterCreatedAt: "2026-03-17T19:02:00.000Z", count: 11 },
+      unseenDivider: { afterMessageId: MessageId.make("message-2"), count: 11 },
     });
     await vi.waitFor(() => expect(screen.text()).toContain("11 new since you last looked"));
     await click(screen.button(/new since you last looked/));
@@ -299,10 +299,36 @@ describe("MessagesTimeline new since you last looked", () => {
     );
   });
 
+  it("places the line after a queued message whose timeline row starts later than its record", async () => {
+    setup();
+    const queued = messageAt(1, "queued question", {}, "queued");
+    const entries = [
+      messageAt(0, "prior question"),
+      messageAt(2, "earlier reply", { role: "assistant" }),
+      { ...queued, createdAt: "2026-03-17T19:05:00.000Z" } as Entry,
+      messageAt(6, "fresh reply", { role: "assistant" }),
+    ];
+    await using screen = await renderTimeline(entries, {
+      unseenDivider: { afterMessageId: MessageId.make("queued"), count: 1 },
+    });
+    await vi.waitFor(() =>
+      expect(document.querySelector("[data-new-messages-divider]")).not.toBeNull(),
+    );
+    const top = (text: string) =>
+      [...document.querySelectorAll<HTMLElement>("[data-timeline-row-id]")]
+        .find((row) => row.textContent?.includes(text))!
+        .getBoundingClientRect().top;
+    const divider = document
+      .querySelector("[data-new-messages-divider]")!
+      .getBoundingClientRect().top;
+    expect(divider).toBeGreaterThan(top("queued question"));
+    expect(divider).toBeLessThan(top("fresh reply"));
+  });
+
   it("dismisses the pill", async () => {
     setup();
     await using screen = await renderTimeline(thread(), {
-      unseenDivider: { afterCreatedAt: "2026-03-17T19:02:00.000Z", count: 3 },
+      unseenDivider: { afterMessageId: MessageId.make("message-2"), count: 3 },
     });
     await vi.waitFor(() => expect(screen.text()).toContain("3 new since you last looked"));
     await click(screen.button("Dismiss new messages"));

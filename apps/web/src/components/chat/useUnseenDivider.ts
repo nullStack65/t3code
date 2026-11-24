@@ -4,11 +4,9 @@ import {
   type UnseenDivider,
 } from "@t3tools/client-runtime/seen-marker";
 import type { Founder, MessageId } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import { useState } from "react";
 
-type UnseenSourceMessage = SeenMessage & { readonly createdAt: DateTime.Utc };
-const NO_MESSAGES: ReadonlyArray<UnseenSourceMessage> = [];
+const NO_MESSAGES: ReadonlyArray<SeenMessage> = [];
 
 /**
  * Where "new since you last looked" starts, fixed at the place this founder had been shown when the
@@ -19,7 +17,7 @@ export function useUnseenDivider(input: {
   readonly viewer: Founder | null;
   readonly shellReady: boolean;
   readonly lastSeenMessageId: MessageId | null;
-  readonly messages: ReadonlyArray<UnseenSourceMessage> | undefined;
+  readonly messages: ReadonlyArray<SeenMessage> | undefined;
 }): UnseenDivider | null {
   const key =
     input.threadKey !== null && input.viewer !== null ? `${input.viewer}:${input.threadKey}` : null;
@@ -33,12 +31,7 @@ export function useUnseenDivider(input: {
   const anchorId = place?.key === key ? place.messageId : null;
   if (anchorId === null) return null;
   return resolveUnseenDivider({
-    messages: (input.messages ?? NO_MESSAGES).map((message) => ({
-      id: message.id,
-      role: message.role,
-      ...(message.streaming === undefined ? {} : { streaming: message.streaming }),
-      createdAt: DateTime.formatIso(message.createdAt),
-    })),
+    messages: input.messages ?? NO_MESSAGES,
     lastSeenMessageId: anchorId,
   });
 }

@@ -355,7 +355,7 @@ interface MessagesTimelineProps {
    */
   collapseActivity?: boolean;
   /** Messages that arrived after the place the viewer had been shown; draws a divider and a jump pill. */
-  unseenDivider?: { readonly afterCreatedAt: string; readonly count: number } | null;
+  unseenDivider?: { readonly afterMessageId: MessageId; readonly count: number } | null;
   includeOtherActivity?: boolean;
   decisionRequestedAt?: string | undefined;
   /** The thread is filed in a founder's inbox; the newest agent-run reply stays unfolded. */
@@ -887,15 +887,25 @@ const ConversationTimeline = memo(function ConversationTimeline({
     ids.add(revealedPillId);
     setExpandedActivity({ ...expandedActivity, ids });
   }
+  // Rows carry the time their turn item started, which can trail the message's own stamp (a queued
+  // message), so the line is placed by the anchor's timeline entry rather than the message record.
+  const dividerAnchorAt =
+    unseenDivider === null || findSender !== null
+      ? undefined
+      : timelineEntries.find(
+          (entry) => entry.kind === "message" && entry.message.id === unseenDivider.afterMessageId,
+        )?.createdAt;
   const rows = insertNewMessagesDivider(
     collapseRows ? collapseTimelineActivity(senderRows, expandedActivityIds, chatter) : senderRows,
-    findSender === null ? unseenDivider : null,
+    unseenDivider === null || dividerAnchorAt === undefined
+      ? null
+      : { afterCreatedAt: dividerAnchorAt, count: unseenDivider.count },
   );
   const dividerIndex = rows.findIndex((row) => row.kind === "new-messages-divider");
   const dividerKey =
     dividerIndex < 0 || unseenDivider === null
       ? null
-      : `${listIdentityKey}\0${unseenDivider.afterCreatedAt}`;
+      : `${listIdentityKey}\0${unseenDivider.afterMessageId}`;
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =

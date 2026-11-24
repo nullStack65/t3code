@@ -130,13 +130,9 @@ export function catchUpOffer(input: {
 
 export const CATCH_ME_UP_TEXT = "Catch me up";
 
-export interface UnseenDividerMessage extends SeenMessage {
-  createdAt: string;
-}
-
-/** Where "new since you last looked" starts: after the message at `afterCreatedAt`. */
+/** Where "new since you last looked" starts: after the message `afterMessageId`. */
 export interface UnseenDivider {
-  readonly afterCreatedAt: string;
+  readonly afterMessageId: MessageId;
   readonly count: number;
 }
 
@@ -145,16 +141,17 @@ export interface UnseenDivider {
  * thread no longer holds draws nothing, since guessing would mislabel old messages as new.
  */
 export function resolveUnseenDivider(input: {
-  readonly messages: ReadonlyArray<UnseenDividerMessage>;
+  readonly messages: ReadonlyArray<SeenMessage>;
   readonly lastSeenMessageId: MessageId | null | undefined;
 }): UnseenDivider | null {
-  if (input.lastSeenMessageId == null) return null;
-  const index = input.messages.findIndex((message) => message.id === input.lastSeenMessageId);
+  const afterMessageId = input.lastSeenMessageId;
+  if (afterMessageId == null) return null;
+  const index = input.messages.findIndex((message) => message.id === afterMessageId);
   if (index < 0) return null;
   const count = input.messages
     .slice(index + 1)
     .filter((message) => message.role === "assistant" && message.streaming !== true).length;
-  return count === 0 ? null : { afterCreatedAt: input.messages[index]!.createdAt, count };
+  return count === 0 ? null : { afterMessageId, count };
 }
 
 export function buildSeenMarker(
