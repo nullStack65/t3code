@@ -142,6 +142,20 @@ describe("redirectLinkError", () => {
     }),
   );
 
+  it.effect("refuses a replacement whose downstream chain is missing or deleted", () =>
+    Effect.gen(function* () {
+      const { lookup } = table({ old: null, a: "b", b: "gone", gone: null, c: "nowhere" }, [
+        "gone",
+      ]);
+      expect(yield* redirectLinkError(lookup, id("old"), id("a"))).toMatch(
+        /chain ends at thread:gone/,
+      );
+      expect(yield* redirectLinkError(lookup, id("old"), id("c"))).toMatch(
+        /chain ends at thread:nowhere/,
+      );
+    }),
+  );
+
   it.effect("refuses a link that would close a loop", () =>
     Effect.gen(function* () {
       // b -> c already; retiring c behind b would loop.

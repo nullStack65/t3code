@@ -13,7 +13,6 @@ import {
   OrchestrationV2WorkerAlertReason,
   OrchestratorMcpThreadSendResult,
   ThreadId,
-  type ThreadRedirectNode,
 } from "@t3tools/contracts";
 import { runModelSignals, workerAlert } from "@t3tools/provider-core/server/subagentProjection";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
@@ -857,9 +856,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
     readonly call: PeerMcpClient.PeerMcpClient["Service"]["call"];
     readonly sha256Hex: (identity: string) => Effect.Effect<string>;
     /** Reads a thread's redirect tombstone; an alert for a retired watcher goes to its replacement. */
-    readonly getThreadShell?: (
-      threadId: ThreadId,
-    ) => Effect.Effect<ThreadRedirectNode | null, unknown>;
+    readonly getThreadShell?: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
   },
   alert: WatcherAlert,
   watcher: ModelAlertWatcher,

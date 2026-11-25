@@ -1,6 +1,3 @@
-import * as NodeFSP from "node:fs/promises";
-import * as NodePath from "node:path";
-
 import {
   type RedirectSourceKind,
   type ResolvedThreadTarget,
@@ -9,9 +6,13 @@ import {
   type ThreadRedirectNode,
   resolveActiveThreadTargetWith,
 } from "@t3tools/contracts";
-import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
@@ -52,24 +53,33 @@ const appendLock = Semaphore.makeUnsafe(1);
 const clip = (value: string) =>
   value.length > MAX_FIELD_LENGTH ? value.slice(0, MAX_FIELD_LENGTH) : value;
 
+const encodeLine = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+
 /** The ledger path: the override when set, else the server's state directory. */
 const ledgerPath = Effect.gen(function* () {
-  const override = process.env[REDIRECT_LEDGER_ENV]?.trim();
-  if (override) return override;
+  const override = yield* Config.String(REDIRECT_LEDGER_ENV).pipe(
+    Config.option,
+    Effect.orElseSucceed(() => Option.none<string>()),
+  );
+  if (Option.isSome(override) && override.value.trim() !== "") return override.value.trim();
   const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
-  return Option.isSome(config) ? NodePath.join(config.value.stateDir, LEDGER_FILE) : undefined;
+  const path = yield* Effect.serviceOption(Path.Path);
+  return Option.isSome(config) && Option.isSome(path)
+    ? path.value.join(config.value.stateDir, LEDGER_FILE)
+    : undefined;
 });
 
-const appendLine = (path: string, line: string) =>
-  Effect.tryPromise(async () => {
-    await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
-    const size = await NodeFSP.stat(path).then(
-      (stat) => stat.size,
-      () => 0,
-    );
-    if (size >= MAX_LEDGER_BYTES) await NodeFSP.rename(path, `${path}.1`);
-    await NodeFSP.appendFile(path, line, { encoding: "utf8", mode: 0o600 });
-  });
+const appendLine = Effect.fnUntraced(function* (path: string, line: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const { dirname } = yield* Path.Path;
+  yield* fs.makeDirectory(dirname(path), { recursive: true });
+  const size = yield* fs.stat(path).pipe(
+    Effect.map((info) => Number(info.size)),
+    Effect.orElseSucceed(() => 0),
+  );
+  if (size >= MAX_LEDGER_BYTES) yield* fs.rename(path, `${path}.1`);
+  yield* fs.writeFileString(path, line, { flag: "a", mode: 0o600 });
+});
 
 /**
  * Appends one redirect-hit record. Never fails and never waits long: a ledger that cannot be
@@ -82,7 +92,7 @@ export const recordRedirectHit = Effect.fn("RetiredThreadRedirect.recordRedirect
   if (path === undefined) {
     return yield* Effect.logWarning("retired-thread redirect not recorded: no ledger path");
   }
-  const timestamp = new Date(yield* Clock.currentTimeMillis).toISOString();
+  const timestamp = DateTime.formatIso(yield* DateTime.now);
   const entry: RedirectLedgerRecord = {
     timestamp,
     retiredThreadId: clip(record.retiredThreadId) as ThreadId,
@@ -96,9 +106,20 @@ export const recordRedirectHit = Effect.fn("RetiredThreadRedirect.recordRedirect
     ...(record.prUrl === undefined ? {} : { prUrl: clip(record.prUrl) }),
     hopCount: record.hopCount,
   };
+  const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
+  const pathService = yield* Effect.serviceOption(Path.Path);
+  if (Option.isNone(fileSystem) || Option.isNone(pathService)) {
+    return yield* Effect.logWarning("retired-thread redirect not recorded: no file system");
+  }
+  const line = yield* encodeLine(entry).pipe(Effect.option);
+  if (Option.isNone(line)) {
+    return yield* Effect.logWarning("retired-thread redirect not recorded: entry not encodable");
+  }
   yield* appendLock
-    .withPermits(1)(appendLine(path, `${JSON.stringify(entry)}\n`))
+    .withPermits(1)(appendLine(path, `${line.value}\n`))
     .pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem.value),
+      Effect.provideService(Path.Path, pathService.value),
       Effect.timeout(APPEND_TIMEOUT),
       Effect.catchCause((cause) =>
         Effect.logWarning("retired-thread redirect ledger append failed", cause),

@@ -20,7 +20,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import { isLegacyInboxPeer, type McpInvocationScope } from "./McpInvocationContext.ts";
+import {
+  clientModeCeiling,
+  isLegacyInboxPeer,
+  type McpInvocationScope,
+} from "./McpInvocationContext.ts";
 import { threadNotFound } from "./threadAccess.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
@@ -245,6 +249,38 @@ const make = Effect.gen(function* () {
         "invalid_request",
         "A thread cannot change its own delegation nudge. Ask from another thread or the client.",
       );
+    }
+    if (input.action === "set_redirect") {
+      // A redirect moves every wake aimed at a thread onto another one, so it is an admin act:
+      // only a full-access, default-mode caller (thread or client) may set or clear it. A narrower
+      // caller could otherwise hijack a thread's wakes or point them at a wider-mode thread.
+      const callerShell =
+        scope.thread === undefined
+          ? null
+          : yield* threadManagement
+              .getThreadShell(scope.thread.threadId)
+              .pipe(Effect.orElseSucceed(() => null));
+      const modes =
+        scope.thread === undefined
+          ? [clientModeCeiling(scope.client)]
+          : callerShell === null
+            ? []
+            : [
+                callerShell,
+                // A linked client's approval narrows the thread it speaks for.
+                ...(scope.client === undefined ? [] : [clientModeCeiling(scope.client)]),
+              ];
+      if (
+        modes.length === 0 ||
+        modes.some(
+          (mode) => mode.runtimeMode !== "full-access" || mode.interactionMode !== "default",
+        )
+      ) {
+        return yield* failure(
+          "capability_denied",
+          "Setting or clearing a thread redirect needs a full-access caller in default mode.",
+        );
+      }
     }
     if (input.action === "set_redirect" && input.replacedByThreadId != null) {
       // Same check the orchestrator repeats at commit; failing here gives the caller a clear reason.

@@ -1,7 +1,3 @@
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
-
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -20,12 +16,9 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import {
-  REDIRECT_LEDGER_ENV,
-  recordRedirectHit,
-  resolveWakeTarget,
-} from "./RetiredThreadRedirect.ts";
+import { recordRedirectHit, resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import { withRedirectLedger } from "./testkit/RedirectLedger.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
 const adapter = {
@@ -96,32 +89,6 @@ const sendMessage = (threadId: ThreadId) =>
       creationSource: "server",
     });
   });
-
-/** Runs the body with the redirect ledger pointed at a fresh temporary file, then removes it. */
-const withLedger = <A, E, R>(body: (path: string) => Effect.Effect<A, E, R>) =>
-  Effect.acquireUseRelease(
-    Effect.sync(() => {
-      const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-redirect-ledger-"));
-      const previous = process.env[REDIRECT_LEDGER_ENV];
-      process.env[REDIRECT_LEDGER_ENV] = NodePath.join(dir, "redirects.jsonl");
-      return { dir, previous };
-    }),
-    ({ dir }) => body(NodePath.join(dir, "redirects.jsonl")),
-    ({ dir, previous }) =>
-      Effect.sync(() => {
-        if (previous === undefined) delete process.env[REDIRECT_LEDGER_ENV];
-        else process.env[REDIRECT_LEDGER_ENV] = previous;
-        NodeFS.rmSync(dir, { recursive: true, force: true });
-      }),
-  );
-
-const readLedger = (path: string) =>
-  NodeFS.existsSync(path)
-    ? NodeFS.readFileSync(path, "utf8")
-        .split("\n")
-        .filter((line) => line.length > 0)
-        .map((line) => JSON.parse(line) as Record<string, unknown>)
-    : [];
 
 it.layer(layerTest)("retired thread tombstone", (it) => {
   it.effect("sets and clears the tombstone, keeping the original retirement time", () =>
@@ -194,7 +161,7 @@ it.layer(layerTest)("retired thread tombstone", (it) => {
   );
 
   it.effect("resolves multi-hop chains and records one ledger line with ids only", () =>
-    withLedger((path) =>
+    withRedirectLedger((ledger) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const a = ThreadId.make("thread:chain-a");
@@ -215,7 +182,7 @@ it.layer(layerTest)("retired thread tombstone", (it) => {
         assert.equal(wake.hopCount, 2);
         assert.isTrue(wake.redirected);
 
-        const lines = readLedger(path);
+        const lines = yield* ledger.records;
         assert.equal(lines.length, 1);
         assert.deepEqual(Object.keys(lines[0]!).toSorted(), [
           "callerThreadId",
@@ -237,13 +204,13 @@ it.layer(layerTest)("retired thread tombstone", (it) => {
           sourceKind: "event",
         });
         assert.isFalse(live.redirected);
-        assert.equal(readLedger(path).length, 1);
+        assert.equal((yield* ledger.records).length, 1);
       }),
     ),
   );
 
   it.effect("fails closed on a dead end and writes no ledger line", () =>
-    withLedger((path) =>
+    withRedirectLedger((ledger) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const old = ThreadId.make("thread:dead-old");
@@ -260,7 +227,7 @@ it.layer(layerTest)("retired thread tombstone", (it) => {
           resolveWakeTarget((id) => orchestrator.getThreadShell(id), old, { sourceKind: "event" }),
         );
         assert.equal(error._tag, "ThreadRedirectError");
-        assert.equal(readLedger(path).length, 0);
+        assert.equal((yield* ledger.records).length, 0);
       }),
     ),
   );
@@ -289,30 +256,21 @@ it.layer(layerTest)("retired thread tombstone", (it) => {
 });
 
 it.effect("recordRedirectHit never fails the wake when the ledger cannot be written", () =>
-  Effect.gen(function* () {
-    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-redirect-ledger-"));
-    const previous = process.env[REDIRECT_LEDGER_ENV];
-    // A file where a directory is needed: the append must fail.
-    const blocker = NodePath.join(dir, "blocker");
-    NodeFS.writeFileSync(blocker, "");
-    process.env[REDIRECT_LEDGER_ENV] = NodePath.join(blocker, "nested", "redirects.jsonl");
-    try {
-      yield* recordRedirectHit({
+  // The ledger path sits under a regular file, so the append must fail.
+  withRedirectLedger(
+    () =>
+      recordRedirectHit({
         retiredThreadId: ThreadId.make("thread:ledger-old"),
         redirectedToThreadId: ThreadId.make("thread:ledger-new"),
         sourceKind: "pr_watch",
         hopCount: 1,
-      });
-    } finally {
-      if (previous === undefined) delete process.env[REDIRECT_LEDGER_ENV];
-      else process.env[REDIRECT_LEDGER_ENV] = previous;
-      NodeFS.rmSync(dir, { recursive: true, force: true });
-    }
-  }),
+      }),
+    { blocked: true },
+  ),
 );
 
 it.effect("recordRedirectHit appends one line per hit and clips long fields", () =>
-  withLedger((path) =>
+  withRedirectLedger((ledger) =>
     Effect.gen(function* () {
       yield* recordRedirectHit({
         retiredThreadId: ThreadId.make("thread:l-old"),
@@ -329,12 +287,12 @@ it.effect("recordRedirectHit appends one line per hit and clips long fields", ()
         taskId: "task:1",
         hopCount: 1,
       });
-      const lines = readLedger(path);
+      const lines = yield* ledger.records;
       assert.equal(lines.length, 2);
       assert.equal((lines[0]!.subscriptionId as string).length, 512);
       assert.equal(lines[0]!.prUrl, "https://github.com/o/r/pull/1");
       assert.equal(lines[1]!.taskId, "task:1");
-      assert.equal(NodeFS.statSync(path).mode & 0o777, 0o600);
+      assert.equal(yield* ledger.mode, 0o600);
     }),
   ),
 );

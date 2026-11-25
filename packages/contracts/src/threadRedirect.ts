@@ -99,7 +99,8 @@ export const resolveActiveThreadTargetWith = <E, R>(
 /**
  * Write-time check for retiring `threadId` behind `replacementId`. Returns the reason the link is
  * refused, or `null` when it is safe. A self-redirect or a replacement whose chain leads back to
- * `threadId` would loop; a missing or deleted replacement would dead-end every wake.
+ * `threadId` would loop; a missing or deleted replacement, or one further down its chain, would
+ * dead-end every wake.
  */
 export const redirectLinkError = <E, R>(
   lookup: (threadId: ThreadId) => Effect.Effect<ThreadRedirectNode | null, E, R>,
@@ -120,7 +121,11 @@ export const redirectLinkError = <E, R>(
       if (seen.has(current)) return "That redirect would create a cycle.";
       seen.add(current);
       const node = yield* lookup(current);
-      const next = node?.replacedByThreadId ?? null;
+      // A downstream link to a missing or deleted thread would dead-end every wake.
+      if (node === null || (node.deletedAt ?? null) !== null) {
+        return `The redirect chain ends at ${current}, which was not found.`;
+      }
+      const next = node.replacedByThreadId ?? null;
       if (next === null) return null;
       current = next;
     }

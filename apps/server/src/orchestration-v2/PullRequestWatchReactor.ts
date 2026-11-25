@@ -6,6 +6,7 @@ import {
   type PullRequestComment,
   type PullRequestRef,
   type PullRequestThreadCommentsResult,
+  type ThreadId,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
 } from "@t3tools/contracts";
@@ -370,7 +371,7 @@ export const make = Effect.gen(function* () {
               : {}),
           }),
     });
-    if (wake !== undefined && route !== "here" && route !== "dropped") {
+    if (wake !== undefined && route !== undefined && route !== "here" && route !== "dropped") {
       // Sent after the sync commits, so a watch that ended while it was read sends nothing. The
       // wake has no pull request stamp: the replacement thread does not watch this pull request.
       yield* engine
