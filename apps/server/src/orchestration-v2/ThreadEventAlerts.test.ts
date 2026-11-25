@@ -127,6 +127,37 @@ it("lane-ended stays quiet for a failure the model alert already reported as a u
   assert.deepEqual(findings, []);
 });
 
+it("lane-ended with open pull requests dedupes by open-PR set across runs, and clears on settle", () => {
+  const run1 = judge(
+    shellWith({ status: "completed", latestRunId: "run:1", pullRequests: [openPullRequest] } as never),
+    "run-ended",
+  );
+  const run2 = judge(
+    shellWith({ status: "completed", latestRunId: "run:2", pullRequests: [openPullRequest] } as never),
+    "run-ended",
+  );
+  const finding1 = run1.findings.find((finding) => finding.kind === "lane-ended");
+  const finding2 = run2.findings.find((finding) => finding.kind === "lane-ended");
+  assert.ok(finding1 && finding2);
+  assert.strictEqual(finding1.signature, finding2.signature);
+  assert.ok(finding1.signature.startsWith("open-prs:"));
+
+  const settled = judge(
+    shellWith({
+      status: "completed",
+      latestRunId: "run:2",
+      settledOverride: "settled",
+      pullRequests: [openPullRequest],
+    } as never),
+    "settled",
+  );
+  assert.ok(settled.evaluated.includes("lane-ended"));
+  assert.deepEqual(
+    settled.findings.filter((finding) => finding.kind === "lane-ended"),
+    [],
+  );
+});
+
 it("promise-without-wake: flags the Fleet lane's real message when nothing is tracked", () => {
   const { findings } = judge(
     shellWith({ latestVisibleMessage: assistantSays(FLEET_PROMISE) } as never),

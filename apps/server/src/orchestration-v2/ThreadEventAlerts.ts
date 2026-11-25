@@ -47,7 +47,7 @@ export type ThreadEventTrigger = "run-ended" | "settled" | "inbox" | "request" |
 
 const KINDS_BY_TRIGGER: Record<ThreadEventTrigger, ReadonlyArray<ThreadEventKind>> = {
   "run-ended": ["lane-ended", "promise-without-wake"],
-  settled: ["promise-without-wake"],
+  settled: ["lane-ended", "promise-without-wake"],
   inbox: ["needs-person"],
   request: ["needs-person"],
   sweep: ["stuck"],
@@ -212,10 +212,14 @@ export function judgeThread(input: {
         prs.length > 0 &&
         !hasWakeHandle(shell, remoteTaskCount, nowMs)
       ) {
+        const openPrSignature = prs
+          .map((link) => `${link.host ?? "github.com"}/${link.repository}#${link.number}`)
+          .toSorted()
+          .join(",");
         findings.push({
           kind: "lane-ended",
           detail: `its last run completed with ${prs.length} open pull request${prs.length === 1 ? "" : "s"} and nothing tracked that will wake it`,
-          signature: shell.latestRunId,
+          signature: `open-prs:${openPrSignature}`,
         });
       }
     }
