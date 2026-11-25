@@ -50,3 +50,23 @@ test("an aggregator that runs on cancellation fails the check", () => {
     checkCoverage(always).some((problem) => problem.includes("cancelled")),
   );
 });
+
+test("a covering step gated by if: ${{ false }} or if: false fails the check", () => {
+  const stepAnchor = `            ${REQUIRED_TESTS[0]} \\\n`;
+  const idx = workflow.indexOf(stepAnchor);
+  assert.ok(idx > 0);
+  const runIdx = workflow.lastIndexOf("        run: |", idx);
+  assert.ok(runIdx > 0);
+
+  const disabledExpr =
+    workflow.slice(0, runIdx) + "        if: ${{ false }}\n" + workflow.slice(runIdx);
+  assert.ok(
+    checkCoverage(disabledExpr).some((problem) => problem.includes(REQUIRED_TESTS[0])),
+  );
+
+  const disabledLiteral =
+    workflow.slice(0, runIdx) + "        if: false\n" + workflow.slice(runIdx);
+  assert.ok(
+    checkCoverage(disabledLiteral).some((problem) => problem.includes(REQUIRED_TESTS[0])),
+  );
+});

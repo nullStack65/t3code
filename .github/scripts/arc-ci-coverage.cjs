@@ -118,6 +118,19 @@ function parseWorkflow(source) {
         .filter(Boolean);
       continue;
     }
+    const stepStart = line.match(/^ {6}- (.*)$/);
+    if (stepStart) {
+      current.directory = "";
+      current.stepCondition = null;
+      const inlineIf = stepStart[1].match(/^if:\s*(.+)$/);
+      if (inlineIf) current.stepCondition = unquote(inlineIf[1]);
+      continue;
+    }
+    const stepIf = line.match(/^ {8}if:\s*(.+)$/);
+    if (stepIf) {
+      current.stepCondition = unquote(stepIf[1]);
+      continue;
+    }
     const directory = line.match(/^ {8}working-directory:\s*(.+)$/);
     if (directory) {
       current.directory = unquote(directory[1]);
@@ -125,15 +138,31 @@ function parseWorkflow(source) {
     }
     const run = line.match(/^ {8}run:\s*(\||>)?\s*$/);
     if (run) {
-      const step = { directory: current.directory ?? "", run: [] };
+      const step = {
+        directory: current.directory ?? "",
+        condition: current.stepCondition ?? null,
+        run: [],
+      };
       current.steps.push(step);
       current.run = step.run;
       current.directory = "";
+      current.stepCondition = null;
       inRun = true;
       runIndent = 8;
     }
   }
   return jobs;
+}
+
+function isFalsyStepCondition(condition) {
+  if (!condition) return false;
+  const unwrapped = condition
+    .trim()
+    .replace(/^\$\{\{\s*/, "")
+    .replace(/\s*\}\}$/, "")
+    .trim()
+    .toLowerCase();
+  return unwrapped === "false" || unwrapped === "0" || unwrapped === "''" || unwrapped === '""' || unwrapped === "!true";
 }
 
 // A test path only counts when a worker actually invokes it. A path that only
@@ -142,6 +171,7 @@ function parseWorkflow(source) {
 function testsIn(job) {
   const found = [];
   for (const step of job.steps) {
+    if (isFalsyStepCondition(step.condition)) continue;
     const prefix = step.directory ? `${step.directory}/` : "";
     let skipping = false;
     for (const line of step.run) {
