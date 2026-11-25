@@ -10,6 +10,8 @@ const inbox = (patch: Partial<ThreadInbox> = {}): ThreadInbox => ({
   ...patch,
 });
 
+const shared = () => inbox({ audience: "shared", attentionKind: "FYI", reason: "fyi" });
+
 const ask = (founder: "kameron" | "jeff") => ({
   founder,
   kind: "decision" as const,
@@ -23,6 +25,16 @@ describe("mentionedFounders", () => {
     expect(mentionedFounders("mail @jefferson about it")).toEqual([]);
     expect(mentionedFounders("@Jeff's draft")).toEqual(["jeff"]);
     expect(mentionedFounders(null)).toEqual([]);
+  });
+
+  it("ignores names in code, emails and quoted logs, but not a ping beside them", () => {
+    expect(mentionedFounders("run `git log @kameron` now")).toEqual([]);
+    expect(mentionedFounders("```\nnotify @jeff\n```")).toEqual([]);
+    expect(mentionedFounders("```\nnotify @jeff")).toEqual([]);
+    expect(mentionedFounders("mail kameron.smith@closura.ai or ops@jeff.example")).toEqual([]);
+    expect(mentionedFounders("> @kameron said ship\n  > @jeff too")).toEqual([]);
+    expect(mentionedFounders("```\n@kameron\n```\nplease review @Jeff")).toEqual(["jeff"]);
+    expect(mentionedFounders("> log @kameron\n`x`\n@kameron decide?")).toEqual(["kameron"]);
   });
 });
 
@@ -65,7 +77,7 @@ describe("resolveBotAttention", () => {
     ).toEqual({ kind: "badge", label: "Approval" });
     expect(
       resolveBotAttention({
-        inbox: inbox(),
+        inbox: shared(),
         viewingFounder: "kameron",
         latestText: "please look @Jeff",
       }),
@@ -108,7 +120,7 @@ describe("resolveBotAttention", () => {
   it("badges names the shell already resolved, and not text it was not given", () => {
     expect(
       resolveBotAttention({
-        inbox: inbox(),
+        inbox: shared(),
         viewingFounder: "kameron",
         mentioned: ["jeff"],
         latestText: "cc @Kameron",
@@ -116,12 +128,12 @@ describe("resolveBotAttention", () => {
     ).toEqual({ kind: "badge", label: "Jeff" });
     expect(
       resolveBotAttention({
-        inbox: inbox(),
+        inbox: shared(),
         viewingFounder: "kameron",
         mentioned: [],
         latestText: "cc @Kameron",
       }),
-    ).toEqual({ kind: "quiet" });
+    ).toEqual({ kind: "fyi" });
   });
 
   it("keeps a one-founder ask as a badge", () => {
@@ -133,5 +145,80 @@ describe("resolveBotAttention", () => {
         viewingFounder: "kameron",
       }).kind,
     ).toBe("badge");
+  });
+
+  describe("false founder pills", () => {
+    const incidental = [
+      "Kameron and Jeff were mentioned in the report",
+      "see `@kameron` and `@jeff` in the config",
+      "```\n@kameron @jeff\n```",
+      "owner kameron.smith@closura.ai, cc jeff@closura.ai, ops@kameron.example",
+      "> @kameron @jeff pinged earlier\nall green",
+    ];
+
+    it("never badges agent-only work on a name, even an explicit ping", () => {
+      const agentOnly = inbox({ audience: "agent-only", attentionKind: "background" });
+      for (const latestText of [...incidental, "@Kameron @Jeff please look"]) {
+        expect(
+          resolveBotAttention({ inbox: agentOnly, viewingFounder: "kameron", latestText }),
+        ).toEqual({
+          kind: "quiet",
+        });
+      }
+      expect(
+        resolveBotAttention({
+          inbox: agentOnly,
+          viewingFounder: "kameron",
+          mentioned: ["kameron", "jeff"],
+        }),
+      ).toEqual({ kind: "quiet" });
+    });
+
+    it("still badges agent-only work that holds a decision request", () => {
+      expect(
+        resolveBotAttention({
+          inbox: inbox({ audience: "agent-only", decisionRequest: ask("kameron") }),
+          viewingFounder: "kameron",
+          latestText: "@Jeff",
+        }),
+      ).toEqual({ kind: "badge", label: "Decision" });
+    });
+
+    it("keeps shared FYI chatter a dot when names only appear incidentally", () => {
+      const fyi = inbox({
+        audience: "shared",
+        attentionKind: "FYI",
+        reason: "fyi",
+        assignee: null,
+      });
+      for (const latestText of incidental) {
+        expect(resolveBotAttention({ inbox: fyi, viewingFounder: "kameron", latestText })).toEqual({
+          kind: "fyi",
+        });
+      }
+    });
+
+    it("badges shared FYI work for a real ping or a decision request", () => {
+      const fyi = inbox({
+        audience: "shared",
+        attentionKind: "FYI",
+        reason: "fyi",
+        assignee: null,
+      });
+      expect(
+        resolveBotAttention({
+          inbox: fyi,
+          viewingFounder: "kameron",
+          latestText: "```\n@kameron\n```\n@Jeff @Kameron can you approve?",
+        }),
+      ).toEqual({ kind: "badge", label: "Kameron · Jeff" });
+      expect(
+        resolveBotAttention({
+          inbox: { ...fyi, decisionRequest: ask("jeff") },
+          viewingFounder: "kameron",
+          latestText: "see `@kameron`",
+        }),
+      ).toEqual({ kind: "badge", label: "Decision" });
+    });
   });
 });
