@@ -51,6 +51,11 @@ const hiddenIds = (localTags: Array<string> | null, linkedTags: Array<string> | 
   ].toSorted();
 const key = (environmentId: EnvironmentId, id: string) =>
   threadKey({ environmentId, threadId: ThreadId.make(id) });
+const withInbox = (
+  entry: ReturnType<typeof thread>,
+  owner: "kameron" | "jeff" | null,
+  audience: string | undefined,
+) => ({ ...entry, inbox: { owner, audience } as never });
 
 describe("hiddenThreadKeys", () => {
   it("hides nothing while every filter is off", () => {
@@ -123,5 +128,85 @@ describe("hiddenThreadKeys", () => {
       new Set([parentKey]),
     );
     expect([...archived]).toEqual([key(linked, "delegated-from-private")]);
+  });
+
+  describe("founder viewer", () => {
+    const threads = [
+      withInbox(thread("cos", []), "kameron", "kameron"),
+      withInbox(
+        thread("cos-subagent", [], { id: "cos", relationship: "subagent" }),
+        null,
+        "agent-only",
+      ),
+      withInbox(thread("cos-agents-only", []), "kameron", "agent-only"),
+      withInbox(thread("kameron-shared", []), "kameron", "shared"),
+      withInbox(thread("kameron-jeff", []), "kameron", "jeff"),
+      withInbox(thread("cos-jeff", []), "jeff", "jeff"),
+      withInbox(thread("shared", []), null, "shared"),
+      thread("no-inbox", []),
+    ];
+    const hiddenFor = (viewer: "kameron" | "jeff" | null) =>
+      [
+        ...hiddenThreadKeys(
+          [{ environmentId: local, threads, hiddenTags: null }],
+          undefined,
+          undefined,
+          undefined,
+          viewer,
+        ),
+      ].toSorted();
+
+    it("hides Kameron's private threads, and their subagents, from Jeff", () => {
+      expect(hiddenFor("jeff")).toEqual(
+        [key(local, "cos"), key(local, "cos-subagent"), key(local, "cos-agents-only")].toSorted(),
+      );
+    });
+
+    it("hides nothing from Kameron or from a client without a founder", () => {
+      expect(hiddenFor("kameron")).toEqual([]);
+      expect(hiddenFor(null)).toEqual([]);
+    });
+
+    it("keeps hiding private threads for Jeff while tags are hidden as well", () => {
+      const keys = hiddenThreadKeys(
+        [
+          {
+            environmentId: local,
+            threads: [...threads, { ...thread("tagged", ["private"]) }],
+            hiddenTags: ["private"],
+          },
+        ],
+        undefined,
+        undefined,
+        undefined,
+        "jeff",
+      );
+      expect([...keys]).toContain(key(local, "tagged"));
+      expect([...keys]).toContain(key(local, "cos"));
+      expect([...keys]).not.toContain(key(local, "cos-jeff"));
+    });
+
+    it("judges an archive page's private thread whose parent is loaded elsewhere", () => {
+      const archived = hiddenThreadKeys(
+        [
+          {
+            environmentId: linked,
+            threads: [
+              withInbox(
+                thread("archived-private", [], undefined, { environmentId: local, id: "plain" }),
+                "kameron",
+                "kameron",
+              ),
+            ],
+            hiddenTags: null,
+          },
+        ],
+        NO_HIDDEN_THREADS,
+        new Set([key(local, "plain")]),
+        true,
+        "jeff",
+      );
+      expect([...archived]).toEqual([key(linked, "archived-private")]);
+    });
   });
 });

@@ -19,6 +19,7 @@ import { threadRoutingUpdateFromMenuAction } from "./threadActionMenu.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import {
   effectiveInboxFilter,
+  isHiddenFromFounder,
   staysActiveWhileWorking,
   type EnvironmentId,
   type InboxChoice,
@@ -1234,11 +1235,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   };
   // Search always looks across every inbox, sender and environment.
   const listFilterApplies = threadSearchQuery.trim().length === 0;
+  // Another founder's private threads stay out of search too (see `isHiddenFromFounder`).
   const inboxThreads = listFilterApplies
     ? threads.filter((thread) =>
         matchesThreadListFilter(thread, threadListFilter, attributionOf(thread)),
       )
-    : threads;
+    : threads.filter(
+        (thread) => !isHiddenFromFounder(thread.source.inbox, threadListFilter.viewingFounder),
+      );
   // The same filter over threads servers counted but did not send, for the Settled total.
   const olderSettledFilter: OlderSettledFilter | null = listFilterApplies
     ? {

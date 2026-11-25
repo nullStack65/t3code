@@ -1,11 +1,13 @@
 import {
   EnvironmentId,
+  type Founder,
   ProjectId,
   RunId,
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadShell,
+  makeThreadInbox,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -26,7 +28,10 @@ const environmentId = EnvironmentId.make("environment-v2");
 const remoteEnvironmentId = EnvironmentId.make("remote-environment-v2");
 const otherProjectId = ProjectId.make("other-project");
 
-function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environmentId]) {
+function makeHarness(
+  environmentIds: ReadonlyArray<EnvironmentId> = [environmentId],
+  viewerFounderAtom?: Atom.Atom<Founder | null>,
+) {
   const snapshotAtom = Atom.family((_environmentId: EnvironmentId) =>
     Atom.make<OrchestrationV2ShellSnapshot | null>(v2ShellSnapshot),
   );
@@ -56,9 +61,69 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
       catalogValueAtom,
       snapshotAtom,
       hiddenThreadTagsAtom: () => Atom.make(null),
+      ...(viewerFounderAtom === undefined ? {} : { viewerFounderAtom }),
     }),
   };
 }
+
+describe("asymmetric founder visibility in thread shell lists", () => {
+  const withInbox = (
+    id: string,
+    owner: Founder | null,
+    audience: string,
+  ): OrchestrationV2ThreadShell => ({
+    ...v2ThreadShell,
+    id: ThreadId.make(id),
+    inbox: { ...makeThreadInbox({ actor: null }), owner, audience: audience as never },
+  });
+  const snapshot = {
+    ...v2ShellSnapshot,
+    threads: [
+      withInbox("cos", "kameron", "kameron"),
+      withInbox("cos-jeff", "jeff", "jeff"),
+      withInbox("shared-bot", null, "shared"),
+      withInbox("kameron-agents", "kameron", "agent-only"),
+    ],
+  };
+  const idsOf = (list: ReadonlyArray<{ readonly id: ThreadId }>) => list.map((thread) => thread.id);
+
+  it("keeps Kameron's private threads out of Jeff's lists and Jeff's in Kameron's", () => {
+    const viewer = Atom.make<Founder | null>("jeff");
+    const { registry, threads, snapshotAtom } = makeHarness([environmentId], viewer);
+    registry.set(snapshotAtom(environmentId), snapshot);
+    const disposers = [
+      registry.mount(threads.hiddenThreadKeysAtom),
+      registry.mount(threads.navigationThreadShellsAtom),
+      registry.mount(threads.visibleThreadShellsAtom),
+      registry.mount(threads.quietThreadShellsAtom),
+    ];
+    const everyList = () =>
+      [
+        threads.navigationThreadShellsAtom,
+        threads.visibleThreadShellsAtom,
+        threads.quietThreadShellsAtom,
+      ].map((atom) => idsOf(registry.get(atom)));
+    for (const ids of everyList()) expect(ids).toEqual(["cos-jeff", "shared-bot"]);
+    // Point reads stay complete, so outboxes and drafts never mistake a hidden thread for gone.
+    expect(registry.get(threads.threadShellsAtom)).toHaveLength(4);
+
+    registry.set(viewer, "kameron");
+    for (const ids of everyList()) {
+      expect(ids).toEqual(["cos", "cos-jeff", "shared-bot", "kameron-agents"]);
+    }
+    for (const dispose of disposers) dispose();
+    registry.dispose();
+  });
+
+  it("hides nothing on a client with no viewer founder", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    registry.set(snapshotAtom(environmentId), snapshot);
+    const dispose = registry.mount(threads.visibleThreadShellsAtom);
+    expect(registry.get(threads.visibleThreadShellsAtom)).toHaveLength(4);
+    dispose();
+    registry.dispose();
+  });
+});
 
 describe("v2 thread shell lists", () => {
   it("preserves ordered reference arrays when a middle thread changes", () => {

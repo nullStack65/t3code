@@ -22,6 +22,7 @@ import {
   projectThreadInbox,
   inboxAfterFounderReply,
   inboxRoutingFor,
+  isHiddenFromFounder,
   primaryInbox,
   withLegacyPeerInboxReason,
   type ThreadInboxRoutingPatch,
@@ -650,5 +651,60 @@ describe("joint sign-off", () => {
       "action",
       "action",
     ]);
+  });
+});
+
+describe("isHiddenFromFounder", () => {
+  const inbox = (owner: "kameron" | "jeff" | null | undefined, audience: string | undefined) => ({
+    owner,
+    audience,
+  });
+
+  it("hides Kameron's private threads and bots from Jeff", () => {
+    expect(isHiddenFromFounder(inbox("kameron", "kameron"), "jeff")).toBe(true);
+    // Audience Kameron hides whoever owns it.
+    expect(isHiddenFromFounder(inbox(null, "kameron"), "jeff")).toBe(true);
+    expect(isHiddenFromFounder(inbox("jeff", "kameron"), "jeff")).toBe(true);
+    expect(isHiddenFromFounder(inbox(undefined, "kameron"), "jeff")).toBe(true);
+  });
+
+  it("hides Kameron-owned threads filed neither Shared nor to Jeff", () => {
+    expect(isHiddenFromFounder(inbox("kameron", "agent-only"), "jeff")).toBe(true);
+    expect(isHiddenFromFounder(inbox("kameron", undefined), "jeff")).toBe(true);
+  });
+
+  it("keeps Kameron-owned threads filed Shared or to Jeff visible to Jeff", () => {
+    expect(isHiddenFromFounder(inbox("kameron", "shared"), "jeff")).toBe(false);
+    expect(isHiddenFromFounder(inbox("kameron", "jeff"), "jeff")).toBe(false);
+  });
+
+  it("keeps Jeff's, shared and unowned threads visible to Jeff", () => {
+    expect(isHiddenFromFounder(inbox("jeff", "jeff"), "jeff")).toBe(false);
+    expect(isHiddenFromFounder(inbox(null, "shared"), "jeff")).toBe(false);
+    expect(isHiddenFromFounder(inbox(null, "agent-only"), "jeff")).toBe(false);
+    expect(isHiddenFromFounder(inbox(null, undefined), "jeff")).toBe(false);
+  });
+
+  it("never hides a thread without an inbox", () => {
+    expect(isHiddenFromFounder(undefined, "jeff")).toBe(false);
+    expect(isHiddenFromFounder(null, "jeff")).toBe(false);
+    expect(isHiddenFromFounder({}, "jeff")).toBe(false);
+  });
+
+  it("hides nothing from Kameron, so Jeff's private threads stay in his lists", () => {
+    for (const entry of [
+      inbox("jeff", "jeff"),
+      inbox("kameron", "kameron"),
+      inbox("kameron", "agent-only"),
+      inbox("jeff", undefined),
+      inbox(null, "shared"),
+    ]) {
+      expect(isHiddenFromFounder(entry, "kameron")).toBe(false);
+    }
+  });
+
+  it("hides nothing from a client without a founder", () => {
+    expect(isHiddenFromFounder(inbox("kameron", "kameron"), undefined)).toBe(false);
+    expect(isHiddenFromFounder(inbox("kameron", "kameron"), null)).toBe(false);
   });
 });
