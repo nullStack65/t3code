@@ -2002,7 +2002,7 @@ const deliveryHarness = Effect.fn("deliveryHarness")(function* (
         (event) =>
           event.type === "run.updated" &&
           event.payload.id === turnInput.runId &&
-          event.payload.status === "waiting",
+          event.payload.status === "completed",
       );
       yield* Queue.offer(harness.events, {
         type: "provider_turn.updated",

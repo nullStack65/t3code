@@ -100,6 +100,7 @@ import {
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
   DEFAULT_DELEGATION_NUDGE_THRESHOLDS,
+  DEFAULT_MODEL_BY_PROVIDER,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -2963,12 +2964,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
         ? settings.providerInstances[queuedRun.providerInstanceId]
         : undefined;
-      // An instance this machine never configured is not disabled: upstream's rule, which also
-      // covers the built-ins the release line once enabled by name.
+      // A built-in driver's default instance needs no settings entry (upstream's rule). A custom
+      // instance this machine no longer configures is gone, so its queued runs are held.
       const instanceDisabledForProject =
         projectOverride !== undefined
           ? !projectOverride
-          : machineInstance !== undefined && !resolveProviderInstanceEnabled(machineInstance);
+          : machineInstance !== undefined
+            ? !resolveProviderInstanceEnabled(machineInstance)
+            : !Object.hasOwn(DEFAULT_MODEL_BY_PROVIDER, queuedRun.providerInstanceId);
       const providerFailed =
         failure !== undefined &&
         failure !== null &&
