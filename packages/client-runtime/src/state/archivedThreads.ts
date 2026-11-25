@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  type Founder,
   type OrchestrationV2ArchivedShellSnapshot,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -56,6 +57,8 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
   readonly liveThreadRefsAtom: Atom.Atom<ReadonlyArray<ScopedThreadRef>>;
   /** Whether any connected environment hides tags, including ones outside this archive's scope. */
   readonly anyEnvironmentHidingAtom: Atom.Atom<boolean>;
+  /** The founder reading this client, whose lists leave out the other founder's private threads. */
+  readonly viewerFounderAtom?: Atom.Atom<Founder | null>;
   readonly labelPrefix: string;
 }) {
   return Atom.family((environmentKey: string) =>
@@ -93,6 +96,7 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
         get(options.hiddenThreadKeysAtom),
         hidingAnywhere ? new Set(get(options.liveThreadRefsAtom).map(threadKey)) : undefined,
         hidingAnywhere,
+        options.viewerFounderAtom === undefined ? null : get(options.viewerFounderAtom),
       );
       if (hidden.size === 0) return { snapshots, error, isLoading };
       return {

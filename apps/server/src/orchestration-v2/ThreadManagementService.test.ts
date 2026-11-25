@@ -1,4 +1,4 @@
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
@@ -11,9 +11,11 @@ import {
   ProviderSessionId,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderInstanceId,
   RunId,
+  ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -38,6 +40,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { withRedirectLedger } from "./testkit/RedirectLedger.ts";
 import type { ServerProvider } from "@t3tools/contracts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
@@ -315,6 +318,7 @@ it.effect.each([
     Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
     Layer.provide(
       Layer.mock(Orchestrator.OrchestratorV2)({
+        getThreadShell: () => Effect.succeed(null),
         getThreadRecords: () =>
           Effect.succeed({
             thread: {
@@ -1407,3 +1411,116 @@ it.effect(
       }).pipe(Effect.provide(layerTest));
     }),
 );
+
+describe("sendToThread to a retired thread", () => {
+  const projectId = ProjectId.make("project:thread-management:retired");
+  const retired = ThreadId.make("thread:thread-management:retired");
+  const middle = ThreadId.make("thread:thread-management:retired-middle");
+  const live = ThreadId.make("thread:thread-management:retired-live");
+  const shells = new Map<ThreadId, { projectId: ProjectId; replacedByThreadId: ThreadId | null }>([
+    [retired, { projectId, replacedByThreadId: middle }],
+    [middle, { projectId, replacedByThreadId: live }],
+    [live, { projectId, replacedByThreadId: null }],
+  ]);
+
+  const run = (input: {
+    readonly scheduledTaskId?: ScheduledTaskId;
+    readonly senderThreadId?: ThreadId;
+  }) =>
+    withRedirectLedger((ledger) =>
+      Effect.gen(function* () {
+        const dispatched: Array<{ type: string; threadId: string }> = [];
+        const layerTest = ThreadManagementService.layer.pipe(
+          Layer.provide(ProviderRegistryMock.layer()),
+          Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+          Layer.provide(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              getThreadShell: (threadId) =>
+                Effect.succeed(
+                  (shells.get(threadId) as unknown as OrchestrationV2ThreadShell | undefined) ??
+                    null,
+                ),
+              getThreadRecords: (threadId) =>
+                Effect.succeed({
+                  thread: {
+                    id: threadId,
+                    projectId,
+                    deletedAt: null,
+                    archivedAt: null,
+                    worktreePath: null,
+                    branch: null,
+                    modelSelection: {
+                      instanceId: ProviderInstanceId.make("codex"),
+                      model: "test",
+                    },
+                  },
+                  runs: [],
+                  providerTurns: [],
+                  messages: [],
+                  turnItems: [],
+                } as unknown as OrchestrationV2ThreadProjection),
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  dispatched.push({ type: command.type, threadId: (command as never)["threadId"] });
+                  return { sequence: 1, storedEvents: [] } as never;
+                }),
+            }),
+          ),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(layerReceiptsTest),
+        );
+        const threads = yield* ThreadManagementService.ThreadManagementService.pipe(
+          Effect.provide(layerTest),
+        );
+        yield* Effect.flip(
+          threads.sendToThread({
+            projectId,
+            threadId: retired,
+            commandId: CommandId.make("command:thread-management:retired"),
+            messageId: MessageId.make("message:thread-management:retired"),
+            text: "Secret message body that never reaches the ledger.",
+            attachments: [],
+            mode: "auto",
+            createdBy: "agent",
+            creationSource: "mcp",
+            ...input,
+          }),
+        );
+        return { dispatched, records: yield* ledger.records };
+      }),
+    );
+
+  it.effect("delivers a thread_send to the live replacement and records the redirect", () =>
+    Effect.gen(function* () {
+      const caller = ThreadId.make("thread:thread-management:caller");
+      const { dispatched, records } = yield* run({ senderThreadId: caller });
+      // The retired thread takes no command at all; the live end of the chain takes the message.
+      expect(dispatched.map((command) => command.threadId)).toEqual([live]);
+      expect(dispatched[0]?.type).toBe("message.dispatch");
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        retiredThreadId: retired,
+        redirectedToThreadId: live,
+        sourceKind: "thread_send",
+        callerThreadId: caller,
+        hopCount: 2,
+      });
+      expect(JSON.stringify(records)).not.toContain("Secret message body");
+    }),
+  );
+
+  it.effect("delivers a scheduled wake to the live replacement and records the task", () =>
+    Effect.gen(function* () {
+      const { dispatched, records } = yield* run({
+        scheduledTaskId: ScheduledTaskId.make("task:nightly"),
+      });
+      expect(dispatched.map((command) => command.threadId)).toEqual([live]);
+      expect(records[0]).toMatchObject({
+        retiredThreadId: retired,
+        redirectedToThreadId: live,
+        sourceKind: "schedule",
+        taskId: "task:nightly",
+      });
+    }),
+  );
+});

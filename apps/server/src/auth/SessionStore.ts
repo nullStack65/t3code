@@ -425,6 +425,8 @@ export class SessionStore extends Context.Service<
     readonly legacyCookieName: string | undefined;
     readonly issue: (input?: {
       readonly ttl?: Duration.Duration;
+      readonly expiresAt?: DateTime.Utc;
+      readonly founder?: Founder;
       readonly subject?: string;
       readonly method?: ServerAuthSessionMethod;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
@@ -434,8 +436,6 @@ export class SessionStore extends Context.Service<
       readonly peerLink?: boolean;
       readonly replaceActiveForSubjectAndMethod?: boolean;
       readonly replaceSessionId?: AuthSessionId;
-      /** The founder the client's pairing code enrolled. */
-      readonly founder?: Founder;
       /** Keeps the session alive this long past each renewal; `ttl` then bounds only the token. */
       readonly renewalWindow?: Duration.Duration;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
@@ -778,9 +778,11 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
       );
       const issuedAt = yield* DateTime.now;
-      const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
-      });
+      const expiresAt =
+        input?.expiresAt ??
+        DateTime.add(issuedAt, {
+          milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+        });
       const sessionExpiresAt = input?.renewalWindow
         ? DateTime.add(issuedAt, { milliseconds: Duration.toMillis(input.renewalWindow) })
         : expiresAt;

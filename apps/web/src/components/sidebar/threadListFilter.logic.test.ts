@@ -366,7 +366,7 @@ describe("thread list filter", () => {
   });
 });
 
-describe("standing bots stay listed for both founders", () => {
+describe("standing bots bypass the inbox and From checkboxes", () => {
   const persona = { name: "Infra" };
   const stuck = {
     environmentId: crown,
@@ -388,14 +388,25 @@ describe("standing bots stay listed for both founders", () => {
     },
   };
 
-  it("lists a background standing bot when Agents is unchecked, for either founder", () => {
-    for (const owner of ["kameron", "jeff"] as const) {
-      const filter = {
-        ...threadListFilterOf({ founderInboxOwner: owner }),
-        inboxes: [owner] as const,
-      };
-      expect(matchesThreadListFilter(stuck, filter, "unknown")).toBe(true);
-    }
+  it("lists a Kameron-audience background standing bot for Kameron, never for Jeff", () => {
+    const kameronFilter = {
+      ...threadListFilterOf({ founderInboxOwner: "kameron" }),
+      inboxes: ["kameron"] as const,
+    };
+    expect(matchesThreadListFilter(stuck, kameronFilter, "unknown")).toBe(true);
+    const jeffFilter = {
+      ...threadListFilterOf({ founderInboxOwner: "jeff" }),
+      inboxes: ["jeff"] as const,
+    };
+    expect(matchesThreadListFilter(stuck, jeffFilter, "unknown")).toBe(false);
+    // Even with every inbox checked, Kameron's private bot stays out of Jeff's list.
+    expect(
+      matchesThreadListFilter(
+        stuck,
+        { ...jeffFilter, inboxes: ["kameron", "jeff", "shared", "agents"] },
+        "unknown",
+      ),
+    ).toBe(false);
     expect(
       matchesThreadListFilter(
         stuck,
@@ -407,21 +418,26 @@ describe("standing bots stay listed for both founders", () => {
         "unknown",
       ),
     ).toBe(false);
-    const jeffWithoutAgents = {
-      ...threadListFilterOf({ founderInboxOwner: "jeff" }),
-      inboxes: ["jeff", "shared"] as const,
+    const kameronWithoutAgents = {
+      ...threadListFilterOf({ founderInboxOwner: "kameron" }),
+      inboxes: ["kameron", "shared"] as const,
     };
     // Background attention files the lane under Agents, so unchecking Agents hides it.
-    expect(matchesThreadListFilter({ ...stuck, standing: null }, jeffWithoutAgents)).toBe(false);
-    expect(matchesThreadListFilter(stuck, jeffWithoutAgents, "unknown")).toBe(true);
+    expect(matchesThreadListFilter({ ...stuck, standing: null }, kameronWithoutAgents)).toBe(false);
+    expect(matchesThreadListFilter(stuck, kameronWithoutAgents, "unknown")).toBe(true);
   });
 
   it("counts a running remote standing bot even when its inbox is unchecked", () => {
     const counts = threadListFilterCounts(
       [stuck],
-      { inboxes: ["jeff"], hiddenEnvironmentIds: [], hiddenAttributions: ["unknown"] },
+      {
+        inboxes: ["jeff"],
+        hiddenEnvironmentIds: [],
+        hiddenAttributions: ["unknown"],
+        viewingFounder: "kameron",
+      },
       () => "unknown",
-      "jeff",
+      "kameron",
     );
     expect(counts.environments.get(crown)).toEqual({
       working: 1,
@@ -429,6 +445,65 @@ describe("standing bots stay listed for both founders", () => {
       needsMe: 0,
       settled: 0,
     });
+  });
+});
+
+describe("counts for an asymmetric founder view", () => {
+  const filterOf = (viewingFounder: "kameron" | "jeff") => ({
+    inboxes: ["kameron", "jeff", "shared", "agents"] as const,
+    hiddenEnvironmentIds: [],
+    hiddenAttributions: [],
+    viewingFounder,
+  });
+  const running = { runtime: { status: "running" } };
+  const entries = [
+    { ...thread(crown, kameron), ...running },
+    { ...thread(crown, jeff), ...running },
+    {
+      environmentId: crown,
+      ...running,
+      source: {
+        inbox: makeThreadInbox({
+          actor: kameron,
+          routing: { owner: "kameron", audience: "agent-only", attentionKind: "background" },
+        }),
+      },
+    },
+  ];
+  const total = (counts: ReturnType<typeof threadListFilterCounts>) =>
+    Object.values(counts.environments.get(crown) ?? {}).reduce((sum, n) => sum + n, 0);
+
+  it("leaves Kameron's private threads out of Jeff's counts", () => {
+    const counts = threadListFilterCounts(entries, filterOf("jeff"), () => "unknown", "jeff");
+    expect(total(counts)).toBe(1);
+    expect(counts.inboxes.get("kameron")).toBeUndefined();
+    expect(counts.inboxes.get("jeff")).toBeDefined();
+  });
+
+  it("keeps every thread in Kameron's counts", () => {
+    const counts = threadListFilterCounts(entries, filterOf("kameron"), () => "unknown", "kameron");
+    expect(total(counts)).toBe(3);
+  });
+
+  it("leaves Kameron's older settled groups out of Jeff's counts", () => {
+    const group = (inbox: "kameron" | "jeff") => ({
+      environmentId: crown,
+      inbox,
+      agentCreated: false,
+      attribution: "unknown" as const,
+      count: 4,
+    });
+    const groups = [group("kameron"), group("jeff")];
+    const forJeff = threadListFilterCounts([], filterOf("jeff"), () => "unknown", "jeff", groups);
+    const forKameron = threadListFilterCounts(
+      [],
+      filterOf("kameron"),
+      () => "unknown",
+      "kameron",
+      groups,
+    );
+    expect(forJeff.environments.get(crown)?.settled).toBe(4);
+    expect(forKameron.environments.get(crown)?.settled).toBe(8);
   });
 });
 

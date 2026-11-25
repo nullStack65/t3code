@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -6,8 +7,6 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { unsetInheritedGitRepositoryEnv } from "@t3tools/shared/testing/gitRepositoryEnv";
 
 class ReplayFixtureGitCommandError extends Schema.TaggedError<ReplayFixtureGitCommandError>()(
   "ReplayFixtureGitCommandError",
@@ -25,6 +24,30 @@ class ReplayFixtureGitCommandError extends Schema.TaggedError<ReplayFixtureGitCo
 // be writing into `.git` when a test removes the workspace (ENOTEMPTY).
 const NO_BACKGROUND_MAINTENANCE = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
 
+const REPLAY_GIT_CONFIG: ReadonlyArray<readonly [key: string, value: string]> = [
+  ["core.autocrlf", "false"],
+  ["core.filemode", "false"],
+  ["core.longpaths", "true"],
+  ["commit.gpgsign", "false"],
+  ["tag.gpgsign", "false"],
+  ["init.defaultBranch", "main"],
+];
+
+function cleanGitEnv(inherited: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  return {
+    ...Object.fromEntries(
+      Object.entries(inherited).filter(([name]) => !name.toUpperCase().startsWith("GIT_")),
+    ),
+    GIT_CONFIG_COUNT: String(REPLAY_GIT_CONFIG.length),
+    ...Object.fromEntries(
+      REPLAY_GIT_CONFIG.flatMap(([key, value], index) => [
+        [`GIT_CONFIG_KEY_${index}`, key],
+        [`GIT_CONFIG_VALUE_${index}`, value],
+      ]),
+    ),
+  };
+}
+
 function runGit(
   cwd: string,
   args: ReadonlyArray<string>,
@@ -35,12 +58,12 @@ function runGit(
 > {
   return Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const env = unsetInheritedGitRepositoryEnv(process.env, yield* HostProcess.Platform);
+    const inherited = yield* HostProcess.Environment;
     const exitCode = yield* spawner.exitCode(
       ChildProcess.make("git", [...NO_BACKGROUND_MAINTENANCE, ...args], {
         cwd,
-        env,
-        extendEnv: true,
+        env: cleanGitEnv(inherited),
+        extendEnv: false,
       }),
     );
     if (Number(exitCode) !== 0) {

@@ -607,6 +607,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
   standing: Schema.optional(StoredThreadStanding),
   /** Opt-in reminder to delegate once the thread does work itself; absent or null is off. */
   delegationNudge: Schema.optional(StoredThreadDelegationNudge),
+  /**
+   * Retirement tombstone. When set, the thread is retired: no wake may start a provider turn on it,
+   * and every wake aimed at it is redirected to this thread (following its own chain).
+   */
+  replacedByThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  /** When the tombstone was written; absent or null on a live thread. */
+  retiredAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2827,6 +2834,9 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   standing: Schema.optional(StoredThreadStanding),
   /** Opt-in reminder to delegate; absent or null is off. */
   delegationNudge: Schema.optional(StoredThreadDelegationNudge),
+  /** Retirement tombstone; see the app thread. */
+  replacedByThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  retiredAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   /** Per-founder read cursors. Older servers omit them; clients then keep the shared cursor. */
   visitsByFounder: Schema.optional(FounderVisits),
@@ -3019,6 +3029,7 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  retiredAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -3495,6 +3506,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  retiredAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   visitsByFounder: Schema.optional(FounderVisitsJson),
   titleRegeneration: Schema.optional(
@@ -3919,6 +3931,8 @@ export const OrchestrationV2Command = Schema.Union([
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request; absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+    /** Retire the thread behind this replacement (stamps `retiredAt`), or null to clear the tombstone. */
+    replacedByThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),

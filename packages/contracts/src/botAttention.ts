@@ -23,13 +23,34 @@ const JOINT_SIGN_OFF_FOUNDERS: readonly Founder[] = Founder.literals;
 /** How much of a message is scanned for an @-mention. The shell stores the names, not the text. */
 export const ATTENTION_MENTION_TEXT_LIMIT = 2000;
 
-const FOUNDER_MENTION = /@(kameron|jeff)\b/gi;
+// The lookbehind keeps an address such as `ops@jeff.example` from being read as a ping.
+const FOUNDER_MENTION = /(?<![\w.+-])@(kameron|jeff)\b/gi;
 
-/** The founders an @-mention names. `@jefferson` is not Jeff. */
+/**
+ * What is not prose, per CommonMark: a fenced block, a `>` quoted line, or an inline code span.
+ * - A fence is 3+ backticks or tildes. A backtick fence's info string holds no backtick, so
+ *   ```` ```@kameron``` ```` on one line is a code span, not a fence. The closing fence repeats the
+ *   opener's character at least as many times and has only trailing whitespace. An unterminated
+ *   fence runs to the end.
+ * - A code span opens on a run of N backticks and closes on the next run of exactly N, so
+ *   ``` ``use `x` @jeff`` ``` is one span and a lone ``` `` ``` closes nothing.
+ */
+const NON_PING_TEXT =
+  /^[ \t]*(`{3,})[^`\n]*$(?:\n[\s\S]*?^[ \t]*\1`*[ \t]*$|[\s\S]*)|^[ \t]*(~{3,})[^\n]*(?:\n[\s\S]*?^[ \t]*\2~*[ \t]*$|[\s\S]*)|^[ \t]*>.*$|(?<!`)(`+)(?!`)[^\n]*?(?<!`)\3(?!`)/gm;
+
+/**
+ * A founder is pinged only by prose written at them. Logs, code and quotes that merely contain an
+ * `@kameron` are incidental, so they must not light the bright pill.
+ */
+function pingableText(text: string): string {
+  return text.replace(NON_PING_TEXT, " ");
+}
+
+/** The founders an @-mention names. `@jefferson` is not Jeff. Code, quoted lines and emails do not count. */
 export function mentionedFounders(text: string | null | undefined): ReadonlyArray<Founder> {
   if (!text) return [];
   const found = new Set<Founder>();
-  for (const match of text.matchAll(FOUNDER_MENTION)) {
+  for (const match of pingableText(text).matchAll(FOUNDER_MENTION)) {
     const name = match[1]?.toLowerCase();
     if (name === "kameron" || name === "jeff") found.add(name);
   }
@@ -63,8 +84,14 @@ export function resolveBotAttention(input: {
   if (ask !== undefined) {
     return { kind: "badge", label: decisionBadgeLabel(ask.kind) };
   }
+  // Agent-only work is not on a founder's plate, so a name in its text never badges. Only a real
+  // decision request (above) can.
   const mentioned =
-    input.mentioned !== undefined ? input.mentioned : mentionedFounders(input.latestText);
+    input.inbox?.audience === "agent-only"
+      ? []
+      : input.mentioned !== undefined
+        ? input.mentioned
+        : mentionedFounders(input.latestText);
   if (mentioned.length > 0) {
     return { kind: "badge", label: mentionBadgeLabel(mentioned) };
   }

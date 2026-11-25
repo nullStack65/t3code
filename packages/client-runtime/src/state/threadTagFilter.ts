@@ -1,5 +1,7 @@
 import {
   type EnvironmentId,
+  type Founder,
+  isHiddenFromFounder,
   isListedThreadLineage,
   type OrchestrationV2ThreadShell,
   type ScopedThreadRef,
@@ -10,7 +12,7 @@ import { threadKey } from "./entities.ts";
 
 type FilterableThread = Pick<
   OrchestrationV2ThreadShell,
-  "id" | "lineage" | "tags" | "delegatedFrom"
+  "id" | "lineage" | "tags" | "delegatedFrom" | "inbox"
 >;
 
 export interface TagFilteredEnvironment {
@@ -63,18 +65,18 @@ function hasHiddenTag(
 }
 
 /**
- * Keys of threads the tag filter hides. Children (subagents, side chats, delegated tasks) follow
- * their parent; while any environment hides tags, a child whose parent is not loaded stays hidden.
- * For a partial list such as an archive page, `alreadyHidden` and `loadedElsewhere` give the
- * hidden and loaded keys of live threads, and `hidingAnywhere` the global flag.
+ * Keys of threads the tag filter hides. Children follow their parent; while any environment hides
+ * tags, a child whose parent is not loaded stays hidden. `alreadyHidden`, `loadedElsewhere` and
+ * `hidingAnywhere` judge an archive page. A `viewer` also hides the other founder's private threads.
  */
 export function hiddenThreadKeys(
   environments: ReadonlyArray<TagFilteredEnvironment>,
   alreadyHidden: ReadonlySet<string> = NO_HIDDEN_THREADS,
   loadedElsewhere: ReadonlySet<string> = NO_HIDDEN_THREADS,
   hidingAnywhere: boolean = environments.some((environment) => environment.hiddenTags !== null),
+  viewer: Founder | null = null,
 ): ReadonlySet<string> {
-  if (alreadyHidden.size === 0 && !hidingAnywhere) return NO_HIDDEN_THREADS;
+  if (alreadyHidden.size === 0 && !hidingAnywhere && viewer !== "jeff") return NO_HIDDEN_THREADS;
   const byKey = new Map<
     string,
     { thread: FilterableThread; environment: TagFilteredEnvironment }
@@ -99,21 +101,24 @@ export function hiddenThreadKeys(
     const followsParent =
       parentKey !== null && (byKey.has(parentKey) || alreadyHidden.has(parentKey));
     if (parentKey !== null && !followsParent && loadedElsewhere.has(parentKey)) {
-      hiddenByKey.set(key, false);
-      return false;
+      const hidden = isHiddenFromFounder(thread.inbox, viewer);
+      hiddenByKey.set(key, hidden);
+      return hidden;
     }
     if (parentKey !== null && !followsParent && hidingAnywhere) {
       hiddenByKey.set(key, true);
       return true;
     }
     if (!followsParent) {
-      const hidden = hasHiddenTag(thread.tags, environment.hiddenTags);
+      const hidden =
+        hasHiddenTag(thread.tags, environment.hiddenTags) ||
+        isHiddenFromFounder(thread.inbox, viewer);
       hiddenByKey.set(key, hidden);
       return hidden;
     }
     // Seed before following the parent so a malformed cycle ends visible.
     hiddenByKey.set(key, false);
-    const hidden = isHidden(parentKey);
+    const hidden = isHiddenFromFounder(thread.inbox, viewer) || isHidden(parentKey);
     hiddenByKey.set(key, hidden);
     return hidden;
   };

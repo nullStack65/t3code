@@ -1,5 +1,5 @@
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import { BACKGROUND_WAIT_STALE_MINUTES } from "@t3tools/contracts";
+import { BACKGROUND_WAIT_STALE_MINUTES, ThreadRedirectError } from "@t3tools/contracts";
 import { staleTimeoutMs } from "./waitStaleness.ts";
 import type {
   OrchestrationV2SearchThreadInput,
@@ -74,6 +74,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import { resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
@@ -455,6 +456,7 @@ export const ThreadManagementError = Schema.Union([
   ThreadManagementDurableRunProjectionError,
   ThreadManagementProviderInstanceDisabledError,
   ThreadManagementWorktreeRestoreError,
+  ThreadRedirectError,
 ]);
 export type ThreadManagementError = typeof ThreadManagementError.Type;
 
@@ -1062,6 +1064,29 @@ const make = Effect.gen(function* () {
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
   )(function* (input) {
+    // A retired thread never takes a turn: the send goes to its replacement, which is read and
+    // steered or queued on its own runs. The ledger records one hit for the redirect.
+    const wake = yield* resolveWakeTarget(
+      (threadId) => orchestrator.getThreadShell(threadId),
+      input.threadId,
+      input.scheduledTaskId === undefined
+        ? { sourceKind: "thread_send", callerThreadId: input.senderThreadId }
+        : { sourceKind: "schedule", taskId: input.scheduledTaskId },
+    );
+    if (wake.redirected) {
+      const replacement = yield* orchestrator.getThreadShell(wake.threadId);
+      if (replacement === null) {
+        return yield* new ThreadManagementThreadNotFoundError({
+          projectId: input.projectId,
+          threadId: wake.threadId,
+        });
+      }
+      return yield* sendToThread({
+        ...input,
+        projectId: replacement.projectId,
+        threadId: wake.threadId,
+      });
+    }
     const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
     if (target.thread.archivedAt !== null) {
       return yield* new ThreadManagementThreadArchivedError({

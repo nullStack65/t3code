@@ -1,3 +1,6 @@
+import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
+import { prepareSubscribe } from "./eventSubscription.ts";
+import { withRedirectLedger } from "./testkit/RedirectLedger.ts";
 import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import { makeThreadInbox } from "@t3tools/contracts";
 import * as HttpClient from "effect/http/HttpClient";
@@ -7024,6 +7027,225 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("redirects a pull request watch wake from a retired thread to its replacement", () =>
+    withRedirectLedger((ledger) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const retiredId = ThreadId.make("runtime-pull-request-watch-retired");
+        const liveId = ThreadId.make("runtime-pull-request-watch-replacement");
+        const projectId = ProjectId.make("pr-watch-retired-project");
+        yield* seedProject({
+          projectId,
+          title: "Watch retired",
+          workspaceRoot: "/workspace/watch-retired",
+          defaultModelSelection: null,
+          createdAt: "2026-10-01T00:00:00.000Z",
+        });
+        for (const id of [retiredId, liveId]) {
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`pr-watch-retired-create-${id}`),
+            threadId: id,
+            projectId,
+            title: id,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+        }
+        const prUrl = "https://github.com/pingdotgg/t3code/pull/31";
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make("pr-watch-retired-start"),
+          threadId: retiredId,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 31,
+          watching: true,
+          link: { url: prUrl, source: "agent" },
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("pr-watch-retired-tombstone"),
+          threadId: retiredId,
+          replacedByThreadId: liveId,
+        });
+
+        let status: "pending" | "success" = "pending";
+        const host = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(PullRequestService.PullRequestService)({
+            detail: () =>
+              Effect.sync(() => ({
+                ...watchedPullRequestDetail({
+                  projectId,
+                  number: 31,
+                  at: "2026-10-02T12:00:00.000Z",
+                }),
+                headSha: "retired31aaa",
+                checks: [{ name: "test", status, description: null, url: null, required: true }],
+              })),
+            activity: () =>
+              Effect.succeed({
+                comments: [],
+                commentCount: 0,
+                commentsTruncated: false,
+                reviewThreads: [],
+                commits: [],
+              }),
+          }),
+        );
+        const summaries = (threadId: ThreadId) =>
+          Effect.map(orchestrator.getThreadRecords(threadId, ["messages"]), ({ messages }) =>
+            messages.flatMap((message) => message.notification?.summary ?? []),
+          );
+
+        const reactor = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+        yield* reactor.sweep;
+        yield* worker.drain();
+        status = "success";
+        yield* TestClock.adjust("10 minutes");
+        yield* reactor.sweep;
+        yield* worker.drain();
+
+        assert.deepEqual(yield* summaries(liveId), ["#31: checks passed"]);
+        // The retired thread took no message and no run.
+        const retired = yield* orchestrator.getThreadRecords(retiredId, ["messages", "runs"]);
+        assert.lengthOf(retired.messages, 0);
+        assert.lengthOf(retired.runs, 0);
+
+        const records = yield* ledger.records;
+        assert.isAtLeast(records.length, 1);
+        for (const record of records) {
+          assert.equal(record.sourceKind, "pr_watch");
+          assert.equal(record.retiredThreadId, retiredId);
+          assert.equal(record.redirectedToThreadId, liveId);
+          assert.equal(record.prUrl, prUrl);
+        }
+      }),
+    ),
+  );
+
+  it.effect("redirects a pull request event subscription wake from a retired thread", () =>
+    withRedirectLedger((ledger) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const retiredId = ThreadId.make("runtime-pr-event-retired");
+        const liveId = ThreadId.make("runtime-pr-event-replacement");
+        const projectId = ProjectId.make("pr-event-retired-project");
+        yield* seedProject({
+          projectId,
+          title: "Event retired",
+          workspaceRoot: "/workspace/event-retired",
+          defaultModelSelection: null,
+          createdAt: "2026-10-01T00:00:00.000Z",
+        });
+        for (const id of [retiredId, liveId]) {
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`pr-event-create-${id}`),
+            threadId: id,
+            projectId,
+            title: id,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+        }
+        const prUrl = "https://github.com/pingdotgg/t3code/pull/32";
+        const prepared = prepareSubscribe({
+          id: "evt_retired_1",
+          subscriberThreadId: retiredId,
+          selector: { entity: "pull_request", by: "url", url: prUrl },
+          events: [{ name: "merged" }],
+          createdAt: "2026-10-02T11:00:00.000Z",
+        });
+        assert.isTrue(prepared.ok);
+        if (!prepared.ok) return;
+        // The subscription table lives in its own in-memory database, shared by the put and the reactor.
+        const store = yield* EventSubscriptionStore.EventSubscriptionStore.pipe(
+          Effect.provide(
+            EventSubscriptionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        );
+        yield* store.put(prepared.subscription);
+        // The subscription rides on the thread's pull request watch.
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make("pr-event-watch"),
+          threadId: retiredId,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 32,
+          watching: true,
+          link: { url: prUrl, source: "agent" },
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("pr-event-tombstone"),
+          threadId: retiredId,
+          replacedByThreadId: liveId,
+        });
+
+        const host = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.succeed(EventSubscriptionStore.EventSubscriptionStore, store),
+          Layer.mock(PullRequestService.PullRequestService)({
+            detail: () =>
+              Effect.succeed({
+                ...watchedPullRequestDetail({
+                  projectId,
+                  number: 32,
+                  at: "2026-10-02T12:00:00.000Z",
+                }),
+                state: "merged" as const,
+                mergedAt: "2026-10-02T12:00:00.000Z",
+              }),
+            activity: () =>
+              Effect.succeed({
+                comments: [],
+                commentCount: 0,
+                commentsTruncated: false,
+                reviewThreads: [],
+                commits: [],
+              }),
+          }),
+        );
+        const reactor = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+        yield* reactor.sweep;
+        yield* worker.drain();
+
+        const delivered = yield* orchestrator.getThreadRecords(liveId, ["messages"]);
+        assert.isAtLeast(delivered.messages.length, 1);
+        const retired = yield* orchestrator.getThreadRecords(retiredId, ["messages", "runs"]);
+        assert.lengthOf(retired.messages, 0);
+        assert.lengthOf(retired.runs, 0);
+
+        const records = yield* ledger.records;
+        assert.isAtLeast(records.length, 1);
+        for (const record of records) {
+          assert.equal(record.sourceKind, "event");
+          assert.equal(record.subscriptionId, "evt_retired_1");
+          assert.equal(record.retiredThreadId, retiredId);
+          assert.equal(record.redirectedToThreadId, liveId);
+          assert.equal(record.prUrl, prUrl);
+        }
+      }),
+    ),
+  );
+
   it.effect.each(["pending", "action-required"] as const)("recovers %s watches", (initialStatus) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -7576,6 +7798,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           // that subscribes late misses none.
           Layer.mock(Orchestrator.OrchestratorV2)({
             dispatch: orchestrator.dispatch,
+            getThreadShell: orchestrator.getThreadShell,
             streamDomainEvents: Stream.fromPubSub(domainEvents),
           }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({

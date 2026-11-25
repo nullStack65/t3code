@@ -324,7 +324,9 @@ async function bootstrapServerAuth(urlCredential: string | null): Promise<Server
     return { status: "authenticated" };
   }
 
-  const bootstrapCredential = urlCredential ?? getDesktopBootstrapCredential();
+  const bootstrapCredential =
+    urlCredential ??
+    (currentSession.auth.workOsGoogleSignIn ? null : getDesktopBootstrapCredential());
   if (!bootstrapCredential) {
     return {
       status: "requires-auth",

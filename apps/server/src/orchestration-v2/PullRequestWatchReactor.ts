@@ -8,8 +8,8 @@ import {
   type PullRequestDetail,
   type PullRequestRef,
   type PullRequestThreadCommentsResult,
-  type ThreadPullRequestLink,
   type ThreadId,
+  type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
 } from "@t3tools/contracts";
 import { commandIndicatesFailure } from "@t3tools/shared/toolOutput";
@@ -64,6 +64,7 @@ import {
   withCursor,
 } from "./eventSubscription.ts";
 import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
+import { resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 import type { EventSubscription } from "@t3tools/contracts";
 
 /** Checks take minutes; faster sweeps waste the account's shared host quota. */
@@ -126,6 +127,8 @@ interface Wake {
   readonly notification: OrchestrationV2Notification;
   readonly includesRemarks?: boolean;
   readonly staleProgressAt?: string;
+  /** Set when an event subscription row, not the plain watch, produced this wake. */
+  readonly subscriptionId?: string;
 }
 
 /** A wake a pass holds back so each thread gets one for everything the pass found. */
@@ -358,7 +361,8 @@ export const make = Effect.gen(function* () {
     endedWatch?: ThreadPullRequestWatch,
   ) {
     const uuid = yield* random.uuidV4();
-    return yield* engine.dispatch({
+    const route = wake === undefined ? undefined : yield* routeWake(target, wake);
+    const synced = yield* engine.dispatch({
       type: "thread.pull-request-watch.sync",
       commandId: CommandId.make(`server:pr-watch:${target.thread.id}:${uuid}`),
       threadId: target.thread.id,
@@ -373,17 +377,77 @@ export const make = Effect.gen(function* () {
             ...(wake.staleProgressAt === undefined
               ? {}
               : { staleProgressAt: wake.staleProgressAt }),
-            wake: {
-              text: wake.text,
-              notification: wake.notification,
-              ...(wake.includesRemarks === undefined
-                ? {}
-                : { includesRemarks: wake.includesRemarks }),
-              messageId: MessageId.make(`message:pr-watch:${uuid}`),
-            },
+            // A retired thread's wake is delivered below, so the sync only advances its cursor.
+            ...(route === "here"
+              ? {
+                  wake: {
+                    text: wake.text,
+                    notification: wake.notification,
+                    ...(wake.includesRemarks === undefined
+                      ? {}
+                      : { includesRemarks: wake.includesRemarks }),
+                    messageId: MessageId.make(`message:pr-watch:${uuid}`),
+                  },
+                }
+              : {}),
           }),
     });
+    if (wake !== undefined && route !== undefined && route !== "here" && route !== "dropped") {
+      // Sent after the sync commits, so a watch that ended while it was read sends nothing. The
+      // wake has no pull request stamp: the replacement thread does not watch this pull request.
+      yield* engine
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`server:pr-watch-redirect:${route.threadId}:${uuid}`),
+          threadId: route.threadId,
+          messageId: MessageId.make(`message:pr-watch:${uuid}`),
+          text: wake.text,
+          notification: wake.notification,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("redirected pull request wake was not delivered", {
+              retiredThreadId: target.thread.id,
+              redirectedToThreadId: route.threadId,
+              cause,
+            }),
+          ),
+        );
+    }
+    return synced;
   });
+
+  /**
+   * Where a wake for this watch goes: `here`, or the live replacement of a retired thread. A
+   * retired thread's chain that loops or dead-ends drops the wake (`dropped`) with a warning; it
+   * never starts a turn on the retired thread.
+   */
+  const routeWake = (target: WatchTarget, wake: Wake) =>
+    resolveWakeTarget(
+      (threadId) => engine.getThreadShell(threadId),
+      target.thread.id,
+      wake.subscriptionId === undefined
+        ? { sourceKind: "pr_watch", prUrl: target.link.url }
+        : { sourceKind: "event", subscriptionId: wake.subscriptionId, prUrl: target.link.url },
+    ).pipe(
+      Effect.map((resolved) => (resolved.redirected ? resolved : ("here" as const))),
+      Effect.catchTag("ThreadRedirectError", (error) =>
+        Effect.logWarning("pull request wake dropped: retired thread has no live replacement", {
+          threadId: target.thread.id,
+          reason: error.reason,
+        }).pipe(Effect.as("dropped" as const)),
+      ),
+    );
+
+  const isRetired = (threadId: ThreadId) =>
+    engine.getThreadShell(threadId).pipe(
+      Effect.map((shell) => shell?.replacedByThreadId != null),
+      Effect.orElseSucceed(() => false),
+    );
 
   const giveUp = (target: WatchTarget, cause: Cause.Cause<PullRequestService.PullRequestError>) => {
     const error = Option.getOrUndefined(Cause.findErrorOption(cause));
@@ -578,11 +642,18 @@ export const make = Effect.gen(function* () {
         rest.length === 0
           ? sendOne(first!)
           : // A watch that ended or moved during the pass fails the whole command; each then
-            // goes on its own, as the orchestrator decides for it alone.
-            sendTogether([first!, ...rest]).pipe(
-              Effect.catchCauseIf(
-                (cause) => !Cause.hasInterruptsOnly(cause),
-                () => Effect.forEach([first!, ...rest], sendOne, { discard: true }),
+            // goes on its own, as the orchestrator decides for it alone. A retired thread's
+            // wakes always go one by one, each to the replacement.
+            isRetired(first!.target.thread.id).pipe(
+              Effect.flatMap((retired) =>
+                retired
+                  ? Effect.forEach([first!, ...rest], sendOne, { discard: true })
+                  : sendTogether([first!, ...rest]).pipe(
+                      Effect.catchCauseIf(
+                        (cause) => !Cause.hasInterruptsOnly(cause),
+                        () => Effect.forEach([first!, ...rest], sendOne, { discard: true }),
+                      ),
+                    ),
               ),
             ),
       { discard: true },
@@ -594,6 +665,7 @@ export const make = Effect.gen(function* () {
     target: WatchTarget,
     detail: Pick<PullRequestDetail, "state" | "baseBranch" | "mergeCommitSha" | "mergedBy">,
     pending: readonly string[] = [],
+    subscriptionId?: string,
   ) => {
     const reason = detail.state === "merged" ? "merged" : "closed";
     const message = pullRequestWatchEndMessage({
@@ -608,10 +680,11 @@ export const make = Effect.gen(function* () {
           target,
           next: null,
           // Summaries a subscription was holding go out with the end, so none is lost.
-          wake:
-            pending.length === 0
-              ? message
-              : { ...message, text: [message.text, ...pending].join("\n") },
+          wake: {
+            ...(subscriptionId === undefined ? {} : { subscriptionId }),
+            ...message,
+            ...(pending.length === 0 ? {} : { text: [message.text, ...pending].join("\n") }),
+          },
           reason,
         });
   };
@@ -675,7 +748,13 @@ export const make = Effect.gen(function* () {
   ) {
     const loaded = yield* loadSubscription(target);
     const pending = loaded.mode === "row" ? loaded.row.pendingSummaries : [];
-    yield* finished(groupKey, target, detail, pending);
+    yield* finished(
+      groupKey,
+      target,
+      detail,
+      pending,
+      loaded.mode === "row" ? loaded.row.id : undefined,
+    );
     if (loaded.mode === "row" && loaded.row.delivery.autoExpireOnClose) {
       yield* dropSubscription(loaded.row);
     }
@@ -705,7 +784,13 @@ export const make = Effect.gen(function* () {
       state: cursorOf(subscription),
       terminal: "merged",
     });
-    yield* finished(groupKey, target, detail, decision.action === "wake" ? decision.summaries : []);
+    yield* finished(
+      groupKey,
+      target,
+      detail,
+      decision.action === "wake" ? decision.summaries : [],
+      loaded.mode === "row" ? loaded.row.id : undefined,
+    );
     if (loaded.mode === "row" && decision.expire) yield* dropSubscription(loaded.row);
   });
 
@@ -1007,6 +1092,7 @@ export const make = Effect.gen(function* () {
               summaries: decision.summaries,
             }),
             includesRemarks: decision.includesRemarks,
+            ...(loaded.mode === "row" ? { subscriptionId: loaded.row.id } : {}),
           };
           const endForComments = report.exhausted && decision.includesRemarks;
           yield* hold(

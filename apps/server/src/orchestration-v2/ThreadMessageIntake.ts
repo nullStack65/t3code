@@ -20,6 +20,7 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { modelSelectionFromCommand, refuseUnservedModel } from "../provider/servedModel.ts";
 import { OrchestratorCommandRejectedError } from "./Orchestrator.ts";
+import { resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 
 // These failures precede commitCommand; generic dispatch errors can follow commits and remain ambiguous.
 function dispatchWasNotAccepted(
@@ -38,6 +39,7 @@ function dispatchWasNotAccepted(
     case "OrchestratorRuntimeModeAboveCeilingError":
     case "ThreadManagementProviderInstanceDisabledError":
     case "ThreadManagementWorktreeRestoreError":
+    case "ThreadRedirectError":
       return true;
     default:
       return false;
@@ -126,6 +128,45 @@ export const withQueuedAttachmentsOnSignOutText = Effect.fn(
 });
 
 /**
+ * A message aimed at a retired thread goes to its live replacement instead; the retired thread
+ * takes no turn. Notes, guest messages and continuations of a run on the retired thread stay put,
+ * and the orchestrator then refuses them rather than start a turn there. Steering or restarting
+ * names a run on the retired thread, so on the replacement the message queues.
+ */
+const redirectRetiredMessage = Effect.fn("ThreadMessageIntake.redirectRetiredMessage")(function* (
+  command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+) {
+  if (
+    command.humanNote === true ||
+    command.guestMessageId !== undefined ||
+    command.manualContinuationOfRunId !== undefined ||
+    command.restartContinuationOfRunId !== undefined ||
+    command.usageLimitContinuationOfRunId !== undefined ||
+    command.steerFollowUpOfRunId !== undefined ||
+    command.providerFailover !== undefined
+  ) {
+    return command;
+  }
+  const threads = yield* ThreadManagement.ThreadManagementService;
+  const wake = yield* resolveWakeTarget(
+    (threadId) => threads.getThreadShell(threadId),
+    command.threadId,
+    command.scheduledTaskId === undefined
+      ? { sourceKind: "thread_send", callerThreadId: command.senderThreadId }
+      : { sourceKind: "schedule", taskId: command.scheduledTaskId },
+  );
+  if (!wake.redirected) return command;
+  return {
+    ...command,
+    threadId: wake.threadId,
+    dispatchMode:
+      command.dispatchMode.type === "steer_active" || command.dispatchMode.type === "restart_active"
+        ? ({ type: "queue_after_active" } as const)
+        : command.dispatchMode,
+  };
+});
+
+/**
  * `sender.managesProviders` is whether the caller holds `providers:manage`. RPC authorization
  * has already checked every command whose payload shows a provider sign-out; a queued edit
  * that keeps its attachments is the one case decided here.
@@ -136,7 +177,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
 ) {
   const command =
     incoming.type === "message.dispatch"
-      ? yield* withGuestAttachments(incoming)
+      ? yield* withGuestAttachments(yield* redirectRetiredMessage(incoming))
       : incoming.type === "queued-run.edit" && !sender.managesProviders
         ? yield* withQueuedAttachmentsOnSignOutText(incoming)
         : incoming;

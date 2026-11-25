@@ -52,4 +52,5 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 # With no base found, check:changed falls back to the nearest remote main.
 echo "pre-push: vp run check:changed ${base:-<nearest remote main>}"
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 vp run check:changed ${base:+"$base"}

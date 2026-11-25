@@ -214,7 +214,7 @@ Code:
 
 Connections:
 
-- **settings.connections** — `/settings/connections`, "Environments": "This machine", "Linked environments", "Network access", "Tailscale HTTPS", "T3 Connect", "Load balancing".
+- **settings.connections** — `/settings/connections`, "Environments": "This machine", "Linked environments", "Network access", "Tailscale HTTPS", "T3 Connect", "Load balancing", "Google sign-in" (when configured).
 - **settings.access** — `/settings/access`, "Sharing & access": paired devices, "Guest links", "Require approval for new devices", "Require enrolled founders".
 - **settings.secrets** — `/settings/secrets`, "Secrets" (only when secrets are enabled).
 
@@ -236,7 +236,7 @@ Old links that redirect:
 ## Onboarding, pairing and connect pages
 
 - **onboard.welcome** — `/welcome`, "Welcome": "Set up an agent" (Codex, Claude Code), "Import projects and their threads", "Set up T3 Connect", mobile app pointer.
-- **onboard.pair** — `/pair`, "Pair with this environment": "Paste a one-time token or pairing secret".
+- **onboard.pair** — `/pair`, "Pair with this environment": "Paste a one-time token or pairing secret", "Sign in with Google" (when configured).
 - **onboard.connect** — `/connect`, "Authorization request", "Connecting your terminal": approves a `t3` CLI sign-in through T3 Connect.
 - **onboard.connect-agent** — `/connect-agent`, "Agent sign-in", "Connect <client>": lets an outside agent connect. Reached from the code made by "Use T3 Code in another app (MCP)".
 - **onboard.approve-agent** — `/approve-agent`, "Agent sign-in": "Choose what it may do", "Read only", "Continue", "Deny".
