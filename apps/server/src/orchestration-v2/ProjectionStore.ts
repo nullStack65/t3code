@@ -1779,8 +1779,10 @@ const linkCardStillAsks = (
  * or agent-to-agent digest merely relays text (often about how pings work), so scanning it would
  * light the pill on the recipient bot.
  */
-const isFounderPingSource = (message: { readonly role: string; readonly humanNote?: boolean }) =>
-  message.role === "assistant" || message.humanNote === true;
+const isFounderPingSource = (message: {
+  readonly role: string;
+  readonly humanNote?: boolean | undefined;
+}) => message.role === "assistant" || message.humanNote === true;
 
 const shellAttentionMentions = (text: string | null | undefined) => {
   const attentionMentions = attentionMentionsFromText(text);
