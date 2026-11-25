@@ -28,6 +28,7 @@ import {
   watcherAlertMessage,
 } from "./ModelAlertReactor.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
+import { withRedirectLedger } from "./testkit/RedirectLedger.ts";
 import { alertIsStale, expectsAutoResume, replacedBySibling } from "./UsageLimitIncidents.ts";
 import type { ThreadEventAlert, ThreadEventKind, ThreadFinding } from "./ThreadEventAlerts.ts";
 
@@ -403,6 +404,49 @@ it.effect("forwards a thread event to a watcher on another environment with one 
       type: "queue_after_active",
     });
   }),
+);
+
+it.effect("sends an alert for a retired watcher to its replacement and records the redirect", () =>
+  withRedirectLedger((ledger) =>
+    Effect.gen(function* () {
+      const dispatched: Array<{ threadId: string }> = [];
+      const tombstones: Record<string, string | null> = { old: "new", new: null, loop: "loop" };
+      const deps = {
+        dispatch: (command: { threadId: string }) =>
+          Effect.sync(() => void dispatched.push(command)),
+        call: () => Effect.die("local watcher"),
+        sha256Hex: (identity: string) => Effect.succeed(`digest(${identity.length})`),
+        getThreadShell: (threadId: string) =>
+          Effect.succeed(
+            threadId in tombstones
+              ? {
+                  replacedByThreadId: tombstones[threadId]
+                    ? ThreadId.make(tombstones[threadId])
+                    : null,
+                }
+              : null,
+          ),
+      } as never;
+      const alert = eventAlert(finding("promise-without-wake", "message:1"));
+      const here = EnvironmentId.make("laptop");
+      const watcher = (id: string) => ({ environmentId: here, threadId: ThreadId.make(id) });
+
+      yield* deliverAlertToWatcher(deps, alert, watcher("old"), here);
+      assert.deepEqual(
+        dispatched.map((command) => command.threadId),
+        ["new"],
+      );
+      const records = yield* ledger.records;
+      assert.equal(records.length, 1);
+      assert.equal(records[0]!.sourceKind, "event");
+      assert.equal(records[0]!.retiredThreadId, "old");
+      assert.equal(records[0]!.redirectedToThreadId, "new");
+
+      // A watcher that cannot be resolved drops the alert: nothing is dispatched anywhere.
+      yield* deliverAlertToWatcher(deps, alert, watcher("loop"), here);
+      assert.equal(dispatched.length, 1);
+    }),
+  ),
 );
 
 const limitInput = (

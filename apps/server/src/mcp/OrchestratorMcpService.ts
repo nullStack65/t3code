@@ -1,4 +1,4 @@
-import { BACKGROUND_WAIT_STALE_MINUTES } from "@t3tools/contracts";
+import { BACKGROUND_WAIT_STALE_MINUTES, resolveActiveThreadTargetWith } from "@t3tools/contracts";
 import {
   staleTimeoutMs,
   waitActivityMs,
@@ -276,6 +276,7 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
       return failure("run_not_found", error.message);
     case "ThreadManagementThreadArchivedError":
     case "ThreadManagementWorktreeRestoreError":
+    case "ThreadRedirectError":
       return failure("thread_not_sendable", error.message);
     case "ThreadManagementNoSteerableRunError":
       return failure(
@@ -3619,9 +3620,29 @@ const make = Effect.gen(function* () {
       } satisfies OrchestratorMcpThreadReadResult;
     }),
     sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, input) {
-      const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId, ["runs"]);
-      yield* assertLiveCallerForOtherThread(scope, parent, target);
-      yield* assertTargetWithinLimits(limits, target.thread);
+      const {
+        parent,
+        limits,
+        target: requested,
+      } = yield* loadScopedThread(scope, input.threadId, ["runs"]);
+      yield* assertLiveCallerForOtherThread(scope, parent, requested);
+      yield* assertTargetWithinLimits(limits, requested.thread);
+      // A retired thread forwards the message to its live replacement, so the replacement is the
+      // thread that takes the turn: the caller must reach it and stay within its modes too.
+      const resolved = yield* resolveActiveThreadTargetWith(
+        (id) => threadManagement.getThreadShell(id),
+        input.threadId,
+      ).pipe(Effect.mapError(threadManagementFailure));
+      const target =
+        resolved.hopCount === 0
+          ? requested
+          : parent !== undefined && resolved.threadId === parent.thread.id
+            ? parent
+            : yield* loadTargetThread(scope, resolved.threadId);
+      if (resolved.hopCount > 0) {
+        yield* assertLiveCallerForOtherThread(scope, parent, target);
+        yield* assertTargetWithinLimits(limits, target.thread);
+      }
 
       const mode = input.mode ?? "auto";
       // A message to another thread rides in that thread's next digest unless the sender
@@ -3629,7 +3650,7 @@ const make = Effect.gen(function* () {
       const deliveryClass =
         input.deliveryClass ??
         (input.digestCategory !== undefined ||
-        (parent !== undefined && parent.thread.id !== input.threadId)
+        (parent !== undefined && parent.thread.id !== target.thread.id)
           ? "digest"
           : undefined);
       if (
@@ -3693,8 +3714,10 @@ const make = Effect.gen(function* () {
                 ),
           ),
         );
+      // The thread that took the message: the replacement when the target was retired.
+      const liveThreadId = result.run.threadId ?? target.thread.id;
       if (result.run.status === "queued" && result.run.queueHeld === true) {
-        yield* threadManagement.getThreadRecords(input.threadId, ["runs"]).pipe(
+        yield* threadManagement.getThreadRecords(liveThreadId, ["runs"]).pipe(
           Effect.flatMap(({ thread, runs }) => {
             const failed = latestExecutedRun(runs);
             return thread.worktreePath === null &&
@@ -3704,7 +3727,7 @@ const make = Effect.gen(function* () {
                   commandId: CommandId.make(
                     `${stableCommandId({ scope, requestKey: key, operation: "thread-send" })}:retry-preparation`,
                   ),
-                  threadId: input.threadId,
+                  threadId: liveThreadId,
                   runId: failed.id,
                 })
               : Effect.void;
@@ -3715,8 +3738,8 @@ const make = Effect.gen(function* () {
         );
       }
       return {
-        threadId: input.threadId,
-        link: threadLinkFor(scope, input.threadId, target.thread.title),
+        threadId: liveThreadId,
+        link: threadLinkFor(scope, liveThreadId, target.thread.title),
         messageId,
         runId: result.run.id,
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),

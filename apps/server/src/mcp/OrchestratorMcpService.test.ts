@@ -4876,6 +4876,127 @@ describe("OrchestratorMcpService thread lookup", () => {
     }),
   );
 
+  describe("sending to a retired thread", () => {
+    const retiredShell = (
+      replacedBy: ThreadId,
+      modes: Parameters<typeof liveThreadShell>[1] = {},
+    ) => ({
+      ...liveThreadShell(ThreadId.make("thread:retired-bot"), { activeRunId: null, ...modes }),
+      replacedByThreadId: replacedBy,
+    });
+    const asThread = (threadId: ThreadId): McpInvocationScope => ({
+      ...client,
+      requestNamespace: `provider:${threadId}`,
+      thread: {
+        threadId,
+        providerSessionId: `provider:${threadId}`,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      },
+      client: undefined,
+    });
+
+    it.effect("refuses a redirect whose live replacement is above the caller's limits", () =>
+      Effect.gen(function* () {
+        const caller = liveThreadShell(ThreadId.make("thread:limited-caller"), {
+          runtimeMode: "auto",
+        });
+        const live = liveThreadShell(ThreadId.make("thread:wide-replacement"), {
+          activeRunId: null,
+          runtimeMode: "full-access",
+        });
+        // The retired thread itself is within the caller's limits; only its replacement is not.
+        const retired = retiredShell(live.id, { runtimeMode: "auto" });
+        const sent = yield* Ref.make(0);
+        const error = yield* Effect.gen(function* () {
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+          return yield* mcp
+            .sendToThread(asThread(caller.id), { threadId: retired.id, message: "hello" })
+            .pipe(Effect.flip);
+        }).pipe(
+          Effect.provide(
+            service([caller, retired, live], sent, {
+              getThreadRecords: () => Effect.succeed(idleThreadProjection(caller)),
+              getProjectThreadRecords: (input) =>
+                Effect.succeed(
+                  idleThreadProjection(input.threadId === retired.id ? retired : live),
+                ),
+            }),
+          ),
+        );
+        assert.equal(error.code, "runtime_mode_escalation_denied");
+        assert.include(error.message, live.id);
+        assert.include(error.message, "above this caller's");
+        assert.equal(yield* Ref.get(sent), 0);
+      }),
+    );
+
+    it.effect("reports the live thread that took the message and retries setup there", () =>
+      Effect.gen(function* () {
+        const live = liveThreadShell(ThreadId.make("thread:live-replacement"), {
+          activeRunId: null,
+        });
+        const retired = retiredShell(live.id);
+        const failedRunId = RunId.make("run:replacement-setup-failed");
+        const retried: Array<ThreadLaunchService.ThreadLaunchPreparationInput> = [];
+        const recordsRead: Array<ThreadId> = [];
+        const sent = yield* Ref.make(0);
+        const result = yield* Effect.gen(function* () {
+          const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+          return yield* mcp.sendToThread(client, { threadId: retired.id, message: "hello" });
+        }).pipe(
+          Effect.provide(
+            service(
+              [retired, live],
+              sent,
+              {
+                getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(live)),
+                getThreadRecords: (threadId) => {
+                  recordsRead.push(threadId);
+                  return Effect.succeed({
+                    thread: { ...live, id: threadId, worktreePath: null },
+                    runs: [
+                      {
+                        id: failedRunId,
+                        status: "failed",
+                        startedAt: null,
+                        workspacePreparation: { type: "worktree" },
+                      },
+                    ],
+                  } as never);
+                },
+                sendToThread: () =>
+                  Effect.succeed({
+                    run: {
+                      id: RunId.make("run:replacement-held"),
+                      threadId: live.id,
+                      status: "queued",
+                      queueHeld: true,
+                    },
+                    delivery: "queued",
+                  } as never),
+              },
+              {
+                retryPreparation: (input) => {
+                  retried.push(input);
+                  return Effect.succeed({} as never);
+                },
+              },
+            ),
+          ),
+        );
+        // The result names the thread that took the turn, not the retired one the caller aimed at.
+        assert.equal(result.threadId, live.id);
+        assert.include(result.link ?? "", live.id);
+        assert.notInclude(result.link ?? "", retired.id);
+        assert.deepStrictEqual(recordsRead, [live.id]);
+        assert.deepStrictEqual(
+          retried.map((input) => [input.threadId, input.runId]),
+          [[live.id, failedRunId]],
+        );
+      }),
+    );
+  });
+
   it.effect("refuses waiting without orchestration capability before reading the target", () =>
     Effect.gen(function* () {
       const sent = yield* Ref.make(0);
