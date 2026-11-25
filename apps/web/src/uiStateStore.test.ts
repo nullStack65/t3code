@@ -11,12 +11,14 @@ import {
   persistState,
   reorderProjects,
   resolveProjectExpanded,
+  setBotCollapsed,
   setProjectExpanded,
   type UiState,
 } from "./uiStateStore";
 
 function makeUiState(overrides: Partial<UiState> = {}): UiState {
   return {
+    botCollapsedById: {},
     projectExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKeys: [],
@@ -94,6 +96,23 @@ describe("uiStateStore pure functions", () => {
   });
 });
 
+describe("bot collapse state", () => {
+  it("collapses and expands by key, dropping the entry on expand", () => {
+    const collapsed = setBotCollapsed(makeUiState(), "group:My Bots", true);
+    expect(collapsed.botCollapsedById).toEqual({ "group:My Bots": true });
+    expect(setBotCollapsed(collapsed, "group:My Bots", true)).toBe(collapsed);
+    expect(setBotCollapsed(collapsed, "group:My Bots", false).botCollapsedById).toEqual({});
+  });
+
+  it("hydrates only collapsed entries and tolerates a missing field", () => {
+    expect(
+      parsePersistedState({ botCollapsedById: { a: true, b: false, c: "x" as never } })
+        .botCollapsedById,
+    ).toEqual({ a: true });
+    expect(parsePersistedState({}).botCollapsedById).toEqual({});
+  });
+});
+
 describe("parsePersistedState", () => {
   it("hydrates raw UI-owned state without server entities", () => {
     const parsed = parsePersistedState({
@@ -117,6 +136,7 @@ describe("parsePersistedState", () => {
     });
 
     expect(parsed).toEqual({
+      botCollapsedById: {},
       projectExpandedById: {
         logical: false,
       },
@@ -228,6 +248,7 @@ describe("uiStateStore persistence", () => {
       localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
     ) as PersistedUiState;
     expect(persisted).toEqual({
+      botCollapsedById: {},
       projectExpandedById: {
         logical: false,
       },

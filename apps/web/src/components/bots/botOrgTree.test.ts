@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { isFounderName, orderBotTree } from "./botOrgTree";
+import { isFounderName, orderBotTree, visibleBotRows } from "./botOrgTree";
 import { splitStandingThreads } from "./botPresence";
 
 const bot = (name: string) => ({ id: name, standing: { name } });
@@ -72,5 +72,26 @@ describe("founders are not bots", () => {
     ]);
     expect(bots.map((t) => t.id)).toEqual(["c"]);
     expect(rest.map((t) => t.id)).toEqual(["k", "w"]);
+  });
+});
+
+describe("visibleBotRows", () => {
+  const rows = orderBotTree(["CEO", "CTO", "Platform", "CFO", "CoS"].map(bot));
+  const shown = (collapsed: string[]) =>
+    visibleBotRows(rows, (thread) => collapsed.includes(thread.id)).map(
+      (row) => `${row.depth}:${row.thread.id}${row.hasReports ? (row.collapsed ? "+" : "-") : ""}`,
+    );
+
+  it("marks bots with reports and lists everything when nothing is collapsed", () => {
+    expect(shown([])).toEqual(["0:CoS", "0:CEO-", "1:CTO-", "2:Platform", "1:CFO"]);
+  });
+
+  it("hides a collapsed bot's whole subtree but not its siblings", () => {
+    expect(shown(["CTO"])).toEqual(["0:CoS", "0:CEO-", "1:CTO+", "1:CFO"]);
+    expect(shown(["CEO"])).toEqual(["0:CoS", "0:CEO+"]);
+  });
+
+  it("ignores a collapse flag on a bot with no reports", () => {
+    expect(shown(["Platform"])).toEqual(shown([]));
   });
 });

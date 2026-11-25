@@ -37,6 +37,18 @@ export function ComposerUsageLimits({
             account.resetCreditInput ??
             (account.instanceId ? { instanceId: account.instanceId } : undefined);
           const driverLabel = providerClients.get(account.driver)?.label ?? account.driver;
+          const statusSuffix =
+            account.status === "held"
+              ? " · Held"
+              : account.status === "signed-out"
+                ? " · Sign in"
+                : "";
+          const instanceLabel = account.instanceId
+            ? account.displayName?.trim() ||
+              (String(account.instanceId) !== String(account.driver)
+                ? account.instanceId
+                : driverLabel)
+            : account.label;
           return (
             <AccountLimits
               key={account.id}
@@ -45,14 +57,7 @@ export function ComposerUsageLimits({
               driver={account.driver}
               accentColor={account.accentColor}
               label={driverLabel}
-              instanceLabel={
-                account.instanceId
-                  ? account.displayName?.trim() ||
-                    (String(account.instanceId) !== String(account.driver)
-                      ? account.instanceId
-                      : driverLabel)
-                  : account.label
-              }
+              instanceLabel={`${instanceLabel}${statusSuffix}`}
               detail={account.plan}
               limits={account.limits}
               now={now}

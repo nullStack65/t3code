@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { AuthMcpClientAccess } from "./auth.ts";
+import { RunDelegationNudgeStats } from "./delegationNudge.ts";
 import { PeerLinkAppAccess } from "./peerLink.ts";
 import {
   ContextTransferId,
@@ -37,12 +38,14 @@ import {
 import { secretRequestPageUrl } from "./secretRequest.ts";
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { LastThreadTitleRegeneration, ThreadTitleRegeneration } from "./threadTitle.ts";
+import { StaleTimeoutMinutes } from "./waitStaleness.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2DeliveryClass,
   OrchestrationV2DigestCategory,
+  OrchestrationV2RunFailure,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2WorkerAlert,
@@ -201,6 +204,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   timeoutMs: Schema.optional(Schema.Finite).annotate({
     description: "Mode 'wait' only. At most 45 s. A timeout does not cancel the child.",
   }),
+  staleTimeoutMinutes: StaleTimeoutMinutes,
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   runtimeMode: Schema.optional(
     OrchestratorMcpRuntimeMode.annotate({
@@ -249,6 +253,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   latestTerminalRunId: Schema.NullOr(RunId),
   latestTerminalStatus: Schema.NullOr(OrchestratorMcpTerminalDelegatedTaskStatus),
   latestTerminalSummary: Schema.NullOr(Schema.String),
+  latestTerminalFailure: Schema.optional(OrchestrationV2RunFailure),
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
@@ -292,6 +297,7 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
 import { InboxChoiceParameter, ThreadInbox, ThreadInboxRoutingPatch } from "./threadInbox.ts";
+import { StoredThreadStanding } from "./threadStanding.ts";
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   inbox: Schema.optional(InboxChoiceParameter),
@@ -417,6 +423,8 @@ export type OrchestratorMcpThreadBackgroundTask = typeof OrchestratorMcpThreadBa
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   inbox: Schema.optionalKey(ThreadInbox),
+  /** Absent from linked environments that predate standing bots on the list. */
+  standing: Schema.optional(StoredThreadStanding),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -539,9 +547,14 @@ export const OrchestratorMcpThreadRun = Schema.Struct({
   model: Schema.String,
   executedModel: Schema.optional(OrchestratorMcpExecutedModel),
   workerAlert: Schema.optional(OrchestratorMcpWorkerAlert),
+  /** Present on a failed latest run with a provider error. */
+  failure: Schema.optional(OrchestrationV2RunFailure),
+  providerFailoverOfRunId: Schema.optional(RunId),
   requestedAt: IsoDateTime,
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),
+  /** Present once the thread's delegation nudge counted this run. */
+  delegationNudge: Schema.optional(RunDelegationNudgeStats),
 });
 export type OrchestratorMcpThreadRun = typeof OrchestratorMcpThreadRun.Type;
 
@@ -632,6 +645,8 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
+  progressAtMs: Schema.optional(Schema.Finite),
+  intentionallyHeld: Schema.optional(Schema.Boolean),
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,

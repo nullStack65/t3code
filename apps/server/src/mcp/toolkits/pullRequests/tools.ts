@@ -1,4 +1,5 @@
 import {
+  StaleTimeoutMinutes,
   McpCapabilityUnavailableError,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
@@ -10,6 +11,8 @@ import {
   ThreadPullRequestLinkSource,
   TrimmedNonEmptyString,
   ThreadId,
+  EventSubscriptionInvalidError,
+  PullRequestEventFilter,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as McpSchema from "effect/ai/McpSchema";
@@ -140,6 +143,7 @@ export const PullRequestToolError = Schema.Union([
   PullRequestWatchService.PullRequestWatchFromSubagentError,
   PullRequestProjectNotFoundError,
   PullRequestGuideFailedError,
+  EventSubscriptionInvalidError,
 ]);
 export type PullRequestToolError = typeof PullRequestToolError.Type;
 
@@ -324,10 +328,20 @@ const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
+export const WatchPullRequestInput = Schema.Struct({
+  ...PullRequestTargetInput.fields,
+  events: Schema.optional(Schema.Array(PullRequestEventFilter)),
+  ignoreAuthors: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  coalesceWindowSeconds: Schema.optional(Schema.Int),
+  autoExpireOnClose: Schema.optional(Schema.Boolean),
+  staleTimeoutMinutes: StaleTimeoutMinutes,
+});
+export type WatchPullRequestInput = typeof WatchPullRequestInput.Type;
+
 const WatchPullRequestTool = Tool.make("watch_pull_request", {
   description:
-    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, or conflicts. Handle old comments first. Only later ones wake you. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
-  parameters: PullRequestTargetInput,
+    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, or conflicts. Comments from coderabbitai do not wake unless ignoreAuthors is []. Optional events, coalesceWindowSeconds, and autoExpireOnClose narrow wakes. Handle old comments first. Only later ones wake you. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself. T3 also wakes you once per quiet period after 30 minutes without progress. Set `staleTimeoutMinutes` to change that deadline.",
+  parameters: WatchPullRequestInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
   dependencies: watchDependencies,

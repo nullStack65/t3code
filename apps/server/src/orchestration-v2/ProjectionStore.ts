@@ -383,6 +383,7 @@ export interface ProjectionRecordFilter {
   readonly runtimeRequestStatuses?: ReadonlyArray<OrchestrationV2RuntimeRequest["status"]>;
   readonly contextTransferStatuses?: ReadonlyArray<OrchestrationV2ContextTransfer["status"]>;
   readonly subagentIds?: ReadonlyArray<NodeId>;
+  readonly openSubagentsOnly?: true;
   readonly subagentRunIds?: ReadonlyArray<RunId>;
   readonly subagentChildThreadIds?: ReadonlyArray<ThreadId>;
   readonly nodeIds?: ReadonlyArray<NodeId>;
@@ -615,6 +616,11 @@ export interface ProjectionStoreV2Shape {
   readonly countThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly countActiveRunThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
   /** Every active thread, in shell order. */
+  readonly listStalenessWaitThreads: Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  readonly getWaitActivityMs: (
+    threadId: ThreadId,
+    runId: RunId | null,
+  ) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly listActiveShellIndex: () => Effect.Effect<
     ReadonlyArray<ActiveShellIndexEntry>,
     ProjectionStoreV2Error
@@ -894,6 +900,9 @@ function preserveRunRecordedFields(
     current.restartCancelledBackgroundWork !== undefined
       ? { restartCancelledBackgroundWork: current.restartCancelledBackgroundWork }
       : {}),
+    ...(next.delegationNudge === undefined && current.delegationNudge !== undefined
+      ? { delegationNudge: current.delegationNudge }
+      : {}),
   };
 }
 
@@ -977,6 +986,7 @@ export function applyToProjection(
     case "thread.active-reordered":
     case "thread.tags-updated":
     case "thread.standing-updated":
+    case "thread.delegation-nudge-updated":
     case "thread.pull-request-synced":
       return {
         ...base,
@@ -1016,6 +1026,13 @@ export function applyToProjection(
                 restartCancelledBackgroundWork: event.payload.restartCancelledBackgroundWork,
               }
             : run,
+        ),
+      };
+    case "run.delegation-nudge-recorded":
+      return {
+        ...base,
+        runs: base.runs.map((run) =>
+          run.id === event.payload.runId ? { ...run, delegationNudge: event.payload.stats } : run,
         ),
       };
     case "run-attempt.created":
@@ -1267,6 +1284,9 @@ const encodeThreadUpdatedAt = Schema.encodeEffect(
 const encodeRunPayload = Schema.encodeEffect(Schema.fromJsonString(OrchestrationV2RunJsonSchema));
 const encodeRestartCancelledBackgroundWork = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2RunJsonSchema.fields.restartCancelledBackgroundWork),
+);
+const encodeRunDelegationNudgeStats = Schema.encodeEffect(
+  Schema.fromJsonString(OrchestrationV2RunJsonSchema.fields.delegationNudge),
 );
 const encodeRunAttemptPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2RunAttemptJsonSchema),
@@ -1952,6 +1972,9 @@ export function threadShellFromProjection(
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     ...(projection.thread.standing ? { standing: projection.thread.standing } : {}),
+    ...(projection.thread.delegationNudge
+      ? { delegationNudge: projection.thread.delegationNudge }
+      : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
     ...(projection.thread.visitsByFounder === undefined
       ? {}
@@ -2269,6 +2292,9 @@ function shellFromState(input: {
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     ...(input.state.thread.tags?.length ? { tags: input.state.thread.tags } : {}),
     ...(input.state.thread.standing ? { standing: input.state.thread.standing } : {}),
+    ...(input.state.thread.delegationNudge
+      ? { delegationNudge: input.state.thread.delegationNudge }
+      : {}),
     lastVisitedAt: input.state.thread.lastVisitedAt,
     opens: input.state.thread.opens ?? null,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
@@ -2444,6 +2470,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "thread.active-reordered":
             case "thread.tags-updated":
             case "thread.standing-updated":
+            case "thread.delegation-nudge-updated":
             case "thread.visited":
             case "thread.marked-unread":
             case "thread.metadata-updated":
@@ -2543,8 +2570,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
-                  keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
-                  "$.restartCancelledBackgroundWork",
+                  keepRecordedRunField(
+                    keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                    "$.restartCancelledBackgroundWork",
+                  ),
+                  "$.delegationNudge",
                 )}
             `;
               break;
@@ -2561,6 +2591,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 '$.restartCancelledBackgroundWork',
                 json(${workJson})
               )
+              WHERE run_id = ${event.payload.runId} AND thread_id = ${event.threadId}
+            `;
+              break;
+            }
+            case "run.delegation-nudge-recorded": {
+              const statsJson = yield* encodeRunDelegationNudgeStats(event.payload.stats);
+              yield* sql`
+              UPDATE orchestration_v2_projection_runs
+              SET payload_json = json_set(payload_json, '$.delegationNudge', json(${statsJson}))
               WHERE run_id = ${event.payload.runId} AND thread_id = ${event.threadId}
             `;
               break;
@@ -3295,6 +3334,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             event.type !== "thread.active-reordered" &&
             event.type !== "thread.tags-updated" &&
             event.type !== "thread.standing-updated" &&
+            event.type !== "thread.delegation-nudge-updated" &&
             event.type !== "thread.visited" &&
             event.type !== "thread.visit-recorded" &&
             event.type !== "thread.marked-unread" &&
@@ -4155,6 +4195,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT payload_json
             FROM orchestration_v2_projection_subagents AS subagent
             WHERE ${threadColumn(filter?.subagentIds ?? filter?.subagentChildThreadIds)} = ${threadId}
+              ${filter?.openSubagentsOnly === true ? sql`AND subagent.status IN ('pending', 'running', 'waiting')` : sql``}
               ${filter?.subagentIds === undefined ? sql`` : sql`AND subagent_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentIds)}))`}
               ${filter?.subagentChildThreadIds === undefined ? sql`` : sql`AND child_thread_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentChildThreadIds)}))`}
               ${filter?.subagentRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentRunIds)}))`}
@@ -8228,6 +8269,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               (
                 SELECT substr(json_extract(message.payload_json, '$.text'), 1, ${ATTENTION_MENTION_TEXT_LIMIT})
                 FROM orchestration_v2_projection_messages message
+                  INDEXED BY orchestration_v2_projection_messages_thread_updated_idx
                 WHERE message.thread_id = t.thread_id
                   AND NOT ${isIdleCompactionMessage("message")}
                 ORDER BY message.updated_at DESC, message.message_id DESC
@@ -9233,6 +9275,52 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return rows[0]?.count ?? 0;
     }, Effect.mapError(shellSnapshotReadError));
 
+    const listStalenessWaitThreads = sql<{ readonly thread_id: string }>`
+      SELECT t.thread_id FROM orchestration_v2_projection_threads t
+      WHERE t.deleted_at IS NULL AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+        AND (
+          json_array_length(t.payload_json, '$.stalenessWaits') > 0
+          OR (
+            json_extract(t.payload_json, '$.settledAt') IS NULL
+            AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
+            AND (
+              EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_provider_threads p,
+                  json_each(p.payload_json, '$.pendingBackgroundTasks') task
+                WHERE p.provider_thread_id = t.active_provider_thread_id
+                  AND json_extract(task.value, '$.awaited') = 1
+              ) OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents task
+                WHERE task.thread_id = t.thread_id AND task.origin = 'app_owned'
+                  AND task.status IN ('pending', 'running', 'waiting')
+                  AND task.completion_delivery_state IS NOT 'disposed'
+                  AND json_extract(task.payload_json, '$.result') IS NULL
+                  AND (json_extract(task.payload_json, '$.completionWake') = 'settled_only'
+                    OR json_extract(task.payload_json, '$.waitedBeforeRecovery') = 1)
+              )
+            )
+          )
+        )
+    `.pipe(
+      Effect.map((rows) => rows.map(({ thread_id }) => ThreadId.make(thread_id))),
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getWaitActivityMs = Effect.fn("ProjectionStore.getWaitActivityMs")(
+      function* (threadId: ThreadId, runId: RunId | null) {
+        if (runId === null) return 0;
+        const rows = yield* sql<{ readonly activity: string | null }>`
+        SELECT max(updated_at) AS activity FROM orchestration_v2_projection_turn_items
+        WHERE thread_id = ${threadId} AND run_id = ${runId}
+          AND type NOT IN ('user_message', 'link_request')
+          AND turn_item_id NOT LIKE 'item:deadline:%'
+      `;
+        const activity = rows[0]?.activity;
+        return activity == null ? 0 : Date.parse(activity);
+      },
+      (effect, threadId) => effect.pipe(Effect.mapError(controlReadError(threadId))),
+    );
+
     const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(function* () {
       const rows = yield* sql<{
         readonly thread_id: string;
@@ -9617,6 +9705,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       countThreads: readOnReader(countThreads),
       countActiveRunThreads: readOnReader(countActiveRunThreads),
       listActiveShellIndex: readOnReader(listActiveShellIndex),
+      listStalenessWaitThreads: NodeSqliteClient.readOnly(listStalenessWaitThreads),
+      getWaitActivityMs: readOnReader(getWaitActivityMs),
       listActiveThreads: readOnReader(listActiveThreads),
       readShellSnapshot: readOnReader(readShellSnapshot),
       listOlderSettledThreads: readOnReader(listOlderSettledThreads),

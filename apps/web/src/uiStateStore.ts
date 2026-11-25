@@ -20,6 +20,7 @@ const LEGACY_PERSISTED_STATE_KEYS = [
 ] as const;
 
 export interface PersistedUiState {
+  botCollapsedById?: Record<string, boolean>;
   projectExpandedById?: Record<string, boolean>;
   projectOrder?: string[];
   threadLastVisitedAtById?: Record<string, string>;
@@ -40,6 +41,11 @@ export interface UiProjectState {
   sidebarProjectScopeKeys: string[];
 }
 
+export interface UiBotState {
+  /** Collapsed sidebar bot groups ("group:<label>") and bot subtrees (a thread key); true only. */
+  botCollapsedById: Record<string, boolean>;
+}
+
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
   threadChangedFilesExpandedById: Record<string, Record<string, boolean>>;
@@ -54,9 +60,10 @@ export interface UiPullRequestState {
 }
 
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiPullRequestState {}
+  extends UiProjectState, UiBotState, UiThreadState, UiEndpointState, UiPullRequestState {}
 
 const initialState: UiState = {
+  botCollapsedById: {},
   projectExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKeys: [],
@@ -142,6 +149,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       : sanitizeStringArray(parsed.projectOrder);
 
   return {
+    botCollapsedById: Object.fromEntries(
+      Object.entries(sanitizeBooleanRecord(parsed.botCollapsedById)).filter(([, value]) => value),
+    ),
     projectExpandedById,
     projectOrder,
     threadLastVisitedAtById: sanitizeTimestampRecord(parsed.threadLastVisitedAtById),
@@ -217,6 +227,7 @@ export function persistState(state: UiState): void {
     window.localStorage.setItem(
       PERSISTED_STATE_KEY,
       JSON.stringify({
+        botCollapsedById: state.botCollapsedById,
         projectExpandedById: state.projectExpandedById,
         projectOrder: state.projectOrder,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
@@ -378,6 +389,15 @@ export function setProjectExpanded(
   };
 }
 
+export function setBotCollapsed(state: UiState, key: string, collapsed: boolean): UiState {
+  if ((state.botCollapsedById[key] === true) === collapsed) return state;
+  const botCollapsedById = { ...state.botCollapsedById };
+  // Expanded is the default, so an expanded entry is dropped rather than stored.
+  if (collapsed) botCollapsedById[key] = true;
+  else delete botCollapsedById[key];
+  return { ...state, botCollapsedById };
+}
+
 export function reorderProjects(
   state: UiState,
   currentProjectOrder: readonly string[],
@@ -430,6 +450,7 @@ interface UiStateStore extends UiState {
   setSidebarProjectScopeKeys: (projectKeys: readonly string[]) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
+  setBotCollapsed: (key: string, collapsed: boolean) => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
     draggedProjectIds: readonly string[],
@@ -452,6 +473,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
+  setBotCollapsed: (key, collapsed) => set((state) => setBotCollapsed(state, key, collapsed)),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
     set((state) =>
       reorderProjects(state, currentProjectOrder, draggedProjectIds, targetProjectIds),

@@ -2,6 +2,7 @@ import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { isThreadWorking as isSidebarThreadWorking } from "@t3tools/client-runtime/state/thread-inbox";
 import * as DateTime from "effect/DateTime";
+import { partitionBotGroups, splitStandingThreads } from "./bots/botPresence";
 import { deriveActiveWorkStartedAt } from "../session-logic.ts";
 import { describe, expect, it } from "vite-plus/test";
 import * as Cause from "effect/Cause";
@@ -40,6 +41,7 @@ import {
   sidebarFolderExpansionKeys,
   freshSessionThreadKeys,
   placeSystemScheduledThreads,
+  filterSidebarV2VisibleThreads,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -1739,6 +1741,32 @@ describe("resolveSidebarFolderDot", () => {
   });
 });
 
+describe("filterSidebarV2VisibleThreads", () => {
+  it("keeps a standing bot outside the scoped project and hides an ordinary thread there", () => {
+    const remote = EnvironmentId.make("primary-r720");
+    const local = EnvironmentId.make("primary-mac-laptop");
+    const lineage = {
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: ThreadId.make("root"),
+    };
+    const row = (id: string, standing: { name: string } | null) => ({
+      archivedAt: null,
+      environmentId: remote,
+      id: ThreadId.make(id),
+      projectId: ProjectId.make("remote-project"),
+      lineage: { ...lineage, rootThreadId: ThreadId.make(id) },
+      standing,
+    });
+    const visible = filterSidebarV2VisibleThreads(
+      [row("infra", { name: "Infra" }), row("note", null)],
+      new Set([`${local}:local-project`]),
+      new Set(),
+    );
+    expect(visible.map((thread) => thread.id)).toEqual([ThreadId.make("infra")]);
+  });
+});
+
 describe("shouldCreateNewThreadInCurrentProject", () => {
   it("opens the picker when several projects are open, or only archived ones exist", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 2, 3)).toBe(false);
@@ -1808,5 +1836,71 @@ describe("placeSystemScheduledThreads", () => {
     expect(revealed.section?.some((thread) => thread.failed)).toBe(true);
 
     expect(place(false).section).toBeNull();
+  });
+});
+
+describe("standing bots bound by a scheduled task", () => {
+  const cosId = ThreadId.make("cos");
+  const ctoId = ThreadId.make("cto");
+  const ordinaryId = ThreadId.make("digest");
+  const keyOf = (id: ThreadId) => scopedThreadKey(scopeThreadRef(localEnvironmentId, id));
+  const shell = (
+    id: ThreadId,
+    standing: { name: string; role: string } | null,
+    audience: string,
+  ) => ({
+    id,
+    standing,
+    source: { inbox: { audience } },
+  });
+  const threads = [
+    shell(cosId, { name: "CoS", role: "Chief of Staff" }, "kameron"),
+    shell(ctoId, { name: "CTO", role: "Engineering & Architecture" }, "shared"),
+    shell(ordinaryId, null, "kameron"),
+  ];
+  const listedBots = (scheduledThreadKeys: ReadonlySet<string>) => {
+    const { rest } = placeSystemScheduledThreads({
+      threads,
+      revealed: false,
+      scheduledThreadKeys,
+      keyOf: (thread) => keyOf(thread.id),
+      standingRoleOf: (thread) => thread.standing?.role ?? null,
+      isStandingOf: (thread) => thread.standing !== null,
+    });
+    return partitionBotGroups(splitStandingThreads(rest).bots);
+  };
+
+  it("keeps every standing bot listed when a scheduled task binds its thread after the snapshot", () => {
+    const snapshot = listedBots(new Set());
+    expect(snapshot.mine.map((thread) => thread.id)).toEqual([cosId]);
+    expect(snapshot.shared.map((thread) => thread.id)).toEqual([ctoId]);
+
+    // A running scheduled task now reports these threads as its fresh-session threads.
+    const updated = listedBots(
+      freshSessionThreadKeys([
+        {
+          environmentId: localEnvironmentId,
+          tasks: [
+            { threadId: cosId, threadMode: "fresh_session" as const },
+            { threadId: ctoId, threadMode: "fresh_session" as const },
+            { threadId: ordinaryId, threadMode: "fresh_session" as const },
+          ],
+        },
+      ]),
+    );
+    expect(updated).toEqual(snapshot);
+  });
+
+  it("still sends an ordinary scheduled thread to the System shelf", () => {
+    const keys = new Set([keyOf(ordinaryId)]);
+    const { system } = placeSystemScheduledThreads({
+      threads,
+      revealed: true,
+      scheduledThreadKeys: keys,
+      keyOf: (thread) => keyOf(thread.id),
+      standingRoleOf: (thread) => thread.standing?.role ?? null,
+      isStandingOf: (thread) => thread.standing !== null,
+    });
+    expect(system.map((thread) => thread.id)).toEqual([ordinaryId]);
   });
 });

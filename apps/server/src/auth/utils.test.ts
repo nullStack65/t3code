@@ -103,6 +103,18 @@ describe("deriveAuthClientMetadata", () => {
     });
     expect(metadata.userAgent).toContain("Electron/36.3.2");
   });
+
+  it("never lets a client present or look like a bot, which only the server issues", () => {
+    const presented = deriveAuthClientMetadata({
+      request: { headers: { "user-agent": "node" }, source: {} } as never,
+      presented: { deviceType: "bot" },
+    });
+    const crawler = deriveAuthClientMetadata({
+      request: { headers: { "user-agent": "curl/8.7.1" }, source: {} } as never,
+    });
+
+    expect([presented.deviceType, crawler.deviceType]).toEqual(["desktop", "unknown"]);
+  });
 });
 
 describe("session cookie isolation", () => {

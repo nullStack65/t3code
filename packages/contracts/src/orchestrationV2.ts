@@ -1,3 +1,4 @@
+import { ThreadStalenessWait } from "./waitStaleness.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -56,6 +57,12 @@ import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
 import { StoredThreadStanding, ThreadStanding } from "./threadStanding.ts";
+import {
+  DelegationNudgeChangedBy,
+  DelegationNudgeUpdate,
+  RunDelegationNudgeStats,
+  StoredThreadDelegationNudge,
+} from "./delegationNudge.ts";
 import { ThreadTitleRegenerationOutcome } from "./threadTitle.ts";
 import {
   OrchestrationSearchThreadsInput,
@@ -521,6 +528,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
+  stalenessWaits: Schema.optional(Schema.Array(ThreadStalenessWait)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
@@ -561,6 +569,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   tags: Schema.optional(StoredThreadTags),
   /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
   standing: Schema.optional(StoredThreadStanding),
+  /** Opt-in reminder to delegate once the thread does work itself; absent or null is off. */
+  delegationNudge: Schema.optional(StoredThreadDelegationNudge),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -619,11 +629,9 @@ export function applyOrchestrationV2ThreadVisit<Thread extends OrchestrationV2Ap
 }
 
 /**
- * The cursors after `founder` reads a shared thread. The first such visit copies the old shared
- * cursor onto the other founder, then moves only the reader. A thread nobody has visited marks
- * both founders read as of this visit, so a later reply is still unread for the founder who was
- * not here. Leaving that founder unset hides the badge, because a missing stamp is not unread.
- * A visit that is not newer returns the existing map, so the caller can skip a write.
+ * Cursors after `founder` reads a shared thread. A first visit copies the shared cursor to the
+ * other founder (an unvisited thread marks both read now, since a missing stamp hides the badge),
+ * then moves only the reader. A visit that is not newer returns the existing map.
  */
 export function nextFounderVisits(
   thread: Pick<OrchestrationV2AppThread, "lastVisitedAt" | "visitsByFounder">,
@@ -669,7 +677,7 @@ export function nextFounderSeenMessage(
 ): FounderSeenMessages {
   const current = thread.seenMessageByFounder;
   if (current?.[founder] === messageId) return current ?? { [founder]: messageId };
-  return { ...(current ?? {}), [founder]: messageId };
+  return { ...current, [founder]: messageId };
 }
 
 /** A thread another agent drives: a local subagent or a task delegated from a linked environment. */
@@ -895,6 +903,8 @@ export const OrchestrationV2Run = Schema.Struct({
   restartContinuationOfRunId: Schema.optional(RunId),
   manualContinuationOfRunId: Schema.optional(RunId),
   usageLimitContinuationOfRunId: Schema.optional(RunId),
+  /** The failed run this one continues on another provider; it and its ancestors form one lineage. */
+  providerFailoverOfRunId: Schema.optional(RunId),
   delegatedTaskId: Schema.optional(NodeId),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
@@ -913,8 +923,17 @@ export const OrchestrationV2Run = Schema.Struct({
   delivery: Schema.optional(OrchestrationV2MessageDelivery),
   /** Digest messages folded into this run's turn, sent to the provider ahead of its message. */
   digest: Schema.optional(Schema.Array(OrchestrationV2DigestEntry)),
+  /** Tool and delegation counts while the thread's delegation nudge was on. */
+  delegationNudge: Schema.optional(RunDelegationNudgeStats),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
+
+export const OrchestrationV2RunDelegationNudgeRecorded = Schema.Struct({
+  runId: RunId,
+  stats: RunDelegationNudgeStats,
+});
+export type OrchestrationV2RunDelegationNudgeRecorded =
+  typeof OrchestrationV2RunDelegationNudgeRecorded.Type;
 
 export function orchestrationV2RunWorkStartedAt(
   run: Pick<OrchestrationV2Run, "workStartedAt" | "startedAt" | "requestedAt">,
@@ -1108,6 +1127,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   /** Set from the run that produced `result`; informs the parent and takes no action. */
   workerAlert: Schema.optional(OrchestrationV2WorkerAlert),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  waitedBeforeRecovery: Schema.optional(Schema.Literal(true)),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   // The run whose unfinished task was cancelled, committed with its Stop.
   cancelledRunId: Schema.optional(RunId),
@@ -1226,6 +1246,7 @@ const PendingBackgroundTaskFields = {
   itemId: Schema.optional(TurnItemId),
   sourceThreadId: Schema.optional(ThreadId),
   taskId: TrimmedNonEmptyString,
+  progressAtMs: Schema.optional(Schema.Finite),
   description: Schema.optional(TrimmedNonEmptyString),
   /** The subagent task that started this work and waits on it. */
   parentTaskId: Schema.optional(TrimmedNonEmptyString),
@@ -1503,6 +1524,7 @@ const MonitorPullRequestStamp = Schema.Struct({
   /** Null when the wake is not about one head, so a newer push does not outdate it. */
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   watchEnded: Schema.optional(Schema.Boolean),
+  staleProgressAt: Schema.optional(IsoDateTime),
   /** Set on a wake covering several pull requests. */
   section: Schema.optional(PullRequestWakeSection),
 });
@@ -1539,6 +1561,15 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
     Schema.Struct({
       kind: Schema.Literal("monitor"),
       pullRequest: Schema.optional(MonitorPullRequestStamp),
+      staleWaits: Schema.optional(
+        Schema.Array(
+          Schema.Struct({
+            kind: ThreadStalenessWait.fields.kind,
+            taskId: ThreadStalenessWait.fields.taskId,
+            lastProgressAtMs: ThreadStalenessWait.fields.lastProgressAtMs,
+          }),
+        ),
+      ),
       /** The other pull requests one wake covers; outdated ones leave it before it starts. */
       otherPullRequests: Schema.optional(Schema.Array(MonitorPullRequestStamp)),
     }),
@@ -1764,8 +1795,102 @@ export const OrchestrationV2ProviderFailure = Schema.Struct({
   code: Schema.NullOr(OrchestrationV2ProviderFailureCode),
   retryable: Schema.NullOr(Schema.Boolean),
   resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** The provider's HTTP status, when it reported one. */
+  httpStatus: Schema.optional(
+    Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
+  ),
 });
 export type OrchestrationV2ProviderFailure = typeof OrchestrationV2ProviderFailure.Type;
+
+/** Why a failed run may move to another provider; `other` never does. */
+export const OrchestrationV2ProviderFailoverClass = Schema.Literals([
+  "payment",
+  "rate_limit",
+  "auth",
+  "quota",
+  "other",
+]);
+export type OrchestrationV2ProviderFailoverClass = typeof OrchestrationV2ProviderFailoverClass.Type;
+
+// A refusal on policy or safety grounds fails the same way on any provider.
+const POLICY_DENIAL_CODE = /polic|safety|moderat|content.?filter|refus|guardrail|violat|cyber/iu;
+const AUTH_CODE = /^(?:unauthori[sz]ed|unauthenticated|authentication.*|invalid.?api.?key)$/iu;
+const RATE_LIMIT_CODE = /rate.?limit/iu;
+
+/** Unknown or ambiguous failures stay `other`, so they never fail over. */
+export function providerFailoverClass(
+  failure: Pick<OrchestrationV2ProviderFailure, "class" | "code" | "httpStatus">,
+): OrchestrationV2ProviderFailoverClass {
+  const code = failure.code ?? "";
+  if (
+    failure.class === "validation_error" ||
+    failure.class === "permission_error" ||
+    POLICY_DENIAL_CODE.test(code)
+  )
+    return "other";
+  if (failure.httpStatus === 402) return "payment";
+  if (failure.httpStatus === 401 || AUTH_CODE.test(code)) return "auth";
+  if (failure.httpStatus === 429 || RATE_LIMIT_CODE.test(code)) return "rate_limit";
+  if (failure.class === "usage_limit") return "quota";
+  return "other";
+}
+
+/** A failed run's provider error for readback. It carries no message text, which may quote the prompt. */
+export const OrchestrationV2RunFailure = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.String,
+  httpStatus: Schema.NullOr(Schema.Int),
+  class: OrchestrationV2ProviderFailoverClass,
+  code: Schema.NullOr(Schema.String),
+  retryable: Schema.NullOr(Schema.Boolean),
+});
+export type OrchestrationV2RunFailure = typeof OrchestrationV2RunFailure.Type;
+
+export function orchestrationV2RunFailure(
+  run: Pick<OrchestrationV2Run, "modelSelection">,
+  failure: OrchestrationV2ProviderFailure,
+): OrchestrationV2RunFailure {
+  return {
+    providerInstanceId: run.modelSelection.instanceId,
+    model: run.modelSelection.model,
+    httpStatus: failure.httpStatus ?? null,
+    class: providerFailoverClass(failure),
+    code: failure.code,
+    retryable: failure.retryable,
+  };
+}
+
+export const OrchestrationV2ProviderFailoverRefusalReason = Schema.Literals([
+  "disabled",
+  "not_failover_class",
+  "not_latest_failed_run",
+  "pending_request",
+  "side_effects",
+  "exhausted",
+]);
+export type OrchestrationV2ProviderFailoverRefusalReason =
+  typeof OrchestrationV2ProviderFailoverRefusalReason.Type;
+
+/** Why a provider failover was not admitted. Candidates lists each one passed over and why. */
+export class OrchestrationV2ProviderFailoverRefused extends Schema.TaggedError<OrchestrationV2ProviderFailoverRefused>()(
+  "OrchestrationV2ProviderFailoverRefused",
+  {
+    runId: RunId,
+    reason: OrchestrationV2ProviderFailoverRefusalReason,
+    failure: Schema.NullOr(OrchestrationV2RunFailure),
+    candidates: Schema.Array(
+      Schema.Struct({
+        providerInstanceId: ProviderInstanceId,
+        model: Schema.String,
+        skipped: Schema.Literals(["not_included", "unavailable", "already_tried"]),
+      }),
+    ),
+  },
+) {
+  override get message(): string {
+    return `Provider failover refused (${this.reason}) for run ${this.runId}.`;
+  }
+}
 
 export const OrchestrationV2ProviderRetry = Schema.Struct({
   attempt: PositiveInt,
@@ -2204,6 +2329,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.active-reordered",
       "thread.tags-updated",
       "thread.standing-updated",
+      "thread.delegation-nudge-updated",
       "thread.visited",
       "thread.marked-unread",
       "thread.metadata-updated",
@@ -2240,6 +2366,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("run.delegation-nudge-recorded"),
+    payload: OrchestrationV2RunDelegationNudgeRecorded,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2480,6 +2611,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   tags: Schema.optional(StoredThreadTags),
   /** Bot persona for a standing thread; absent or null is an ordinary thread. Independent of pinning. */
   standing: Schema.optional(StoredThreadStanding),
+  /** Opt-in reminder to delegate; absent or null is off. */
+  delegationNudge: Schema.optional(StoredThreadDelegationNudge),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   /** Per-founder read cursors. Older servers omit them; clients then keep the shared cursor. */
   visitsByFounder: Schema.optional(FounderVisits),
@@ -3201,6 +3334,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.active-reordered",
       "thread.tags-updated",
       "thread.standing-updated",
+      "thread.delegation-nudge-updated",
       "thread.visited",
       "thread.marked-unread",
       "thread.pull-request-synced",
@@ -3237,6 +3371,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("run.background-work-cancelled"),
     payload: OrchestrationV2RunBackgroundWorkCancelled,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("run.delegation-nudge-recorded"),
+    payload: OrchestrationV2RunDelegationNudgeRecorded,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -3477,6 +3616,14 @@ export const OrchestrationV2Command = Schema.Union([
     standing: Schema.NullOr(ThreadStanding),
   }),
   Schema.Struct({
+    type: Schema.Literal("thread.delegation-nudge.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ...DelegationNudgeUpdate.fields,
+    /** Who asked; absent means the user. */
+    changedBy: Schema.optional(DelegationNudgeChangedBy),
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.tag.set"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -3572,6 +3719,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     watching: Schema.Boolean,
+    staleTimeoutMs: Schema.optional(PositiveInt),
     link: Schema.optional(
       Schema.Struct({
         url: TrimmedNonEmptyString,
@@ -3657,6 +3805,16 @@ export const OrchestrationV2Command = Schema.Union([
     restartContinuationOfRunId: Schema.optional(RunId),
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
+    /** Continue a failed run on the first eligible candidate, in order. Replaces `modelSelection`. */
+    providerFailover: Schema.optional(
+      Schema.Struct({
+        ofRunId: RunId,
+        candidates: Schema.Array(ModelSelection).check(
+          Schema.isMinLength(1),
+          Schema.isMaxLength(8),
+        ),
+      }),
+    ),
     steerFollowUpOfRunId: Schema.optional(RunId),
     steerFollowUpAfterRunOrdinal: Schema.optional(NonNegativeInt),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
@@ -3831,6 +3989,7 @@ export const OrchestrationV2Command = Schema.Union([
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+    staleTimeoutMs: Schema.optional(PositiveInt),
     // Defaults to settled_only; fire-and-forget wakes require always.
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
     createdAt: Schema.optional(Schema.DateTimeUtc),
@@ -3876,6 +4035,34 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("thread.wait-staleness.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    operation: Schema.Union([
+      Schema.Struct({
+        type: Schema.Literal("register"),
+        kind: ThreadStalenessWait.fields.kind,
+        taskIds: Schema.Array(Schema.String),
+        staleTimeoutMs: PositiveInt,
+        providerThreadId: Schema.optional(ProviderThreadId),
+        onlyIfMissing: Schema.optional(Schema.Literal(true)),
+      }),
+      Schema.Struct({
+        type: Schema.Literal("clear"),
+        kind: ThreadStalenessWait.fields.kind,
+        taskIds: Schema.Array(Schema.String),
+        registeredBy: Schema.optional(CommandId),
+      }),
+      Schema.Struct({
+        type: Schema.Literal("remote-progress"),
+        taskId: NodeId,
+        progressAtMs: Schema.Finite,
+        held: Schema.optional(Schema.Boolean),
+      }),
+      Schema.Struct({ type: Schema.Literal("sweep") }),
+    ]),
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
@@ -3929,6 +4116,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
      * makes the read's answer describe the old head, so the cleared answer stays.
      */
     checksPendingBefore: Schema.optional(Schema.Boolean),
+    staleProgressAt: Schema.optional(IsoDateTime),
     /** With `watch: null`, the state the ended watch keeps instead of its last saved one. */
     endedWatch: Schema.optional(ThreadPullRequestWatch),
     /** More watches of this thread recorded together, which `wake` also reports on. */
@@ -3939,6 +4127,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
           startedAt: IsoDateTime,
           watch: Schema.NullOr(ThreadPullRequestWatch),
           checksPendingBefore: Schema.optional(Schema.Boolean),
+          staleProgressAt: Schema.optional(IsoDateTime),
           endedWatch: Schema.optional(ThreadPullRequestWatch),
           includesRemarks: Schema.optional(Schema.Boolean),
         }),
@@ -3973,6 +4162,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     driver: ProviderDriverKind,
     modelSelection: ModelSelection,
     remoteChild: OrchestrationV2RemoteTaskChild,
+    staleTimeoutMs: Schema.optional(PositiveInt),
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   }),
   /**

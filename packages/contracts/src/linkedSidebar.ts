@@ -14,6 +14,7 @@ import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { OrchestratorMcpThreadStatus } from "./orchestratorMcp.ts";
 import { OrchestrationV2Actor, OrchestrationV2CreationSource } from "./orchestrationV2.ts";
 import { ThreadInbox } from "./threadInbox.ts";
+import { StoredThreadStanding } from "./threadStanding.ts";
 
 export const LinkedSidebarInput = Schema.Struct({
   catalogEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
@@ -22,6 +23,8 @@ export type LinkedSidebarInput = typeof LinkedSidebarInput.Type;
 
 export const LinkedSidebarThread = Schema.Struct({
   inbox: Schema.optionalKey(ThreadInbox),
+  /** Absent from linked environments that predate standing bots on the list. */
+  standing: Schema.optional(StoredThreadStanding),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,

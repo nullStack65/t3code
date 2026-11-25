@@ -627,11 +627,15 @@ function toCheckEntries(raw: ReadonlyArray<CheckFields> | null | undefined): Rea
     const name = trimmed(check.name) ?? trimmed(check.context);
     if (name === null) return [];
     const status = toCheckStatus(check);
+    const phase = check.status?.trim().toUpperCase();
+    const pendingPhase =
+      phase === "IN_PROGRESS" ? "in-progress" : phase === "QUEUED" ? "queued" : undefined;
     return [
       {
         check: {
           name,
           status,
+          ...(pendingPhase === undefined ? {} : { pendingPhase }),
           description: trimmed(check.description),
           url: trimmed(check.detailsUrl) ?? trimmed(check.targetUrl),
           ...(typeof check.isRequired === "boolean" ? { required: check.isRequired } : {}),

@@ -1,3 +1,9 @@
+import { BACKGROUND_WAIT_STALE_MINUTES } from "@t3tools/contracts";
+import {
+  staleTimeoutMs,
+  waitActivityMs,
+  waitIntentionallyHeld,
+} from "../orchestration-v2/waitStaleness.ts";
 import {
   CommandId,
   EnvironmentId,
@@ -69,10 +75,15 @@ import {
   agentLaunchInboxError,
   agentLaunchInboxRouting,
   withLegacyPeerInboxReason,
+  orchestrationV2RunFailure,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { latestExecutedRun, runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import {
+  latestExecutedRun,
+  latestRootProviderFailure,
+  runRanAfter,
+} from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
@@ -372,6 +383,23 @@ function listCapabilityModels(input: {
 
 const advertisedModel = (provider: ServerProvider, model: string) =>
   findServedModel(provider.models, model);
+
+/** Antigravity 1.3 IDs append the thinking level (`gemini-3.8-flash-high`); the agent still accepts them. */
+function antigravitySuffixedModel(provider: ServerProvider, model: string) {
+  if (provider.driver !== "antigravity" || advertisedModel(provider, model)) return;
+  const separator = model.lastIndexOf("-");
+  if (separator === -1) return;
+  const family = model.slice(0, separator);
+  const value = model.slice(separator + 1);
+  const thinking = provider.models
+    .find((candidate) => candidate.slug === family)
+    ?.capabilities?.optionDescriptors?.find(
+      (descriptor) => descriptor.type === "select" && descriptor.role === "reasoning",
+    );
+  if (thinking?.type === "select" && thinking.options.some((choice) => choice.id === value)) {
+    return { model: family, thinking: { id: thinking.id, value } };
+  }
+}
 
 const withV = (version: string) => (version.startsWith("v") ? version : `v${version}`);
 
@@ -933,6 +961,7 @@ function listItemFromShell(
 ): OrchestratorMcpThreadListItem {
   return {
     ...(shell.inbox === undefined ? {} : { inbox: shell.inbox }),
+    ...(shell.standing == null ? {} : { standing: shell.standing }),
     threadId: shell.id,
     projectId: shell.projectId,
     title: shell.title,
@@ -1041,11 +1070,25 @@ function runExecutedModel(
     : (latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId)?.model ?? null);
 }
 
+/** A failed run's typed provider error, read from its own error items only. */
+function runFailure(
+  run: OrchestrationV2Run | undefined,
+  turnItems: Parameters<typeof latestRootProviderFailure>[1],
+) {
+  const failure = run === undefined ? null : latestRootProviderFailure(run, turnItems);
+  return run === undefined || failure === null
+    ? undefined
+    : orchestrationV2RunFailure(run, failure);
+}
+
 function threadRun(
   projection: Pick<OrchestrationV2ThreadProjection, "providerTurns">,
   run: OrchestrationV2Run,
 ): OrchestratorMcpThreadRun {
   return {
+    ...(run.providerFailoverOfRunId === undefined
+      ? {}
+      : { providerFailoverOfRunId: run.providerFailoverOfRunId }),
     runId: run.id,
     ordinal: run.ordinal,
     status: run.status,
@@ -1055,6 +1098,7 @@ function threadRun(
     requestedAt: DateTime.formatIso(run.requestedAt),
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
+    ...(run.delegationNudge === undefined ? {} : { delegationNudge: run.delegationNudge }),
   };
 }
 
@@ -1619,7 +1663,10 @@ const make = Effect.gen(function* () {
 
     const inheritedSelection = input.parent.thread.modelSelection;
     const requestedModel = input.target?.model;
+    const antigravityTarget =
+      requestedModel === undefined ? undefined : antigravitySuffixedModel(provider, requestedModel);
     const model =
+      antigravityTarget?.model ??
       requestedModel ??
       (instanceId === inheritedSelection.instanceId
         ? inheritedSelection.model
@@ -1630,7 +1677,7 @@ const make = Effect.gen(function* () {
         `Provider ${instanceId} has no model available for inheritance.`,
       );
     }
-    if (requestedModel !== undefined) yield* requireAdvertisedModel(provider, requestedModel);
+    if (requestedModel !== undefined) yield* requireAdvertisedModel(provider, model);
     const advertised = advertisedModel(provider, model);
     const descriptors = advertised?.capabilities?.optionDescriptors;
     const requestedOptions = withLegacyUltracodeEffort(descriptors, input.target?.options);
@@ -1654,14 +1701,17 @@ const make = Effect.gen(function* () {
           descriptors,
         )
       : undefined;
-    if (requestedOptions !== undefined) {
+    if (requestedOptions !== undefined || antigravityTarget !== undefined) {
       const selections = new Map(
-        (requestedOptions.length === 0 ? [] : (options ?? [])).map((selection) => [
+        (requestedOptions?.length === 0 ? [] : (options ?? [])).map((selection) => [
           selection.id,
           selection,
         ]),
       );
-      for (const selection of requestedOptions) {
+      if (antigravityTarget !== undefined && requestedOptions?.length !== 0) {
+        selections.set(antigravityTarget.thinking.id, antigravityTarget.thinking);
+      }
+      for (const selection of requestedOptions ?? []) {
         selections.set(selection.id, selection);
       }
       options = [...selections.values()];
@@ -1818,6 +1868,7 @@ const make = Effect.gen(function* () {
         instanceId: task.providerInstanceId,
         model: task.model,
       };
+    const latestTerminalFailure = runFailure(terminalRun, childProjection.turnItems);
     const result = {
       taskId: task.id,
       childThreadId: task.childThreadId,
@@ -1841,6 +1892,7 @@ const make = Effect.gen(function* () {
       latestTerminalStatus:
         terminalStatus !== null && isTerminalTaskStatus(terminalStatus) ? terminalStatus : null,
       latestTerminalSummary: latestTerminalSummary === derivedResult ? null : latestTerminalSummary,
+      ...(latestTerminalFailure === undefined ? {} : { latestTerminalFailure }),
       latestTerminalResultContextTransferId:
         latestTerminalResultContextTransferId === resultContextTransferId
           ? null
@@ -2853,6 +2905,14 @@ const make = Effect.gen(function* () {
           // delegations deliver through the blocking tool call until `awaitTask`
           // gives up the wait (timeout, cancelled call) and upgrades the wake.
           completionWake: input.mode === "wait" ? "settled_only" : "always",
+          ...(input.mode === "wait"
+            ? {
+                staleTimeoutMs: staleTimeoutMs(
+                  input.staleTimeoutMinutes,
+                  BACKGROUND_WAIT_STALE_MINUTES,
+                ),
+              }
+            : {}),
         })
         .pipe(
           Effect.mapError((error) =>
@@ -3459,30 +3519,34 @@ const make = Effect.gen(function* () {
       const runs = target.runs
         .toSorted((left, right) => right.ordinal - left.ordinal)
         .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT);
-      // Only an agent-created thread's latest run is judged, so a read loads one run's replies and notices.
+      // Only the latest run is judged, and only when it is an agent's or failed, so a read loads
+      // one run's replies and notices.
       const latestRun = runs[0];
-      const latestAlert =
+      const latestRecords =
         latestRun === undefined ||
-        target.thread.createdBy !== "agent" ||
+        (target.thread.createdBy !== "agent" && latestRun.status !== "failed") ||
         !ThreadManagementService.isTerminalRunStatus(latestRun.status)
           ? undefined
-          : subagentResultForRun(
-              {
-                ...target,
-                ...(yield* threadManagement
-                  .getThreadRecords(input.threadId, ["messages", "turnItems"], {
-                    messageRoles: ["assistant"],
-                    messageRunIds: [latestRun.id],
-                    turnItemRunId: latestRun.id,
-                    turnItemTypes: ["assistant_message", "error", "system_notice"],
-                  })
-                  .pipe(Effect.mapError(threadManagementFailure))),
-              },
-              latestRun,
-            ).workerAlert;
+          : yield* threadManagement
+              .getThreadRecords(input.threadId, ["messages", "turnItems"], {
+                messageRoles: ["assistant"],
+                messageRunIds: [latestRun.id],
+                turnItemRunId: latestRun.id,
+                turnItemTypes: ["assistant_message", "error", "system_notice"],
+              })
+              .pipe(Effect.mapError(threadManagementFailure));
+      const latestAlert =
+        latestRun === undefined ||
+        latestRecords === undefined ||
+        target.thread.createdBy !== "agent"
+          ? undefined
+          : subagentResultForRun({ ...target, ...latestRecords }, latestRun).workerAlert;
+      const latestFailure =
+        latestRecords === undefined ? undefined : runFailure(latestRun, latestRecords.turnItems);
       const recentRuns = runs.map((run) => ({
         ...threadRun(target, run),
         ...(run === latestRun && latestAlert !== undefined ? { workerAlert: latestAlert } : {}),
+        ...(run === latestRun && latestFailure !== undefined ? { failure: latestFailure } : {}),
       }));
       const { items, start } = timelineItemsWithinBudget(
         { thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null },
@@ -3698,7 +3762,29 @@ const make = Effect.gen(function* () {
         : [];
       const wakesCaller =
         ownedTask && !childRequests.some((request) => request.status === "pending");
+      const progressShell =
+        result.timedOut && input.untilDelegatedWorkSettled === true
+          ? yield* threadManagement
+              .getThreadShell(input.threadId)
+              .pipe(Effect.orElseSucceed(() => null))
+          : null;
+      const progress =
+        progressShell === null
+          ? {}
+          : {
+              progressAtMs: Math.max(
+                waitActivityMs(progressShell),
+                yield* threadManagement
+                  .getWaitActivityMs(progressShell.id, progressShell.latestRunId)
+                  .pipe(Effect.orElseSucceed(() => 0)),
+              ),
+              intentionallyHeld: waitIntentionallyHeld(
+                progressShell,
+                yield* Clock.currentTimeMillis,
+              ),
+            };
       return {
+        ...progress,
         threadId: input.threadId,
         runId: result.run?.id ?? null,
         status,

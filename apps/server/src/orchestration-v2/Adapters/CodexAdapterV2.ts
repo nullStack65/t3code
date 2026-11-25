@@ -5248,6 +5248,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       payload.error.codexErrorInfo,
                       notificationCode,
                     ),
+                    httpStatus: codexErrorHttpStatus(payload.error.codexErrorInfo),
                   }),
                   payload.error,
                 ),
@@ -5278,6 +5279,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     ? "transport_error"
                     : "provider_error",
                 retryable: true,
+                httpStatus: codexErrorHttpStatus(payload.error.codexErrorInfo),
               }),
               payload.error,
             );
@@ -6442,6 +6444,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                         message: input.failureMessage,
                         code: failureCode,
                         class: failureClass,
+                        httpStatus: codexErrorHttpStatus(input.failureErrorInfo),
                       }),
                       input.failureMessage,
                     );

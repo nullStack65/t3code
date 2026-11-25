@@ -4,6 +4,7 @@ import * as Random from "effect/Random";
 import * as EnvironmentKeys from "./cloud/environmentKeys.ts";
 import * as AssetSigner from "./assets/AssetSigner.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
+import * as EventSubscriptionStore from "./persistence/EventSubscriptions.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
@@ -221,6 +222,7 @@ import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementSer
 import * as CompactionLoopGuard from "./orchestration-v2/CompactionLoopGuard.ts";
 import * as IdleCompactionService from "./orchestration-v2/IdleCompactionService.ts";
 import * as SessionSpendGuardReactor from "./orchestration-v2/SessionSpendGuardReactor.ts";
+import * as DelegationNudgeReactor from "./orchestration-v2/DelegationNudgeReactor.ts";
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
@@ -656,6 +658,14 @@ const layerSessionSpendGuardWorker = Layer.effectDiscard(
   ),
 );
 
+const layerDelegationNudgeWorker = Layer.effectDiscard(
+  DelegationNudgeReactor.make.pipe(Effect.flatMap((service) => service.start())),
+).pipe(
+  Layer.provide(
+    Layer.mergeAll(ProjectionStoreV2.layer, RuntimeLayer.layerEventSink, IdAllocator.layer),
+  ),
+);
+
 const layerCompactionLoopGuard = Layer.effectDiscard(
   CompactionLoopGuard.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(ProjectionStoreV2.layer));
@@ -716,6 +726,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
   layerSessionSpendGuardWorker,
+  layerDelegationNudgeWorker,
   layerCompactionLoopGuard,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   DatabaseStorage.layer.pipe(
@@ -886,6 +897,7 @@ const layerMakeRoutes = Layer.mergeAll(
     speechStreamRouteLayer,
   ),
   McpHttpServer.layer.pipe(
+    Layer.provide(EventSubscriptionStore.layer),
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),

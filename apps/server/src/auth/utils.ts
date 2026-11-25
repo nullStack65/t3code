@@ -113,7 +113,7 @@ function inferDeviceType(userAgent: string | undefined): AuthClientMetadataDevic
 
   const normalized = userAgent.toLowerCase();
   if (/bot|crawler|spider|slurp|curl|wget/.test(normalized)) {
-    return "bot";
+    return "unknown";
   }
   if (/ipad|tablet/.test(normalized)) {
     return "tablet";
@@ -187,11 +187,16 @@ export function deriveAuthClientMetadata(input: {
   const ipAddress = resolveClientIpAddress(input.request);
   const os = input.presented?.os ?? inferOs(userAgent);
   const browser = inferBrowser(userAgent);
+  // Only the server issues bot sessions, which founder enforcement exempts; a client cannot claim one.
+  const presentedDeviceType = input.presented?.deviceType;
   return {
     ...(input.presented?.label ? { label: input.presented.label } : {}),
     ...(ipAddress ? { ipAddress } : {}),
     ...(userAgent ? { userAgent } : {}),
-    deviceType: input.presented?.deviceType ?? inferDeviceType(userAgent),
+    deviceType:
+      presentedDeviceType === undefined || presentedDeviceType === "bot"
+        ? inferDeviceType(userAgent)
+        : presentedDeviceType,
     ...(os ? { os } : {}),
     ...(browser ? { browser } : {}),
   };

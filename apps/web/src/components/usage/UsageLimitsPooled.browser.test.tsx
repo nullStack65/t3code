@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  UsageLimitSourceId,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { CHATGPT_USAGE_URL } from "@t3tools/shared/usageLimits";
@@ -153,5 +154,89 @@ describe("UsageLimitsPooled quiet states", () => {
     await expect.element(summary).toBeVisible();
     await summary.click();
     await expect.element(screen.getByText("(primary-r720)")).toBeVisible();
+  });
+});
+
+describe("UsageLimitsPooled Grok accounts", () => {
+  it("shows the emergency route and the other SuperGrok seat as named rows", async () => {
+    const grok = ProviderDriverKind.make("grok");
+    const limits = (usedPercent: number) => ({
+      checkedAt,
+      windows: [
+        {
+          id: "subscription",
+          kind: "weekly" as const,
+          label: "Weekly",
+          usedPercent,
+          windowDurationMins: 7 * 24 * 60,
+          resetsAt: "2026-11-27T00:00:00.000Z",
+        },
+      ],
+    });
+    const emergency: ServerProvider = {
+      instanceId: ProviderInstanceId.make("grok-direct"),
+      driver: grok,
+      displayName: "Grok · Emergency (direct)",
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated", email: "a@example.com" },
+      checkedAt,
+      models: [],
+      slashCommands: [],
+      skills: [],
+      usageLimits: limits(7),
+    };
+    const presentations = new Map([
+      [
+        EnvironmentId.make("desk"),
+        {
+          entry: { target: { label: "Desk" } },
+          serverConfig: {
+            providers: [emergency],
+            usageLimitSources: [
+              {
+                id: UsageLimitSourceId.make("magpie"),
+                kind: "magpie" as const,
+                label: "Magpie",
+                checkedAt,
+                accounts: [
+                  {
+                    id: "grok:a@example.com",
+                    driver: grok,
+                    email: "a@example.com",
+                    displayName: "A Person · SuperGrok",
+                    plan: "SuperGrok",
+                    status: "held" as const,
+                    statusDetail: "Held.",
+                    usageLimits: limits(7),
+                  },
+                  {
+                    id: "grok:b@example.com",
+                    driver: grok,
+                    email: "b@example.com",
+                    displayName: "B Person · SuperGrok",
+                    plan: "SuperGrok",
+                    usageLimits: limits(65),
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ]);
+    await using screen = await render(
+      <UsageLimitsPooled
+        presentations={presentations}
+        now={Date.parse("2026-11-20T21:00:00.000Z")}
+      />,
+    );
+
+    await expect.element(screen.getByText("Grok · Emergency (direct)")).toBeVisible();
+    await expect.element(screen.getByText("B Person · SuperGrok")).toBeVisible();
+    await expect.element(screen.getByText("Held")).toBeVisible();
+    expect(screen.container.textContent).not.toContain("A Person · SuperGrok");
   });
 });

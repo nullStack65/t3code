@@ -281,6 +281,7 @@ export function makeProviderFailure(input: {
   readonly class?: OrchestrationV2ProviderFailureClass;
   readonly retryable?: boolean | null;
   readonly resetAt?: string | null;
+  readonly httpStatus?: number | null;
 }): OrchestrationV2ProviderFailure {
   const curated = curatedCauseMessages(input.cause);
   const requestTooLarge =
@@ -294,11 +295,14 @@ export function makeProviderFailure(input: {
   const code =
     rawCode === null ? null : boundedText(rawCode, MAX_PROVIDER_FAILURE_CODE_LENGTH) || null;
 
+  // Claude reports its status only as an `api_error_<status>` code.
+  const status = input.httpStatus ?? Number(/^api_error_(\d{3})$/u.exec(code ?? "")?.[1]);
   return {
     class: input.class ?? "unknown",
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
     code,
     retryable: requestTooLarge ? false : (input.retryable ?? null),
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { httpStatus: status } : {}),
     ...(input.class === "usage_limit" &&
     input.resetAt != null &&
     Number.isFinite(Date.parse(input.resetAt))

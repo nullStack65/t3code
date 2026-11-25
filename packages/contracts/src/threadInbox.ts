@@ -116,19 +116,35 @@ export function inboxRoutingFor(inbox: InboxChoice): ThreadInboxRouting {
 
 /**
  * Where an agent-launched top-level thread is filed: the chosen inbox, else Agents, so agent
- * work never lands in a founder's inbox by default. `inboxRouting` adjusts the chosen inbox.
+ * work never lands in a founder's inbox by default. A standing bot is the exception: with no
+ * inbox and no audience, it is Shared with FYI attention, so both founders see it. `inboxRouting`
+ * adjusts the chosen inbox. An explicit `attentionKind` is kept.
  */
 export const agentLaunchInboxRouting = (input: {
   readonly inbox?: InboxChoice | undefined;
   readonly inboxRouting?: ThreadInboxRoutingPatch | undefined;
-}): ThreadInboxRoutingPatch =>
-  input.inbox === undefined
+  readonly standing?: { readonly name: string } | null | undefined;
+}): ThreadInboxRoutingPatch => {
+  if (
+    input.standing != null &&
+    input.inbox === undefined &&
+    input.inboxRouting?.audience === undefined
+  ) {
+    return {
+      ...inboxRoutingFor("shared"),
+      ...input.inboxRouting,
+      attentionKind: input.inboxRouting?.attentionKind ?? "FYI",
+      reason: input.inboxRouting?.reason ?? "fyi",
+    };
+  }
+  return input.inbox === undefined
     ? (input.inboxRouting ?? inboxRoutingFor("agents"))
     : { ...inboxRoutingFor(input.inbox), ...input.inboxRouting };
+};
 
 export const InboxChoiceParameter = InboxChoice.annotate({
   description:
-    "Sidebar inbox for the new thread. Default 'agents': autonomous work reports one final result there. Pick 'kameron' or 'jeff' (your `inbox.owner` in t3_thread_read) or 'shared' only when they will converse in it, review, decide or approve, and set `inboxRouting.reason`.",
+    "Sidebar inbox for the new thread. Default 'agents': autonomous work reports one final result there. A standing bot (`standing` set, this and `inboxRouting.audience` omitted) defaults to 'shared' with FYI attention, for both founders. Pick 'kameron' or 'jeff' (your `inbox.owner` in t3_thread_read) or 'shared' only when they will converse in it, review, decide or approve, and set `inboxRouting.reason`.",
 });
 export const compositeThreadKey = (environmentId: string, threadId: string) =>
   JSON.stringify([environmentId, threadId]);
@@ -191,22 +207,81 @@ export const routeThreadInbox = (
   const { reason, ...fields } = routing;
   // A move ends any open ask: it would otherwise keep the thread in the asked founder's lane.
   const { decisionRequest: _ask, ...current } = inbox;
+  // Naming a founder as the audience, without an assignee, is that founder's inbox. Audience
+  // alone used to leave the Agents assignee in place, so the lane stayed hidden.
+  const founderAudience =
+    fields.audience === "kameron" || fields.audience === "jeff" ? fields.audience : undefined;
+  const impliedAssignee =
+    fields.assignee !== undefined
+      ? fields.assignee
+      : founderAudience !== undefined && current.assignee?.kind !== "human"
+        ? { kind: "human" as const, id: founderAudience }
+        : undefined;
+  const nextAudience =
+    fields.audience ??
+    (impliedAssignee?.kind === "human" ? impliedAssignee.id : undefined) ??
+    current.audience;
+  // An Agents launch stores background attention. A route that only names kameron, jeff or
+  // shared used to leave that in place, and a founder lane treats background as not shown.
+  // FYI is what a shared bot uses. An explicit attentionKind, including background, is kept.
+  // A human assignment that is already in a founder inbox still wakes background work to action.
+  const leavingAgents =
+    current.audience === "agent-only" &&
+    (nextAudience === "kameron" || nextAudience === "jeff" || nextAudience === "shared");
+  const attentionKind =
+    fields.attentionKind !== undefined
+      ? fields.attentionKind
+      : leavingAgents && current.attentionKind === "background"
+        ? "FYI"
+        : impliedAssignee?.kind === "human" && current.attentionKind === "background"
+          ? "action"
+          : undefined;
   const { reason: _previous, ...routed } = {
     ...current,
     ...fields,
-    ...(fields.assignee?.kind === "human"
+    ...(impliedAssignee !== undefined && fields.assignee === undefined
+      ? { assignee: impliedAssignee }
+      : {}),
+    ...(attentionKind === undefined ? {} : { attentionKind }),
+    ...(impliedAssignee?.kind === "human"
       ? {
-          owner: fields.owner === undefined ? fields.assignee.id : fields.owner,
-          audience: fields.audience ?? fields.assignee.id,
-          attentionKind:
-            fields.attentionKind ??
-            (inbox.attentionKind === "background" ? "action" : inbox.attentionKind),
+          owner: fields.owner === undefined ? impliedAssignee.id : fields.owner,
+          audience: fields.audience ?? impliedAssignee.id,
         }
       : {}),
   };
   const kept = reason ?? (inboxReachesFounders(routed) ? "conversation" : undefined);
   return kept === undefined ? routed : { ...routed, reason: kept };
 };
+
+/**
+ * Standing is a shared bot, not background work. Setting a persona refiles an Agents inbox to
+ * Shared with FYI attention, and lifts `background` attention on a founder or Shared inbox to
+ * FYI. Clearing standing leaves the inbox alone. An inbox that is already a founder or Shared
+ * inbox with action or FYI attention is unchanged.
+ */
+export function inboxAfterStandingSet<T extends ThreadInbox | null | undefined>(
+  inbox: T,
+  standing: { readonly name: string } | null,
+): T {
+  if (standing == null || inbox == null) return inbox;
+  if (inbox.audience === "agent-only") {
+    return routeThreadInbox(inbox, {
+      ...inboxRoutingFor("shared"),
+      reason: inbox.reason ?? "fyi",
+    }) as T;
+  }
+  if (
+    inbox.attentionKind === "background" &&
+    (inbox.audience === "kameron" || inbox.audience === "jeff" || inbox.audience === "shared")
+  ) {
+    return routeThreadInbox(inbox, {
+      attentionKind: "FYI",
+      reason: inbox.reason ?? "fyi",
+    }) as T;
+  }
+  return inbox;
+}
 
 /**
  * Agent routing that would reach a founder's or the shared inbox must carry a reason. Returns the

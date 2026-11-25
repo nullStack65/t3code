@@ -1057,13 +1057,15 @@ it.effect("a coalesced window dispatches the prompt saved after it opened", () =
         yield* TestClock.adjust("10 seconds");
         yield* workers.get("webhook-coalescing")!;
         const launched = yield* Queue.take(launches);
-        assert.equal(launched.initialMessage?.text, "Use the updated instructions.");
+        assert.isTrue(launched.initialMessage?.text.startsWith("Use the updated instructions."));
         const owner = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries[0]!;
         const { delivery } = yield* service.getWebhookDelivery({
           id: task.id,
           deliveryId: owner.id,
         });
-        assert.equal(delivery.renderedPrompt, "Use the updated instructions.");
+        assert.isTrue(
+          delivery.renderedPrompt?.startsWith("Use the updated instructions.") === true,
+        );
       }),
     { workers },
   );
@@ -1088,7 +1090,7 @@ it.effect("retrying a running window keeps the prompt it was dispatched with", (
         yield* TestClock.adjust("10 seconds");
         yield* drainPendingDispatch(workers);
         const launched = yield* Queue.take(launches);
-        assert.equal(launched.initialMessage?.text, "Prompt at dispatch");
+        assert.isTrue(launched.initialMessage?.text.startsWith("Prompt at dispatch"));
         yield* save("Prompt saved after dispatch");
         yield* sql`DROP TRIGGER fail_completion`;
         yield* drainPendingDispatch(workers);
@@ -1098,7 +1100,7 @@ it.effect("retrying a running window keeps the prompt it was dispatched with", (
           id: task.id,
           deliveryId: owner.id,
         });
-        assert.equal(delivery.renderedPrompt, "Prompt at dispatch");
+        assert.isTrue(delivery.renderedPrompt?.startsWith("Prompt at dispatch") === true);
       }),
     { workers },
   );

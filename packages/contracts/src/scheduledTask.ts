@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import {
   CommandId,
+  EnvironmentId,
   ForwardCompatibleArray,
   IsoDateTime,
   ProjectId,
@@ -238,6 +239,38 @@ export function scheduledTaskThreadMode(
   return task.threadMode ?? (task.threadId === null ? "new_thread" : "continue");
 }
 
+/** One machine an accepted placement may run on, under the link incarnation accepted then. */
+export const ScheduledTaskPlacementDestination = Schema.Struct({
+  environmentId: EnvironmentId,
+  /** The link's incarnation when accepted; null for the origin itself, which needs no link. */
+  linkIncarnation: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ScheduledTaskPlacementDestination = typeof ScheduledTaskPlacementDestination.Type;
+
+/**
+ * The placement a task's origin accepted for it, by a real native or MCP caller's authority. Each
+ * fresh occurrence chooses only within these destinations and mode ceilings; edits may keep or
+ * narrow it, never widen it. A new peer or a re-paired link needs a new acceptance.
+ */
+export const ScheduledTaskPlacementPolicy = Schema.Struct({
+  revision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  placement: Schema.Literal("auto"),
+  originEnvironmentId: EnvironmentId,
+  destinations: Schema.Array(ScheduledTaskPlacementDestination),
+  runtimeModeCeiling: RuntimeMode,
+  interactionModeCeiling: ProviderInteractionMode,
+  acceptedVia: Schema.Literals(["native", "mcp"]),
+  acceptedAt: IsoDateTime,
+});
+export type ScheduledTaskPlacementPolicy = typeof ScheduledTaskPlacementPolicy.Type;
+
+/** A task owned by an accepted placement: its incarnation is new when it is deleted and recreated. */
+export const ScheduledTaskPlacement = Schema.Struct({
+  incarnation: TrimmedNonEmptyString,
+  policy: ScheduledTaskPlacementPolicy,
+});
+export type ScheduledTaskPlacement = typeof ScheduledTaskPlacement.Type;
+
 export const ScheduledTask = Schema.Struct({
   id: ScheduledTaskId,
   title: TrimmedNonEmptyString,
@@ -263,14 +296,32 @@ export const ScheduledTask = Schema.Struct({
   webhook: Schema.optional(ScheduledTaskWebhookEndpoint),
   /** Why the task cannot run regardless of `enabled`, such as a managed policy refusing webhooks. */
   blockedByPolicy: Schema.optionalKey(Schema.String),
+  /** Set when an accepted placement owns the task; legacy tasks run on their own machine. */
+  placement: Schema.optionalKey(ScheduledTaskPlacement),
 });
 export type ScheduledTask = typeof ScheduledTask.Type;
+
+/**
+ * A stored task this server cannot read, such as one saved by a newer version. It is kept as it
+ * is: never run, converted or cleaned up here.
+ */
+export const ScheduledTaskUnsupported = Schema.Struct({
+  id: ScheduledTaskId,
+  title: Schema.String,
+  projectId: Schema.String,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  reason: Schema.String,
+});
+export type ScheduledTaskUnsupported = typeof ScheduledTaskUnsupported.Type;
 
 export const ScheduledTaskListInput = Schema.Struct({});
 export type ScheduledTaskListInput = typeof ScheduledTaskListInput.Type;
 
 export const ScheduledTaskListResult = Schema.Struct({
   tasks: ForwardCompatibleArray(ScheduledTask),
+  /** Stored tasks this server cannot read; absent from older servers. */
+  unsupported: Schema.optionalKey(ForwardCompatibleArray(ScheduledTaskUnsupported)),
   /** The server's IANA zone for fixed-time schedules. Absent from older servers. */
   timeZone: Schema.optional(TrimmedNonEmptyString),
 });
