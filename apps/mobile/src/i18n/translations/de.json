@@ -1940,6 +1940,7 @@
   "69c659d8b6e271cc": "Die Seite fordert eine Datei an.",
   "a6efeb99b479990a": "Dateien auswählen",
   "59c87648d44b958c": "Datei auswählen",
+  "6f321f153b8711bb": "Option auswählen",
   "61a552a67e9e3eac": "Antwort auf Dialog",
   "1d9bd868fafea18a": "Ablehnen",
   "1d0a7acef4a95536": "Akzeptieren",
@@ -5010,6 +5011,7 @@
   "5a2d803b3ea43f18": "Nutzungslimit erreicht.",
   "d5365c5e28a18442": "{summary}: {message}",
   "bff5692f10fc10b0": "Lange drücken zum Kopieren.",
+  "1a1beecff68a6e61": "Google-Konto bestätigen",
   "a1984c617f973156": "{preview}, Tool-Aufruf fehlgeschlagen",
   "38574c0d1e49b278": "{preview}, angemeldet",
   "fd0d04d5a6627f70": "Öffnet den Thread dieses Agenten. Lange drücken zum Kopieren.",
@@ -5312,6 +5314,8 @@
   "cd5d90cbbfae32f6": "Aufnahme {time}",
   "6236e2f587bc4eb4": "Wird transkribiert",
   "4e430d5ea01c249b": "Die Antwort konnte nicht gesendet werden",
+  "a3c43735e1a81498": "Begründung für {title}",
+  "bfad234f016cfa3f": "Warum, in einem Satz. Gilt für die Antwort, die du wählst.",
   "e721a8b98f44d5f7": "Erst den Agenten fragen",
   "e39f89c909df4db0": "Die Ausführung konnte nicht fortgesetzt werden",
   "28c9dd162825c117": "Diese Ausführung abbrechen?",
@@ -5338,6 +5342,14 @@
       "v": "v"
     }
   ],
+  "e114d37b32ab0dc7": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " braucht eine Begründung."
+  ],
   "9de4e24c9273b496": "Diese Verbindung kann Ausführungen lesen, aber nicht beantworten.",
   "6dac41769b114edf": [
     {
@@ -5358,16 +5370,54 @@
   "59a3213338779c6e": "Fertig",
   "5a3b1fe78182d8dc": "{choice} geantwortet",
   "b17bd06e3b1ec0d2": "{choice} geantwortet: {reason}",
+  "99451a5d2d40440f": "Zurückgezogen von {by}.",
+  "3ee30a50b70fffab": "Zurückgezogen von {by}: {reason}",
   "89102905bf09b0e8": "Live ansehen",
   "eea0013efc9e4339": "Transkript",
   "ba8337dca3232880": "Ausführung öffnen",
+  "235902a19e95833b": [
+    "von dir,",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "3759768c5d342c22": [
+    "beantwortet",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "8afa4fbe16f95bcf": [
+    "von ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    ",",
+    " ",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
+  ],
   "cab70ed0237438ef": "Schritt wird geladen…",
   "30a5be40eb956663": "arbeitet",
   "edc8f6e9720f4eda": "schläft",
   "0684698b49273da5": "wartet",
   "063173aa16052cb9": "läuft",
   "3ba4cf953dd20f22": "fehlgeschlagen",
+  "0f93532dd76391fc": "Du hast {choice} geantwortet",
+  "7e1fd2eb570a372b": "{who} hat {choice} geantwortet",
   "e777db2880f53a46": "niemand hat geantwortet",
+  "201490988858b511": "zurückgezogen von {by}",
   "34f59bbbead0b97f": "{names} und {count} weitere",
   "ac1556f6ce89a5ea": "{count} parallel",
   "e197c4963bacc746": "{count} laufen",

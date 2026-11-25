@@ -47,6 +47,7 @@ export const threadEnvironment = createThreadEnvironmentAtoms(
   { getInboxOrigin: () => inboxOriginFor(getClientSettings()) },
 );
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
+export const environmentThreadStateAtom = environmentThreads.stateAtom;
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
   environmentThreads.stateAtom,
 );

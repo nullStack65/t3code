@@ -1578,6 +1578,7 @@
   "6848f5bbb2bd9eec": "PDF document",
   "7873a79df0cf6d0e": "Browser page",
   "0b55696e27387e4e": "Press Shift+Escape to leave the browser page.",
+  "90dfebe26eb86b2d": "Page select options",
   "737d3c6bec93f9e6": "Choose files for the page",
   "e6a3fa7cfc14f86a": "Browser dialog",
   "61a552a67e9e3eac": "Dialog response",
@@ -4670,6 +4671,7 @@
       "c": "”"
     }
   ],
+  "91aadfc843c600de": "Verify Google account",
   "a2aaca7ff8310186": "Open chat",
   "a3048aaa541b7744": "Activity",
   "4a3cbccb2beedeb0": "image",
@@ -6801,8 +6803,8 @@
   "e545fcdb83e2c36a": "Add to review",
   "2250f241daadd71b": "Add to agent",
   "be9b06fae29cc07a": "All commits",
-  "5ef391d5403d7bdd": "{count, plural, one {Show more ({count} left)} other {Show more ({count} left)}}",
   "ccd5fc4db08374d7": "{count, plural, one {{count} test file hidden} other {{count} test files hidden}}",
+  "5ef391d5403d7bdd": "{count, plural, one {Show more ({count} left)} other {Show more ({count} left)}}",
   "c12871955b159db4": "viewed in {app}",
   "98b353c208fd7977": "viewed",
   "d65b870952bbe4f0": "These ticks are kept here, not on the host",
@@ -7610,8 +7612,9 @@
   "5e11277c0af743da": "Paste a full pairing URL here to fill both fields automatically.",
   "4573320c3e8ab4b7": "This machine is on your T3 Connect account. Use it as a fallback route.",
   "7a790e431eace2aa": "Add T3 Connect",
-  "4bbeed02695f8895": [
-    "Also link it for agents on ",
+  "012b6f79d9871cff": [
+    "Also link it for agents on",
+    " ",
     {
       "i": 1,
       "k": "_gt_value_1",
@@ -8991,7 +8994,7 @@
   "a9cdd8c7073be920": "Command Palette: Toggle",
   "4e0943e8c7a465d1": "File Picker: Toggle",
   "df5fdcdf26a6b52a": "Project Search: Toggle",
-  "a8ff6d33b060736f": "Usage: Open",
+  "0ca6fd2b8fcab2c3": "Usage: Toggle",
   "a513d51b71b95674": "Theme: Select",
   "1ffd8427452372e1": "Appearance: Cycle",
   "3a3bb4a7551a87cc": "Theme Editor: Toggle",
@@ -12481,6 +12484,7 @@
   "9c015d3d034316cb": "Use arrow keys to adjust the focused value. Hold Shift for larger steps. Use Home and End for the minimum and maximum. Press Tab to move between saturation and brightness.",
   "8639d5532561f87f": "Close",
   "e1186ad82ee08b33": "Close",
+  "a4579e548b768663": "Show sidebar",
   "a1b11a1cf39c9dc9": "Resize Sidebar",
   "c557090df5722838": "Toggle Sidebar",
   "bbde430e56272901": "Drag to resize sidebar",
@@ -12797,9 +12801,14 @@
   "dd7a1e58c2553933": "wakes in {duration}",
   "95cc952724dd7310": "about to wake",
   "3cc34921c0128593": "running",
-  "e777db2880f53a46": "nobody answered",
   "dc90739d391a5e67": "You said {choice}",
+  "4e96712d839ccbff": "{who} said {choice}",
+  "e777db2880f53a46": "nobody answered",
+  "201490988858b511": "withdrawn by {by}",
   "389f2563b5b763fd": "Quick steps",
+  "99451a5d2d40440f": "Withdrawn by {by}.",
+  "3ee30a50b70fffab": "Withdrawn by {by}: {reason}",
+  "92e129bf413a1220": "withdrawn",
   "a41c8d758121ad81": "slept",
   "9db248b770096984": "waited",
   "c76124517af28686": "running for {duration}",
@@ -12835,6 +12844,49 @@
   "8bffb377e2a6a7de": "its version is no longer registered",
   "f92d9132f7b85d1a": "Loading steps…",
   "6ebc59f64c761a49": "Nothing yet.",
+  "19097cfb8f5a79cf": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " said",
+    " ",
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
+    "."
+  ],
+  "e7bbf693910057bf": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " said",
+    " ",
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
+    ": ",
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    }
+  ],
   "a759dccd157d7dae": [
     "You said",
     " ",
@@ -12868,6 +12920,15 @@
       "v": "v"
     }
   ],
+  "3759768c5d342c22": [
+    "answered",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "c98009be9a273b31": "Open run",
   "c8eb9be36d4d51ad": [
     "Thread on ",
@@ -12893,6 +12954,14 @@
   ],
   "02dfe6c63fd0b8a1": "Add a reason",
   "19abd94828a3bdbc": "Ask the agent first",
+  "e114d37b32ab0dc7": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " needs a reason."
+  ],
   "a18721fa8f328361": "Needs you",
   "bbf24e7920c1e86b": "Running",
   "8d6e18d2ad832db6": "All",

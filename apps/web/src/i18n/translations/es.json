@@ -1578,6 +1578,7 @@
   "6848f5bbb2bd9eec": "Documento PDF",
   "7873a79df0cf6d0e": "Página del navegador",
   "0b55696e27387e4e": "Pulsa Shift+Escape para salir de la página del navegador.",
+  "90dfebe26eb86b2d": "Opciones de selección de la página",
   "737d3c6bec93f9e6": "Elige archivos para la página",
   "e6a3fa7cfc14f86a": "Cuadro de diálogo del navegador",
   "61a552a67e9e3eac": "Respuesta al cuadro de diálogo",
@@ -4668,6 +4669,7 @@
       "c": "”"
     }
   ],
+  "91aadfc843c600de": "Verificar cuenta de Google",
   "a2aaca7ff8310186": "Abrir chat",
   "a3048aaa541b7744": "Actividad",
   "4a3cbccb2beedeb0": "imagen",
@@ -6794,8 +6796,8 @@
   "e545fcdb83e2c36a": "Añadir a la revisión",
   "2250f241daadd71b": "Añadir al agente",
   "be9b06fae29cc07a": "Todos los commits",
-  "5ef391d5403d7bdd": "{count, plural, one {Mostrar más (queda {count})} other {Mostrar más (quedan {count})}}",
   "ccd5fc4db08374d7": "{count, plural, one {{count} archivo de prueba oculto} other {{count} archivos de prueba ocultos}}",
+  "5ef391d5403d7bdd": "{count, plural, one {Mostrar más (queda {count})} other {Mostrar más (quedan {count})}}",
   "c12871955b159db4": "visto en {app}",
   "98b353c208fd7977": "vistos",
   "d65b870952bbe4f0": "Estas marcas se guardan aquí, no en el host",
@@ -7603,8 +7605,9 @@
   "5e11277c0af743da": "Pega aquí una URL de emparejamiento completa para rellenar ambos campos automáticamente.",
   "4573320c3e8ab4b7": "Esta máquina está en tu cuenta de T3 Connect. Úsala como ruta alternativa.",
   "7a790e431eace2aa": "Añadir T3 Connect",
-  "4bbeed02695f8895": [
-    "Also link it for agents on ",
+  "012b6f79d9871cff": [
+    "Also link it for agents on",
+    " ",
     {
       "i": 1,
       "k": "_gt_value_1",
@@ -8981,7 +8984,7 @@
   "a9cdd8c7073be920": "Paleta de comandos: alternar",
   "4e0943e8c7a465d1": "Selector de archivos: alternar",
   "df5fdcdf26a6b52a": "Búsqueda en el proyecto: alternar",
-  "a8ff6d33b060736f": "Uso: abrir",
+  "0ca6fd2b8fcab2c3": "Uso: Mostrar u ocultar",
   "a513d51b71b95674": "Tema: seleccionar",
   "1ffd8427452372e1": "Apariencia: alternar",
   "3a3bb4a7551a87cc": "Editor de temas: alternar",
@@ -12466,6 +12469,7 @@
   "9c015d3d034316cb": "Usa las flechas para ajustar el valor enfocado. Mantén Shift para pasos más grandes. Usa Inicio y Fin para el mínimo y el máximo. Pulsa Tab para pasar entre saturación y brillo.",
   "8639d5532561f87f": "Cerrar",
   "e1186ad82ee08b33": "Cerrar",
+  "a4579e548b768663": "Mostrar barra lateral",
   "a1b11a1cf39c9dc9": "Cambiar el tamaño de la barra lateral",
   "c557090df5722838": "Alternar barra lateral",
   "bbde430e56272901": "Arrastra para cambiar el tamaño de la barra lateral",
@@ -12782,9 +12786,14 @@
   "dd7a1e58c2553933": "despierta en {duration}",
   "95cc952724dd7310": "a punto de despertar",
   "3cc34921c0128593": "en curso",
-  "e777db2880f53a46": "nadie respondió",
   "dc90739d391a5e67": "Dijiste {choice}",
+  "4e96712d839ccbff": "{who} dijo {choice}",
+  "e777db2880f53a46": "nadie respondió",
+  "201490988858b511": "retirada por {by}",
   "389f2563b5b763fd": "Pasos rápidos",
+  "99451a5d2d40440f": "Retirada por {by}.",
+  "3ee30a50b70fffab": "Retirada por {by}: {reason}",
+  "92e129bf413a1220": "retirada",
   "a41c8d758121ad81": "en espera",
   "9db248b770096984": "esperó",
   "c76124517af28686": "en ejecución desde hace {duration}",
@@ -12820,6 +12829,49 @@
   "8bffb377e2a6a7de": "su versión ya no está registrada",
   "f92d9132f7b85d1a": "Cargando pasos…",
   "6ebc59f64c761a49": "Nada todavía.",
+  "19097cfb8f5a79cf": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " dijo",
+    " ",
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
+    "."
+  ],
+  "e7bbf693910057bf": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " dijo",
+    " ",
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
+    ": ",
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    }
+  ],
   "a759dccd157d7dae": [
     "Dijiste",
     " ",
@@ -12853,6 +12905,15 @@
       "v": "v"
     }
   ],
+  "3759768c5d342c22": [
+    "respondida",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "c98009be9a273b31": "Abrir ejecución",
   "c8eb9be36d4d51ad": [
     "Hilo en ",
@@ -12878,6 +12939,14 @@
   ],
   "02dfe6c63fd0b8a1": "Añadir un motivo",
   "19abd94828a3bdbc": "Preguntar antes al agente",
+  "e114d37b32ab0dc7": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " necesita un motivo."
+  ],
   "a18721fa8f328361": "Te necesitan",
   "bbf24e7920c1e86b": "En ejecución",
   "8d6e18d2ad832db6": "Todas",

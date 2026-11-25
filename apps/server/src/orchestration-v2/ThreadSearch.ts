@@ -25,6 +25,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
+  EXACT_PHRASE_GAP,
   messageSearchTokens,
   foldSearchQuery,
   rankMessageMatches,
@@ -78,6 +79,8 @@ const SearchRequest = Schema.Struct({
   ),
   /** For each short word outside ASCII, the spellings a hit must contain one of. */
   shortSpellings: Schema.fromJsonString(Schema.Array(Schema.Array(Schema.String))),
+  /** How many of the newest hits to read. */
+  hitLimit: Schema.Number,
   projectId: Schema.NullOr(ProjectId),
   /** Threads the caller already lists, left out before the hit limit. */
   excludedThreadIds: TokenList,
@@ -173,17 +176,27 @@ function buildMessageSearch(
   typeof SearchRequest.Type,
   "projectId" | "excludedThreadIds" | "sender" | "includeHumanNotes"
 > | null {
-  const { long, short } = messageSearchTokens(query);
+  const { long, short, words, exact } = messageSearchTokens(query);
   // With a sender and no words, every one of that sender's newest messages is a hit.
   if (long.length === 0 && short.length === 0 && bySender) {
-    return { match: null, substrings: [], shortSpellings: [] };
+    return { match: null, hitLimit: MESSAGE_HIT_LIMIT, substrings: [], shortSpellings: [] };
   }
   if (long.length === 0) return null;
   // Two-character CJK words are too short for trigrams.
   const indexed = hasIndex && long.every((token) => Array.from(token).length >= 3);
   const narrowing = short.filter((token) => !NON_ASCII.test(token));
+  const phrases = long.map((token) => `"${token.replaceAll('"', '""')}"`).join(" ");
+  // An exact query's words sit together, so the index reads only hits that hold them that
+  // close. The distance covers the widest phrase the matcher accepts, so it never drops a match.
+  const near =
+    exact && long.length > 1
+      ? words.join(" ").length + (words.length - 1) * EXACT_PHRASE_GAP
+      : null;
   return {
-    match: indexed ? long.map((token) => `"${token.replaceAll('"', '""')}"`).join(" ") : null,
+    match: !indexed ? null : near === null ? phrases : `NEAR(${phrases}, ${near})`,
+    // The matcher drops most hits that hold a phrase's words but not together, so a
+    // phrase reads every candidate: the newest ones would otherwise hide an older match.
+    hitLimit: exact && words.length > 1 ? MESSAGE_CANDIDATE_LIMIT : MESSAGE_HIT_LIMIT,
     substrings: (indexed ? narrowing : [...long, ...narrowing]).map((token) => ({
       token,
       accentInsensitive: accentInsensitiveGlob(token),
@@ -269,6 +282,7 @@ export const messageHitsQuery = (
     match,
     substrings,
     shortSpellings,
+    hitLimit,
     projectId,
     excludedThreadIds,
     sender,
@@ -382,7 +396,7 @@ export const messageHitsQuery = (
     -- The index's own rowid, so FTS5 returns hits newest first and stops at
     -- the limit; ordering by the messages table's rowid sorts every hit.
     ORDER BY "messageRowid" DESC
-    LIMIT ${MESSAGE_HIT_LIMIT}
+    LIMIT ${hitLimit}
   `;
 
 const TitleCandidateRow = Schema.Struct({

@@ -1940,6 +1940,7 @@
   "69c659d8b6e271cc": "La page demande un fichier.",
   "a6efeb99b479990a": "Choisir des fichiers",
   "59c87648d44b958c": "Choisir un fichier",
+  "6f321f153b8711bb": "Choisir une option",
   "61a552a67e9e3eac": "Réponse à la boîte de dialogue",
   "1d9bd868fafea18a": "Refuser",
   "1d0a7acef4a95536": "Accepter",
@@ -5004,6 +5005,7 @@
   "5a2d803b3ea43f18": "Limite d’utilisation atteinte.",
   "d5365c5e28a18442": "{summary} : {message}",
   "bff5692f10fc10b0": "Appuyez longuement pour copier.",
+  "1a1beecff68a6e61": "Vérifier le compte Google",
   "a1984c617f973156": "{preview}, échec de l’appel d’outil",
   "38574c0d1e49b278": "{preview}, connecté",
   "fd0d04d5a6627f70": "Ouvre le fil de cet agent. Appuyez longuement pour copier.",
@@ -5306,6 +5308,8 @@
   "cd5d90cbbfae32f6": "Enregistrement {time}",
   "6236e2f587bc4eb4": "Transcription",
   "4e430d5ea01c249b": "Impossible d’envoyer la réponse",
+  "a3c43735e1a81498": "Raison pour {title}",
+  "bfad234f016cfa3f": "Pourquoi, en une phrase. Elle accompagne la réponse que vous choisissez.",
   "e721a8b98f44d5f7": "Demander d’abord à l’agent",
   "e39f89c909df4db0": "Impossible de reprendre l’exécution",
   "28c9dd162825c117": "Annuler cette exécution ?",
@@ -5332,6 +5336,14 @@
       "v": "v"
     }
   ],
+  "e114d37b32ab0dc7": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " nécessite une raison."
+  ],
   "9de4e24c9273b496": "Cette connexion peut lire les exécutions, mais pas y répondre.",
   "6dac41769b114edf": [
     {
@@ -5352,16 +5364,54 @@
   "59a3213338779c6e": "Terminé",
   "5a3b1fe78182d8dc": "A répondu {choice}",
   "b17bd06e3b1ec0d2": "A répondu {choice} : {reason}",
+  "99451a5d2d40440f": "Retirée par {by}.",
+  "3ee30a50b70fffab": "Retirée par {by} : {reason}",
   "89102905bf09b0e8": "Suivre en direct",
   "eea0013efc9e4339": "Transcription",
   "ba8337dca3232880": "Ouvrir l’exécution",
+  "235902a19e95833b": [
+    "par vous,",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "3759768c5d342c22": [
+    "répondue",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "8afa4fbe16f95bcf": [
+    "par ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    ",",
+    " ",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
+  ],
   "cab70ed0237438ef": "Chargement de l’étape…",
   "30a5be40eb956663": "en cours",
   "edc8f6e9720f4eda": "en veille",
   "0684698b49273da5": "en attente",
   "063173aa16052cb9": "en cours",
   "3ba4cf953dd20f22": "échec",
+  "0f93532dd76391fc": "Vous avez répondu {choice}",
+  "7e1fd2eb570a372b": "{who} a répondu {choice}",
   "e777db2880f53a46": "personne n’a répondu",
+  "201490988858b511": "retirée par {by}",
   "34f59bbbead0b97f": "{names} et {count} de plus",
   "ac1556f6ce89a5ea": "{count} en parallèle",
   "e197c4963bacc746": "{count} en cours",

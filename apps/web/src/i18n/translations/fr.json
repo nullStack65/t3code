@@ -1578,6 +1578,7 @@
   "6848f5bbb2bd9eec": "Document PDF",
   "7873a79df0cf6d0e": "Page du navigateur",
   "0b55696e27387e4e": "Appuyez sur Shift+Escape pour quitter la page du navigateur.",
+  "90dfebe26eb86b2d": "Options de sélection de la page",
   "737d3c6bec93f9e6": "Choisir des fichiers pour la page",
   "e6a3fa7cfc14f86a": "Boîte de dialogue du navigateur",
   "61a552a67e9e3eac": "Réponse à la boîte de dialogue",
@@ -4669,6 +4670,7 @@
       "c": " »"
     }
   ],
+  "91aadfc843c600de": "Vérifier le compte Google",
   "a2aaca7ff8310186": "Ouvrir la discussion",
   "a3048aaa541b7744": "Activité",
   "4a3cbccb2beedeb0": "image",
@@ -6795,8 +6797,8 @@
   "e545fcdb83e2c36a": "Ajouter à la revue",
   "2250f241daadd71b": "Ajouter à l’agent",
   "be9b06fae29cc07a": "Tous les commits",
-  "5ef391d5403d7bdd": "{count, plural, one {Afficher plus ({count} restant)} other {Afficher plus ({count} restants)}}",
   "ccd5fc4db08374d7": "{count, plural, one {{count} fichier de test masqué} other {{count} fichiers de test masqués}}",
+  "5ef391d5403d7bdd": "{count, plural, one {Afficher plus ({count} restant)} other {Afficher plus ({count} restants)}}",
   "c12871955b159db4": "vus dans {app}",
   "98b353c208fd7977": "vus",
   "d65b870952bbe4f0": "Ces coches sont conservées ici, pas sur l’hôte",
@@ -7604,8 +7606,9 @@
   "5e11277c0af743da": "Collez ici une URL d’appairage complète pour remplir automatiquement les deux champs.",
   "4573320c3e8ab4b7": "Cette machine est sur votre compte T3 Connect. Utilisez-la comme route de secours.",
   "7a790e431eace2aa": "Ajouter T3 Connect",
-  "4bbeed02695f8895": [
-    "Also link it for agents on ",
+  "012b6f79d9871cff": [
+    "Also link it for agents on",
+    " ",
     {
       "i": 1,
       "k": "_gt_value_1",
@@ -8982,7 +8985,7 @@
   "a9cdd8c7073be920": "Palette de commandes : afficher/masquer",
   "4e0943e8c7a465d1": "Sélecteur de fichiers : afficher/masquer",
   "df5fdcdf26a6b52a": "Recherche dans le projet : afficher/masquer",
-  "a8ff6d33b060736f": "Utilisation : ouvrir",
+  "0ca6fd2b8fcab2c3": "Utilisation : Afficher ou masquer",
   "a513d51b71b95674": "Thème : sélectionner",
   "1ffd8427452372e1": "Apparence : alterner",
   "3a3bb4a7551a87cc": "Éditeur de thème : afficher/masquer",
@@ -12471,6 +12474,7 @@
   "9c015d3d034316cb": "Utilisez les flèches pour ajuster la valeur active. Maintenez Shift pour des pas plus grands. Utilisez Home et End pour le minimum et le maximum. Appuyez sur Tab pour passer de la saturation à la luminosité.",
   "8639d5532561f87f": "Fermer",
   "e1186ad82ee08b33": "Fermer",
+  "a4579e548b768663": "Afficher la barre latérale",
   "a1b11a1cf39c9dc9": "Redimensionner la barre latérale",
   "c557090df5722838": "Afficher ou masquer la barre latérale",
   "bbde430e56272901": "Faites glisser pour redimensionner la barre latérale",
@@ -12787,9 +12791,14 @@
   "dd7a1e58c2553933": "réveil dans {duration}",
   "95cc952724dd7310": "réveil imminent",
   "3cc34921c0128593": "en cours",
-  "e777db2880f53a46": "personne n’a répondu",
   "dc90739d391a5e67": "Vous avez répondu {choice}",
+  "4e96712d839ccbff": "{who} a répondu {choice}",
+  "e777db2880f53a46": "personne n’a répondu",
+  "201490988858b511": "retirée par {by}",
   "389f2563b5b763fd": "Étapes rapides",
+  "99451a5d2d40440f": "Retirée par {by}.",
+  "3ee30a50b70fffab": "Retirée par {by} : {reason}",
+  "92e129bf413a1220": "retirée",
   "a41c8d758121ad81": "en veille",
   "9db248b770096984": "a attendu",
   "c76124517af28686": "en cours depuis {duration}",
@@ -12825,6 +12834,49 @@
   "8bffb377e2a6a7de": "sa version n’est plus enregistrée",
   "f92d9132f7b85d1a": "Chargement des étapes…",
   "6ebc59f64c761a49": "Rien pour l’instant.",
+  "19097cfb8f5a79cf": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " a répondu",
+    " ",
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
+    "."
+  ],
+  "e7bbf693910057bf": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " a répondu",
+    " ",
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
+    ": ",
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    }
+  ],
   "a759dccd157d7dae": [
     "Vous avez répondu",
     " ",
@@ -12858,6 +12910,15 @@
       "v": "v"
     }
   ],
+  "3759768c5d342c22": [
+    "répondue",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "c98009be9a273b31": "Ouvrir l’exécution",
   "c8eb9be36d4d51ad": [
     "Fil sur ",
@@ -12883,6 +12944,14 @@
   ],
   "02dfe6c63fd0b8a1": "Ajouter une raison",
   "19abd94828a3bdbc": "Demander d’abord à l’agent",
+  "e114d37b32ab0dc7": [
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " nécessite une raison."
+  ],
   "a18721fa8f328361": "Vous attendent",
   "bbf24e7920c1e86b": "En cours",
   "8d6e18d2ad832db6": "Toutes",
