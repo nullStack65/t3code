@@ -52,7 +52,8 @@ function isScrolledToEnd(node: SeenScrollNode) {
   if (scrollTop === undefined || scrollHeight === undefined || clientHeight === undefined) {
     return false;
   }
-  return scrollHeight - scrollTop - clientHeight <= SCROLLED_TO_END_SLACK_PX;
+  // A zero-height (hidden) container is not "at the bottom".
+  return clientHeight > 0 && scrollHeight - scrollTop - clientHeight <= SCROLLED_TO_END_SLACK_PX;
 }
 
 export function startSeenMarkerSampling(input: {

@@ -75,7 +75,7 @@ export function NewSinceLastSeenPill(props: {
           size="xs"
           variant="glass"
         >
-          <Arrow className="size-3.5 shrink-0" />
+          <Arrow aria-hidden="true" className="size-3.5 shrink-0" />
           <span className="truncate">{props.count} new since you last looked</span>
           <span aria-hidden className="shrink-0 text-muted-foreground">
             ·
@@ -89,7 +89,7 @@ export function NewSinceLastSeenPill(props: {
           size="icon-xs"
           variant="glass"
         >
-          <XIcon className="size-3.5" />
+          <XIcon aria-hidden="true" className="size-3.5" />
         </Button>
       </div>
     </div>
