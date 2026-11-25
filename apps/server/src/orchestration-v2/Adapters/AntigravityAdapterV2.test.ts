@@ -1631,8 +1631,14 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
       const question = yield* askQuestion(opened.requestPermission);
       yield* opened.until((event) => event.type === "runtime_request.updated");
       yield* opened.rejectSteer;
-      const failed = (yield* opened.throughTerminal).at(-1);
+      const run = yield* opened.throughTerminal;
+      const failed = run.at(-1);
       assert.equal(failed?.type === "turn.terminal" && failed.status, "failed");
+      const cancelled = run.filter(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "cancelled",
+      );
+      assert.lengthOf(cancelled, 1, "one cancelled update for the one question");
       // The app dismisses the turn's questions at turn.terminal; the agent must hear it too.
       assert.deepEqual(yield* Fiber.join(question), { outcome: { outcome: "cancelled" } });
     }).pipe(Effect.provide(layerSession)),

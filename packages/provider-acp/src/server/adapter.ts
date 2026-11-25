@@ -6524,19 +6524,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         /**
          * Resolves pending requests as cancelled, so a live agent gets a native answer.
-         * Pass a provider turn to cancel only the requests it raised.
+         * Pass a filter to cancel only the requests it selects.
          */
         const cancelPendingRuntimeRequestEntries = Effect.fnUntraced(function* (
-          providerTurnId?: OrchestrationV2RuntimeRequest["providerTurnId"],
+          selects?: (request: PendingRuntimeRequest) => boolean,
         ) {
           const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => {
             const cancelled: Array<PendingRuntimeRequest> = [];
             const kept = new Map<string, PendingRuntimeRequest>();
             for (const [key, request] of current) {
-              if (
-                providerTurnId === undefined ||
-                request.runtimeRequest.providerTurnId === providerTurnId
-              ) {
+              if (selects === undefined || selects(request)) {
                 cancelled.push(request);
               } else {
                 kept.set(key, request);
@@ -8535,9 +8532,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               },
             });
           }
-          // turn.terminal cancels this turn's pending requests on the server; answer the
-          // agent too, or a native question keeps it blocked and it rejects every prompt.
-          yield* cancelPendingRuntimeRequestEntries(context.providerTurnId);
+          // At turn.terminal the server dismisses the turn's pending questions (not its
+          // approvals); answer the agent too, or its question keeps it blocked and it
+          // rejects every later prompt.
+          yield* cancelPendingRuntimeRequestEntries(
+            (request) =>
+              request.type === "user_input" &&
+              request.runtimeRequest.providerTurnId === context.providerTurnId,
+          );
           const turn = providerTurnPayload(context, settledStatus, now);
           yield* Ref.update(providerTurns, (current) => {
             const updated = new Map(current);
