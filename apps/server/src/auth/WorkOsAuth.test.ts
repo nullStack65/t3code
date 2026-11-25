@@ -1,3 +1,4 @@
+import type { ManagedPolicyDocument } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -117,6 +118,9 @@ it.effect("verifies issuer, app, time, organization, and both founder identity f
       [{ jwt: { sid: undefined } }, 401],
       [{ jwt: { client_id: "client_other" } }, 401],
       [{ jwt: { aud: "client_other" } }, 401],
+      [{ jwt: { client_id: undefined } }, 401],
+      [{ jwt: { client_id: clientId, aud: "client_other" } }, 401],
+      [{ jwt: { client_id: "client_other", aud: clientId } }, 401],
       [{ jwt: { org_id: "org_other" } }, 403],
       [{ user: { id: "user_other" } }, 401],
       [{ user: { email: "unlisted@example.test" } }, 403],
@@ -127,7 +131,16 @@ it.effect("verifies issuer, app, time, organization, and both founder identity f
     ] as const) {
       expect((yield* verify(input).pipe(Effect.flip)).status).toBe(status);
     }
-    expect((yield* verify({ jwt: { client_id: undefined } })).founder).toBe("kameron");
+    // Either claim may bind the token to this application, but one must, and none may disagree.
+    expect((yield* verify({ jwt: { client_id: undefined, aud: clientId } })).founder).toBe(
+      "kameron",
+    );
+    expect(
+      (yield* verify({ jwt: { client_id: undefined, aud: [clientId, "other"] } })).founder,
+    ).toBe("kameron");
+    expect((yield* verify({ jwt: { client_id: clientId, aud: clientId } })).founder).toBe(
+      "kameron",
+    );
   }),
 );
 
@@ -163,6 +176,7 @@ it.effect(
         Layer.provideMerge(serverAuthLayer),
         Layer.provide(node),
         Layer.provide(withEnv(env)),
+        Layer.provide(ManagedPolicy.layerTest()),
         Layer.provide(Layer.succeed(FetchHttpClient.Fetch, mockWorkOs)),
       );
       const services = yield* Layer.build(authServices);
@@ -313,5 +327,66 @@ it.effect(
         (yield* serverAuth.messageSenderOf((yield* sessions.verify(token)).sessionId)).founder,
       ).toBe("kameron");
       expect((yield* redeem(verifier)).status).toBe(401);
+    }),
+);
+
+const noRemoteClients: ManagedPolicyDocument = {
+  schemaVersion: 1,
+  organization: "Example Corp",
+  limits: { clients: ["desktop", "local-browser"] },
+};
+
+it.effect(
+  "managed policy without remote clients blocks AuthKit sign-in and revokes its browsers",
+  () =>
+    Effect.gen(function* () {
+      const { jwks, makeBody } = yield* makeSigner();
+      const valid = yield* Effect.promise(() => makeBody());
+      const mockWorkOs: typeof fetch = async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (path === `/sso/jwks/${clientId}`) return Response.json(jwks);
+        if (path === "/user_management/authenticate") return Response.json(valid);
+        return new Response(null, { status: 404 });
+      };
+      const node = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
+      const build = (policy?: ManagedPolicyDocument) =>
+        Layer.build(
+          workOsLayer.pipe(
+            Layer.provideMerge(
+              EnvironmentAuth.layer.pipe(
+                Layer.provide(SqlitePersistence.layerMemory),
+                Layer.provide(ServerSecretStore.layer),
+                Layer.provide(ServerEnvironment.layerIdentity),
+                Layer.provide(ManagedPolicy.layerTest(policy)),
+                Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-workos-test-" })),
+              ),
+            ),
+            Layer.provide(node),
+            Layer.provide(withEnv(env)),
+            Layer.provide(ManagedPolicy.layerTest(policy)),
+            Layer.provide(Layer.succeed(FetchHttpClient.Fetch, mockWorkOs)),
+          ),
+        );
+      const client = { label: "Browser", deviceType: "desktop" } as const;
+
+      const blocked = yield* build(noRemoteClients);
+      const blockedAuth = Context.get(blocked, WorkOsAuth);
+      expect((yield* blockedAuth.begin(null).pipe(Effect.flip)).status).toBe(403);
+      expect(
+        (yield* blockedAuth
+          .callback({ state: "s", challengeCookie: "s", code: "valid", client })
+          .pipe(Effect.flip)).status,
+      ).toBe(403);
+      expect(
+        (yield* Context.get(blocked, EnvironmentAuth.EnvironmentAuth).getDescriptor())
+          .workOsGoogleSignIn,
+      ).toBeUndefined();
+
+      const allowed = yield* build();
+      expect((yield* Context.get(allowed, WorkOsAuth).begin(null)).state).toBeTruthy();
+      expect(
+        (yield* Context.get(allowed, EnvironmentAuth.EnvironmentAuth).getDescriptor())
+          .workOsGoogleSignIn,
+      ).toBe(true);
     }),
 );

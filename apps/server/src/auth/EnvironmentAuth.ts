@@ -829,8 +829,12 @@ export const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const digest = yield* Digest.Digest;
   const authDescriptor = yield* policy.getDescriptor();
+  const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const workOs = yield* readConfig;
-  const descriptor = workOs ? { ...authDescriptor, workOsGoogleSignIn: true } : authDescriptor;
+  const descriptor =
+    workOs && ManagedLimits.allowsRemoteClients(managedPolicy)
+      ? { ...authDescriptor, workOsGoogleSignIn: true }
+      : authDescriptor;
   const workOsSubjects = workOs
     ? new Set([subjectFor(workOs, "kameron"), subjectFor(workOs, "jeff")])
     : new Set<string>();
@@ -874,7 +878,6 @@ export const make = Effect.gen(function* () {
     return Effect.void;
   });
   const config = yield* ServerConfig.ServerConfig;
-  const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const devAuth = resolveReusableDevAuth(config);
 
   const authenticateToken = (
@@ -1836,6 +1839,10 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   const sessions = (yield* stores.sessions.listActive()).filter(
     (session) =>
       disallowed.has(session.subject) ||
+      // AuthKit browsers sign in from wherever the configured origin is reachable.
+      (!remoteAllowed &&
+        session.subject.startsWith(WORKOS_SUBJECT_PREFIX) &&
+        session.method === "browser-session-cookie") ||
       // The startup link also pairs browsers on this machine; only a device elsewhere goes.
       (!remoteAllowed &&
         session.subject === INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT &&

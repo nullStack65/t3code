@@ -14,7 +14,15 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
-import { createRemoteJWKSet, customFetch, jwtVerify, type JWTVerifyGetKey } from "jose";
+import {
+  createRemoteJWKSet,
+  customFetch,
+  jwtVerify,
+  type JWTPayload,
+  type JWTVerifyGetKey,
+} from "jose";
+import * as ManagedLimits from "../policy/managedLimits.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { readConfig, subjectFor, WORKOS_PATH, type WorkOsConfig } from "./WorkOsConfig.ts";
 
@@ -42,6 +50,11 @@ const denied = () =>
   });
 const unavailable = () =>
   new WorkOsError({ status: 503, message: "Could not establish a T3 Code session." });
+const remoteClientsDisallowed = () =>
+  new WorkOsError({
+    status: 403,
+    message: "Your organization's policy does not allow remote clients to sign in.",
+  });
 const upstreamUnavailable = () =>
   new WorkOsError({ status: 502, message: "WorkOS is unavailable. Start again." });
 
@@ -52,6 +65,20 @@ const responseSchema = Schema.Struct({
   user: Schema.Struct({ id: Schema.String, email: Schema.String, email_verified: Schema.Boolean }),
 });
 const decodeResponse = Schema.decodeUnknownEffect(responseSchema);
+
+/**
+ * Fail closed: the token must name this application in `client_id` or `aud`, and any claim it
+ * does carry must name it too, so a token minted for another application or for none is refused.
+ */
+const boundToClient = (payload: JWTPayload, clientId: string) => {
+  const audienceMatches =
+    payload.aud === clientId || (Array.isArray(payload.aud) && payload.aud.includes(clientId));
+  return (
+    (payload.client_id === clientId || audienceMatches) &&
+    (payload.client_id === undefined || payload.client_id === clientId) &&
+    (payload.aud === undefined || audienceMatches)
+  );
+};
 
 interface Identity {
   readonly founder: Founder;
@@ -84,10 +111,7 @@ export const verifyCodeResponse = Effect.fn("WorkOsAuth.verifyCodeResponse")(fun
     typeof payload.iat !== "number" ||
     payload.iat > now.epochMilliseconds / 1000 ||
     typeof payload.exp !== "number" ||
-    (payload.client_id !== undefined && payload.client_id !== config.clientId) ||
-    (payload.aud !== undefined &&
-      payload.aud !== config.clientId &&
-      !(Array.isArray(payload.aud) && payload.aud.includes(config.clientId)))
+    !boundToClient(payload, config.clientId)
   )
     return yield* invalid();
 
@@ -155,6 +179,7 @@ export class WorkOsAuth extends Context.Service<
 const make = Effect.gen(function* () {
   const config = yield* readConfig;
   const sessions = yield* SessionStore.SessionStore;
+  const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const http = yield* HttpClient.HttpClient;
   const fetchJwks = yield* FetchHttpClient.Fetch;
   const browser = new Map<string, BrowserTransaction>();
@@ -231,6 +256,7 @@ const make = Effect.gen(function* () {
   const begin = Effect.fn("WorkOsAuth.begin")(function* (desktopId: string | null) {
     if (!config)
       return yield* new WorkOsError({ status: 404, message: "WorkOS sign-in is disabled." });
+    if (!ManagedLimits.allowsRemoteClients(managedPolicy)) return yield* remoteClientsDisallowed();
     const now = (yield* DateTime.now).epochMilliseconds;
     const pending = desktopId ? desktop.get(desktopId) : undefined;
     if (desktopId && (!pending || pending.expiresAt <= now || pending.started))
@@ -265,6 +291,8 @@ const make = Effect.gen(function* () {
     function* (input) {
       if (!config || !key)
         return yield* new WorkOsError({ status: 404, message: "WorkOS sign-in is disabled." });
+      if (!ManagedLimits.allowsRemoteClients(managedPolicy))
+        return yield* remoteClientsDisallowed();
       const transaction = browser.get(input.state);
       const now = (yield* DateTime.now).epochMilliseconds;
       if (!transaction || transaction.expiresAt <= now || input.state !== input.challengeCookie)
