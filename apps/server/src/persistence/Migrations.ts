@@ -134,6 +134,7 @@ import Migration0114 from "./Migrations/114_WorkflowRunIndexes.ts";
 import Migration0115 from "./Migrations/115_WorkflowRunTags.ts";
 import Migration0116 from "./Migrations/116_ForkHistoryMembership.ts";
 import Migration0117 from "./Migrations/117_WorkflowMailSender.ts";
+import Migration0118 from "./Migrations/118_WorkflowPools.ts";
 
 /**
  * Closura: deployed fork databases record the fork's own migrations at ledger ids 97 to 102.
@@ -267,6 +268,7 @@ const migrationEntries = [
   [115 + UPSTREAM_MIGRATION_ID_OFFSET, "WorkflowRunTags", Migration0115],
   [116 + UPSTREAM_MIGRATION_ID_OFFSET, "ForkHistoryMembership", Migration0116],
   [117 + UPSTREAM_MIGRATION_ID_OFFSET, "WorkflowMailSender", Migration0117],
+  [118 + UPSTREAM_MIGRATION_ID_OFFSET, "WorkflowPools", Migration0118],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

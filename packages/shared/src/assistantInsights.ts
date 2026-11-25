@@ -1,3 +1,5 @@
+const INSIGHT_BLOCK = /^★ Insight(?:\s|─)|(?<![^\r\n])`★ Insight[ \t]+─{3,}`[ \t]*(?![^\r\n])/mu;
+
 // Markdown has no lettered or "•" lists, so lines such as "A. merge it" and
 // "B. hold it" are one paragraph to CommonMark and render as a solid block.
 const PSEUDO_LIST_LINE = /^ {0,3}(?:\(?[A-Za-z]\)|[A-Za-z]\.|[•·▪◦‣])[ \t]+\S/u;
@@ -20,5 +22,5 @@ function hasPseudoListLines(text: string): boolean {
 }
 
 export function shouldPreserveAssistantLineBreaks(text: string): boolean {
-  return /^★ Insight(?:\s|─)/mu.test(text) || hasPseudoListLines(text);
+  return INSIGHT_BLOCK.test(text) || hasPseudoListLines(text);
 }
