@@ -129,6 +129,7 @@ import {
   shouldPersistProviderEvent,
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import { frameUntrustedToolResult } from "../../security/untrustedContent.ts";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
@@ -845,10 +846,14 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
             input.cyberAccess.defaultProgram,
           ].find(isCodexCyberAccessProgram);
     // MCP-written app context must be quoted user input, not developer instructions.
+    // External untrusted sources (mail, Twenty, web fetch, PR comments) are also fenced.
     const appContext = Object.fromEntries(
       (input.appContext ?? []).map((entry) => [
         entry.key,
-        { kind: "untrusted" as const, value: entry.text },
+        {
+          kind: "untrusted" as const,
+          value: frameUntrustedToolResult(entry.key, entry.text).text,
+        },
       ]),
     );
     const t3Context =
