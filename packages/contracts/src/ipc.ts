@@ -1088,6 +1088,7 @@ export interface DesktopBridge {
   /** The environment ID recorded in this app's T3 home, such as its own machine's background service. */
   getHostEnvironmentId?: () => Promise<string | null>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
+  workOsSignIn?: (action: "start" | "finish" | "logout") => Promise<void>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog: () => Promise<string | null>;

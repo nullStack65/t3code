@@ -55,6 +55,7 @@ import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { MCP_APPROVAL_SUBJECT_PREFIX } from "../persistence/AuthPairingLinks.ts";
 import { requestUrl } from "../requestUrl.ts";
+import { readConfig, subjectFor, WORKOS_SUBJECT_PREFIX } from "./WorkOsConfig.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
@@ -827,9 +828,56 @@ export const make = Effect.gen(function* () {
   const sessions = yield* SessionStore.SessionStore;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const digest = yield* Digest.Digest;
-  const descriptor = yield* policy.getDescriptor();
-  const config = yield* ServerConfig.ServerConfig;
+  const authDescriptor = yield* policy.getDescriptor();
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
+  const workOs = yield* readConfig;
+  const descriptor =
+    workOs && ManagedLimits.allowsRemoteClients(managedPolicy)
+      ? { ...authDescriptor, workOsGoogleSignIn: true }
+      : authDescriptor;
+  const workOsSubjects = workOs
+    ? new Set([subjectFor(workOs, "kameron"), subjectFor(workOs, "jeff")])
+    : new Set<string>();
+  const assertWorkOsSession = Effect.fn("EnvironmentAuth.assertWorkOsSession")((
+    session: Pick<AuthenticatedSession, "subject" | "method">,
+    request: HttpServerRequest.HttpServerRequest,
+    socket: boolean,
+  ): Effect.Effect<void, ServerAuthInvalidCredentialError> => {
+    if (workOs && session.subject === "desktop-bootstrap") {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "Sign in with Google on this desktop.",
+        }),
+      );
+    }
+    if (!session.subject.startsWith(WORKOS_SUBJECT_PREFIX)) return Effect.void;
+    if (!workOs || !workOsSubjects.has(session.subject)) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "WorkOS enrollment no longer applies to this session.",
+        }),
+      );
+    }
+    if (session.method !== "browser-session-cookie") return Effect.void;
+    const requestOrigin = Option.map(requestUrl(request), (url) => url.origin);
+    const origin = request.headers.origin;
+    const write = request.method !== "GET" && request.method !== "HEAD";
+    if (
+      Option.getOrUndefined(requestOrigin) !== workOs.origin ||
+      (socket || write || origin !== undefined
+        ? origin !== workOs.origin
+        : request.headers["sec-fetch-site"] !== undefined &&
+          request.headers["sec-fetch-site"] !== "same-origin")
+    ) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "WorkOS browser sessions require the configured HTTPS origin.",
+        }),
+      );
+    }
+    return Effect.void;
+  });
+  const config = yield* ServerConfig.ServerConfig;
   const devAuth = resolveReusableDevAuth(config);
 
   const authenticateToken = (
@@ -885,6 +933,7 @@ export const make = Effect.gen(function* () {
 
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
+    socket = false,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
     const dpopToken = parseDpopToken(request);
     const credential = resolveRequestCredential(request);
@@ -902,6 +951,7 @@ export const make = Effect.gen(function* () {
       );
     }
     return authenticateToken(credential.token).pipe(
+      Effect.tap((session) => assertWorkOsSession(session, request, socket)),
       Effect.flatMap((session) => {
         if (session.proofKeyThumbprint) {
           if (!dpopToken || dpopToken !== credential.token) {
@@ -941,6 +991,7 @@ export const make = Effect.gen(function* () {
         (session) =>
           ({
             authenticated: true,
+            ...(workOsSubjects.has(session.subject) ? { workOsSession: true } : {}),
             auth: descriptor,
             ...authScopeResponse(session.scopes),
             sessionMethod: session.method,
@@ -1582,6 +1633,7 @@ export const make = Effect.gen(function* () {
           const session = yield* sessions
             .verifyWebSocketToken(websocketTicket)
             .pipe(mapSessionVerificationErrors, Effect.flatMap(rejectMcpClientAudience));
+          yield* assertWorkOsSession(session, request, true);
           if (session.audience !== undefined && session.audience !== use) {
             return yield* new ServerAuthInvalidCredentialError({
               diagnostic: `WebSocket ticket was issued for the ${session.audience} route.`,
@@ -1621,7 +1673,7 @@ export const make = Effect.gen(function* () {
         }
       }
 
-      return yield* authenticateRequest(request);
+      return yield* authenticateRequest(request, true);
     });
 
   const authenticateMcpClient: EnvironmentAuth["Service"]["authenticateMcpClient"] = (request) => {
@@ -1787,6 +1839,10 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   const sessions = (yield* stores.sessions.listActive()).filter(
     (session) =>
       disallowed.has(session.subject) ||
+      // AuthKit browsers sign in from wherever the configured origin is reachable.
+      (!remoteAllowed &&
+        session.subject.startsWith(WORKOS_SUBJECT_PREFIX) &&
+        session.method === "browser-session-cookie") ||
       // The startup link also pairs browsers on this machine; only a device elsewhere goes.
       (!remoteAllowed &&
         session.subject === INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT &&

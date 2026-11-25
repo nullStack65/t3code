@@ -178,6 +178,7 @@ export const ServerAuthDescriptor = Schema.Struct({
   bootstrapMethods: Schema.Array(ServerAuthBootstrapMethod),
   sessionMethods: Schema.Array(ServerAuthSessionMethod),
   sessionCookieName: TrimmedNonEmptyString,
+  workOsGoogleSignIn: Schema.optionalKey(Schema.Boolean),
   /** Older servers omit this and authorize self-updates with orchestration:operate. */
   serverUpdateScope: Schema.optionalKey(Schema.Literal(AuthEnvironmentMaintainScope)),
 });
@@ -527,6 +528,7 @@ export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentia
 
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,
+  workOsSession: Schema.optionalKey(Schema.Boolean),
   auth: ServerAuthDescriptor,
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
   permissions: authScopeResponseFields.permissions,

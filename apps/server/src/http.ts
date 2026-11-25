@@ -1,3 +1,4 @@
+import { WORKOS_PATH } from "./auth/WorkOsConfig.ts";
 import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
@@ -405,6 +406,7 @@ const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((
   // Signed URLs carry bearer tokens in the path, so they never reach a trace.
   return (
     UNTRACED_REQUEST_PATHS.has(path) ||
+    path.startsWith(`${WORKOS_PATH}/`) ||
     path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
     path.startsWith(`${ASSET_ROUTE_PREFIX}/`) ||
     path.startsWith(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`)

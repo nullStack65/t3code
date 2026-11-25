@@ -1,3 +1,4 @@
+import { WorkOsSignIn } from "../auth/WorkOsSignIn";
 import type { Founder } from "@t3tools/contracts";
 import { SessionPermissions } from "./SessionPermissions";
 import { useSearch } from "@tanstack/react-router";
@@ -1299,6 +1300,13 @@ function ConnectionsSettingsContent({
               ) : null
             }
           >
+            {isPrimaryAccess && accessSessionState.data?.auth.workOsGoogleSignIn ? (
+              <SettingsRow
+                title="Google sign-in"
+                description="Verify who is using this environment."
+                control={<WorkOsSignIn signedIn={accessSessionState.data.workOsSession === true} />}
+              />
+            ) : null}
             {accessServerConfig?.managedPolicy ? (
               <div className="px-3 py-2 sm:px-4">
                 <ManagedByOrganization policy={accessServerConfig.managedPolicy} />
