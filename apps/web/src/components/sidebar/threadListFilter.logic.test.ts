@@ -61,11 +61,10 @@ describe("thread list filter", () => {
   });
 
   it.each(["jeff", "kameron"] as const)(
-    "shows %s their personal and shared standing bots",
+    "shows %s their personal and shared standing bots, asymmetrically",
     (owner) => {
       const filter = threadListFilterOf({ founderInboxOwner: owner });
-      const all = threadListFilterOf({});
-      const visible = (audience: "kameron" | "jeff" | "shared", selected = filter) =>
+      const visible = (audience: "kameron" | "jeff" | "shared") =>
         matchesThreadListFilter(
           {
             ...thread(laptop, bot),
@@ -77,15 +76,12 @@ describe("thread list filter", () => {
               }),
             },
           },
-          selected,
-          undefined,
-          owner,
+          filter,
         );
-      const other = owner === "jeff" ? "kameron" : "jeff";
       expect(visible(owner)).toBe(true);
       expect(visible("shared")).toBe(true);
-      expect(visible(other, all)).toBe(false);
-      expect(visible("shared", { ...filter, inboxes: [owner] })).toBe(false);
+      // Jeff never lists Kameron's private bots; Kameron keeps listing Jeff's.
+      expect(visible(owner === "jeff" ? "kameron" : "jeff")).toBe(owner === "kameron");
     },
   );
 
@@ -459,7 +455,7 @@ describe("standing bots bypass the inbox and From checkboxes", () => {
     expect(matchesThreadListFilter(stuck, kameronWithoutAgents, "unknown")).toBe(true);
   });
 
-  it("counts a running standing bot that bypasses filters when no founder is viewing", () => {
+  it("counts a running remote standing bot even when its inbox is unchecked", () => {
     const counts = threadListFilterCounts(
       [stuck],
       {

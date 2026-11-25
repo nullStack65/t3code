@@ -1851,6 +1851,7 @@ describe("standing bots bound by a scheduled task", () => {
   ) => ({
     id,
     standing,
+    lineage: { parentThreadId: null, rootThreadId: id, relationshipToParent: null },
     source: { inbox: { audience } },
   });
   const threads = [
