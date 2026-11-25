@@ -30,6 +30,7 @@ import {
   sidebarFilterIconClass,
   EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
+  inboxKeepsSharedChecked,
   type olderSettledFilterCounts,
   SIDEBAR_FILTER_OPTION_LABEL_CLASS,
   threadListFilterCounts,
@@ -149,11 +150,7 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
         {inboxOrder.map((inbox) => {
           const checked = filter.inboxes.includes(inbox);
           const isLast = checked && filter.inboxes.length === 1;
-          const keepsShared =
-            inbox === "shared" &&
-            owner !== undefined &&
-            filter.inboxes.length === 2 &&
-            filter.inboxes.includes(owner);
+          const keepsShared = inboxKeepsSharedChecked(inbox, filter, owner);
           const count = counts.inboxes.get(inbox) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
           return (
             <MenuCheckboxItem

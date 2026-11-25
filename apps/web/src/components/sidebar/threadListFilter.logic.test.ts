@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   changedThreadListFilters,
+  inboxKeepsSharedChecked,
   sidebarFilterIconClass,
   inboxMenuOrder,
   matchesThreadListFilter,
@@ -458,7 +459,7 @@ describe("standing bots bypass the inbox and From checkboxes", () => {
     expect(matchesThreadListFilter(stuck, kameronWithoutAgents, "unknown")).toBe(true);
   });
 
-  it("counts a running remote standing bot even when its inbox is unchecked", () => {
+  it("counts a running standing bot that bypasses filters when no founder is viewing", () => {
     const counts = threadListFilterCounts(
       [stuck],
       {
@@ -476,6 +477,35 @@ describe("standing bots bypass the inbox and From checkboxes", () => {
       needsMe: 0,
       settled: 0,
     });
+  });
+});
+
+describe("inboxKeepsSharedChecked", () => {
+  const filterOf = (inboxes: ReadonlyArray<"kameron" | "jeff" | "shared" | "agents">) => ({
+    inboxes: [...inboxes],
+    hiddenEnvironmentIds: [],
+    hiddenAttributions: [],
+  });
+
+  it("locks Shared only while it is checked beside just the founder's own inbox", () => {
+    expect(inboxKeepsSharedChecked("shared", filterOf(["jeff", "shared"]), "jeff")).toBe(true);
+    expect(inboxKeepsSharedChecked("jeff", filterOf(["jeff", "shared"]), "jeff")).toBe(false);
+    expect(inboxKeepsSharedChecked("shared", filterOf(["jeff", "shared"]), undefined)).toBe(false);
+  });
+
+  it("lets Shared be unchecked and re-checked once Agents is also selected", () => {
+    const withAgents = filterOf(["jeff", "shared", "agents"]);
+    expect(inboxKeepsSharedChecked("shared", withAgents, "jeff")).toBe(false);
+    const order = inboxMenuOrder("jeff");
+    const unchecked = filterOf(toggleFilterOption(withAgents.inboxes, "shared", order));
+    expect(unchecked.inboxes).toEqual(["jeff", "agents"]);
+    // Unchecked Shared must stay enabled so it can be checked again.
+    expect(inboxKeepsSharedChecked("shared", unchecked, "jeff")).toBe(false);
+    expect(toggleFilterOption(unchecked.inboxes, "shared", order)).toEqual([
+      "jeff",
+      "shared",
+      "agents",
+    ]);
   });
 });
 

@@ -1,7 +1,7 @@
 import {
   matchesListedInboxes,
   standingBotBypassesListFilters,
-  matchesThreadListFilter as matchesWorkThreadListFilter,
+  matchesThreadListFilter,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
 import {
@@ -24,6 +24,7 @@ import {
 import type { ThreadAttribution } from "@t3tools/contracts/settings";
 
 export {
+  matchesThreadListFilter,
   threadListFilterOf,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
@@ -44,27 +45,21 @@ interface FilterableThread {
   };
 }
 
-function standingInbox(thread: FilterableThread): Founder | "shared" | null {
-  const audience = thread.standing == null ? undefined : thread.source.inbox?.audience;
-  return audience === "jeff" || audience === "kameron" || audience === "shared" ? audience : null;
-}
-
-export function matchesThreadListFilter(
-  thread: FilterableThread,
+/**
+ * Whether the Inbox menu must keep `Shared` checked: with only the founder's own inbox
+ * plus `Shared` selected, unchecking `Shared` would be a founder-only selection.
+ */
+export function inboxKeepsSharedChecked(
+  inbox: InboxChoice,
   filter: ThreadListFilter,
-  attribution?: ThreadAttribution,
-  viewingFounder?: Founder,
+  owner: Founder | undefined,
 ) {
-  if (viewingFounder === undefined) {
-    return matchesWorkThreadListFilter(thread, filter, attribution);
-  }
-  const inbox = standingInbox(thread);
-  if (inbox === null) return matchesWorkThreadListFilter(thread, filter, attribution);
   return (
-    (inbox === "shared" || inbox === viewingFounder) &&
-    filter.inboxes.includes(inbox) &&
-    !filter.hiddenEnvironmentIds.includes(thread.environmentId) &&
-    (attribution === undefined || !filter.hiddenAttributions.includes(attribution))
+    inbox === "shared" &&
+    filter.inboxes.includes("shared") &&
+    owner !== undefined &&
+    filter.inboxes.length === 2 &&
+    filter.inboxes.includes(owner)
   );
 }
 
@@ -323,7 +318,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
     if (isHiddenFromFounder(thread.source.inbox, filter.viewingFounder)) continue;
     tally({
       environmentId: thread.environmentId,
-      inbox: standingInbox(thread) ?? primaryInbox(thread.source.inbox),
+      inbox: primaryInbox(thread.source.inbox),
       agentCreated: thread.source.createdBy === "agent",
       attribution: attributionOf(thread),
       bucket: threadListFilterBucket(thread, viewingFounder),
