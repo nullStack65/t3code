@@ -608,4 +608,40 @@ it.layer(NodeServices.layer)("EventNdjsonLogger", (it) => {
         }
       }),
   );
+
+  it.effect("redacts secrets in Claude tool_use inputs before writing provider logs (CLO-1099)", () =>
+    Effect.gen(function* () {
+      const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-provider-redact-"));
+      const basePath = NodePath.join(tempDir, "events.log");
+      const fakeToken = `ghp_${"C3d4E5f6G7h8I9j0K1l2".repeat(2)}`;
+      try {
+        const store = yield* makeEventNdjsonLogStore(basePath, { batchWindowMs: 0 });
+        yield* store.logger("native").write(
+          {
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  name: "Bash",
+                  input: {
+                    command: `curl -H "Authorization: Bearer ${fakeToken}" https://example.test`,
+                    password: "hunter2-secret-value",
+                  },
+                },
+              ],
+            },
+          },
+          ThreadId.make("redact-thread"),
+        );
+        yield* store.close();
+        const logged = NodeFS.readFileSync(ownedLogPath(basePath, "redact-thread"), "utf8");
+        assert.notInclude(logged, fakeToken);
+        assert.notInclude(logged, "hunter2-secret-value");
+        assert.include(logged, "[redacted]");
+      } finally {
+        NodeFS.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
 });

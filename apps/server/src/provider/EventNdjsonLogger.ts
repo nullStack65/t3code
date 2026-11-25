@@ -24,6 +24,7 @@ import {
   toSafeThreadAttachmentSegment,
 } from "../attachmentStore.ts";
 import type * as ResourceAttribution from "../resourceTelemetry/ResourceAttribution.ts";
+import { redactSecretsDeep } from "../security/secretRedaction.ts";
 
 const MEBIBYTE = 1024 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -610,7 +611,7 @@ const drainPending = Effect.fnUntraced(function* (input: {
 });
 
 const serializeEvent = Effect.fnUntraced(function* (event: unknown) {
-  return yield* encodeUnknownJsonString(event).pipe(
+  return yield* encodeUnknownJsonString(redactSecretsDeep(event)).pipe(
     Effect.catch((error) =>
       logWarning("failed to serialize provider event log record", {
         errorTag: errorTag(error),

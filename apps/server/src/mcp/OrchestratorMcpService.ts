@@ -151,8 +151,8 @@ import {
   interactionModeRank,
   resolveInteractionMode,
   resolveRuntimeMode,
+  resolveSafeTaskPrompt,
   runtimeModeRank,
-  taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -2884,6 +2884,7 @@ const make = Effect.gen(function* () {
         }
         workspaceStrategy = { type: "worktree", baseRef: base.commitSha, startFromOrigin: false };
       }
+      const safeTask = yield* resolveSafeTaskPrompt(input);
       // ThreadManagementService.dispatch is the chokepoint for this command
       // type's own enablement check, using the same command id and its
       // receipt-replay exemption, so no separate assert runs here.
@@ -2896,7 +2897,7 @@ const make = Effect.gen(function* () {
           parentThreadId: scope.thread.threadId,
           parentRunId: parentRun.id,
           parentNodeId: parentRun.rootNodeId,
-          task: taskPrompt(input),
+          task: safeTask,
           ...(input.title === undefined ? {} : { title: input.title }),
           modelSelection: target.modelSelection,
           runtimeMode,
