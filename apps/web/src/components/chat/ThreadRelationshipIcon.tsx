@@ -22,6 +22,8 @@ export function threadRelationshipStatusLabel(status: string | null): string {
     case "waiting":
     case "blocked":
       return "Waiting";
+    case "unreachable":
+      return "Unreachable";
     case "completed":
       return "Done";
     case "failed":
@@ -94,11 +96,13 @@ export function ThreadRelationshipIcon({
             status === "pending" ||
             status === "waiting"
             ? "bg-info"
-            : status === "failed" || status === "error"
-              ? "bg-destructive"
-              : status === "completed"
-                ? "bg-success"
-                : "bg-muted-foreground/45",
+            : status === "unreachable"
+              ? "bg-warning"
+              : status === "failed" || status === "error"
+                ? "bg-destructive"
+                : status === "completed"
+                  ? "bg-success"
+                  : "bg-muted-foreground/45",
         )}
         aria-hidden="true"
       />

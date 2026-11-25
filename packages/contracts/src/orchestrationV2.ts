@@ -1096,6 +1096,10 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
    * one owed, so each reaches the thread there once however often it is sent.
    */
   stopCount: Schema.optional(NonNegativeInt),
+  /** ISO timestamp of the last successful contact with the peer for this task. */
+  lastSeenAt: Schema.optional(IsoDateTime),
+  /** Set to "unreachable" once peer contact fails past the staleness threshold; cleared on recovery. */
+  peerStatus: Schema.optional(Schema.Literals(["reachable", "unreachable"])),
 });
 export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
 
@@ -4214,6 +4218,19 @@ const OrchestrationV2InternalCommand = Schema.Union([
     commandId: CommandId,
     parentThreadId: ThreadId,
     taskId: NodeId,
+  }),
+  /**
+   * Records peer reachability and last successful peer contact for an open remote task.
+   * Updates both the subagent record and its timeline turn item so clients and `task_status`
+   * can distinguish an unreachable peer from a live running task.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.peer-status"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    peerStatus: Schema.Literals(["reachable", "unreachable"]),
+    lastSeenAt: IsoDateTime,
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),

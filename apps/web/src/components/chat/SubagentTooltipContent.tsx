@@ -1,4 +1,5 @@
 import type {
+  OrchestrationV2RemoteTaskChild,
   OrchestrationV2ThreadShell,
   OrchestrationV2TurnItemStatus,
   OrchestrationProjectShell,
@@ -8,6 +9,7 @@ import type {
   OrchestrationV2Subagent,
 } from "@t3tools/contracts";
 import {
+  isRemoteTaskUnreachable,
   resolveSubagentMetadata,
   subagentDetailPreview,
 } from "@t3tools/client-runtime/state/subagent-display";
@@ -23,12 +25,14 @@ import {
   FolderIcon,
   GitBranchIcon,
   TerminalIcon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { ThreadHoverCard } from "../ThreadHoverCard";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 import { deriveProviderInstanceEntries, shouldShowInstanceBadge } from "../../providerInstances";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
 
 export function SubagentTooltipContent(props: {
   title: string;
@@ -47,6 +51,7 @@ export function SubagentTooltipContent(props: {
   parentProject?: Pick<OrchestrationProjectShell, "workspaceRoot"> | undefined;
   childProject?: Pick<OrchestrationProjectShell, "id" | "title" | "workspaceRoot"> | undefined;
   status: OrchestrationV2TurnItemStatus;
+  remote?: OrchestrationV2RemoteTaskChild | undefined;
   result?: string | null | undefined;
   progress?: string | null | undefined;
 }) {
@@ -108,15 +113,21 @@ export function SubagentTooltipContent(props: {
   const entries = deriveProviderInstanceEntries(props.providers ?? []);
   const entry = entries.find((candidate) => candidate.instanceId === props.provider?.instanceId);
   const showInstanceBadge = entry !== undefined && shouldShowInstanceBadge(entry, entries);
-  const working = ["running", "in_progress", "pending", "waiting"].includes(props.status);
+  const unreachable = isRemoteTaskUnreachable({ status: props.status, remoteChild: props.remote });
+  const working =
+    !unreachable && ["running", "in_progress", "pending", "waiting"].includes(props.status);
   const failed = ["failed", "error"].includes(props.status);
-  const StatusIcon = working
-    ? CircleDashedIcon
-    : failed
-      ? CircleXIcon
-      : props.status === "completed"
-        ? CheckIcon
-        : CircleDashedIcon;
+  const lastSeen =
+    unreachable && props.remote?.lastSeenAt ? formatRelativeTimeLabel(props.remote.lastSeenAt) : "";
+  const StatusIcon = unreachable
+    ? TriangleAlertIcon
+    : working
+      ? CircleDashedIcon
+      : failed
+        ? CircleXIcon
+        : props.status === "completed"
+          ? CheckIcon
+          : CircleDashedIcon;
   return (
     <ThreadHoverCard title={props.title}>
       <div className="flex min-w-0 items-center gap-2">
@@ -153,20 +164,25 @@ export function SubagentTooltipContent(props: {
         <span
           className={cn(
             "inline-flex items-center gap-1 rounded-sm font-medium capitalize",
-            working
-              ? "text-info"
-              : failed
-                ? "text-error"
-                : props.status === "completed"
-                  ? "text-success"
-                  : "text-muted-foreground",
+            unreachable
+              ? "text-warning"
+              : working
+                ? "text-info"
+                : failed
+                  ? "text-error"
+                  : props.status === "completed"
+                    ? "text-success"
+                    : "text-muted-foreground",
           )}
         >
           <StatusIcon aria-hidden className="size-3 shrink-0" />
-          {props.status.replaceAll("_", " ")}
+          {unreachable ? "Unreachable" : props.status.replaceAll("_", " ")}
         </span>
         {props.elapsed}
       </div>
+      {unreachable && lastSeen ? (
+        <div className="text-2xs text-muted-foreground">Last seen {lastSeen}</div>
+      ) : null}
       {metadata.map(({ label, value }) => {
         const Icon = label === "Branch" ? GitBranchIcon : FolderIcon;
         return (

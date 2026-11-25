@@ -1,5 +1,6 @@
 import {
   formatSubagentDisplayTitle,
+  isRemoteTaskUnreachable,
   resolveSubagentMetadata,
   subagentCardDetail,
   subagentDetailPreview,
@@ -20,7 +21,7 @@ import { resolveSelectableModel } from "@t3tools/shared/model";
 
 const PROMPT_TITLE_LIMIT = 80;
 
-export type SubagentRowTone = "working" | "completed" | "failed" | "stopped";
+export type SubagentRowTone = "working" | "unreachable" | "completed" | "failed" | "stopped";
 
 export interface SubagentRowPresentation {
   readonly title: string;
@@ -96,12 +97,13 @@ export function resolveSubagentRowPresentation(
   >,
   canOpenRemote = false,
 ): SubagentRowPresentation {
-  const live = isActiveSubagentStatus(subagent.status);
+  const unreachable = isRemoteTaskUnreachable(subagent);
+  const live = !unreachable && isActiveSubagentStatus(subagent.status);
   return {
     title: rowTitle(subagent),
     detail: subagentDetailPreview(subagent),
-    statusLabel: rowStatusLabel(subagent.status),
-    tone: rowTone(subagent.status),
+    statusLabel: unreachable ? "Unreachable" : rowStatusLabel(subagent.status),
+    tone: unreachable ? "unreachable" : rowTone(subagent.status),
     live,
     canOpenThread:
       subagent.childThreadId !== null || (subagent.remoteChild !== undefined && canOpenRemote),
@@ -109,7 +111,7 @@ export function resolveSubagentRowPresentation(
   };
 }
 
-export type WorkflowRailTone = SubagentRowTone | "queued";
+export type WorkflowRailTone = Exclude<SubagentRowTone, "unreachable"> | "queued";
 
 export interface WorkflowRailItem {
   readonly key: string;

@@ -2020,11 +2020,19 @@ const make = Effect.gen(function* () {
     waitTimedOut: boolean,
     acknowledgeTerminal: boolean,
   ): Effect.fn.Return<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> {
+    const probe = task.result === null ? yield* remoteDelegation.runStatus(scope, task) : undefined;
+    const lastSeenAt = probe?.lastSeenAt ?? task.remoteChild?.lastSeenAt;
     const status: OrchestratorMcpDelegateTaskResult["status"] =
       task.result === null
-        ? (yield* remoteDelegation.runStatus(scope, task)) === "starting"
-          ? "starting"
-          : "running"
+        ? probe?.peerStatus === "unreachable"
+          ? "unreachable"
+          : probe?.runStatus === "starting"
+            ? "starting"
+            : probe?.runStatus === "queued"
+              ? "queued"
+              : probe?.runStatus === "waiting"
+                ? "waiting"
+                : "running"
         : task.status === "completed" ||
             task.status === "failed" ||
             task.status === "cancelled" ||
@@ -2077,6 +2085,7 @@ const make = Effect.gen(function* () {
       childRunId: null,
       childNodeId: task.id,
       status,
+      ...(lastSeenAt === undefined ? {} : { lastSeenAt }),
       workState: terminal ? "result_available" : "working",
       hasPendingChildRuns: false,
       providerInstanceId: task.providerInstanceId,

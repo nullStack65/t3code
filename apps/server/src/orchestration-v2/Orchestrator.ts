@@ -715,6 +715,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "delegated_task.remote.request":
     case "delegated_task.remote.complete":
     case "delegated_task.remote.stop":
+    case "delegated_task.remote.peer-status":
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
@@ -11272,9 +11273,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return;
     }
     const now = yield* DateTime.now;
+    const settledRemoteChild: OrchestrationV2RemoteTaskChild =
+      remoteChild!.peerStatus === "unreachable"
+        ? {
+            ...remoteChild!,
+            peerStatus: "reachable",
+            lastSeenAt: DateTime.formatIso(now),
+          }
+        : command.stoppedThere === "ran-out" && remoteChild!.lastSeenAt !== undefined
+          ? {
+              ...remoteChild!,
+              lastSeenAt: DateTime.formatIso(now),
+            }
+          : remoteChild!;
     const updatedTask: OrchestrationV2Subagent = {
       ...task,
-      remoteChild,
+      remoteChild: settledRemoteChild,
       status: command.status,
       result: command.result,
       ...(command.executedModel === undefined ? {} : { executedModel: command.executedModel }),
@@ -11336,6 +11350,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: {
           ...item,
+          remoteChild: settledRemoteChild,
           status: command.status,
           result: command.result,
           completedAt: now,
@@ -11381,6 +11396,75 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     yield* emitRemoteStopOwed(events, command, task, task.remoteChild);
+  });
+
+  /**
+   * Records peer reachability and last successful peer contact for an open remote task,
+   * updating both the subagent record and its timeline turn item.
+   */
+  const dispatchRemoteDelegatedTaskPeerStatus = Effect.fn(
+    "orchestrationV2.dispatch.remoteDelegatedTaskPeerStatus",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.peer-status" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const parentProjection = yield* projectionStore
+      .getThreadRecords(command.parentThreadId, ["subagents", "turnItems"], {
+        subagentIds: [command.taskId],
+        turnItemTypes: ["subagent"],
+        turnItemNodeIds: [command.taskId],
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+        ),
+      );
+    const task = parentProjection.subagents.find(
+      (candidate) =>
+        candidate.id === command.taskId &&
+        candidate.origin === "app_owned" &&
+        candidate.remoteChild !== undefined,
+    );
+    if (task?.remoteChild === undefined || task.result !== null) return;
+    if (
+      task.remoteChild.peerStatus === command.peerStatus &&
+      task.remoteChild.lastSeenAt === command.lastSeenAt
+    ) {
+      return;
+    }
+    const now = yield* DateTime.now;
+    const remoteChild: OrchestrationV2RemoteTaskChild = {
+      ...task.remoteChild,
+      peerStatus: command.peerStatus,
+      lastSeenAt: command.lastSeenAt,
+    };
+    const emitEvent = emit(events, command);
+    yield* emitEvent({
+      type: "subagent.updated",
+      threadId: command.parentThreadId,
+      ...(task.runId === null ? {} : { runId: task.runId }),
+      nodeId: task.id,
+      driver: task.driver,
+      occurredAt: now,
+      payload: { ...task, remoteChild, updatedAt: now },
+    });
+    const item = parentProjection.turnItems.find(
+      (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
+    );
+    if (item !== undefined) {
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.parentThreadId,
+        ...(item.runId === null ? {} : { runId: item.runId }),
+        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+        driver: task.driver,
+        occurredAt: now,
+        payload: { ...item, remoteChild, updatedAt: now } as OrchestrationV2TurnItem,
+      });
+    }
   });
 
   const emitRemoteStopOwed = Effect.fn("orchestrationV2.dispatch.remoteStopOwed")(function* (
@@ -16593,6 +16677,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "delegated_task.remote.stop":
         yield* dispatchRemoteDelegatedTaskStop(command, events);
+        break;
+      case "delegated_task.remote.peer-status":
+        yield* dispatchRemoteDelegatedTaskPeerStatus(command, events);
         break;
       case "delegated_task.wake-policy":
         updateDelegatedCompletionOnlyRunId = yield* dispatchDelegatedTaskWakePolicy(

@@ -94,6 +94,36 @@ describe("resolveSubagentRowPresentation", () => {
     expect(row.detail).toBe(`${"x".repeat(280)}…`);
     expect(row.statusLabel).toBe("Failed");
   });
+
+  it("surfaces unreachable tone and label when an active remote task loses peer contact", () => {
+    const remoteChild = {
+      environmentId: "env-box" as never,
+      threadId: ThreadId.make("thread-box"),
+      label: "Box",
+      lastSeenAt: "2026-11-25T20:00:00.000Z",
+      peerStatus: "unreachable" as const,
+    };
+    const unreachable = resolveSubagentRowPresentation({
+      ...base,
+      childThreadId: null,
+      status: "running",
+      remoteChild,
+    });
+    expect(unreachable.statusLabel).toBe("Unreachable");
+    expect(unreachable.tone).toBe("unreachable");
+    expect(unreachable.live).toBe(false);
+    expect(unreachable.runsOn).toBe("Box");
+
+    const recovered = resolveSubagentRowPresentation({
+      ...base,
+      childThreadId: null,
+      status: "running",
+      remoteChild: { ...remoteChild, peerStatus: "reachable" },
+    });
+    expect(recovered.statusLabel).toBe("Working");
+    expect(recovered.tone).toBe("working");
+    expect(recovered.live).toBe(true);
+  });
 });
 
 type WorkflowAgent = OrchestrationV2SubagentWorkflow["agents"][number];
