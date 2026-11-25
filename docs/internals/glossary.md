@@ -13,7 +13,9 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 | Workspace root | The project's base filesystem directory on the environment.                                       |
 | Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
 | Thread         | The durable conversation and work history for a project. It survives provider process exits.      |
-| Turn           | One user-to-agent cycle, a V2 run. Provider work can end before checkpoint and diff work settles. |
+| Turn           | One user-to-agent cycle (a V2 run), including follow-up work such as checkpointing. Provider work can end before checkpoint and diff work settles. |
+| Owner          | The founder (`kameron` or `jeff`, or `null`) an inbox-routed thread belongs to (`ThreadInbox.owner`); an organizational label, never an access check. |
+| Task           | A unit of delegated or scheduled work tracked in its own thread or run (such as a `delegate_task` child thread or a scheduled task).              |
 | Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |
 | T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.             |
 

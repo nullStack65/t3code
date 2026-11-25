@@ -62,6 +62,8 @@ We need to be on the same page with terminology. When communicating, use this la
 - **project** means an environment-local workspace record rooted at a directory.
 - **thread** means the durable conversation and work history for a project.
 - **turn** means one user-to-agent cycle, including follow-up work such as checkpointing.
+- **owner** means the founder (`kameron` or `jeff`, or `null`) an inbox-routed thread belongs to (`ThreadInbox.owner`); an organizational label, never an access check.
+- **task** means a unit of delegated or scheduled work tracked in its own thread or run (such as a `delegate_task` child or a scheduled task).
 - **T3 home** means the base data directory. Runtime state normally lives below its userdata directory.
 
 ## The three ways to hurt yourself
