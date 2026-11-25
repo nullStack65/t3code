@@ -11,11 +11,15 @@ against `release/native-0.1.10`. It leaves a manually owned upstream proposal
 with its existing owner. Branch updates use normal fast-forward pushes, and
 multiple open sync proposals stop the job for Platform / CTO triage.
 
-Configure the `T3_FORK_SYNC_TOKEN` repository Actions secret with a
-repository-scoped credential for `nullStack65` that can push the sync branch
-and open and update PRs. The job verifies the login before writing. The default
-workflow token can suppress the protected pull-request checks, so the job
-requires the configured credential.
+The job authenticates with a short-lived GitHub App installation token, minted
+each run from the `T3_SYNC_APP_ID` and `T3_SYNC_APP_PRIVATE_KEY` repository
+Actions secrets (contents, pull requests and workflows write). An installation
+token cannot read `/user`, so the job checks the App's bot login instead. If
+the App cannot mint a token, the job falls back to the `T3_FORK_SYNC_TOKEN`
+repository Actions secret, a repository-scoped credential for `nullStack65`
+that can push the sync branch and open and update PRs; the job verifies that
+login before writing. The default workflow token can suppress the protected
+pull-request checks, so the job requires one of these credentials.
 
 A clean candidate can reach same-repository Actions secrets and private CI.
 Platform / CTO admits the exact SHA via the

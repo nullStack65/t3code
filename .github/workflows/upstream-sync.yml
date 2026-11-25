@@ -32,12 +32,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # A short-lived installation token, minted per run. If the App cannot mint one, the
+      # static T3_FORK_SYNC_TOKEN below still works, so a sync is never lost to the App.
+      - name: Mint a short-lived sync token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ secrets.T3_SYNC_APP_ID }}
+          private-key: ${{ secrets.T3_SYNC_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
       - name: Sync upstream main
         shell: bash
         env:
           UPSTREAM_URL: https://github.com/pingdotgg/t3code.git
           BASE_BRANCH: release/native-0.1.10
           GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.T3_FORK_SYNC_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.T3_FORK_SYNC_TOKEN }}
+          # Set only when the App token is in use; the script checks the credential's identity.
+          SYNC_APP_ACTOR: ${{ steps.app-token.outputs.token && format('{0}[bot]', steps.app-token.outputs.app-slug) || '' }}
           ADMITTED_UPSTREAM_SHA: ${{ vars.T3_FORK_SYNC_ADMITTED_UPSTREAM_SHA }}
         run: bash scripts/upstream-sync.sh

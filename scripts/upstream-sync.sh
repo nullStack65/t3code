@@ -19,11 +19,15 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 
 if [[ "$dry" != 1 ]]; then
-  : "${GH_TOKEN:?Configure the T3_FORK_SYNC_TOKEN Actions secret for nullStack65}"
-  actor=$(gh api user --jq .login)
-  if [[ "$actor" != nullStack65 ]]; then
-    echo 'The sync credential must authenticate as the CI-admitted nullStack65 account.' >&2
-    exit 1
+  : "${GH_TOKEN:?Configure the T3_SYNC_APP_ID and T3_SYNC_APP_PRIVATE_KEY secrets, or the T3_FORK_SYNC_TOKEN secret for nullStack65}"
+  # A GitHub App installation token cannot read /user, so its identity is the App's bot login.
+  actor="${SYNC_APP_ACTOR:-}"
+  if [[ -z "$actor" ]]; then
+    actor=$(gh api user --jq .login)
+    if [[ "$actor" != nullStack65 ]]; then
+      echo 'The sync credential must authenticate as the CI-admitted nullStack65 account or the sync App.' >&2
+      exit 1
+    fi
   fi
 fi
 

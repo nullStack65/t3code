@@ -95,14 +95,14 @@ esac
       },
     });
   }
-  function open(head, ref = branch, draft = true) {
+  function open(head, ref = branch, draft = true, login = "nullStack65") {
     NodeFS.writeFileSync(
       NodePath.join(root, "open"),
       JSON.stringify([
         {
           number: 1,
           draft,
-          user: { login: "nullStack65" },
+          user: { login },
           head: { ref, sha: head, repo: { full_name: "nullStack65/t3code" } },
         },
       ]),
@@ -191,5 +191,27 @@ NodeTest.test(
     NodeAssert.equal(existing.status, 0, existing.stderr);
     NodeAssert.match(existing.stdout, /owned by the existing PR #1/);
     NodeAssert.doesNotMatch(f.log(), /pr create|PATCH|pr merge/);
+  },
+);
+
+NodeTest.test(
+  "a short-lived App token authenticates by its bot login and owns its own proposal",
+  (t) => {
+    const f = fixture(t);
+    const release = commit(f.work, "README.md", "fork\n");
+    git(f.work, "push", "-q", "origin", base);
+    const upstream = commit(f.upstream, "README.md", "upstream\n");
+    // An installation token cannot read /user, so the fixture's answer there must never matter.
+    const app = { SYNC_APP_ACTOR: "t3-sync[bot]", FIXTURE_ACTOR: "not-consulted" };
+    const first = f.run({ ADMITTED_UPSTREAM_SHA: upstream, ...app });
+    NodeAssert.equal(first.status, 0, first.stderr);
+    NodeAssert.doesNotMatch(f.log(), /api user/);
+    const head = git(f.origin, "rev-parse", branch);
+    NodeAssert.equal(git(f.origin, "rev-parse", `${head}^`), release);
+    f.open(head, branch, true, "t3-sync[bot]");
+    const next = f.run({ SYNC_DATE: "2026-11-24", ...app });
+    NodeAssert.equal(next.status, 0, next.stderr);
+    NodeAssert.match(f.log(), /PATCH repos\/nullStack65\/t3code\/pulls\/1/);
+    NodeAssert.equal((f.log().match(/pr create/g) ?? []).length, 1);
   },
 );
