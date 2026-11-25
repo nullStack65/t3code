@@ -9,6 +9,8 @@ import type {
   ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 import { resolveUserMessagePresentation } from "./userMessage.ts";
 
@@ -130,23 +132,27 @@ function messageSenderDevice(sentBy: OrchestrationV2MessageSentBy): string {
  * up; without it an agent is "Agent". A person nobody has named yet is "Unknown person", and a
  * message from before senders were recorded is "Unknown sender".
  */
-export function messageSenderLabel(sender: MessageSender, agentTitle?: string | null): string {
+export function messageSenderLabel(
+  sender: MessageSender,
+  agentTitle?: string | null,
+  resolve: MFunctionType = mFallback,
+): string {
   switch (sender.kind) {
     case "person":
-      if (sender.sentBy === null) return "Unknown sender";
+      if (sender.sentBy === null) return resolve(msg("Unknown sender"));
       return sender.sentBy.founder === null
-        ? "Unknown person"
+        ? resolve(msg("Unknown person"))
         : FOUNDER_NAMES[sender.sentBy.founder];
     case "guest":
-      return `${sender.name} (guest)`;
+      return resolve(msg("{name} (guest)", { name: sender.name }));
     case "agent":
-      return agentTitle?.trim() || sender.linkedSender?.title.trim() || "Agent";
+      return agentTitle?.trim() || sender.linkedSender?.title.trim() || resolve(msg("Agent"));
     case "automation":
-      return "Automation";
+      return resolve(msg("Automation"));
     case "system":
       return "T3 Code";
     case "model":
-      return sender.provider ?? "Model";
+      return sender.provider ?? resolve(msg("Model"));
   }
 }
 

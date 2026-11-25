@@ -43,6 +43,7 @@ export const olderSettledThreads = createOlderSettledThreadAtoms(
 export const threadEnvironment = createThreadEnvironmentAtoms(
   connectionAtomRuntime,
   threadFamilies.snapshotAtom,
+  environmentShell.statusAtom,
   { getInboxOrigin: () => inboxOriginFor(getClientSettings()) },
 );
 const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);

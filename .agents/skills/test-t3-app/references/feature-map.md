@@ -154,6 +154,7 @@ Code: apps/web/src/components/ThreadTerminalDrawer.tsx
 - **terminal.new** — "New Terminal". `terminal.new` (`mod+n` in a terminal).
 - **terminal.split** — "Split Terminal Horizontally" `terminal.split` (`mod+d` in a terminal); "Split Terminal Vertically" `terminal.splitVertical` (`mod+shift+d` in a terminal). Layout: "Single", "Side by side", "Stacked".
 - **terminal.close** — "Close Terminal". `terminal.close` (`mod+w` in a terminal).
+- **terminal.switch** — previous / next terminal in the drawer. `terminal.previous` (`ctrl+alt+[`, `cmd+shift+[` on macOS) and `terminal.next` (`ctrl+alt+]`, `cmd+shift+]` on macOS) while a terminal has focus.
 - **terminal.context-menu** — "Copy", "Paste", "Select all", "Add to chat", "Jump to latest".
 
 ## Command palette and pickers
@@ -177,6 +178,9 @@ Code: apps/web/src/components/CommandPalette.tsx
 - **page.project-link** — `/projects/$projectKey`. Project link that redirects to that project's settings.
 - **page.pull-requests** — `/pull-requests`. "Pull requests" across servers: filters "Authored", "Reviewing", "Blocked on me", "Open", "Merged", "Closed"; "Sort pull requests". Opened from the sidebar or "Open pull requests".
 - **page.usage** — `/usage`. "Usage" for cost, tokens and limits. `usage.open` (`mod+u`). On the page: "Cost" `usage.cost` (`c`), "Tokens" `usage.tokens` (`t`), "Limits" `usage.limits` (`l`); "Usage period" `usage.period.day` (`mod+shift+1`), `usage.period.week` (`mod+shift+2`), `usage.period.month` (`mod+shift+3`), `usage.period.quarter` (`mod+shift+4`); "Refresh usage".
+- **page.issues** — `/issues`. "Issues" from the linked issue trackers.
+- **page.workflows** — `/workflows`. "Workflows": runs, their steps and the workflow definitions.
+- **page.linked-thread** — `/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId`. A thread on a linked environment this app is not connected to, read through the environment named first.
 
 ## Settings
 

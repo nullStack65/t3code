@@ -187,7 +187,8 @@ describe("React Compiler coverage", () => {
   it("caches the new-task model options and host environments", () => {
     const file = "src/features/threads/new-task-flow-provider.tsx";
     expect(compilerCachedCalls(file, "buildModelOptions")).toEqual([true]);
-    expect(compilerCachedCalls(file, "repositoryGroupingKeyOf")).toEqual([true, true]);
+    // The first call sits in a module-level helper the compiler does not reach.
+    expect(compilerCachedCalls(file, "repositoryGroupingKeyOf")).toEqual([false, true, true]);
   });
 
   // An uncached registration would re-register the workspace inspector on every render.
