@@ -14,6 +14,7 @@ import {
   founderInboxLane,
   Founder,
   InboxChoice,
+  isHiddenFromFounder,
   primaryInbox,
   type EnvironmentId,
   type OrchestrationV2ThreadShell,
@@ -295,6 +296,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
     }
   };
   for (const thread of threads) {
+    if (isHiddenFromFounder(thread.source.inbox, filter.viewingFounder)) continue;
     tally({
       environmentId: thread.environmentId,
       inbox: primaryInbox(thread.source.inbox),
@@ -306,6 +308,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
     });
   }
   for (const group of olderGroups) {
+    if (filter.viewingFounder === "jeff" && group.inbox === "kameron") continue;
     tally({ ...group, bucket: "settled", amount: group.count });
   }
   return { inboxes, environments, from, unclassified };

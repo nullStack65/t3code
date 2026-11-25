@@ -455,6 +455,26 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
 }
 
 /**
+ * Whether a thread is private to Kameron, so Jeff's lists must leave it out. Asymmetric: Kameron
+ * and a client with no founder see everything. Hidden for Jeff: audience Kameron, or Kameron-owned
+ * and filed neither Shared nor to Jeff. A thread without an inbox stays visible.
+ */
+export function isHiddenFromFounder(
+  inbox:
+    | {
+        readonly owner?: Founder | null | undefined;
+        readonly audience?: string | null | undefined;
+      }
+    | null
+    | undefined,
+  viewer: Founder | null | undefined,
+): boolean {
+  if (viewer !== "jeff" || !inbox) return false;
+  if (inbox.audience === "kameron") return true;
+  return inbox.owner === "kameron" && inbox.audience !== "shared" && inbox.audience !== "jeff";
+}
+
+/**
  * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents and
  * Shared, else every inbox so unclassified history stays visible. Shared is a default so both
  * founders see shared bots without opening the filter.

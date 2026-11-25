@@ -1,4 +1,8 @@
-import type { OrchestrationV2ProviderFailureClass } from "@t3tools/contracts";
+import {
+  type Founder,
+  isHiddenFromFounder,
+  type OrchestrationV2ProviderFailureClass,
+} from "@t3tools/contracts";
 
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { BotAvatarState } from "./BotAvatar";
@@ -75,25 +79,28 @@ export function splitStandingThreads<T extends { readonly standing: unknown }>(
 
 /** A shared bot belongs to both founders; every other standing bot is one's own. */
 function isSharedBotThread(thread: {
-  readonly source: { readonly inbox?: { readonly audience?: string } | null | undefined };
+  readonly source: { readonly inbox?: BotInbox | null | undefined };
 }): boolean {
   return thread.source.inbox?.audience === "shared";
 }
 
+type BotInbox = {
+  readonly owner?: Founder | null | undefined;
+  readonly audience?: string | null | undefined;
+};
+
 /**
- * The two bot groups. Shared audience is Shared Bots. With a viewer, an Agents inbox, a missing
- * inbox, or the other founder's bot is Shared Bots too, so both founders see every standing bot.
- * The viewer's own founder-audience bots stay in My Bots. A shared bot is never also listed there.
+ * The two bot groups. Shared audience is Shared Bots. With a viewer, an Agents or missing inbox
+ * and the other founder's bots are Shared Bots too; the viewer's own stay in My Bots. Jeff never
+ * lists Kameron's private bots (`isHiddenFromFounder`), while Kameron lists Jeff's.
  */
 export function partitionBotGroups<
-  T extends { readonly source: { readonly inbox?: { readonly audience?: string } | null } },
->(
-  threads: readonly T[],
-  viewer?: "kameron" | "jeff",
-): { readonly mine: T[]; readonly shared: T[] } {
+  T extends { readonly source: { readonly inbox?: BotInbox | null } },
+>(threads: readonly T[], viewer?: Founder): { readonly mine: T[]; readonly shared: T[] } {
   const mine: T[] = [];
   const shared: T[] = [];
   for (const thread of threads) {
+    if (isHiddenFromFounder(thread.source.inbox, viewer)) continue;
     const audience = thread.source.inbox?.audience;
     const sharedWithBoth =
       isSharedBotThread(thread) ||

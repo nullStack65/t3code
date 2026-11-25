@@ -88,11 +88,15 @@ describe("splitStandingThreads", () => {
 });
 
 describe("partitionBotGroups", () => {
+  const thread = (id: string, audience?: string) => ({
+    id,
+    source: { inbox: audience === undefined ? null : { audience } },
+  });
+  const owned = (id: string, owner: "kameron" | "jeff", audience: string | undefined) => ({
+    id,
+    source: { inbox: { owner, audience } },
+  });
   it("puts shared-inbox bots in their own group and leaves the rest as mine", () => {
-    const thread = (id: string, audience?: string) => ({
-      id,
-      source: { inbox: audience === undefined ? null : { audience } },
-    });
     expect(
       partitionBotGroups([thread("shared", "shared"), thread("jeff", "jeff"), thread("open")]),
     ).toEqual({
@@ -101,11 +105,7 @@ describe("partitionBotGroups", () => {
     });
   });
 
-  it("shows every standing bot to both founders", () => {
-    const thread = (id: string, audience?: string) => ({
-      id,
-      source: { inbox: audience === undefined ? null : { audience } },
-    });
+  it("keeps Jeff's personal bots in Kameron's lists beside his own and shared ones", () => {
     const threads = [
       thread("shared", "shared"),
       thread("mine", "kameron"),
@@ -122,13 +122,27 @@ describe("partitionBotGroups", () => {
         thread("open"),
       ],
     });
+  });
+
+  it("never lists Kameron's personal bots for Jeff", () => {
+    const threads = [
+      thread("shared", "shared"),
+      thread("cos", "kameron"),
+      thread("cos-jeff", "jeff"),
+      thread("agents", "agent-only"),
+      thread("open"),
+      owned("kameron-agents", "kameron", "agent-only"),
+      owned("kameron-unfiled", "kameron", undefined),
+      owned("kameron-shared", "kameron", "shared"),
+      owned("kameron-jeff", "kameron", "jeff"),
+    ];
     expect(partitionBotGroups(threads, "jeff")).toEqual({
-      mine: [thread("other", "jeff")],
+      mine: [thread("cos-jeff", "jeff"), owned("kameron-jeff", "kameron", "jeff")],
       shared: [
         thread("shared", "shared"),
-        thread("mine", "kameron"),
         thread("agents", "agent-only"),
         thread("open"),
+        owned("kameron-shared", "kameron", "shared"),
       ],
     });
   });
