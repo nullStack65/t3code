@@ -36,6 +36,31 @@ describe("mentionedFounders", () => {
     expect(mentionedFounders("```\n@kameron\n```\nplease review @Jeff")).toEqual(["jeff"]);
     expect(mentionedFounders("> log @kameron\n`x`\n@kameron decide?")).toEqual(["kameron"]);
   });
+
+  it("reads multi-backtick code spans as one span and ignores unmatched runs", () => {
+    expect(mentionedFounders("run ``@kameron`` now")).toEqual([]);
+    expect(mentionedFounders("run ``use `x` @jeff`` now")).toEqual([]);
+    expect(mentionedFounders("```@kameron``` is code")).toEqual([]);
+    expect(mentionedFounders("`` ``\n@jeff look")).toEqual(["jeff"]);
+    expect(mentionedFounders("an empty `` pair, @kameron?")).toEqual(["kameron"]);
+    expect(mentionedFounders("``a`` `b` @jeff")).toEqual(["jeff"]);
+    expect(mentionedFounders("``a ` b`` @kameron")).toEqual(["kameron"]);
+  });
+
+  it("closes a fence only on at least as many fence characters and no trailing text", () => {
+    // A single-line triple-backtick span must not swallow the lines after it.
+    expect(mentionedFounders("```@kameron```\nping @jeff")).toEqual(["jeff"]);
+    // A longer fence is not closed by a shorter one, so the ping inside stays code.
+    expect(mentionedFounders("````\n```\n@kameron\n```\n````\n@jeff")).toEqual(["jeff"]);
+    expect(mentionedFounders("~~~~\n~~~\n@kameron\n~~~~\nping @jeff")).toEqual(["jeff"]);
+    // Longer closers and trailing whitespace close; trailing text does not.
+    expect(mentionedFounders("```\n@kameron\n`````  \n@jeff")).toEqual(["jeff"]);
+    expect(mentionedFounders("```\n@kameron\n``` done\n@jeff\n```\nafter @kameron")).toEqual([
+      "kameron",
+    ]);
+    // A tilde fence is not closed by backticks.
+    expect(mentionedFounders("~~~\n@kameron\n```\n@jeff\n~~~\n@kameron")).toEqual(["kameron"]);
+  });
 });
 
 describe("resolveBotAttention", () => {

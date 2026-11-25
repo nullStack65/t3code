@@ -26,9 +26,17 @@ export const ATTENTION_MENTION_TEXT_LIMIT = 2000;
 // The lookbehind keeps an address such as `ops@jeff.example` from being read as a ping.
 const FOUNDER_MENTION = /(?<![\w.+-])@(kameron|jeff)\b/gi;
 
-/** Fenced blocks (an unterminated fence runs to the end), `>` quoted lines, then inline code. */
+/**
+ * What is not prose, per CommonMark: a fenced block, a `>` quoted line, or an inline code span.
+ * - A fence is 3+ backticks or tildes. A backtick fence's info string holds no backtick, so
+ *   ```` ```@kameron``` ```` on one line is a code span, not a fence. The closing fence repeats the
+ *   opener's character at least as many times and has only trailing whitespace. An unterminated
+ *   fence runs to the end.
+ * - A code span opens on a run of N backticks and closes on the next run of exactly N, so
+ *   ``` ``use `x` @jeff`` ``` is one span and a lone ``` `` ``` closes nothing.
+ */
 const NON_PING_TEXT =
-  /^[ \t]*(```|~~~)[^\n]*(?:\n[\s\S]*?^[ \t]*\1[^\n]*$|[\s\S]*)|^[ \t]*>.*$|`[^`\n]*`/gm;
+  /^[ \t]*(`{3,})[^`\n]*$(?:\n[\s\S]*?^[ \t]*\1`*[ \t]*$|[\s\S]*)|^[ \t]*(~{3,})[^\n]*(?:\n[\s\S]*?^[ \t]*\2~*[ \t]*$|[\s\S]*)|^[ \t]*>.*$|(?<!`)(`+)(?!`)[^\n]*?(?<!`)\3(?!`)/gm;
 
 /**
  * A founder is pinged only by prose written at them. Logs, code and quotes that merely contain an

@@ -1774,6 +1774,14 @@ const linkCardStillAsks = (
   latestUserAuthoredMessageAt === null ||
   !DateTime.isGreaterThan(latestUserAuthoredMessageAt, item.startedAt ?? item.updatedAt);
 
+/**
+ * Only an assistant reply, or a founder's own note, can ping a founder. An incoming user message
+ * or agent-to-agent digest merely relays text (often about how pings work), so scanning it would
+ * light the pill on the recipient bot.
+ */
+const isFounderPingSource = (message: { readonly role: string; readonly humanNote?: boolean }) =>
+  message.role === "assistant" || message.humanNote === true;
+
 const shellAttentionMentions = (text: string | null | undefined) => {
   const attentionMentions = attentionMentionsFromText(text);
   return attentionMentions === undefined ? {} : { attentionMentions };
@@ -1866,7 +1874,7 @@ export function threadShellFromProjection(
   const latestUserMessage = userMessages[0] ?? null;
   const latestVisibleText =
     projection.messages
-      .filter((message) => idleCompactionOf(message) === undefined)
+      .filter((message) => idleCompactionOf(message) === undefined && isFounderPingSource(message))
       .toSorted(
         (left, right) =>
           DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt) ||
@@ -8271,6 +8279,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 FROM orchestration_v2_projection_messages message
                   INDEXED BY orchestration_v2_projection_messages_thread_updated_idx
                 WHERE message.thread_id = t.thread_id
+                  AND (
+                    message.role = 'assistant'
+                    OR json_extract(message.payload_json, '$.humanNote') = 1
+                  )
                   AND NOT ${isIdleCompactionMessage("message")}
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1

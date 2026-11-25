@@ -1464,6 +1464,90 @@ it.effect("shells flag a latest run triggered by a provider background wake", ()
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("shells read founder @-mentions only from assistant replies and founder notes", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("attention-mentions");
+    const at = (yield* store.getThreadProjection(threadId)).updatedAt;
+    let seconds = 1;
+    const send = (
+      id: string,
+      message: {
+        readonly role: "user" | "assistant";
+        readonly createdBy: "user" | "agent";
+        readonly text: string;
+        readonly humanNote?: true;
+      },
+    ) =>
+      Effect.gen(function* () {
+        const updatedAt = DateTime.add(at, { seconds: seconds++ });
+        yield* store.apply({
+          id: EventId.make(`event:attention-mentions:${id}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: updatedAt,
+          payload: {
+            id: MessageId.make(`message:attention-mentions:${id}`),
+            threadId,
+            runId: null,
+            nodeId: null,
+            creationSource: "server",
+            attachments: [],
+            streaming: false,
+            createdAt: updatedAt,
+            updatedAt,
+            ...message,
+          },
+        });
+        return [
+          (yield* store.getThreadShell(threadId))?.attentionMentions,
+          ProjectionStore.threadShellFromProjection(yield* store.getThreadProjection(threadId))
+            .attentionMentions,
+        ];
+      });
+
+    // An incoming message or agent-to-agent digest that only talks about the rules never pings.
+    for (const [id, createdBy] of [
+      ["incoming-user", "user"],
+      ["digest", "agent"],
+    ] as const) {
+      assert.deepEqual(
+        yield* send(id, {
+          role: "user",
+          createdBy,
+          text: "Remember: @kameron and @jeff are pinged only by an assistant reply.",
+        }),
+        [undefined, undefined],
+        id,
+      );
+    }
+    // An assistant reply that writes at a founder does.
+    assert.deepEqual(
+      yield* send("assistant", {
+        role: "assistant",
+        createdBy: "agent",
+        text: "Need a call on the rollout, @kameron.",
+      }),
+      [["kameron"], ["kameron"]],
+    );
+    // A later incoming message does not replace what the assistant said, and never adds a name.
+    assert.deepEqual(
+      yield* send("later-digest", { role: "user", createdBy: "agent", text: "fyi @jeff" }),
+      [["kameron"], ["kameron"]],
+    );
+    // A founder's own note to the other founder still pings.
+    assert.deepEqual(
+      yield* send("note", {
+        role: "user",
+        createdBy: "user",
+        humanNote: true,
+        text: "please look @jeff",
+      }),
+      [["jeff"], ["jeff"]],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("SQL queue readiness skips held runs without bypassing active work", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;
