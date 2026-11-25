@@ -6519,10 +6519,31 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const waiting = turnAttached;
           turnAttached = yield* Deferred.make<boolean>();
           yield* Deferred.succeed(waiting, false);
-          const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => [
-            [...current.values()],
-            new Map<string, PendingRuntimeRequest>(),
-          ]);
+          yield* cancelPendingRuntimeRequestEntries();
+        });
+
+        /**
+         * Resolves pending requests as cancelled, so a live agent gets a native answer.
+         * Pass a provider turn to cancel only the requests it raised.
+         */
+        const cancelPendingRuntimeRequestEntries = Effect.fnUntraced(function* (
+          providerTurnId?: OrchestrationV2RuntimeRequest["providerTurnId"],
+        ) {
+          const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => {
+            const cancelled: Array<PendingRuntimeRequest> = [];
+            const kept = new Map<string, PendingRuntimeRequest>();
+            for (const [key, request] of current) {
+              if (
+                providerTurnId === undefined ||
+                request.runtimeRequest.providerTurnId === providerTurnId
+              ) {
+                cancelled.push(request);
+              } else {
+                kept.set(key, request);
+              }
+            }
+            return [cancelled, kept];
+          });
           if (requests.length === 0) return;
 
           const now = yield* DateTime.now;
@@ -8514,6 +8535,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               },
             });
           }
+          // turn.terminal cancels this turn's pending requests on the server; answer the
+          // agent too, or a native question keeps it blocked and it rejects every prompt.
+          yield* cancelPendingRuntimeRequestEntries(context.providerTurnId);
           const turn = providerTurnPayload(context, settledStatus, now);
           yield* Ref.update(providerTurns, (current) => {
             const updated = new Map(current);
@@ -9567,6 +9591,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 generation,
                 Effect.gen(function* () {
                   if (context.finalized || context.interrupted) return false;
+                  // An agent waiting on its own question or approval rejects a new prompt,
+                  // which would fail the turn; the orchestrator queues a declined steer instead.
+                  for (const request of (yield* Ref.get(pendingRuntimeRequests)).values()) {
+                    if (request.runtimeRequest.providerTurnId === context.providerTurnId) {
+                      return "declined" as const;
+                    }
+                  }
                   // The steer prompt carries the turn on, also past a prompt that already settled.
                   const released = context.foregroundIdle;
                   context.foregroundIdle = yield* Deferred.make<void>();
@@ -9614,6 +9645,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   return true;
                 }),
               );
+              if (Option.contains(steered, "declined")) {
+                return yield* new ProviderAdapter.ProviderAdapterSteerDeclinedError({
+                  driver,
+                  providerThreadId: turnInput.providerThread.id,
+                  providerTurnId: turnInput.providerTurnId,
+                });
+              }
               if (!Option.contains(steered, true)) {
                 return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                   driver,
@@ -9965,7 +10003,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             (effect, turnInput) =>
               effect.pipe(
                 Effect.mapError((cause) =>
-                  cause._tag === "ProviderAdapterSteerRunUnsupportedError"
+                  cause._tag === "ProviderAdapterSteerRunUnsupportedError" ||
+                  cause._tag === "ProviderAdapterSteerDeclinedError"
                     ? cause
                     : new ProviderAdapter.ProviderAdapterSteerRunError({
                         driver,

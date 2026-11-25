@@ -1049,7 +1049,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     readonly released: Deferred.Deferred<void> | undefined;
   }> = [];
   const steered = yield* Deferred.make<void>();
-  const releaseSteer = yield* Deferred.make<void>();
+  const releaseSteer = yield* Deferred.make<void, EffectAcpErrors.AcpRequestError>();
   let terminate: AntigravityAdapterV2RuntimeInput["onTermination"];
   const usage = { sessionUpdate: "usage_update", used: 9000, size: 1048576 } as const;
   const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
@@ -1234,6 +1234,11 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     cancels: () => cancels,
     prompts,
     releaseSteer: Deferred.succeed(releaseSteer, undefined),
+    /** agy rejects a prompt that arrives while its own question waits for an answer. */
+    rejectSteer: Deferred.fail(
+      releaseSteer,
+      new EffectAcpErrors.AcpRequestError({ code: -32603, errorMessage: "agent is busy" }),
+    ),
     runtimeDies: Effect.suspend(
       () =>
         terminate?.(
@@ -1242,6 +1247,8 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     ),
   };
 });
+
+type OpenedSession = Effect.Success<ReturnType<typeof openSessionWithRunningCommand>>;
 
 describe("AntigravityAdapterV2 work after the prompt ends", () => {
   it.effect("wakes for a late workspace edit only on the bound ACP session", () =>
@@ -1549,6 +1556,85 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
         "failed",
         "a silent steer prompt must still hit the inactivity timeout",
       );
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  // agy 1.5.x rejects every session/prompt while its own ask_question waits for an answer, and
+  // stays blocked until that question gets a native response.
+  const askQuestion = (requestPermission: OpenedSession["requestPermission"]) =>
+    requestPermission(
+      {
+        sessionId: "mock-session-1",
+        toolCall: { toolCallId: "interaction_1", title: "Which branch?" },
+        options: [
+          { optionId: "main", name: "main", kind: "allow_once" },
+          { optionId: "dev", name: "dev", kind: "allow_once" },
+        ],
+      },
+      { requestId: "question-1", method: "session/request_permission" },
+    ).pipe(Effect.forkScoped({ startImmediately: true }));
+  const steerInput = (
+    providerThread: OpenedSession["providerThread"],
+    providerTurnId: ProviderAdapter.ProviderAdapterV2SteerInput["providerTurnId"],
+  ): ProviderAdapter.ProviderAdapterV2SteerInput => ({
+    threadId: ThreadId.make("thread-antigravity-wake"),
+    runId: RunId.make("run-antigravity-wake-1"),
+    providerThread,
+    providerTurnId,
+    message: {
+      messageId: MessageId.make("message-antigravity-steer"),
+      text: "A delegated task finished",
+      attachments: [],
+      createdBy: "agent",
+      creationSource: "provider",
+    },
+  });
+
+  it.effect("declines a steer while the agent waits on its own question", () =>
+    Effect.gen(function* () {
+      const opened = yield* openSessionWithRunningCommand({ WaitMsBeforeAsync: 10000 }, undefined, {
+        agentVersion: "1.5.11",
+        holdsFirstPrompt: false,
+      });
+      yield* opened.startTurn(1, false);
+      const prompt = yield* opened.throughPromptSettled;
+      const providerTurnId = prompt.flatMap((event) =>
+        event.type === "provider_turn.updated" ? [event.providerTurn.id] : [],
+      )[0]!;
+      const question = yield* askQuestion(opened.requestPermission);
+      yield* opened.until((event) => event.type === "runtime_request.updated");
+
+      const declined = yield* opened.session
+        .steerTurn(steerInput(opened.providerThread, providerTurnId))
+        .pipe(Effect.flip);
+      assert.equal(declined._tag, "ProviderAdapterSteerDeclinedError", "the app queues it instead");
+      assert.lengthOf(opened.prompts, 1, "the waiting agent would reject a steer prompt");
+      assert.equal(opened.cancels(), 0);
+      assert.isUndefined(question.pollUnsafe(), "the question stays open for the user");
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect("answers the agent's open question when its turn fails", () =>
+    Effect.gen(function* () {
+      const opened = yield* openSessionWithRunningCommand({ WaitMsBeforeAsync: 10000 }, undefined, {
+        agentVersion: "1.5.11",
+        holdsFirstPrompt: false,
+      });
+      yield* opened.startTurn(1, false);
+      const prompt = yield* opened.throughPromptSettled;
+      const providerTurnId = prompt.flatMap((event) =>
+        event.type === "provider_turn.updated" ? [event.providerTurn.id] : [],
+      )[0]!;
+      yield* opened.session.steerTurn(steerInput(opened.providerThread, providerTurnId));
+      assert.lengthOf(opened.prompts, 2);
+      // The agent asks while the steer prompt is in flight, then rejects that prompt.
+      const question = yield* askQuestion(opened.requestPermission);
+      yield* opened.until((event) => event.type === "runtime_request.updated");
+      yield* opened.rejectSteer;
+      const failed = (yield* opened.throughTerminal).at(-1);
+      assert.equal(failed?.type === "turn.terminal" && failed.status, "failed");
+      // The app dismisses the turn's questions at turn.terminal; the agent must hear it too.
+      assert.deepEqual(yield* Fiber.join(question), { outcome: { outcome: "cancelled" } });
     }).pipe(Effect.provide(layerSession)),
   );
 
