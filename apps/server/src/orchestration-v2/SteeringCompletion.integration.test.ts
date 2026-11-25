@@ -1763,7 +1763,11 @@ const deliveryHarness = Effect.fn("deliveryHarness")(function* (
           event.payload.id === turnInput.runId &&
           event.payload.status === "waiting",
       );
-      yield* Queue.offer(harness.events, { type: "provider_turn.updated", driver, providerTurn: turn });
+      yield* Queue.offer(harness.events, {
+        type: "provider_turn.updated",
+        driver,
+        providerTurn: turn,
+      });
       yield* Queue.offer(harness.events, {
         type: "turn.terminal",
         driver,
@@ -1779,11 +1783,7 @@ const deliveryHarness = Effect.fn("deliveryHarness")(function* (
       yield* orchestrator.resumeQueuedRuns;
       yield* worker.drain();
     });
-  const send = (
-    threadId: ThreadId,
-    id: string,
-    delivery?: OrchestrationV2MessageDelivery,
-  ) =>
+  const send = (threadId: ThreadId, id: string, delivery?: OrchestrationV2MessageDelivery) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
@@ -2402,6 +2402,114 @@ it.effect(
         assert.deepEqual(offers.at(-1)?.delegatedCompletion, {
           parentRunId: origin.runId,
           generation: 2,
+          messageId: delivery!.messageId,
+        });
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(requests))));
+    }),
+);
+
+it.effect(
+  "re-offers an acknowledged terminal task when steering_restart cuts the observing attempt",
+  () =>
+    Effect.gen(function* () {
+      const harness = yield* nextTurnSelectionHarness("steered-cut-ack", true, false);
+      const offers: ProviderContinuationRequests.ProviderContinuationRequest[] = [];
+      const requests = Layer.succeed(ProviderContinuationRequests.ProviderContinuationRequests, {
+        offer: (request) => Effect.sync(() => void offers.push(request)),
+        take: Effect.never,
+      });
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = yield* harness.startFirstTurn;
+        const origin = harness.started[0]!;
+        const taskId = NodeId.make("task:steered-cut-ack");
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:steered-cut-ack-task"),
+              type: "subagent.updated",
+              threadId,
+              runId: origin.runId,
+              nodeId: taskId,
+              occurredAt: now,
+              payload: {
+                id: taskId,
+                threadId,
+                runId: origin.runId,
+                parentNodeId: origin.rootNodeId,
+                origin: "app_owned",
+                createdBy: "agent",
+                driver,
+                providerInstanceId: instanceId,
+                providerThreadId: null,
+                childThreadId: null,
+                nativeTaskRef: null,
+                prompt: "Run checks",
+                title: "Checks",
+                model: null,
+                completionWake: "settled_only",
+                completionDelivery: { state: "pending", observedByRunId: null },
+                status: "completed",
+                result: "all checks passed",
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+
+        yield* orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make("command:steered-cut-ack"),
+          parentThreadId: threadId,
+          taskId,
+          observedByRunId: origin.runId,
+        });
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(threadId)).subagents[0]?.completionDelivery,
+          { state: "acknowledged", observedByRunId: origin.runId },
+        );
+
+        const restartedRunning = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "provider-turn.updated" &&
+              event.payload.status === "running" &&
+              event.payload.ordinal === 2,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:steered-cut-ack-steer"),
+          threadId,
+          messageId: MessageId.make("message:steered-cut-ack-steer"),
+          text: "actually check logs too",
+          attachments: [],
+          modelSelection: runSelection,
+          dispatchMode: { type: "steer_active", targetRunId: origin.runId },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        yield* Fiber.join(restartedRunning);
+
+        const afterRestart = yield* orchestrator.getThreadProjection(threadId);
+        const task = afterRestart.subagents.find((candidate) => candidate.id === taskId);
+        assert.deepEqual(task?.completionDelivery, { state: "claimed", observedByRunId: null });
+        assert.equal(task?.completionWake, "always");
+        const delivery = afterRestart.runs.find((run) => run.id === origin.runId)
+          ?.delegatedCompletion?.delivery;
+        assert.deepEqual(delivery?.taskIds, [taskId]);
+        assert.deepEqual(offers.at(-1)?.delegatedCompletion, {
+          parentRunId: origin.runId,
+          generation: delivery!.generation,
           messageId: delivery!.messageId,
         });
       }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(requests))));
