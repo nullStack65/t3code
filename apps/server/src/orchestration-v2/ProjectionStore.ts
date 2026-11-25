@@ -1975,6 +1975,12 @@ export function threadShellFromProjection(
     ...(projection.thread.delegationNudge
       ? { delegationNudge: projection.thread.delegationNudge }
       : {}),
+    ...(projection.thread.replacedByThreadId
+      ? {
+          replacedByThreadId: projection.thread.replacedByThreadId,
+          retiredAt: projection.thread.retiredAt ?? null,
+        }
+      : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
     ...(projection.thread.visitsByFounder === undefined
       ? {}
@@ -2294,6 +2300,12 @@ function shellFromState(input: {
     ...(input.state.thread.standing ? { standing: input.state.thread.standing } : {}),
     ...(input.state.thread.delegationNudge
       ? { delegationNudge: input.state.thread.delegationNudge }
+      : {}),
+    ...(input.state.thread.replacedByThreadId
+      ? {
+          replacedByThreadId: input.state.thread.replacedByThreadId,
+          retiredAt: input.state.thread.retiredAt ?? null,
+        }
       : {}),
     lastVisitedAt: input.state.thread.lastVisitedAt,
     opens: input.state.thread.opens ?? null,

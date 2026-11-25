@@ -13,6 +13,7 @@ import {
   nextFounderSeenMessage,
   nextFounderVisits,
   rewindFounderVisit,
+  redirectLinkError,
   routeThreadInbox,
   type ThreadInbox,
 } from "@t3tools/contracts";
@@ -5096,6 +5097,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} is no longer empty.`,
         });
     }
+    // A tombstone must never loop or lead nowhere, or every wake aimed at the thread would fail.
+    if (command.type === "thread.metadata.update" && command.replacedByThreadId != null) {
+      const linkError = yield* redirectLinkError(
+        (id) => projectionStore.getThreadShell(id),
+        command.threadId,
+        command.replacedByThreadId,
+      ).pipe(mapDispatchError(command));
+      if (linkError !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: linkError,
+        });
+      }
+    }
     if (command.type === "thread.archive" && thread.archivedAt !== null) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -5669,10 +5685,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.delegation-nudge.set": {
-          const thresholds =
-            command.thresholds ??
-            thread.delegationNudge?.thresholds ??
-            [...DEFAULT_DELEGATION_NUDGE_THRESHOLDS];
+          const thresholds = command.thresholds ??
+            thread.delegationNudge?.thresholds ?? [...DEFAULT_DELEGATION_NUDGE_THRESHOLDS];
           return {
             ...thread,
             delegationNudge: {
@@ -5744,6 +5758,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {}
               : { inbox: askedInbox(thread.inbox, command, now) }),
             ...(command.title === undefined ? {} : { title: command.title }),
+            ...(command.replacedByThreadId === undefined
+              ? {}
+              : command.replacedByThreadId === null
+                ? { replacedByThreadId: null, retiredAt: null }
+                : {
+                    replacedByThreadId: command.replacedByThreadId,
+                    // Re-pointing a retired thread keeps its original retirement time.
+                    retiredAt: thread.retiredAt ?? now,
+                  }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
@@ -7706,6 +7729,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "A note is a text message on a shared thread, and it does not wake the bot.",
         });
       }
+    }
+    // Backstop for the redirect: every entrypoint resolves a retired thread to its replacement before
+    // it dispatches, so a message that still arrives here must fail closed, never start a turn.
+    if (command.humanNote !== true && projection.thread.replacedByThreadId != null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is retired; its replacement is ${projection.thread.replacedByThreadId}.`,
+      });
     }
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);

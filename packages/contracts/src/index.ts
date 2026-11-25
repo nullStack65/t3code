@@ -52,6 +52,7 @@ export * from "./eventSubscription.ts";
 export * from "./threadSearch.ts";
 export * from "./threadTags.ts";
 export * from "./threadStanding.ts";
+export * from "./threadRedirect.ts";
 export * from "./delegationNudge.ts";
 export * from "./threadTitle.ts";
 export * from "./t3ProjectFile.ts";

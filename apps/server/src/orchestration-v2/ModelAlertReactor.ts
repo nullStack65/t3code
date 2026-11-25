@@ -13,6 +13,7 @@ import {
   OrchestrationV2WorkerAlertReason,
   OrchestratorMcpThreadSendResult,
   ThreadId,
+  type ThreadRedirectNode,
 } from "@t3tools/contracts";
 import { runModelSignals, workerAlert } from "@t3tools/provider-core/server/subagentProjection";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
@@ -47,6 +48,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 import {
   cursorOf,
   planThreadSubscription,
@@ -854,6 +856,10 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
     readonly dispatch: Orchestrator.OrchestratorV2["Service"]["dispatch"];
     readonly call: PeerMcpClient.PeerMcpClient["Service"]["call"];
     readonly sha256Hex: (identity: string) => Effect.Effect<string>;
+    /** Reads a thread's redirect tombstone; an alert for a retired watcher goes to its replacement. */
+    readonly getThreadShell?: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ThreadRedirectNode | null, unknown>;
   },
   alert: WatcherAlert,
   watcher: ModelAlertWatcher,
@@ -869,10 +875,26 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
     expiresAtMs ?? DateTime.toEpochMillis(yield* DateTime.now) + ALERT_DIGEST_TTL_MS,
   );
   if (watcher.environmentId === here) {
+    // A retired watcher never takes a turn: the alert follows its redirect, or is dropped with a
+    // warning when the chain cannot be resolved.
+    const target =
+      deps.getThreadShell === undefined
+        ? watcher.threadId
+        : yield* resolveWakeTarget(deps.getThreadShell, watcher.threadId, {
+            sourceKind: "event",
+          }).pipe(
+            Effect.map((wake) => wake.threadId),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("alert for retired watcher dropped", { cause }).pipe(
+                Effect.as(null),
+              ),
+            ),
+          );
+    if (target === null) return;
     yield* deps.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`server:${key}`),
-      threadId: watcher.threadId,
+      threadId: target,
       messageId: MessageId.make(`message:${key}`),
       text: message,
       attachments: [],
@@ -986,7 +1008,12 @@ export const make = Effect.gen(function* () {
     expiresAtMs: number,
   ) =>
     deliverAlertToWatcher(
-      { dispatch: engine.dispatch, call: peers.call, sha256Hex },
+      {
+        dispatch: engine.dispatch,
+        call: peers.call,
+        sha256Hex,
+        getThreadShell: (threadId) => engine.getThreadShell(threadId),
+      },
       alert,
       watcher,
       here,
@@ -1339,35 +1366,50 @@ export const make = Effect.gen(function* () {
     if (decision.action === "wake") {
       eventWakeSeq += 1;
       const seq = eventWakeSeq;
-      yield* engine
-        .dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(`server:event-sub:${subscription.id}:${seq}`),
-          threadId: subscription.subscriberThreadId,
-          messageId: MessageId.make(`message:event-sub:${subscription.id}:${seq}`),
-          text: [
-            `Update on thread ${title} (${watchedThreadId}), which you subscribed to:`,
-            ...decision.summaries,
-          ].join("\n"),
-          notification: {
-            source: { kind: "monitor" },
-            outcome: "updated",
-            summary: decision.summaries[0] ?? "thread event",
-          },
-          attachments: [],
-          dispatchMode: { type: "queue_after_active" },
-          createdBy: "agent",
-          creationSource: "server",
-        })
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("event subscription wake failed", {
-              id: subscription.id,
-              threadId: subscription.subscriberThreadId,
-              cause,
-            }),
-          ),
-        );
+      const wakeTarget = yield* resolveWakeTarget(
+        (threadId) => engine.getThreadShell(threadId),
+        subscription.subscriberThreadId,
+        { sourceKind: "event", subscriptionId: subscription.id },
+      ).pipe(
+        Effect.map((wake) => wake.threadId),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription wake dropped", {
+            id: subscription.id,
+            threadId: subscription.subscriberThreadId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (wakeTarget !== null)
+        yield* engine
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`server:event-sub:${subscription.id}:${seq}`),
+            threadId: wakeTarget,
+            messageId: MessageId.make(`message:event-sub:${subscription.id}:${seq}`),
+            text: [
+              `Update on thread ${title} (${watchedThreadId}), which you subscribed to:`,
+              ...decision.summaries,
+            ].join("\n"),
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "updated",
+              summary: decision.summaries[0] ?? "thread event",
+            },
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("event subscription wake failed", {
+                id: subscription.id,
+                threadId: subscription.subscriberThreadId,
+                cause,
+              }),
+            ),
+          );
     }
     if (decision.expire) {
       yield* store.remove(subscription.subscriberThreadId, subscription.id).pipe(

@@ -51,6 +51,7 @@ export const ThreadMetadataMcpAction = Schema.Literals([
   "resolve_decision",
   "set_standing",
   "set_delegation_nudge",
+  "set_redirect",
 ]);
 export type ThreadMetadataMcpAction = typeof ThreadMetadataMcpAction.Type;
 
@@ -72,6 +73,12 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
         "Required only when action is set_delegation_nudge: {enabled, thresholds?}. When on, the thread is reminded to delegate after that many of its own tool calls in one request (default [5, 10]). A thread cannot change its own setting.",
     }),
   ),
+  replacedByThreadId: Schema.optional(
+    Schema.NullOr(ThreadId).annotate({
+      description:
+        "Required only when action is set_redirect: the live thread that replaces this retired one. Every wake aimed at this thread (t3_thread_send, schedules, PR watches, event subscriptions) is redirected there and no provider turn ever starts here. null clears the tombstone. Self-redirects and cycles are rejected.",
+    }),
+  ),
   clientRequestId: Schema.optional(ThreadMetadataClientRequestId),
 }).check(
   Schema.makeFilter((input) =>
@@ -79,9 +86,10 @@ export const ThreadMetadataMcpUpdateInput = Schema.Struct({
     (input.action === "route") === (input.inboxRouting !== undefined) &&
     (input.action === "request_decision") === (input.decision !== undefined) &&
     (input.action === "set_standing") === (input.standing !== undefined) &&
-    (input.action === "set_delegation_nudge") === (input.delegationNudge !== undefined)
+    (input.action === "set_delegation_nudge") === (input.delegationNudge !== undefined) &&
+    (input.action === "set_redirect") === (input.replacedByThreadId !== undefined)
       ? true
-      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; set_delegation_nudge requires delegationNudge; other actions reject those fields.",
+      : "rename requires title; route requires inboxRouting; request_decision requires decision; set_standing requires standing; set_delegation_nudge requires delegationNudge; set_redirect requires replacedByThreadId (null clears); other actions reject those fields.",
   ),
 );
 export type ThreadMetadataMcpUpdateInput = typeof ThreadMetadataMcpUpdateInput.Type;
@@ -97,6 +105,8 @@ export const ThreadMetadataMcpUpdateResult = Schema.Struct({
   inbox: Schema.optionalKey(ThreadInbox),
   standing: Schema.optionalKey(StoredThreadStanding),
   delegationNudge: Schema.optionalKey(StoredThreadDelegationNudge),
+  replacedByThreadId: Schema.optionalKey(Schema.NullOr(ThreadId)),
+  retiredAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
   updatedAt: IsoDateTime,
 });
 export type ThreadMetadataMcpUpdateResult = typeof ThreadMetadataMcpUpdateResult.Type;
