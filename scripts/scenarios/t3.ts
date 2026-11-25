@@ -1,14 +1,19 @@
 // `test` for web scenarios: e2e's web test plus `t3`, which seeds state and opens the signed-in
 // app. `t3-mobile.ts` is the same for the iOS app.
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import { test as base } from "@e2e-dev/web";
+import { ORCHESTRATION_PROTOCOL_VERSION, WsRpcGroup } from "@t3tools/contracts";
 import { expect } from "e2e";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { RpcClient, RpcSerialization } from "effect/rpc";
+import { Socket } from "effect/socket";
 
 import { APP_DIR, T3_HOME } from "../e2e.config.ts";
 import { run } from "./shell.ts";
@@ -148,6 +153,33 @@ const environmentId = (baseUrl: string) =>
     Effect.map((environment) => environment.environmentId),
     Effect.provide(FetchHttpClient.layer),
   );
+
+/** The typed RPC client of the server on `home` at `origin`, signed in through its own CLI. */
+export const rpcClient = Effect.fn("scenario.rpcClient")(function* (home: string, origin: string) {
+  const issued = yield* makeState(home).cli(["auth", "session", "issue", "--token-only"]);
+  const { ticket } = yield* HttpClient.execute(
+    HttpClientRequest.post(`${origin}/api/auth/websocket-ticket`).pipe(
+      HttpClientRequest.bearerToken(issued.stdout.trim()),
+    ),
+  ).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Struct({ ticket: Schema.String }))),
+    Effect.provide(FetchHttpClient.layer),
+  );
+  // Built into the caller's scope: `Effect.provide` would close the socket once `make` returns.
+  const protocol = yield* Layer.build(
+    RpcClient.layerProtocolSocket().pipe(
+      Layer.provide(
+        Socket.layerWebSocket(
+          `${origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION}&wsTicket=${encodeURIComponent(ticket)}`,
+        ),
+      ),
+      Layer.provide(RpcSerialization.layerJson),
+      Layer.provide(NodeWS.layerWebSocketConstructor),
+    ),
+  );
+  return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provideContext(protocol));
+});
 
 export const test = base.extend<{ t3: T3 }>({
   t3: async ({ app, browser }, use) => {
