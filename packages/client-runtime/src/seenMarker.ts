@@ -1,4 +1,9 @@
-import type { Founder, MessageId, ThreadSeenMarker } from "@t3tools/contracts";
+import type {
+  Founder,
+  MessageId,
+  OrchestrationV2TimelineVisibility,
+  ThreadSeenMarker,
+} from "@t3tools/contracts";
 
 const SEEN_DWELL_MS = 2_000;
 
@@ -54,6 +59,21 @@ export interface SeenMessage {
   id: MessageId;
   role: string;
   streaming?: boolean;
+  /** Who created the message (`"user"` vs `"agent"`). Human user messages are never unseen. */
+  createdBy?: string | undefined;
+  /** An explicit `user_timeline` stamp makes an agent/non-user message new to the reader. */
+  timelineVisibility?: OrchestrationV2TimelineVisibility | undefined;
+}
+
+/**
+ * Whether a message counts as new for "catch me up" and the new-messages line. A model reply
+ * always does. Anything else does only when it is not a human founder's own message and the server
+ * stamped it for the user's own timeline, such as an agent-sent message.
+ */
+function isUnseenCandidate(message: SeenMessage): boolean {
+  if (message.streaming === true) return false;
+  if (message.role === "assistant") return true;
+  return message.timelineVisibility === "user_timeline" && message.createdBy !== "user";
 }
 
 interface SeenEntry {
@@ -121,14 +141,34 @@ export function catchUpOffer(input: {
   if (input.lastSeenMessageId == null || input.seenAt == null || input.seenAt === "") return null;
   const index = input.messages.findIndex((message) => message.id === input.lastSeenMessageId);
   const after = index < 0 ? input.messages : input.messages.slice(index + 1);
-  const unseen = after.some(
-    (message) => message.role === "assistant" && message.streaming !== true,
-  );
+  const unseen = after.some(isUnseenCandidate);
   if (!unseen) return null;
   return { lastSeenMessageId: input.lastSeenMessageId, seenAt: input.seenAt };
 }
 
 export const CATCH_ME_UP_TEXT = "Catch me up";
+
+/** Where "new since you last looked" starts: after the message `afterMessageId`. */
+export interface UnseenDivider {
+  readonly afterMessageId: MessageId;
+  readonly count: number;
+}
+
+/**
+ * The line between what this founder had been shown and what arrived since. A place the
+ * thread no longer holds draws nothing, since guessing would mislabel old messages as new.
+ */
+export function resolveUnseenDivider(input: {
+  readonly messages: ReadonlyArray<SeenMessage>;
+  readonly lastSeenMessageId: MessageId | null | undefined;
+}): UnseenDivider | null {
+  const afterMessageId = input.lastSeenMessageId;
+  if (afterMessageId == null) return null;
+  const index = input.messages.findIndex((message) => message.id === afterMessageId);
+  if (index < 0) return null;
+  const count = input.messages.slice(index + 1).filter(isUnseenCandidate).length;
+  return count === 0 ? null : { afterMessageId, count };
+}
 
 export function buildSeenMarker(
   threadKey: string,

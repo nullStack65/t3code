@@ -1,204 +1,217 @@
-import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  cpSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+import * as NodeTest from "node:test";
 
-import { CONFLICT_BUDGET, decideSync, issueBody, pullRequestBody } from "./fork-sync-plan.mjs";
+import { conflictPaths, proposalBody } from "./fork-sync-plan.mjs";
 
-const scriptDir = new URL(".", import.meta.url).pathname;
+const scriptDir = NodeURL.fileURLToPath(new URL(".", import.meta.url));
+const base = "release/native-0.1.10";
+const branch = "sync/upstream-proposal-2026-11-23-0-1";
+const isolated = { ...process.env };
+for (const key of Object.keys(isolated)) {
+  if (key.startsWith("GIT_") || key.startsWith("GITHUB_RUN_")) delete isolated[key];
+}
+isolated.GIT_CONFIG_GLOBAL = "/dev/null";
+isolated.GIT_CONFIG_NOSYSTEM = "1";
 
-test("a clean lag opens a pull request and forbids a force-push", () => {
-  const decision = decideSync({ behind: 4, conflictFiles: [] });
-  assert.equal(decision.action, "open-pr");
-  assert.equal(decision.allowForcePush, false);
-});
-
-test("any conflict flags Platform / CTO and does not resolve it", () => {
-  const one = decideSync({ behind: 4, conflictFiles: ["apps/server/src/server.ts"] });
-  assert.equal(one.action, "flag-conflicts");
-  assert.equal(one.owner, "Platform / CTO");
-  assert.equal(one.overBudget, false);
-  assert.equal(one.allowForcePush, false);
-
-  const files = Array.from({ length: CONFLICT_BUDGET + 1 }, (_, index) => `file-${index}.ts`);
-  const over = decideSync({ behind: 783, conflictFiles: files });
-  assert.equal(over.overBudget, true);
-  assert.equal(over.allowForcePush, false);
-});
-
-test("a rejected push is not retried with force", () => {
-  const decision = decideSync({ behind: 2, pushRejected: true });
-  assert.equal(decision.action, "flag-diverged");
-  assert.equal(decision.allowForcePush, false);
-});
-
-test("an up-to-date line does nothing", () => {
-  assert.equal(decideSync({ behind: 0 }).action, "up-to-date");
-});
-
-test("the sync pull request body has one Deploy line", () => {
-  const body = pullRequestBody({
-    behind: 3,
-    ahead: 1,
-    mergeBase: "abc",
-    ciWillStart: false,
-  });
-  const deploy = body.split("\n").filter((line) => line.startsWith("Deploy:"));
-  assert.deepEqual(deploy, ["Deploy: fleet"]);
-  assert.match(body, /Platform \/ CTO/);
-  assert.match(body, /Model: github-actions/);
-  assert.match(body, /Task: sync/);
-});
-
-test("the conflict issue names the owner and the files", () => {
-  const decision = decideSync({
-    behind: 2,
-    conflictFiles: ["apps/web/src/components/Sidebar.tsx"],
-  });
-  const body = issueBody({
-    decision,
-    behind: 2,
-    ahead: 9,
-    mergeBase: "abc",
-    date: "2026-11-21",
-  });
-  assert.match(body, /Platform \/ CTO/);
-  assert.match(body, /Sidebar\.tsx/);
-  assert.match(body, /Do not force-push/);
-});
-
-test("the workflow script never force-pushes or merges", () => {
-  const source = readFileSync(join(scriptDir, "upstream-sync.sh"), "utf8");
-  assert.equal(source.includes("--force"), false);
-  assert.equal(source.includes("push -f"), false);
-  assert.equal(source.includes("pr merge"), false);
-});
-
-function git(cwd, args) {
-  return execFileSync("git", ["-C", cwd, ...args], {
+function git(cwd, ...args) {
+  return NodeChildProcess.execFileSync("git", ["-C", cwd, ...args], {
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
-  });
+    env: isolated,
+  }).trim();
 }
 
-function commit(cwd, file, contents, message) {
-  writeFileSync(join(cwd, file), contents);
-  git(cwd, ["add", file]);
-  git(cwd, ["commit", "-q", "-m", message]);
+function commit(cwd, file, contents) {
+  NodeFS.writeFileSync(NodePath.join(cwd, file), contents);
+  git(cwd, "add", file);
+  git(
+    cwd,
+    "-c",
+    "user.name=fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "-qm",
+    file,
+  );
+  return git(cwd, "rev-parse", "HEAD");
 }
 
-function identity(cwd) {
-  git(cwd, ["config", "user.email", "sync@example.com"]);
-  git(cwd, ["config", "user.name", "sync"]);
-  git(cwd, ["config", "commit.gpgsign", "false"]);
-}
-
-function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "upstream-sync-"));
-  const origin = join(root, "origin.git");
-  const work = join(root, "work");
-  const upstream = join(root, "upstream");
-  execFileSync("git", ["init", "-q", work]);
-  identity(work);
-  git(work, ["checkout", "-q", "-b", "release/native-0.1.10"]);
-  commit(work, "README.md", "base\n", "base");
-  execFileSync("git", ["init", "--bare", "-q", origin]);
-  git(work, ["remote", "add", "origin", origin]);
-  git(work, ["push", "-q", "origin", "release/native-0.1.10"]);
-  execFileSync("git", ["clone", "-q", work, upstream]);
-  identity(upstream);
-  git(upstream, ["checkout", "-q", "-b", "main"]);
-  const bin = join(root, "bin");
-  mkdirSync(bin);
-  writeFileSync(
-    join(bin, "gh"),
-    `#!/bin/sh
-printf '%s\\n' "$*" >> "$GH_LOG"
-case "$1 $2" in
-  "pr list"|"issue list") exit 0 ;;
-  "pr create") printf '%s\\n' "https://github.com/nullStack65/t3code/pull/1" ;;
-  "issue create") printf '%s\\n' "https://github.com/nullStack65/t3code/issues/1" ;;
+function fixture(t) {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "upstream-sync-"));
+  t.after(() => NodeFS.rmSync(root, { recursive: true, force: true }));
+  const work = NodePath.join(root, "work");
+  const upstream = NodePath.join(root, "upstream");
+  const origin = NodePath.join(root, "origin.git");
+  const bin = NodePath.join(root, "bin");
+  for (const dir of [work, origin, bin]) NodeFS.mkdirSync(dir);
+  git(work, "init", "-qb", base);
+  const common = commit(work, "README.md", "base\n");
+  git(origin, "init", "-q", "--bare");
+  git(work, "remote", "add", "origin", origin);
+  git(work, "push", "-q", "origin", base);
+  git(root, "clone", "-q", work, upstream);
+  git(upstream, "switch", "-qc", "main");
+  NodeFS.mkdirSync(NodePath.join(work, "scripts"));
+  for (const name of ["fork-drift-receipt.mjs", "fork-sync-plan.mjs", "upstream-sync.sh"]) {
+    NodeFS.cpSync(NodePath.join(scriptDir, name), NodePath.join(work, "scripts", name));
+  }
+  NodeFS.writeFileSync(
+    NodePath.join(bin, "gh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GH_FIXTURE/log"
+case "$*" in
+  'api user --jq .login') printf '%s\n' "\${FIXTURE_ACTOR:-nullStack65}" ;;
+  'api --paginate --method GET '*) cat "$GH_FIXTURE/open" ;;
+  'pr create '*)
+    while [[ "$1" != --body-file ]]; do shift; done
+    cp "$2" "$GH_FIXTURE/body" ;;
+  'api --method PATCH '*)
+    for arg do case "$arg" in body=@*) cp "\${arg#body=@}" "$GH_FIXTURE/body" ;; esac; done ;;
+  'pr ready '*) ;;
+  *) exit 90 ;;
 esac
 `,
+    { mode: 0o755 },
   );
-  chmodSync(join(bin, "gh"), 0o755);
-  mkdirSync(join(work, "scripts"));
-  for (const name of ["fork-drift-receipt.mjs", "fork-sync-plan.mjs", "upstream-sync.sh"]) {
-    cpSync(join(scriptDir, name), join(work, "scripts", name));
+  NodeFS.writeFileSync(NodePath.join(root, "open"), "[]\n");
+  function run(extra = {}) {
+    return NodeChildProcess.spawnSync("bash", ["scripts/upstream-sync.sh"], {
+      cwd: work,
+      encoding: "utf8",
+      env: {
+        ...isolated,
+        PATH: `${bin}:${process.env.PATH}`,
+        UPSTREAM_URL: upstream,
+        SYNC_DATE: "2026-11-23",
+        GH_FIXTURE: root,
+        GH_TOKEN: "fixture",
+        ...extra,
+      },
+    });
   }
-  chmodSync(join(work, "scripts", "upstream-sync.sh"), 0o755);
-  return { root, origin, work, upstream, bin };
-}
-
-function decisionFrom(output) {
-  const line = output.split("\n").findLast((entry) => entry.startsWith("{"));
-  return JSON.parse(line);
-}
-
-function runSync(ctx, extraEnv = {}) {
-  return execFileSync("bash", ["scripts/upstream-sync.sh"], {
-    cwd: ctx.work,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${ctx.bin}:${process.env.PATH}`,
-      GH_LOG: join(ctx.root, "gh.log"),
-      UPSTREAM_URL: ctx.upstream,
-      PUSH_REMOTE: "origin",
-      GH_REPO: "nullStack65/t3code",
-      SYNC_DATE: "2026-11-21",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
-      ...extraEnv,
-    },
-  });
-}
-
-test("a conflicting upstream flags and does not push", () => {
-  const ctx = fixture();
-  try {
-    commit(ctx.work, "README.md", "fork\n", "fork");
-    git(ctx.work, ["push", "-q", "origin", "release/native-0.1.10"]);
-    commit(ctx.upstream, "README.md", "upstream\n", "upstream");
-    const release = git(ctx.origin, ["rev-parse", "release/native-0.1.10"]).trim();
-    const output = runSync(ctx, { DRY_RUN: "1" });
-    const decision = decisionFrom(output);
-    assert.equal(decision.action, "flag-conflicts");
-    assert.equal(decision.allowForcePush, false);
-    assert.ok(decision.files.includes("README.md"));
-    assert.equal(git(ctx.origin, ["rev-parse", "release/native-0.1.10"]).trim(), release);
-    assert.throws(() => git(ctx.origin, ["rev-parse", "sync/upstream-2026-11-21"]));
-  } finally {
-    rmSync(ctx.root, { recursive: true, force: true });
+  function open(head, ref = branch, draft = true, login = "nullStack65") {
+    NodeFS.writeFileSync(
+      NodePath.join(root, "open"),
+      JSON.stringify([
+        {
+          number: 1,
+          draft,
+          user: { login },
+          head: { ref, sha: head, repo: { full_name: "nullStack65/t3code" } },
+        },
+      ]),
+    );
   }
+  return {
+    work,
+    upstream,
+    origin,
+    common,
+    run,
+    open,
+    log: () => NodeFS.readFileSync(NodePath.join(root, "log"), "utf8"),
+    body: () => NodeFS.readFileSync(NodePath.join(root, "body"), "utf8"),
+  };
+}
+
+NodeTest.test("conflict paths stop before git's messages and preserve unusual filenames", () => {
+  NodeAssert.deepEqual(conflictPaths("tree\0ordinary.ts\0new\nline.ts\0\0message\0"), [
+    "ordinary.ts",
+    "new\nline.ts",
+  ]);
+  NodeAssert.match(
+    proposalBody({ mode: "conflict", files: ["new\nline.ts"] }),
+    /    "new\\nline.ts"/,
+  );
 });
 
-test("a clean upstream opens a sync branch without moving the release line", () => {
-  const ctx = fixture();
-  try {
-    commit(ctx.upstream, "upstream.txt", "new\n", "upstream feature");
-    const release = git(ctx.origin, ["rev-parse", "release/native-0.1.10"]).trim();
-    const output = runSync(ctx);
-    const decision = decisionFrom(output);
-    assert.equal(decision.action, "open-pr");
-    assert.equal(decision.allowForcePush, false);
-    assert.equal(git(ctx.origin, ["rev-parse", "release/native-0.1.10"]).trim(), release);
-    assert.equal(git(ctx.origin, ["rev-parse", "sync/upstream-2026-11-21"]).trim().length, 40);
-    const log = readFileSync(join(ctx.root, "gh.log"), "utf8");
-    assert.match(log, /pr create/);
-    assert.equal(log.includes("pr merge"), false);
-    assert.equal(log.includes("--force"), false);
-  } finally {
-    rmSync(ctx.root, { recursive: true, force: true });
-  }
-});
+NodeTest.test(
+  "a conflict opens one draft and a later run updates its body even after the date changes",
+  (t) => {
+    const f = fixture(t);
+    const release = commit(f.work, "README.md", "fork\n");
+    git(f.work, "push", "-q", "origin", base);
+    const upstream = commit(f.upstream, "README.md", "upstream\n");
+    const first = f.run({ ADMITTED_UPSTREAM_SHA: upstream });
+    NodeAssert.equal(first.status, 0, first.stderr);
+    const head = git(f.origin, "rev-parse", branch);
+    NodeAssert.equal(git(f.origin, "rev-parse", `${head}^`), release);
+    for (const sha of [head, release, upstream, f.common])
+      NodeAssert.match(f.body(), new RegExp(sha));
+    NodeAssert.match(f.body(), /Conflicts in 1 files[\s\S]*"README.md"/);
+    NodeAssert.match(f.body(), /--is-ancestor upstream proposal-head: `1`/);
+    NodeAssert.match(f.log(), /pr create .* --draft/);
+    f.open(head);
+    const next = f.run({ SYNC_DATE: "2026-11-24" });
+    NodeAssert.equal(next.status, 0, next.stderr);
+    NodeAssert.match(f.log(), /PATCH repos\/nullStack65\/t3code\/pulls\/1/);
+    NodeAssert.equal((f.log().match(/pr create/g) ?? []).length, 1);
+    NodeAssert.equal(git(f.origin, "rev-parse", base), release);
+  },
+);
+
+NodeTest.test(
+  "a clean merge needs exact SHA admission and updates the same draft for real CI",
+  (t) => {
+    const f = fixture(t);
+    const upstream = commit(f.upstream, "candidate.txt", "candidate\n");
+    const first = f.run();
+    NodeAssert.equal(first.status, 0, first.stderr);
+    const oldHead = git(f.origin, "rev-parse", branch);
+    NodeAssert.match(f.body(), /pending Platform \/ CTO admission/);
+    f.open(oldHead);
+    const admitted = f.run({ ADMITTED_UPSTREAM_SHA: upstream });
+    NodeAssert.equal(admitted.status, 0, admitted.stderr);
+    const head = git(f.origin, "rev-parse", branch);
+    NodeAssert.equal(git(f.origin, "rev-parse", `${head}^1`), oldHead);
+    NodeAssert.equal(git(f.origin, "rev-parse", `${head}^2`), upstream);
+    NodeAssert.equal(git(f.origin, "rev-parse", base), f.common);
+    NodeAssert.match(f.body(), /--is-ancestor upstream proposal-head: `0`/);
+    NodeAssert.match(f.body(), /Deploy: none/);
+    NodeAssert.match(f.log(), /pr ready 1 --repo/);
+    NodeAssert.doesNotMatch(git(f.origin, "ls-tree", "-r", "--name-only", head), /pending\.md/);
+  },
+);
+
+NodeTest.test(
+  "missing or CI-ineligible credentials and a hand-owned proposal prevent publication",
+  (t) => {
+    const f = fixture(t);
+    const upstream = commit(f.upstream, "candidate.txt", "candidate\n");
+    NodeAssert.match(f.run({ GH_TOKEN: "" }).stderr, /T3_FORK_SYNC_TOKEN/);
+    NodeAssert.match(f.run({ FIXTURE_ACTOR: "github-actions[bot]" }).stderr, /CI-admitted/);
+    f.open(f.common, "sync/upstream-antigravity-acp-20261120", false);
+    const existing = f.run({ ADMITTED_UPSTREAM_SHA: upstream });
+    NodeAssert.equal(existing.status, 0, existing.stderr);
+    NodeAssert.match(existing.stdout, /owned by the existing PR #1/);
+    NodeAssert.doesNotMatch(f.log(), /pr create|PATCH|pr merge/);
+  },
+);
+
+NodeTest.test(
+  "a short-lived App token authenticates by its bot login and owns its own proposal",
+  (t) => {
+    const f = fixture(t);
+    const release = commit(f.work, "README.md", "fork\n");
+    git(f.work, "push", "-q", "origin", base);
+    const upstream = commit(f.upstream, "README.md", "upstream\n");
+    // An installation token cannot read /user, so the fixture's answer there must never matter.
+    const app = { SYNC_APP_ACTOR: "t3-sync[bot]", FIXTURE_ACTOR: "not-consulted" };
+    const first = f.run({ ADMITTED_UPSTREAM_SHA: upstream, ...app });
+    NodeAssert.equal(first.status, 0, first.stderr);
+    NodeAssert.doesNotMatch(f.log(), /api user/);
+    const head = git(f.origin, "rev-parse", branch);
+    NodeAssert.equal(git(f.origin, "rev-parse", `${head}^`), release);
+    f.open(head, branch, true, "t3-sync[bot]");
+    const next = f.run({ SYNC_DATE: "2026-11-24", ...app });
+    NodeAssert.equal(next.status, 0, next.stderr);
+    NodeAssert.match(f.log(), /PATCH repos\/nullStack65\/t3code\/pulls\/1/);
+    NodeAssert.equal((f.log().match(/pr create/g) ?? []).length, 1);
+  },
+);

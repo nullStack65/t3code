@@ -156,6 +156,29 @@ describe("timeline seen sampling", () => {
     vi.unstubAllGlobals();
   });
 
+  it("marks the newest settled message once the list rests at the bottom", () => {
+    const clock = manualTimers();
+    const page = host();
+    const latestId = MessageId.make("message-latest");
+    const sampling = startSeenMarkerSampling({
+      host: page.samplingHost,
+      threadKey: "env:thread",
+      getScrollNode: () => ({
+        ...scrollNode(),
+        scrollTop: 600,
+        scrollHeight: 1000,
+        clientHeight: 400,
+      }),
+      getMessages: () => [...messages, { id: latestId, role: "assistant" }],
+      now: () => new Date(seenAt),
+      timers: clock.timers,
+    });
+    page.flush();
+    clock.fireNext();
+    expect(buildSeenMarker("env:thread")).toEqual({ lastSeenMessageId: latestId, seenAt });
+    sampling.dispose();
+  });
+
   it("does not mark a hidden or blurred window", () => {
     const clock = manualTimers();
     const page = host();

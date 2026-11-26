@@ -17,6 +17,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PullRequestWatchService from "../../../pullRequest/PullRequestWatchService.ts";
 import {
   PullRequestHostRequiredError,
+  PullRequestRepositoryInvalidError,
   PullRequestTargetIncompleteError,
   PullRequestUrlInvalidError,
   PullRequestUrlUnavailableError,
@@ -59,12 +60,12 @@ const failure = Schema.Union([
   PersistenceSqlError,
   PersistenceDecodeError,
   PullRequestWatchService.PullRequestWatchFailedError,
-  PullRequestWatchService.PullRequestNotOpenError,
   PullRequestWatchService.PullRequestWatchFromSubagentError,
   PullRequestWatchService.PullRequestWatchThreadNotFoundError,
   PullRequestUrlInvalidError,
   PullRequestTargetIncompleteError,
   PullRequestHostRequiredError,
+  PullRequestRepositoryInvalidError,
   PullRequestUrlUnavailableError,
   PullRequestUnavailableError,
 ]);

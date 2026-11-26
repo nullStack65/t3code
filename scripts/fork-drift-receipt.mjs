@@ -5,7 +5,7 @@
 // budget. Read-only: it never fetches, merges or writes. The weekly receipt is
 // `node scripts/fork-drift-receipt.mjs --base origin/release/native-0.1.10`.
 
-import { execFileSync } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 
 export const UPSTREAM_REF = "upstream/main";
 export const CONFLICT_BUDGET = 25;
@@ -35,7 +35,7 @@ export function budgetFindings(drift, behindBudget = BEHIND_BUDGET) {
 }
 
 function git(root, args) {
-  return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  return NodeChildProcess.execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
 }
 
 function main() {
@@ -49,7 +49,12 @@ function main() {
   const root = rootIndex === -1 ? process.cwd() : args[rootIndex + 1];
   const drift = measure(root, baseRef);
   const findings = budgetFindings(drift);
-  const receipt = { ...drift, behindBudget: BEHIND_BUDGET, conflictBudget: CONFLICT_BUDGET, findings };
+  const receipt = {
+    ...drift,
+    behindBudget: BEHIND_BUDGET,
+    conflictBudget: CONFLICT_BUDGET,
+    findings,
+  };
   process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
   if (findings.length > 0) process.exitCode = 1;
 }

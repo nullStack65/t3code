@@ -416,6 +416,8 @@ function summaryOf(change: PullRequestWatchChange): string {
     }
     case "checks-passed":
       return change.required ? "Required checks passed" : "Checks passed";
+    case "checks-finished":
+      return `Every check has finished: ${change.passed} passed, ${change.failing.length} still failing: ${change.failing.map((check) => check.name).join(", ")}`;
     case "checks-awaiting-approval":
       return `Checks awaiting approval: ${change.checks.map((check) => check.name).join(", ")}`;
     case "remarks":
@@ -473,6 +475,12 @@ export function selectWatchChanges(
         if (remarks.length > 0) selected.push({ kind: "remarks", remarks });
         break;
       }
+      case "checks-finished":
+        // Closura: the wake that follows a failure, so a `checks.failed` subscriber receives it.
+        if (events === null || events.some((event) => event.name === "checks.failed")) {
+          selected.push(change);
+        }
+        break;
       case "conflicting":
         if (events === null || events.some((event) => event.name === "conflict.detected")) {
           selected.push(change);

@@ -9,6 +9,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
 import { AsyncResult, type Atom } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
@@ -33,6 +34,21 @@ const state = vi.hoisted(() => ({
   delivery: null as { readonly drain: () => void; readonly dispose: () => void } | null,
   admit: vi.fn(),
   start: vi.fn(),
+  // Delivery runs commands as Effects; tests steer them with the settled results the mocks return.
+  command: (Effect: typeof import("effect/Effect"), settle: (input: unknown) => unknown) => ({
+    label: "command",
+    run: (_registry: unknown, input: unknown) =>
+      Effect.promise(
+        async () =>
+          (await settle(input)) as
+            | import("effect/reactivity").AsyncResult.Success<unknown>
+            | import("effect/reactivity").AsyncResult.Failure<unknown, Error>,
+      ).pipe(
+        Effect.flatMap((result) =>
+          result._tag === "Failure" ? Effect.failCause(result.cause) : Effect.succeed(result.value),
+        ),
+      ),
+  }),
   prepare: vi.fn(),
   manager: null as unknown as ReturnType<
     typeof import("./thread-outbox-manager").createThreadOutboxManager
@@ -116,8 +132,9 @@ vi.mock("./server", async () => {
 });
 vi.mock("./threads", async () => {
   const { Atom, AsyncResult: R } = await import("effect/reactivity");
+  const Effect = await import("effect/Effect");
   return {
-    threadEnvironment: { startTurn: state.start },
+    threadEnvironment: { startTurn: state.command(Effect, state.start) },
     environmentThreadShells: { threadShellsAtom: Atom.make([]).pipe(Atom.keepAlive) },
     threadFamilies: { mount: () => () => {}, familyAtom: () => Atom.make(R.success({})) },
     environmentThreadDetails: { stateAtom: () => Atom.make(null) },
@@ -127,6 +144,7 @@ vi.mock("./git", () => ({ gitEnvironment: {} }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
 vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "abcd" }));
 vi.mock("../lib/attachmentUpload", () => ({ prepareTurnAttachments: state.prepare }));
+vi.mock("./composer-attachment-uploads", () => ({ uploadComposerAttachmentShared: vi.fn() }));
 vi.mock("./thread-outbox", async () => {
   const model = await import("./thread-outbox-model");
   const { createThreadOutboxManager } = await import("./thread-outbox-manager");
@@ -170,7 +188,7 @@ vi.mock("./use-thread-outbox", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     editingQueuedMessageIdsAtom: Atom.make<Record<string, true>>({}).pipe(Atom.keepAlive),
-    dispatchingQueuedMessageIdAtom: Atom.make<MessageId | null>(null).pipe(Atom.keepAlive),
+    dispatchingQueuedMessageIdsAtom: Atom.make<Record<string, true>>({}).pipe(Atom.keepAlive),
     retryingQueuedMessageIdsAtom: Atom.make({}).pipe(Atom.keepAlive),
     threadOutboxShellStatusesAtom: Atom.make(
       new Map([
@@ -197,7 +215,7 @@ vi.mock("./use-composer-drafts", async () => {
 });
 
 import { appAtomRegistry } from "./atom-registry";
-import { dispatchingQueuedMessageIdAtom, editingQueuedMessageIdsAtom } from "./use-thread-outbox";
+import { dispatchingQueuedMessageIdsAtom, editingQueuedMessageIdsAtom } from "./use-thread-outbox";
 import { pendingThreadCreationOutcomesAtom } from "./pending-thread-creation";
 import * as drafts from "./use-composer-drafts";
 import { createThreadOutboxDelivery } from "./threadOutboxDelivery";
@@ -262,7 +280,7 @@ const storedRecords = () =>
   [...state.stored.entries()].map(([file, raw]) => ({ file, record: JSON.parse(raw) as unknown }));
 const targetEffects = () => state.events.filter((event) => !event.startsWith("admit"));
 
-const idle = () => appAtomRegistry.get(dispatchingQueuedMessageIdAtom) === null;
+const idle = () => Object.keys(appAtomRegistry.get(dispatchingQueuedMessageIdsAtom)).length === 0;
 /** Resolves when the outbox and its delivery slot reach this state; checked on each change. */
 function until(predicate: () => boolean): Promise<void> {
   const done = Promise.withResolvers<void>();
@@ -270,7 +288,7 @@ function until(predicate: () => boolean): Promise<void> {
     if (predicate()) done.resolve();
   };
   const stops = [
-    appAtomRegistry.subscribe(dispatchingQueuedMessageIdAtom, check),
+    appAtomRegistry.subscribe(dispatchingQueuedMessageIdsAtom, check),
     appAtomRegistry.subscribe(state.manager.queuedMessagesByThreadKeyAtom, check),
   ];
   check();
@@ -303,7 +321,7 @@ beforeEach(() => {
   for (const atom of state.generation.values())
     appAtomRegistry.set(atom as Atom.Writable<number>, 1);
   appAtomRegistry.set(state.manager.queuedMessagesByThreadKeyAtom, {});
-  appAtomRegistry.set(dispatchingQueuedMessageIdAtom, null);
+  appAtomRegistry.set(dispatchingQueuedMessageIdsAtom, {});
   appAtomRegistry.set(editingQueuedMessageIdsAtom, {});
   appAtomRegistry.set(pendingThreadCreationOutcomesAtom, {});
   state.admit
@@ -323,16 +341,16 @@ beforeEach(() => {
     );
   state.prepare
     .mockReset()
-    .mockImplementation(
-      async (input: { environmentId: string; attachments: ReadonlyArray<unknown> }) => {
+    .mockImplementation((input: { environmentId: string; attachments: ReadonlyArray<unknown> }) =>
+      Effect.sync(() => {
         state.events.push(`prepare:${input.environmentId}`);
         return {
-          status: "ready",
+          status: "ready" as const,
           attachments: [],
           draftAttachments: input.attachments,
           pendingAttachmentIds: [],
         };
-      },
+      }),
     );
   state.start.mockReset().mockImplementation(async (target: { environmentId: string }) => {
     state.events.push(`start:${target.environmentId}`);

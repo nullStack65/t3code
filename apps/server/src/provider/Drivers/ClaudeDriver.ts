@@ -39,7 +39,10 @@ import {
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
-import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
+import {
+  resolveClaudeModelCatalog,
+  scopeClaudeUpgradeMessageToChannel,
+} from "../ClaudeModelCatalog.ts";
 import { fetchMagpieGatewayCatalog, withMagpieGatewayModels } from "../MagpieGatewayModels.ts";
 import {
   makeClaudeCodeModelRoutes,
@@ -347,6 +350,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
               enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
             }),
+          ),
+          Effect.flatMap((enrichedSnapshot) =>
+            modelCatalog.pipe(
+              Effect.map((catalog) =>
+                scopeClaudeUpgradeMessageToChannel(catalog, enrichedSnapshot),
+              ),
+            ),
           ),
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),

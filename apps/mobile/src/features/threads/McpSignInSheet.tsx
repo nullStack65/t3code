@@ -1,20 +1,15 @@
-import {
-  ProviderMcpSignInError,
-  type EnvironmentId,
-  type ProviderThreadId,
-  type ThreadId,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ProviderThreadId, ThreadId } from "@t3tools/contracts";
+import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import * as Haptics from "expo-haptics";
-import { T, useGT } from "gt-react-native";
+import { msg, T, useGT, useMessages } from "gt-react-native";
 import { useRef, useState } from "react";
 import { ScrollView } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import * as Schema from "effect/Schema";
 
 import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
@@ -29,8 +24,6 @@ export interface McpSignInTarget {
   readonly server: string;
 }
 
-const isMcpSignInError = Schema.is(ProviderMcpSignInError);
-
 /**
  * Signs an agent's MCP server in from the notice that says it needs one. The
  * agent keeps the credential; the user approves in a browser, then pastes back
@@ -42,6 +35,7 @@ export function McpSignInSheet(props: {
   readonly onClose: () => void;
 }) {
   const gt = useGT();
+  const m = useMessages();
   const insets = useSafeAreaInsets();
   const { server } = props.target;
   const start = useAtomCommand(threadEnvironment.mcpSignInStart, {
@@ -67,9 +61,9 @@ export function McpSignInSheet(props: {
 
   const failed = (result: AtomCommandResult<unknown, unknown> & { readonly _tag: "Failure" }) => {
     if (isAtomCommandInterrupted(result)) return;
-    const failure = squashAtomCommandFailure(result);
     setError(
-      isMcpSignInError(failure) ? failure.detail : gt("The sign-in couldn't continue. Try again."),
+      errorDisplayMessage(squashAtomCommandFailure(result), m) ??
+        m(msg("The sign-in couldn't continue. Try again.")),
     );
   };
   // The command marks the server signed in for the thread, which every notice about it shows.

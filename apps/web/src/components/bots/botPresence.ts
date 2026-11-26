@@ -3,6 +3,7 @@ import {
   isHiddenFromFounder,
   type OrchestrationV2ProviderFailureClass,
 } from "@t3tools/contracts";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { BotAvatarState } from "./BotAvatar";
@@ -64,14 +65,16 @@ export function sortBotThreads<
  * Splits standing bots out of the sidebar's thread list. Bots go to their own group whatever
  * their pin, settle or snooze state; everything else continues to the ordinary sections.
  */
-export function splitStandingThreads<T extends { readonly standing: unknown }>(
-  threads: readonly T[],
-): { readonly bots: T[]; readonly rest: T[] } {
+export function splitStandingThreads<
+  T extends Pick<EnvironmentThreadShell, "standing" | "lineage">,
+>(threads: readonly T[]): { readonly bots: T[]; readonly rest: T[] } {
   const bots: T[] = [];
   const rest: T[] = [];
   for (const thread of threads) {
+    const isChild =
+      thread.lineage.parentThreadId !== null || thread.lineage.relationshipToParent === "subagent";
     // A founder is a human, not a bot: founder-to-founder threads stay out of the Bots shelf.
-    const isBot = thread.standing != null && !isFounderStanding(thread.standing);
+    const isBot = thread.standing != null && !isFounderStanding(thread.standing) && !isChild;
     (isBot ? bots : rest).push(thread);
   }
   return { bots, rest };
@@ -90,25 +93,31 @@ type BotInbox = {
 };
 
 /**
- * The two bot groups. Shared audience is Shared Bots. With a viewer, an Agents or missing inbox
- * and the other founder's bots are Shared Bots too; the viewer's own stay in My Bots. Jeff never
- * lists Kameron's private bots (`isHiddenFromFounder`), while Kameron lists Jeff's.
+ * The three bot groups:
+ * - `mine` ("My Bots"): the viewer's own personal bots (`audience === viewer`, or all personal bots when no viewer is set).
+ * - `others` ("Others"): the other founder's personal bots (shown for Kameron; Jeff never lists Kameron's private bots via `isHiddenFromFounder`).
+ * - `shared` ("Closura"): all company bots (`audience === "shared"`, `"agent-only"`, or missing).
  */
 export function partitionBotGroups<
   T extends { readonly source: { readonly inbox?: BotInbox | null } },
->(threads: readonly T[], viewer?: Founder): { readonly mine: T[]; readonly shared: T[] } {
+>(
+  threads: readonly T[],
+  viewer?: Founder,
+): { readonly mine: T[]; readonly others: T[]; readonly shared: T[] } {
   const mine: T[] = [];
+  const others: T[] = [];
   const shared: T[] = [];
   for (const thread of threads) {
     if (isHiddenFromFounder(thread.source.inbox, viewer)) continue;
     const audience = thread.source.inbox?.audience;
-    const sharedWithBoth =
-      isSharedBotThread(thread) ||
-      (viewer !== undefined &&
-        (audience === "agent-only" ||
-          audience == null ||
-          ((audience === "kameron" || audience === "jeff") && audience !== viewer)));
-    (sharedWithBoth ? shared : mine).push(thread);
+    const isPersonal = audience === "kameron" || audience === "jeff";
+    if (!isPersonal || isSharedBotThread(thread)) {
+      shared.push(thread);
+    } else if (viewer !== undefined && audience !== viewer) {
+      others.push(thread);
+    } else {
+      mine.push(thread);
+    }
   }
-  return { mine, shared };
+  return { mine, others, shared };
 }

@@ -15,6 +15,8 @@ const earlier = DateTime.makeUnsafe("2026-11-20T12:00:00.000Z");
 const later = DateTime.makeUnsafe("2026-11-20T13:00:00.000Z");
 const newest = DateTime.makeUnsafe("2026-11-20T14:00:00.000Z");
 
+const decodeVisitJson = Schema.decodeSync(OrchestrationV2ThreadVisitJson);
+
 describe("per-founder read cursors", () => {
   it("seeds the other founder from the shared cursor, then advances only the reader", () => {
     const seeded = nextFounderVisits(
@@ -137,7 +139,7 @@ describe("per-founder read cursors", () => {
   });
 
   it("decodes founder visit timestamps stored as strings", () => {
-    const visit = Schema.decodeSync(OrchestrationV2ThreadVisitJson)({
+    const visit = decodeVisitJson({
       lastVisitedAt: "2026-11-20T12:00:00.000Z",
       visitsByFounder: {
         kameron: "2026-11-20T12:00:00.000Z",

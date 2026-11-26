@@ -53,6 +53,59 @@ describe("subagent shell events", () => {
       shouldPublishShellApplicationEvent(stored("parent", "turn-item.updated"), subagents),
     ).toBe(true);
     expect(
+      shouldPublishShellApplicationEvent(
+        {
+          event: {
+            threadId: "parent",
+            type: "turn-item.updated",
+            payload: { type: "assistant_message", status: "running" },
+          },
+        } as ApplicationStoredEvent,
+        subagents,
+      ),
+    ).toBe(false);
+    expect(
+      shouldPublishShellApplicationEvent(
+        {
+          event: {
+            threadId: "parent",
+            type: "turn-item.updated",
+            payload: { type: "assistant_message", status: "completed" },
+          },
+        } as ApplicationStoredEvent,
+        subagents,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPublishShellApplicationEvent(
+        {
+          event: {
+            threadId: "parent",
+            type: "turn-item.updated",
+            payload: { type: "dynamic_tool", status: "running", toolName: "t3_thread_wait" },
+          },
+        } as ApplicationStoredEvent,
+        subagents,
+      ),
+    ).toBe(true);
+    expect(
+      shouldPublishShellApplicationEvent(
+        {
+          event: {
+            threadId: "parent",
+            type: "turn-item.updated",
+            payload: {
+              type: "dynamic_tool",
+              status: "running",
+              toolName: "delegate_task",
+              input: { mode: "wait" },
+            },
+          },
+        } as ApplicationStoredEvent,
+        subagents,
+      ),
+    ).toBe(true);
+    expect(
       shouldPublishShellApplicationEvent(stored("child", "turn-item.updated"), subagents),
     ).toBe(false);
     for (const itemType of ["secret_request", "link_request", "user_message"]) {
