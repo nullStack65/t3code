@@ -246,6 +246,28 @@ describe("ask_agent side-channel RPC", () => {
           assert.deepEqual(fork.sourcePoint, { type: "latest_stable" });
         }
 
+        // Side-channel fork is restricted to read-only plan + approval-required before sending.
+        const interactionModeCmd = commands.find((c) => c.type === "thread.interaction-mode.set");
+        assert.isDefined(interactionModeCmd);
+        if (interactionModeCmd?.type === "thread.interaction-mode.set") {
+          assert.equal(interactionModeCmd.threadId, result.sideThreadId);
+          assert.equal(interactionModeCmd.interactionMode, "plan");
+        }
+        const runtimeModeCmd = commands.find((c) => c.type === "thread.runtime-mode.set");
+        assert.isDefined(runtimeModeCmd);
+        if (runtimeModeCmd?.type === "thread.runtime-mode.set") {
+          assert.equal(runtimeModeCmd.threadId, result.sideThreadId);
+          assert.equal(runtimeModeCmd.runtimeMode, "approval-required");
+        }
+
+        // Disposable side-channel fork is deleted on completion (no stop needed when settled).
+        assert.isUndefined(commands.find((c) => c.type === "thread.stop"));
+        const deleteCmd = commands.find((c) => c.type === "thread.delete");
+        assert.isDefined(deleteCmd);
+        if (deleteCmd?.type === "thread.delete") {
+          assert.equal(deleteCmd.threadId, result.sideThreadId);
+        }
+
         // Question went ONLY to the side-channel fork, never the target main thread.
         const sends = yield* Ref.get(sentCalls);
         assert.equal(sends.length, 1);
@@ -319,6 +341,16 @@ describe("ask_agent side-channel RPC", () => {
       assert.isNull(result.answer);
 
       const commands = yield* Ref.get(dispatched);
+      const stopCmd = commands.find((c) => c.type === "thread.stop");
+      assert.isDefined(stopCmd);
+      if (stopCmd?.type === "thread.stop") {
+        assert.equal(stopCmd.threadId, result.sideThreadId);
+      }
+      const deleteCmd = commands.find((c) => c.type === "thread.delete");
+      assert.isDefined(deleteCmd);
+      if (deleteCmd?.type === "thread.delete") {
+        assert.equal(deleteCmd.threadId, result.sideThreadId);
+      }
       const audit = commands.find((c) => c.type === "thread.audit-notice.append");
       assert.isDefined(audit);
       if (audit?.type === "thread.audit-notice.append") {
