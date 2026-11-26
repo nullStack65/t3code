@@ -1,4 +1,4 @@
-import { useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   appConnectionReports,
   appPairingAddresses,
@@ -8,7 +8,11 @@ import {
   offersLinkedEnvironments,
   singleFlightByKey,
 } from "@t3tools/client-runtime/link-request";
-import { createPeerLinkEnvironmentAtoms } from "@t3tools/client-runtime/state/peerLinks";
+import { linkBackOffer, type LinkBackOffer } from "@t3tools/client-runtime/link-batch";
+import {
+  createPeerLinkEnvironmentAtoms,
+  linkThroughRoutes,
+} from "@t3tools/client-runtime/state/peerLinks";
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
@@ -18,16 +22,22 @@ import {
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
+  runAtomCommand,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import * as DateTime from "effect/DateTime";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useEffectEvent } from "react";
+import { useContext, useEffect, useEffectEvent } from "react";
 
 import { connectPairing } from "../connection/onboarding";
+import { useNowMinute } from "../hooks/useNowMinute";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { msg } from "gt-react";
+import { m } from "../i18n/messages";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { mintPairingCodeOn } from "./peerPairingCode";
+import { environmentAtomList, environmentIdsKey } from "./environmentAtomList";
 import { useEnvironmentIdentities, useEnvironments } from "./environments";
 import { environmentPresentations } from "./presentation";
 import { relayEnvironmentDiscovery } from "./relay";
@@ -36,6 +46,11 @@ import { useEnvironmentsWithScope } from "./session";
 import { useAtomCommand } from "./use-atom-command";
 
 export const peerLinkEnvironment = createPeerLinkEnvironmentAtoms(connectionAtomRuntime);
+
+/** Each environment's link list as the settings list loads it, in the order of the ids. */
+export const peerLinkListsAtom = environmentAtomList("peer-links:lists", (environmentId) =>
+  peerLinkEnvironment.list({ environmentId, input: {} }),
+);
 
 /** Whether `environmentId` offers links, so its threads may name another machine. */
 export const offersLinkedEnvironmentsAtom = Atom.family((environmentId: EnvironmentId) =>
@@ -48,11 +63,12 @@ const offersNoLinksAtom = Atom.make(false).pipe(Atom.withLabel("peer-links:offer
 
 /**
  * The machines `environmentId` links to, by name, while it offers links, and none otherwise.
- * Its agents can read threads there. Listing asks each linked machine whether it answers, so
- * every caller shares one briefly cached list.
+ * Its agents can read threads there, and so can a client allowed to read threads on it.
+ * A `wanted` machine the names lack makes them reread.
  */
 export function useLinkedEnvironments(
   environmentId: EnvironmentId | null,
+  wanted?: EnvironmentId,
 ): ReadonlyMap<EnvironmentId, string> {
   const offered = useAtomValue(
     environmentId === null ? offersNoLinksAtom : offersLinkedEnvironmentsAtom(environmentId),
@@ -60,9 +76,16 @@ export function useLinkedEnvironments(
   const identities = useEnvironmentIdentities();
   const links = useEnvironmentQuery(
     offered && environmentId !== null
-      ? peerLinkEnvironment.list({ environmentId, input: {} })
+      ? peerLinkEnvironment.names({ environmentId, input: {} })
       : null,
   );
+  const registry = useContext(RegistryContext);
+  const queried = offered ? environmentId : null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- links made outside this client are not pushed, so meeting an unknown machine asks the server again
+  useEffect(() => {
+    if (queried === null || wanted === undefined) return;
+    peerLinkEnvironment.refreshNamesLacking(registry, queried, [wanted]);
+  }, [registry, queried, wanted]);
   return linkedEnvironmentNames({
     links: offered ? (links.data?.links ?? []) : [],
     environments: identities,
@@ -172,10 +195,14 @@ export async function linkFromThisApp(
 ): Promise<string | null> {
   const [url, ...alternateUrls] = machine.urls;
   if (url === undefined)
-    return `This app has no address for ${machine.label} that another machine can reach.`;
+    return m(
+      msg("This app has no address for {label} that another machine can reach.", {
+        label: machine.label,
+      }),
+    );
   const code = await mintPairingCodeOn(machine.environmentId, access);
   if (code._tag === "Failure") return linkRequestFailureMessage(code.failure);
-  const linked = await peerLinkEnvironment.link.run(appAtomRegistry, {
+  const linked = await runAtomCommand(appAtomRegistry, peerLinkEnvironment.link, {
     environmentId: hostId,
     input: {
       url,
@@ -228,7 +255,7 @@ async function addToApp(
     readonly onHostMachine: boolean;
   },
 ): Promise<AddToAppOutcome> {
-  const issued = await peerLinkEnvironment.addToApp.run(appAtomRegistry, {
+  const issued = await runAtomCommand(appAtomRegistry, peerLinkEnvironment.addToApp, {
     environmentId: hostId,
     input: { environmentId: machine.environmentId },
   });
@@ -241,7 +268,7 @@ async function addToApp(
   // does not answer as this machine never receives the code, so the next can.
   let failure: string | null = null;
   for (const host of appPairingAddresses(issued.value.urls, machine.onHostMachine)) {
-    const result = await connectPairing.run(appAtomRegistry, {
+    const result = await runAtomCommand(appAtomRegistry, connectPairing, {
       host,
       pairingCode: issued.value.credential,
       expectedEnvironmentId: machine.environmentId,
@@ -252,7 +279,13 @@ async function addToApp(
   }
   return {
     _tag: "Failed",
-    message: failure ?? `${machine.label} answers only at addresses this device cannot open.`,
+    message:
+      failure ??
+      m(
+        msg("{label} answers only at addresses this device cannot open.", {
+          label: machine.label,
+        }),
+      ),
   };
 }
 
@@ -315,8 +348,15 @@ export function LinkOnConnectCoordinator() {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: `${report.label} was added but not linked`,
-            description: `${report.label}${report.serverVersion === null ? "" : ` ${report.serverVersion}`} is too old to link, so agents cannot work there. Update it, then link it from Linked environments.`,
+            title: m(msg("{label} was added but not linked", { label: report.label })),
+            description: m(
+              msg(
+                "{label} is too old to link, so agents cannot work there. Update it, then link it from Linked environments.",
+                {
+                  label: `${report.label}${report.serverVersion === null ? "" : ` ${report.serverVersion}`}`,
+                },
+              ),
+            ),
           }),
         );
         continue;
@@ -325,10 +365,13 @@ export function LinkOnConnectCoordinator() {
         void linkFromThisApp(host, report, choice.access).then((failure) =>
           toastManager.add(
             failure === null
-              ? { type: "success", title: `Linked ${report.label} for agents` }
+              ? {
+                  type: "success",
+                  title: m(msg("Linked {label} for agents", { label: report.label })),
+                }
               : stackedThreadToast({
                   type: "error",
-                  title: `${report.label} was added but not linked`,
+                  title: m(msg("{label} was added but not linked", { label: report.label })),
                   description: failure,
                 }),
           ),
@@ -340,4 +383,96 @@ export function LinkOnConnectCoordinator() {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- links a machine on another server once its connection here comes up
   useEffect(() => link(), [ready.map((environment) => environment.environmentId).join("\n")]);
   return null;
+}
+
+/**
+ * The machines `sourceId` can link to through another environment's full-access link, by
+ * environment id. Reads those environments' links only while `enabled`: listing them asks every
+ * linked machine whether it answers.
+ */
+export function useLinkThroughRoutes(sourceId: EnvironmentId, enabled: boolean) {
+  const { environments } = useEnvironments();
+  const writable = useEnvironmentsWithScope(environments, AuthAccessWriteScope);
+  const nowMinute = useNowMinute();
+  const hosts = environments
+    .filter(
+      (environment) =>
+        enabled &&
+        environment.environmentId !== sourceId &&
+        environment.connection.phase === "connected" &&
+        offersLinkedEnvironments(environment.serverConfig) &&
+        writable.has(environment.environmentId),
+    )
+    .map((environment) => environment.environmentId);
+  const lists = useAtomValue(peerLinkListsAtom(environmentIdsKey(hosts)));
+  return linkThroughRoutes({
+    sourceEnvironmentId: sourceId,
+    hosts: hosts.map((environmentId, index) => {
+      const list = lists[index];
+      return { environmentId, links: list?._tag === "Success" ? list.value.links : [] };
+    }),
+    now: DateTime.makeUnsafe(nowMinute),
+  });
+}
+
+const NOT_OFFERED: LinkBackOffer = { kind: "hidden" };
+
+/**
+ * Whether linking `sourceId` to each of `targetIds` can also link that machine back, and the
+ * source as the reverse link names it. Only machines that could link back are asked for their
+ * links, and only while `enabled`: listing asks every machine they link to whether it answers.
+ */
+export function useLinkBackOffers(
+  sourceId: EnvironmentId,
+  targetIds: ReadonlyArray<EnvironmentId>,
+  enabled: boolean,
+) {
+  const { environments } = useEnvironments();
+  const discovery = useAtomValue(relayEnvironmentDiscovery.stateValueAtom);
+  const writable = useEnvironmentsWithScope(environments, AuthAccessWriteScope);
+  const source = linkableMachines({
+    environments,
+    threadEnvironmentId: null,
+    links: [],
+    connect: discovery.environments,
+  }).find((machine) => machine.environmentId === sourceId);
+  const wanted = new Set(targetIds);
+  const targets = environments.filter((environment) => wanted.has(environment.environmentId));
+  const listed = targets
+    .filter(
+      (target) =>
+        enabled &&
+        target.connection.phase === "connected" &&
+        offersLinkedEnvironments(target.serverConfig) &&
+        writable.has(target.environmentId),
+    )
+    .map((target) => target.environmentId);
+  const lists = useAtomValue(peerLinkListsAtom(environmentIdsKey(listed)));
+  const offers = new Map<EnvironmentId, LinkBackOffer>();
+  for (const target of targets) {
+    if (source === undefined) break;
+    const list = lists[listed.indexOf(target.environmentId)];
+    offers.set(
+      target.environmentId,
+      linkBackOffer({
+        source: {
+          environmentId: sourceId,
+          connected: source.connected,
+          writable: writable.has(sourceId),
+          urls: source.urls,
+        },
+        target: {
+          connected: target.connection.phase === "connected",
+          offersLinks: offersLinkedEnvironments(target.serverConfig),
+          writable: writable.has(target.environmentId),
+          links: list?._tag === "Success" ? list.value.links : null,
+        },
+      }),
+    );
+  }
+  return {
+    source: source ?? null,
+    offerFor: (targetId: EnvironmentId | null): LinkBackOffer =>
+      (targetId === null ? undefined : offers.get(targetId)) ?? NOT_OFFERED,
+  };
 }

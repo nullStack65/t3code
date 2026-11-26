@@ -581,6 +581,22 @@ it.live.each(["pooled", "exclusive"] as const)(
             Stream.runDrain,
             Effect.forkScoped,
           );
+        // The continuation starts from an async run.updated reaction, which drain alone does not await.
+        const continuationRunning = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+          })
+          .pipe(
+            Stream.map((stored) => stored.event),
+            Stream.filter(
+              (event) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
         // What t3_worktree_handoff dispatches while the calling turn is still running.
         const bound = yield* orchestrator.dispatch({
           type: "thread.metadata.update",
@@ -601,6 +617,7 @@ it.live.each(["pooled", "exclusive"] as const)(
           ["queued"],
         );
         yield* Fiber.join(settled);
+        yield* Fiber.join(continuationRunning);
         yield* worker.drain();
         return yield* orchestrator.getThreadProjection(threadId);
       }).pipe(
@@ -908,11 +925,22 @@ it.live(
     }),
 );
 
-it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] as const)(
+const accountSwitchModes = [
+  "active",
+  "idle",
+  "selection-command",
+  "pooled",
+  "separate-home",
+  "active-separate-home",
+] as const;
+
+it.live.each(accountSwitchModes)(
   "preserves native history only for compatible account switches (%s)",
   (mode) =>
     Effect.gen(function* () {
       const name = `shared-home-${mode}`;
+      const active = mode === "active" || mode === "active-separate-home";
+      const separateHome = mode === "separate-home" || mode === "active-separate-home";
       const cwd = yield* checkpointWorkspace(name);
       const threadId = ThreadId.make(`thread:${name}`);
       const targetId = ProviderInstanceId.make("codex-shadow-account");
@@ -961,8 +989,7 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
         getMetadata: (instanceId) =>
           Effect.succeed({
             driver,
-            continuationKey:
-              mode === "separate-home" ? `codex:home:/${instanceId}` : "codex:home:/shared",
+            continuationKey: separateHome ? `codex:home:/${instanceId}` : "codex:home:/shared",
             enabled: true,
             capabilities,
           }),
@@ -972,7 +999,7 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
         const selection = {
           ...initialSelection,
-          model: mode === "active" ? initialSelection.model : "complete",
+          model: active ? initialSelection.model : "complete",
         };
         yield* orchestrator.dispatch({
           type: "thread.create",
@@ -992,7 +1019,7 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
           Effect.gen(function* () {
             const terminal = yield* orchestrator.streamDomainEvents.pipe(
               Stream.filter((event) =>
-                mode === "active" && step === "first"
+                active && step === "first"
                   ? event.type === "provider-turn.updated" && event.payload.status === "running"
                   : event.type === "run.updated" && event.payload.status === "completed",
               ),
@@ -1037,14 +1064,20 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
         const second = yield* dispatch(
           "second",
           targetSelection,
-          mode === "active" ? first.runs[0]!.id : undefined,
+          active ? first.runs[0]!.id : undefined,
         );
         const targetThread = second.providerThreads.find(
           (thread) => thread.id === second.thread.activeProviderThreadId,
         )!;
-        if (mode === "separate-home") {
+        if (separateHome) {
           assert.notEqual(targetThread.id, originalThread.id);
           assert.lengthOf(second.contextHandoffs, 1);
+          assert.deepEqual(
+            second.turnItems.flatMap((item) =>
+              item.type === "handoff" ? [item.contextHandoffId] : [],
+            ),
+            [second.contextHandoffs[0]!.id],
+          );
           assert.lengthOf(second.contextTransfers, 1);
           assert.isEmpty(resumes);
           assert.notEqual(messages[1], "second");

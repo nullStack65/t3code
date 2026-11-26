@@ -1,5 +1,5 @@
 import { TYPING_TTL_MS, typingLabel, type EnvironmentId, type Founder } from "@t3tools/contracts";
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 
 import { useClientSettings } from "../../hooks/useSettings";
 import { orchestrationEnvironment } from "../../state/orchestration";
@@ -23,29 +23,32 @@ export function useSharedThreadTyping(
   const report = useOrchestrationCommand(orchestrationEnvironment.v2.reportTyping, {
     reportFailure: false,
   });
-  const reportRef = useRef(report);
-  reportRef.current = report;
   const shared = thread?.source.inbox?.audience === "shared";
   const threadId = thread?.id;
+  const reportTyping = useEffectEvent(
+    (typingThreadId: NonNullable<typeof threadId>, typing: boolean) =>
+      report({ environmentId, input: { threadId: typingThreadId, typing } }),
+  );
   const { data } = useEnvironmentQuery(
     shared && threadId ? orchestrationEnvironment.v2.typing({ environmentId, input: {} }) : null,
   );
   const reportingRef = useRef(false);
   const lastEditRef = useRef(0);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells the server this founder is typing while the draft changes
   useEffect(() => {
     if (!shared || threadId === undefined) return;
     const text = prompt.trim();
     if (text.length === 0) {
       if (!reportingRef.current) return;
       reportingRef.current = false;
-      void reportRef.current({ environmentId, input: { threadId, typing: false } });
+      void reportTyping(threadId, false);
       return;
     }
     lastEditRef.current = Date.now();
     const send = () => {
       reportingRef.current = true;
-      void reportRef.current({ environmentId, input: { threadId, typing: true } });
+      void reportTyping(threadId, true);
     };
     const debounce = window.setTimeout(send, REPORT_DEBOUNCE_MS);
     const heartbeat = window.setInterval(() => {
@@ -55,15 +58,16 @@ export function useSharedThreadTyping(
       window.clearTimeout(debounce);
       window.clearInterval(heartbeat);
     };
-  }, [environmentId, prompt, shared, threadId]);
+  }, [prompt, shared, threadId]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stops the typing report when the thread changes or unmounts
   useEffect(() => {
     return () => {
       if (!reportingRef.current || threadId === undefined) return;
       reportingRef.current = false;
-      void reportRef.current({ environmentId, input: { threadId, typing: false } });
+      void reportTyping(threadId, false);
     };
-  }, [environmentId, threadId]);
+  }, [threadId]);
 
   const founders = ((threadId ? data?.[threadId] : undefined) ?? []).filter(
     (founder): founder is Founder => founder !== self,

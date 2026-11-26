@@ -10,6 +10,12 @@ const handlers = {
       message: "Shown to the user. Don't repeat it.",
     }),
   ),
+  silent_ack: McpToolAccess.actsAsCaller(() =>
+    Effect.succeed({
+      acknowledged: true as const,
+      message: "Acknowledged silently; kept folded.",
+    }),
+  ),
 } satisfies McpToolAccess.Handlers<typeof MessageToolkit.tools>;
 
 export const layer = McpToolAccess.toLayer(MessageToolkit, handlers);

@@ -6,9 +6,11 @@ import {
   reachesOverLoopback,
 } from "@t3tools/client-runtime/link-request";
 import { AuthAccessWriteScope, type EnvironmentId } from "@t3tools/contracts";
+import { msg, useGT, useMessages } from "gt-react";
 import { useEffect, useEffectEvent } from "react";
 
 import { toastManager } from "../components/ui/toast";
+import { m } from "../i18n/messages";
 import { useLiveRefresh } from "../hooks/useLiveRefresh";
 import { useClientSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import { useEnvironments } from "./environments";
@@ -34,16 +36,23 @@ export function useKnownEnvironments(environmentId: EnvironmentId | null): {
   readonly isPending: boolean;
   readonly refresh: () => void;
 } {
+  const gt = useGT();
+  const resolve = useMessages();
   const { environments } = useEnvironments();
   const known = useEnvironmentQuery(
     environmentId === null ? null : peerLinkEnvironment.environments({ environmentId, input: {} }),
   );
   const host = environments.find((environment) => environment.environmentId === environmentId);
   return {
-    rows: knownEnvironmentRows(known.data?.environments ?? [], environments, {
-      label: host?.label ?? "That environment",
-      onHostMachine: host !== undefined && reachesOverLoopback(host),
-    }),
+    rows: knownEnvironmentRows(
+      known.data?.environments ?? [],
+      environments,
+      {
+        label: host?.label ?? gt("That environment"),
+        onHostMachine: host !== undefined && reachesOverLoopback(host),
+      },
+      resolve,
+    ),
     error: known.error,
     loading: environmentId !== null && !known.data,
     isPending: known.isPending,
@@ -120,9 +129,9 @@ function AutoAddFromHost({
         autoAddFailures.delete(key);
         toastManager.add({
           type: "success",
-          title: `${row.label} added from ${hostLabel}'s links`,
+          title: m(msg("{label} added from {host}'s links", { label: row.label, host: hostLabel })),
           ...(outcome.access === "read-only"
-            ? { description: "Read-only: the link allows no more." }
+            ? { description: m(msg("Read-only: the link allows no more.")) }
             : {}),
         });
       });

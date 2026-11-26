@@ -98,7 +98,7 @@ export const make = Effect.gen(function* () {
     | { readonly base: string; readonly token: string; readonly expiresAt: number }
     | undefined;
 
-  const primaryConfig = Effect.fn("DesktopLocalEnvironmentAuth.primaryConfig")(function* () {
+  const primaryBackend = Effect.fn("DesktopLocalEnvironmentAuth.primaryBackend")(function* () {
     const instances = yield* pool.list;
     const primary = instances.find((instance) => instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID);
     if (primary === undefined || !(yield* primary.waitForReady(Duration.infinity))) {
@@ -107,8 +107,10 @@ export const make = Effect.gen(function* () {
     const config = yield* primary.currentConfig;
     if (Option.isNone(config))
       return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
-    return config.value;
+    return { primary, config: config.value };
   });
+
+  const primaryConfig = () => primaryBackend().pipe(Effect.map(({ config }) => config));
 
   const getBearerToken = mutex
     .withPermits(1)(
@@ -118,7 +120,7 @@ export const make = Effect.gen(function* () {
           return cached.value;
         }
 
-        const config = yield* primaryConfig();
+        const { primary, config } = yield* primaryBackend();
         // Secret-authenticated backends accept the current window token; the launch token may be stale.
         const secret = config.bootstrap.desktopBootstrapSecret;
         const credential =
@@ -130,25 +132,32 @@ export const make = Effect.gen(function* () {
         if (!credential) {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
-        const session = yield* bootstrapRemoteBearerSession({
-          httpBaseUrl: config.httpBaseUrl.href,
-          credential,
-          clientMetadata: {
-            label: "T3 Code Desktop",
-            deviceType: "desktop",
-          },
-        }).pipe(
-          Effect.provideService(HttpClient.HttpClient, httpClient),
+        const exchange = Effect.gen(function* () {
+          // Each attempt goes only to a backend that is currently ready.
+          if (!(yield* primary.waitForReady(Duration.infinity))) {
+            return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+          }
+          return yield* bootstrapRemoteBearerSession({
+            httpBaseUrl: config.httpBaseUrl.href,
+            credential,
+            clientMetadata: {
+              label: "T3 Code Desktop",
+              deviceType: "desktop",
+            },
+          }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
+        });
+        const session = yield* exchange.pipe(
           Effect.retry({
-            while: isTransientBearerBootstrapError,
+            while: (error) =>
+              error._tag !== "DesktopLocalEnvironmentAuthBackendNotConfiguredError" &&
+              isTransientBearerBootstrapError(error),
             schedule: Schedule.spaced(BOOTSTRAP_TRANSIENT_RETRY_INTERVAL),
           }),
           Effect.timeout(BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT),
-          Effect.mapError(
-            (cause) =>
-              new DesktopLocalEnvironmentAuthSessionBootstrapError({
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            cause._tag === "DesktopLocalEnvironmentAuthBackendNotConfiguredError"
+              ? cause
+              : new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
           ),
         );
         yield* Ref.set(tokenRef, Option.some(session.access_token));
