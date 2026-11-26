@@ -94,6 +94,8 @@ export interface ChatMessage {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
+  /** The server's stamp for where this belongs; without one the run's origin decides. */
+  readonly timelineVisibility?: import("@t3tools/contracts").OrchestrationV2TimelineVisibility;
 }
 
 export interface ProposedPlan {

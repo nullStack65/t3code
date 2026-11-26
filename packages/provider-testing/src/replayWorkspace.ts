@@ -20,6 +20,10 @@ class ReplayFixtureGitCommandError extends Schema.TaggedError<ReplayFixtureGitCo
   }
 }
 
+// `git commit` otherwise leaves a detached `git maintenance run --auto` behind, which can still
+// be writing into `.git` when a test removes the workspace (ENOTEMPTY).
+const NO_BACKGROUND_MAINTENANCE = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
+
 const REPLAY_GIT_CONFIG: ReadonlyArray<readonly [key: string, value: string]> = [
   ["core.autocrlf", "false"],
   ["core.filemode", "false"],
@@ -56,7 +60,11 @@ function runGit(
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const inherited = yield* HostProcess.Environment;
     const exitCode = yield* spawner.exitCode(
-      ChildProcess.make("git", args, { cwd, env: cleanGitEnv(inherited), extendEnv: false }),
+      ChildProcess.make("git", [...NO_BACKGROUND_MAINTENANCE, ...args], {
+        cwd,
+        env: cleanGitEnv(inherited),
+        extendEnv: false,
+      }),
     );
     if (Number(exitCode) !== 0) {
       return yield* new ReplayFixtureGitCommandError({

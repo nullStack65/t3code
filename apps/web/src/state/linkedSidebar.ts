@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
+import { m } from "../i18n/messages";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentSummaries } from "./presentation";
 import { environmentProjects } from "./projects";
@@ -38,7 +39,13 @@ const sameThread = (left: EnvironmentThreadShell, right: EnvironmentThreadShell)
   left.snoozedUntil === right.snoozedUntil &&
   left.runtime?.status === right.runtime?.status &&
   left.lastVisitedAt === right.lastVisitedAt &&
+  left.standing?.name === right.standing?.name &&
+  left.standing?.role === right.standing?.role &&
+  left.standing?.avatarId === right.standing?.avatarId &&
+  left.standing?.accent === right.standing?.accent &&
   left.latestRun?.completedAt === right.latestRun?.completedAt &&
+  left.lineage.parentThreadId === right.lineage.parentThreadId &&
+  left.lineage.relationshipToParent === right.lineage.relationshipToParent &&
   left.source.inbox?.owner === right.source.inbox?.owner &&
   left.source.inbox?.audience === right.source.inbox?.audience &&
   left.source.inbox?.attentionKind === right.source.inbox?.attentionKind;
@@ -50,7 +57,7 @@ const linkedSidebarSupplementAtom = Atom.make((get) => {
   const environments = [...get(linkedSidebarByHostAtom).values()].flatMap(
     (result) => result.environments,
   );
-  const next = sidebarFromServerLinks({ catalogEnvironmentIds: catalog, environments });
+  const next = sidebarFromServerLinks({ catalogEnvironmentIds: catalog, environments }, m);
   const previous = Option.getOrNull(get.self<ReturnType<typeof sidebarFromServerLinks>>());
   if (
     previous !== null &&
@@ -129,6 +136,20 @@ export function useLinkedOnlyEnvironment(environmentId: EnvironmentId | null) {
   return environmentId === null
     ? null
     : (identities.find((identity) => identity.environmentId === environmentId) ?? null);
+}
+
+/** The connected host whose server-side peer link surfaces `environmentId`, if any. */
+export function useLinkedOnlyEnvironmentHost(
+  environmentId: EnvironmentId | null,
+): EnvironmentId | null {
+  const byHost = useAtomValue(linkedSidebarByHostAtom);
+  if (environmentId === null) return null;
+  for (const [hostId, result] of byHost) {
+    if (result.environments.some((env) => env.environmentId === environmentId)) {
+      return hostId;
+    }
+  }
+  return null;
 }
 
 export function useSidebarEnvironmentIdentities() {

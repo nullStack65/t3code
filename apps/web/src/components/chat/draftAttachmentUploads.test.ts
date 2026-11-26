@@ -39,17 +39,21 @@ vi.mock("../../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/session")>()),
   readEnvironmentScope: () => true,
 }));
-vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/attachments")>()),
-  runAttachmentUploadCycle: async (input: {
-    readonly environmentId: string;
-    readonly upload: { readonly name: string };
-  }) => {
-    uploads.to.push({ environmentId: input.environmentId, name: input.upload.name });
-    uploads.sequence.push(`upload:${input.environmentId}`);
-    return { status: "uploaded" as const, attachmentId: `upload-${uploads.to.length}` };
-  },
-}));
+vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => {
+  const { Effect } = await import("effect");
+  return {
+    ...(await importOriginal<typeof import("@t3tools/client-runtime/state/attachments")>()),
+    runAttachmentUploadCycle: (input: {
+      readonly environmentId: string;
+      readonly upload: { readonly name: string };
+    }) =>
+      Effect.sync(() => {
+        uploads.to.push({ environmentId: input.environmentId, name: input.upload.name });
+        uploads.sequence.push(`upload:${input.environmentId}`);
+        return { status: "uploaded" as const, attachmentId: `upload-${uploads.to.length}` };
+      }),
+  };
+});
 // Both machines connected, on their first established session, as the queue's checks read them.
 vi.mock("../../connection/catalog", async () => {
   const { AsyncResult: Result, Atom: A } = await import("effect/reactivity");

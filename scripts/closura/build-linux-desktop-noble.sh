@@ -6,9 +6,9 @@
 set -euo pipefail
 
 SNAPSHOT="20261117T000000Z"
-UPSTREAM_BASE="7d32075e3757ded707914e2450c3e392a9665765" # pingdotgg/t3code v0.1.10
-OFFICIAL_DEB_URL="https://github.com/pingdotgg/t3code/releases/download/v0.1.10/T3-Code-0.1.10-amd64.deb"
-OFFICIAL_DEB_SHA256="c06f7eee35ad0d066ba023539c46901d2d6b9121842077f83d3b4fe7f877d360"
+UPSTREAM_BASE="ca81b7b97a1c4b91e5ac25768d0f6629f37732fd" # pingdotgg/t3code v0.1.12
+OFFICIAL_DEB_URL="https://github.com/pingdotgg/t3code/releases/download/v0.1.12/T3-Code-0.1.12-amd64.deb"
+OFFICIAL_DEB_SHA256="c1ca3e656e12ba10377513e9bbe20a5112540cda9601e21c70b85ba7c53f1b29"
 MAGICK_URL="https://github.com/ImageMagick/ImageMagick/releases/download/7.1.2-36/ImageMagick-7.1.2-36-portable-Q16-HDRI-linux-x64.tar.xz"
 MAGICK_SHA256="72c8dd0268f824f621e1628737b79d8e80bc63a5d46a69950dabb13c5de80c91"
 RUST_TARGET="x86_64-unknown-linux-gnu"
@@ -48,14 +48,14 @@ have_node="$(node --version | sed 's/^v//')"
 [ "$have_node" = "$want_node" ] || fail "node $have_node on PATH; package.json engines require $want_node"
 [ -d "$repo/node_modules" ] || fail "dependencies are not installed (run vp install)"
 git -C "$repo" cat-file -e "$UPSTREAM_BASE^{commit}" 2>/dev/null \
-  || fail "upstream v0.1.10 commit $UPSTREAM_BASE is not in this clone; fetch it to verify native/"
+  || fail "upstream v0.1.12 commit $UPSTREAM_BASE is not in this clone; fetch it to verify native/"
 git -C "$repo" diff --quiet "$UPSTREAM_BASE" HEAD -- native \
-  || fail "native/ differs from upstream v0.1.10; the official prebuilt helpers would not match this source"
+  || fail "native/ differs from upstream v0.1.12; the official prebuilt helpers would not match this source"
 for rel in native/resource-monitor/target native/hyprland-snap-shot/target native/kde-snap-shot/target; do
   git -C "$repo" check-ignore -q "$rel/$RUST_TARGET/release/x" || fail "$rel is not gitignored"
 done
 [ -f "$lock" ] || fail "missing $lock"
-echo "preflight ok: node $have_node, native/ == upstream v0.1.10, provide-build-tools=$provide_tools"
+echo "preflight ok: node $have_node, native/ == upstream v0.1.12, provide-build-tools=$provide_tools"
 [ "$preflight_only" -eq 1 ] && exit 0
 
 mkdir -p "$work" "$out"
@@ -127,7 +127,7 @@ mkdir -p "$work/imagemagick"
 tar -xJf "$work/imagemagick.tar.xz" -C "$work/imagemagick"
 ln -sfn "$(ls -d "$work"/imagemagick/ImageMagick-*/bin/magick)" "$bin/magick"
 
-# ---- official v0.1.10 native helpers (native/ verified unchanged above) -------
+# ---- official v0.1.12 native helpers (native/ verified unchanged above) -------
 fetch "$OFFICIAL_DEB_URL" "$OFFICIAL_DEB_SHA256" "$work/official.deb"
 rm -rf "$work/official"
 dpkg-deb -x "$work/official.deb" "$work/official"

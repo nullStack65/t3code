@@ -17,14 +17,15 @@ vi.mock("../../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/session")>()),
   readEnvironmentScope: () => true,
 }));
-vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/attachments")>()),
-  verifyPersistedAttachmentUpload: async () => ({ status: "verified" as const }),
-  runAttachmentUploadCycle: async () => ({
-    status: "uploaded" as const,
-    attachmentId: "upload-file-retried",
-  }),
-}));
+vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => {
+  const { Effect } = await import("effect");
+  return {
+    ...(await importOriginal<typeof import("@t3tools/client-runtime/state/attachments")>()),
+    verifyPersistedAttachmentUpload: () => Effect.succeed({ status: "verified" as const }),
+    runAttachmentUploadCycle: () =>
+      Effect.succeed({ status: "uploaded" as const, attachmentId: "upload-file-retried" }),
+  };
+});
 
 // Node has no FileReader; this one reads the real bytes, after `gate` when one is set.
 let gate: Promise<void> | null = null;

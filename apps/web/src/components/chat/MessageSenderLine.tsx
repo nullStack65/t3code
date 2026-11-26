@@ -7,8 +7,12 @@ import {
   messageSenderLabel,
   type MessageSender,
 } from "@t3tools/client-runtime/message-sender";
+import { useMessages } from "gt-react";
 
-import { brandProviderInstanceEntries, deriveProviderInstanceEntries } from "../../providerInstances";
+import {
+  brandProviderInstanceEntries,
+  deriveProviderInstanceEntries,
+} from "../../providerInstances";
 import { serverEnvironment } from "../../state/server";
 import { getTriggerDisplayModelName } from "./providerIconUtils";
 
@@ -20,7 +24,8 @@ export function MessageSenderLine({
   readonly sender: MessageSender;
   readonly align: "start" | "end";
 }) {
-  const label = messageSenderLabel(sender);
+  const m = useMessages();
+  const label = messageSenderLabel(sender, undefined, m);
   const detail = messageSenderDetail(sender);
   return (
     <p

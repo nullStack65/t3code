@@ -1,14 +1,10 @@
-import {
-  effectiveInboxFilter,
-  type EnvironmentId,
-  type Founder,
-  type InboxChoice,
-} from "@t3tools/contracts";
+import { type EnvironmentId, type Founder, type InboxChoice } from "@t3tools/contracts";
 import {
   THREAD_ATTRIBUTION_LABELS,
   THREAD_ATTRIBUTIONS,
 } from "@t3tools/client-runtime/state/thread-attribution";
 import type { ThreadAttribution } from "@t3tools/contracts/settings";
+import { T, useGT } from "gt-react";
 import { SlidersHorizontalIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -35,6 +31,7 @@ import {
   sidebarFilterIconClass,
   EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
+  inboxKeepsSharedChecked,
   type olderSettledFilterCounts,
   SIDEBAR_FILTER_OPTION_LABEL_CLASS,
   threadListFilterCounts,
@@ -57,15 +54,15 @@ type CountedThread = Parameters<typeof threadListFilterCounts>[0][number] &
 const LAST_OPTION_NOTE = ", the last one shown, so it stays checked";
 
 /** Chooses which inboxes and environments the thread list shows. Search still finds every thread. */
-export function SidebarThreadFilterMenu<T extends CountedThread>({
+export function SidebarThreadFilterMenu<TThread extends CountedThread>({
   countedThreads,
   olderSettled,
   attributionOf,
 }: {
   /** Called only while the menu is open. */
-  countedThreads: () => ReadonlyArray<T>;
+  countedThreads: () => ReadonlyArray<TThread>;
   olderSettled: () => ReturnType<typeof olderSettledFilterCounts>;
-  attributionOf: (thread: T) => ThreadAttribution;
+  attributionOf: (thread: TThread) => ThreadAttribution;
 }) {
   const filter = useClientSettings(threadListFilterOf);
   const owner = useClientSettings((settings) => settings.founderInboxOwner);
@@ -111,7 +108,7 @@ export function SidebarThreadFilterMenu<T extends CountedThread>({
 }
 
 // Mounted only while the menu is open, so counting never runs on streaming ticks.
-function SidebarThreadFilterOptions<T extends CountedThread>({
+function SidebarThreadFilterOptions<TThread extends CountedThread>({
   countedThreads,
   olderSettled,
   attributionOf,
@@ -120,14 +117,15 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
   environments,
   isChanged,
 }: {
-  countedThreads: () => ReadonlyArray<T>;
+  countedThreads: () => ReadonlyArray<TThread>;
   olderSettled: () => ReturnType<typeof olderSettledFilterCounts>;
-  attributionOf: (thread: T) => ThreadAttribution;
+  attributionOf: (thread: TThread) => ThreadAttribution;
   filter: ThreadListFilter;
   owner: Founder | undefined;
   environments: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly label: string }>;
   isChanged: boolean;
 }) {
+  const gt = useGT();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const linkedEnvironmentIds = linkedSidebarEnvironmentIds();
   const inboxOrder = inboxMenuOrder(owner);
@@ -150,17 +148,20 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
   return (
     <>
       <MenuGroup>
-        <MenuGroupLabel>Inbox</MenuGroupLabel>
+        <MenuGroupLabel>
+          <T>Inbox</T>
+        </MenuGroupLabel>
         {inboxOrder.map((inbox) => {
           const checked = filter.inboxes.includes(inbox);
           const isLast = checked && filter.inboxes.length === 1;
+          const keepsShared = inboxKeepsSharedChecked(inbox, filter, owner);
           const count = counts.inboxes.get(inbox) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
           return (
             <MenuCheckboxItem
               key={inbox}
               checked={checked}
-              disabled={isLast}
-              aria-label={`${INBOX_LABELS[inbox]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : ""}`}
+              disabled={isLast || keepsShared}
+              aria-label={`${INBOX_LABELS[inbox]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : keepsShared ? ", stays checked with the founder-only selection" : ""}`}
               onCheckedChange={() =>
                 void updateClientSettings({
                   founderInboxFilter: toggleFilterOption(filter.inboxes, inbox, inboxOrder),
@@ -174,7 +175,9 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
       </MenuGroup>
       <MenuSeparator />
       <MenuGroup>
-        <MenuGroupLabel>From</MenuGroupLabel>
+        <MenuGroupLabel>
+          <T>From</T>
+        </MenuGroupLabel>
         {THREAD_ATTRIBUTIONS.map((from) => {
           const checked = shownAttributions.includes(from);
           const isLast = checked && shownAttributions.length === 1;
@@ -184,7 +187,7 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
               key={from}
               checked={checked}
               disabled={isLast}
-              aria-label={`From ${THREAD_ATTRIBUTION_LABELS[from]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : ""}`}
+              aria-label={`${gt("From {from}, {counts}", { from: THREAD_ATTRIBUTION_LABELS[from], counts: stateCountPhrase(count) })}${isLast ? LAST_OPTION_NOTE : ""}`}
               onCheckedChange={() => {
                 const shown = toggleFilterOption(shownAttributions, from, THREAD_ATTRIBUTIONS);
                 void updateClientSettings({
@@ -203,7 +206,9 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
         <>
           <MenuSeparator />
           <MenuGroup>
-            <MenuGroupLabel>Environments</MenuGroupLabel>
+            <MenuGroupLabel>
+              <T>Environments</T>
+            </MenuGroupLabel>
             {environments.map((environment) => {
               const checked = shownEnvironmentIds.includes(environment.environmentId);
               const isLast = checked && shownEnvironmentIds.length === 1;
@@ -251,12 +256,15 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
       <MenuSeparator />
       <p className="px-2 py-1.5 text-muted-foreground text-xs">
         {!allInboxesShown && counts.unclassified > 0
-          ? `${counts.unclassified} thread${counts.unclassified === 1 ? " has" : "s have"} no inbox and ${counts.unclassified === 1 ? "shows" : "show"} only with every inbox checked. `
+          ? `${gt(
+              "{count, plural, one {{count} thread has no inbox and shows only with every inbox checked.} other {{count} threads have no inbox and show only with every inbox checked.}}",
+              { count: counts.unclassified },
+            )} `
           : null}
         {older.lowerBound
-          ? "Some servers send settled totals only, so settled counts are minimums. "
+          ? `${gt("Some servers send settled totals only, so settled counts are minimums.")} `
           : null}
-        Subagent threads open from their parent and are not counted.
+        <T>Subagent threads open from their parent and are not counted.</T>
       </p>
       {isChanged ? (
         <>
@@ -264,13 +272,13 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
           <MenuItem
             onClick={() =>
               void updateClientSettings({
-                founderInboxFilter: effectiveInboxFilter({ founderInboxOwner: owner }),
+                founderInboxFilter: [],
                 sidebarHiddenEnvironmentIds: [],
                 sidebarHiddenThreadAttributions: [],
               })
             }
           >
-            Reset to default
+            <T>Reset to default</T>
           </MenuItem>
         </>
       ) : null}
@@ -299,7 +307,7 @@ function FilterOptionRow({
   indicator?: ReactNode;
 }) {
   return (
-    <span className="flex min-w-0 items-center gap-2">
+    <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5">
       {indicator}
       <span className={SIDEBAR_FILTER_OPTION_LABEL_CLASS}>{label}</span>
       <span className="grid shrink-0 grid-cols-4 gap-x-1.5 text-center">

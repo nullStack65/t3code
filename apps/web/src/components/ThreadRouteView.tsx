@@ -5,10 +5,13 @@ import { visibilityParentKey } from "@t3tools/client-runtime/state/threads";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { Link, Navigate, useNavigate } from "@tanstack/react-router";
+import { T, useGT, Var } from "gt-react";
 import { useEffect, useState } from "react";
 
 import ChatView from "./ChatView";
-import { BackgroundThreadContext } from "./chat/backgroundThread";
+import { BackgroundThreadContext, HiddenThreadContext } from "./chat/backgroundThread";
+import { Button } from "./ui/button";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
@@ -17,8 +20,14 @@ import {
   useAnyEnvironmentHiding,
   useQuietThreadShell,
 } from "../state/entities";
+import { environmentUnreachableAtom } from "../state/presentation";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { readLinkedSidebarThreadShell, useLinkedOnlyEnvironment } from "../state/linkedSidebar";
+import {
+  readLinkedSidebarThreadShell,
+  useLinkedOnlyEnvironment,
+  useLinkedOnlyEnvironmentHost,
+} from "../state/linkedSidebar";
+import { LinkedThreadPage } from "./chat/LinkedThreadPage";
 import { useEnvironmentShellStatus } from "../state/shell";
 import { environmentThreadShells, threadFamilies, useEnvironmentThread } from "../state/threads";
 import {
@@ -32,7 +41,7 @@ import {
  * Keeps the family of an open thread the shell leaves out (an older settled thread) in the shell
  * rows until the route leaves it, so every reader of its shell row finds it.
  */
-function useOpenThreadFamily(threadRef: ScopedThreadRef | null, missing: boolean) {
+export function useOpenThreadFamily(threadRef: ScopedThreadRef | null, missing: boolean) {
   const key = threadRef === null ? null : scopedThreadKey(threadRef);
   // Sticks to the route thread, so the row the family brings in does not release it.
   const [mountedKey, setMountedKey] = useState<string | null>(null);
@@ -47,21 +56,24 @@ function useOpenThreadFamily(threadRef: ScopedThreadRef | null, missing: boolean
 }
 
 function LinkedOnlyThreadNotice({ hostLabel, title }: { hostLabel: string; title: string | null }) {
+  const gt = useGT();
   return (
     <div
       className="flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center"
       data-testid="linked-only-thread-notice"
     >
-      <h2 className="text-base font-medium text-foreground">{title ?? "Thread"}</h2>
+      <h2 className="text-base font-medium text-foreground">{title ?? gt("Thread")}</h2>
       <p className="max-w-md text-sm text-muted-foreground">
-        This thread lives on {hostLabel}, which this device sees through a server link but is not
-        connected to. Add {hostLabel} as a connection to open it here.
+        <T>
+          This thread lives on <Var>{hostLabel}</Var>, which this device sees through a server link
+          but is not connected to. Add <Var>{hostLabel}</Var> as a connection to open it here.
+        </T>
       </p>
       <Link
         to="/settings/connections"
         className="text-sm font-medium text-foreground underline underline-offset-4"
       >
-        Open connection settings
+        <T>Open connection settings</T>
       </Link>
     </div>
   );
@@ -90,9 +102,13 @@ export function ThreadRouteView({
   );
   const serverThreadRef = target.kind === "server" ? target.threadRef : null;
   const linkedOnlyEnvironment = useLinkedOnlyEnvironment(serverThreadRef?.environmentId ?? null);
+  const linkedOnlyHost = useLinkedOnlyEnvironmentHost(serverThreadRef?.environmentId ?? null);
   const serverThreadShell = useQuietThreadShell(serverThreadRef);
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
+  const environmentUnreachable = useAtomValue(
+    environmentUnreachableAtom(serverThreadRef?.environmentId ?? null),
+  );
   const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus);
   const draftThread = useComposerDraftStore((store) =>
     serverThreadRef ? store.getDraftThreadByRef(serverThreadRef) : null,
@@ -163,6 +179,7 @@ export function ThreadRouteView({
     serverThreadDeleted: serverThreadShell?.deletedAt != null,
     unlistedThreadDetail,
     draftThreadExists: draftThread !== null,
+    environmentUnreachable,
   });
   const environmentHasAnyThreads = environmentThreadRefs.length > 0 || environmentHasDraftThreads;
 
@@ -183,12 +200,19 @@ export function ThreadRouteView({
   let view: React.ReactNode = null;
   let redirect: React.ReactNode = null;
   if (target.kind === "server" && linkedOnlyEnvironment !== null) {
-    view = (
-      <LinkedOnlyThreadNotice
-        hostLabel={linkedOnlyEnvironment.label}
-        title={readLinkedSidebarThreadShell(target.threadRef)?.title ?? null}
-      />
-    );
+    view =
+      linkedOnlyHost !== null ? (
+        <LinkedThreadPage
+          viaEnvironmentId={linkedOnlyHost}
+          environmentId={target.threadRef.environmentId}
+          threadId={target.threadRef.threadId}
+        />
+      ) : (
+        <LinkedOnlyThreadNotice
+          hostLabel={linkedOnlyEnvironment.label}
+          title={readLinkedSidebarThreadShell(target.threadRef)?.title ?? null}
+        />
+      );
   } else if (target.kind === "draft") {
     if (
       draftSession &&
@@ -241,6 +265,8 @@ export function ThreadRouteView({
     } else {
       redirect = <Navigate to="/" replace />;
     }
+  } else if (renderState === "unreachable") {
+    view = <UnreachableEnvironmentState />;
   } else if (hiddenByTagFilter) {
     redirect = <Navigate to="/" replace />;
   } else if (offShellBlocked) {
@@ -262,8 +288,30 @@ export function ThreadRouteView({
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
       inert={background}
     >
-      <BackgroundThreadContext value={background}>{view}</BackgroundThreadContext>
+      <BackgroundThreadContext value={background}>
+        <HiddenThreadContext value={background}>{view}</HiddenThreadContext>
+      </BackgroundThreadContext>
       {background ? null : redirect}
     </SidebarInset>
+  );
+}
+
+function UnreachableEnvironmentState() {
+  return (
+    <Empty className="flex-1">
+      <EmptyHeader>
+        <EmptyTitle>
+          <T>Thread unavailable</T>
+        </EmptyTitle>
+        <EmptyDescription>
+          <T>This thread is on an environment this app is not connected to.</T>
+        </EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button render={<Link to="/settings/connections" />} size="sm">
+          <T>Open Environments</T>
+        </Button>
+      </EmptyContent>
+    </Empty>
   );
 }

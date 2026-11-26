@@ -28,6 +28,9 @@ import {
   withLegacyPeerInboxReason,
   type ThreadInboxRoutingPatch,
 } from "./threadInbox.ts";
+const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
+const encode = Schema.encodeSync(ClientSettingsSchema);
+const isDecisionAsk = Schema.is(ThreadDecisionAsk);
 const kameron = { kind: "human", id: "kameron" } as const;
 const jeff = { kind: "human", id: "jeff" } as const;
 const bot = { kind: "agent", id: "lead" } as const;
@@ -48,9 +51,7 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxView(j, "all")).toBe(true);
     expect(matchesInboxView(k, "all")).toBe(true);
   });
-  it("keeps All until a founder is chosen, then defaults to that founder plus Agents and Shared", () => {
-    const decode = Schema.decodeUnknownSync(ClientSettingsSchema);
-    const encode = Schema.encodeSync(ClientSettingsSchema);
+  it("keeps All until a founder is chosen, then defaults to that founder plus Shared", () => {
     // Settings saved by the single-choice selector still decode; that choice is not carried over.
     const upgraded = decode({ notificationMode: "off", founderInboxView: "all" });
     // Any later settings write saves the whole snapshot; it must not record an unmade choice.
@@ -63,9 +64,9 @@ describe("shared fleet organizational inbox", () => {
     expect(matchesInboxFilter(undefined, effectiveInboxFilter(upgraded))).toBe(true);
     const jeffClient = decode(encode({ ...upgraded, founderInboxOwner: "jeff" }));
     const filter = effectiveInboxFilter(jeffClient);
-    expect(filter).toEqual(["jeff", "agents", "shared"]);
+    expect(filter).toEqual(["jeff", "shared"]);
     expect(matchesInboxFilter(makeThreadInbox({ actor: jeff }), filter)).toBe(true);
-    expect(matchesInboxFilter(makeThreadInbox({ actor: bot }), filter)).toBe(true);
+    expect(matchesInboxFilter(makeThreadInbox({ actor: bot }), filter)).toBe(false);
     expect(matchesInboxFilter(makeThreadInbox({ actor: kameron }), filter)).toBe(false);
     expect(
       matchesInboxFilter(
@@ -102,19 +103,42 @@ describe("shared fleet organizational inbox", () => {
     });
     expect(matchesInboxFilter(filedToKameron, ["kameron"])).toBe(true);
     expect(matchesInboxFilter(filedToKameron, ["agents"])).toBe(false);
-    expect(effectiveInboxFilter({ founderInboxOwner: "jeff", founderInboxFilter: [] })).toEqual([
-      "jeff",
-      "agents",
-      "shared",
-    ]);
+    for (const owner of ["jeff", "kameron"] as const) {
+      expect(effectiveInboxFilter({ founderInboxOwner: owner })).toEqual([owner, "shared"]);
+      expect(effectiveInboxFilter({ founderInboxOwner: owner, founderInboxFilter: [] })).toEqual([
+        owner,
+        "shared",
+      ]);
+      expect(
+        effectiveInboxFilter(
+          decode(encode({ ...upgraded, founderInboxOwner: owner, founderInboxFilter: [owner] })),
+        ),
+      ).toEqual([owner, "shared"]);
+      expect(
+        effectiveInboxFilter({ founderInboxOwner: owner, founderInboxFilter: ["agents"] }),
+      ).toEqual(["agents"]);
+    }
     // Every inbox is All, which keeps unclassified history.
     const every = ["shared", "jeff", "agents", "kameron"] as const;
     expect(matchesInboxFilter(undefined, every)).toBe(true);
     expect(matchesInboxFilter(undefined, every.slice(1))).toBe(false);
   });
-  it("attributes new work only to a chosen founder and leaves unchosen work in All", () => {
+  it("prefers a session founder over client settings and leaves legacy history discoverable", () => {
     expect(inboxOriginFor({})).toBeUndefined();
-    // The server creates no inbox for a human thread without an origin, like legacy history.
+    for (const [bound, preference] of [
+      [jeff, kameron],
+      [kameron, jeff],
+    ] as const) {
+      expect(
+        creatorInboxOrigin(preference, { founder: bound.id, deviceType: "mobile" }),
+      ).toEqual(bound);
+    }
+    expect(creatorInboxOrigin(jeff, { founder: null, deviceType: "desktop" })).toEqual(jeff);
+    expect(
+      creatorInboxOrigin(undefined, { founder: null, deviceType: "mobile" }),
+    ).toBeUndefined();
+    expect(creatorInboxOrigin(bot, { founder: "jeff", deviceType: "bot" })).toEqual(bot);
+    // The current device cannot safely supply a founder for existing unclassified history.
     for (const view of ["kameron", "jeff", "agents", "shared"] as const) {
       expect(matchesInboxView(undefined, view)).toBe(false);
     }
