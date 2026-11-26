@@ -33,6 +33,8 @@ import {
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpAskAgentInput,
+  OrchestratorMcpAskAgentResult,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitInput,
@@ -298,6 +300,20 @@ const ThreadSendTool = Tool.make("t3_thread_send", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const AskAgentTool = Tool.make("ask_agent", {
+  description:
+    "Ask another agent thread a question off-timeline on a read-only context snapshot (`sideChat` fork) and return its plain assistant text directly as `answer`. Logs only a 1-line folded audit item on the target thread.",
+  parameters: OrchestratorMcpAskAgentInput,
+  success: OrchestratorMcpAskAgentResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Ask an agent off-timeline")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.OpenWorld, true);
+
 const ThreadWaitTool = Tool.make("t3_thread_wait", {
   description:
     "Wait for a thread's run to finish. No `runId`: latest. Idle: at once. On timeout, with `next` end your turn; without, call again.",
@@ -408,6 +424,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadReadTool,
   ThreadUpdateTool,
   ThreadSendTool,
+  AskAgentTool,
   ThreadWaitTool,
   ThreadInterruptTool,
   EnvironmentLinksTool,

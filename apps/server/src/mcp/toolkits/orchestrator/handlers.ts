@@ -307,6 +307,15 @@ const handlers = {
         return yield* remote.followUp(scope, environmentId, input, sent);
       }),
   ),
+  ask_agent: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.askAgent(scope, input);
+      }),
+  ),
   t3_thread_wait: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
