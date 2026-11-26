@@ -160,6 +160,10 @@ interface BoxThread {
   readonly afterLaunch: Ref.Ref<Effect.Effect<void>>;
   /** The box's load as its `orchestrator_capabilities` reports it. */
   readonly resources: Ref.Ref<HostResourcesSnapshot>;
+  /** Offered as each wait on the launched run starts there. */
+  readonly waitStarted: Queue.Queue<void>;
+  /** Completing the current one fails the waits on the launched run now open there. */
+  readonly dropWaits: Ref.Ref<Deferred.Deferred<void>>;
 }
 
 const GiB = 1024 ** 3;
@@ -213,6 +217,8 @@ const makeBoxThread = Effect.gen(function* () {
     sent: yield* Ref.make<ReadonlyArray<string>>([]),
     afterLaunch: yield* Ref.make<Effect.Effect<void>>(Effect.void),
     resources: yield* Ref.make(loadOf(0.1)),
+    waitStarted: yield* Queue.unbounded<void>(),
+    dropWaits: yield* Ref.make(yield* Deferred.make<void>()),
   } satisfies BoxThread;
 });
 
@@ -360,8 +366,23 @@ const boxToolkitLayer = (thread: BoxThread) => {
               : {}),
           };
         }
+        const drop = yield* Ref.get(thread.dropWaits);
+        yield* Queue.offer(thread.waitStarted, undefined);
         const done = yield* Deferred.await(thread.finished).pipe(
           Effect.timeoutOption(input.timeoutMs),
+          Effect.raceFirst(
+            Deferred.await(drop).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new ThreadManagement.ThreadManagementProjectionLoadError({
+                    projectId: boxProject,
+                    threadId: input.threadId,
+                    cause: "connection lost",
+                  }),
+                ),
+              ),
+            ),
+          ),
         );
         // Only a waiter that asks waits past the run for the thread's own task.
         if (
@@ -4116,6 +4137,66 @@ it.effect(
         expect(completed).toMatchObject({
           status: "completed",
           result: "Completed after follower reconnect.",
+          remoteChild: { peerStatus: "reachable" },
+        });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "starts the unreachable clock when a long wait drops, and shows reachable as soon as the peer answers again",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const retries = yield* steppedRetries;
+        const a = yield* makeLaptop(database, offers).pipe(
+          Effect.provideService(RemoteDelegation.FollowRetrySchedule, retries.schedule),
+        );
+        yield* linkTo(a.links, b, "full-access");
+        yield* seedParent(a);
+        const peerStatus = Effect.map(
+          a.orchestrator.getThreadProjection(parentThreadId),
+          (projection) => projection.subagents[0]?.remoteChild?.peerStatus,
+        );
+
+        const delegated = yield* delegateToBox(a);
+        yield* Queue.take(thread.waitStarted);
+
+        // Five minutes into a healthy long wait, the link drops and the wait fails.
+        yield* TestClock.adjust("5 minutes");
+        yield* Ref.set(b.descriptor, descriptorOf("environment-elsewhere", "Elsewhere"));
+        const drop = yield* Ref.get(thread.dropWaits);
+        yield* Ref.set(thread.dropWaits, yield* Deferred.make<void>());
+        yield* Deferred.succeed(drop, undefined);
+        yield* Queue.take(retries.failed);
+        expect(yield* peerStatus).toBe("reachable");
+
+        // Failing past the threshold from that first failure reports unreachable.
+        yield* TestClock.adjust("3 minutes");
+        yield* Queue.offer(retries.retry, undefined);
+        yield* Queue.take(retries.failed);
+        expect(yield* peerStatus).toBe("unreachable");
+
+        // Back again while the run still works there: reachable before the next long wait returns.
+        yield* Ref.set(b.descriptor, box);
+        yield* Queue.offer(retries.retry, undefined);
+        yield* Queue.take(thread.waitStarted);
+        const recovered = (yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents[0];
+        expect(recovered?.result).toBeNull();
+        expect(recovered?.remoteChild?.peerStatus).toBe("reachable");
+
+        yield* Ref.set(thread.reply, "Finished after the dropped wait.");
+        yield* Ref.set(thread.status, "completed");
+        yield* Deferred.succeed(thread.finished, undefined);
+        expect(yield* taskResult(a, delegated.taskId)).toMatchObject({
+          status: "completed",
+          result: "Finished after the dropped wait.",
           remoteChild: { peerStatus: "reachable" },
         });
       }),

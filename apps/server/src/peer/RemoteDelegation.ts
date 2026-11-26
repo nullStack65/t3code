@@ -351,6 +351,19 @@ const make = Effect.gen(function* () {
 
   /** Epoch millis of the latest successful peer contact per open remote task. */
   const lastContactAt = new Map<NodeId, number>();
+  /**
+   * Epoch millis of the first failed peer call since the last contact. The
+   * unreachable clock starts here: a follower's long wait can hold the last
+   * contact up to FOLLOW_WAIT_MS old while the peer was answering all along.
+   */
+  const failingSince = new Map<NodeId, number>();
+
+  /** Whether `task` has failed to reach its peer for the whole threshold, counting this failure. */
+  const failedPastThreshold = (task: OrchestrationV2Subagent, nowMs: number): boolean => {
+    const since = failingSince.get(task.id) ?? nowMs;
+    failingSince.set(task.id, since);
+    return nowMs - Math.max(since, effectiveLastSeenMs(task)) >= thresholdMs;
+  };
 
   const effectiveLastSeenMs = (task: OrchestrationV2Subagent): number => {
     const inMemory = lastContactAt.get(task.id);
@@ -390,6 +403,7 @@ const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(now);
     const nowIso = DateTime.formatIso(now);
     lastContactAt.set(task.id, nowMs);
+    failingSince.delete(task.id);
     const remote = task.remoteChild;
     if (remote === undefined || task.result !== null) return nowIso;
     const persistedMs = parseIsoMs(remote.lastSeenAt);
@@ -413,9 +427,8 @@ const make = Effect.gen(function* () {
     const remote = task?.remoteChild;
     if (task === undefined || remote === undefined || task.result !== null) return;
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-    const lastSeenMs = effectiveLastSeenMs(task);
-    const lastSeenIso = DateTime.formatIso(DateTime.makeUnsafe(lastSeenMs));
-    if (nowMs - lastSeenMs < thresholdMs) return;
+    if (!failedPastThreshold(task, nowMs)) return;
+    const lastSeenIso = DateTime.formatIso(DateTime.makeUnsafe(effectiveLastSeenMs(task)));
     if (remote.peerStatus === "unreachable" && remote.lastSeenAt === lastSeenIso) return;
     yield* persistPeerStatus(parentThreadId, taskId, "unreachable", lastSeenIso);
   });
@@ -1603,6 +1616,15 @@ const make = Effect.gen(function* () {
           Option.isSome(ended) ? Effect.succeed({ endedHere: true } as const) : Effect.never,
         ),
       );
+    // Coming back from failures, a quick read shows the peer answers again
+    // now, rather than when the next long wait returns.
+    if (remote.peerStatus === "unreachable" || failingSince.has(taskId)) {
+      yield* forwarding.readThread(scope, remote.environmentId, {
+        threadId: remote.threadId,
+        limit: 1,
+      });
+      yield* recordPeerContact(parentThreadId, task);
+    }
     const waited = yield* forwarding
       .waitForThread(scope, remote.environmentId, {
         threadId: remote.threadId,
@@ -1740,6 +1762,7 @@ const make = Effect.gen(function* () {
             if (following.get(taskId) === state) {
               following.delete(taskId);
               lastContactAt.delete(taskId);
+              failingSince.delete(taskId);
             }
           }),
         ),
@@ -1843,9 +1866,8 @@ const make = Effect.gen(function* () {
       return { runStatus: status, peerStatus: "reachable" as const, lastSeenAt };
     }
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-    const lastSeenMs = effectiveLastSeenMs(task);
-    const lastSeenAt = DateTime.formatIso(DateTime.makeUnsafe(lastSeenMs));
-    const unreachable = remote.peerStatus === "unreachable" || nowMs - lastSeenMs >= thresholdMs;
+    const lastSeenAt = DateTime.formatIso(DateTime.makeUnsafe(effectiveLastSeenMs(task)));
+    const unreachable = failedPastThreshold(task, nowMs) || remote.peerStatus === "unreachable";
     if (unreachable && (remote.peerStatus !== "unreachable" || remote.lastSeenAt !== lastSeenAt)) {
       yield* persistPeerStatus(task.threadId, task.id, "unreachable", lastSeenAt);
     }
