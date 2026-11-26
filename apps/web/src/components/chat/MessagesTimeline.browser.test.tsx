@@ -266,6 +266,76 @@ it("keeps a model-hidden note visible and only promotes it after an explicit cli
   expect(remounted.buttons("Promote to agent")).toHaveLength(0);
 });
 
+function messageAt(minute: number, text: string, overrides = {}, id = `message-${minute}`): Entry {
+  const createdAt = `2026-03-17T19:${String(minute).padStart(2, "0")}:00.000Z`;
+  const base = message(text, { createdAt, updatedAt: createdAt, ...overrides }, id);
+  return { ...base, createdAt } as Entry;
+}
+
+describe("MessagesTimeline new since you last looked", () => {
+  const longText = (label: string) => `${label}\n\n${"filler line\n\n".repeat(12)}`;
+  const thread = () =>
+    Array.from({ length: 24 }, (_, index) =>
+      messageAt(index, longText(`message ${index}`), index % 2 === 0 ? {} : { role: "assistant" }),
+    );
+
+  it("shows a divider and a jump pill while the divider is off screen, and jump clears the pill", async () => {
+    setup();
+    await using screen = await renderTimeline(thread(), {
+      unseenDivider: { afterMessageId: MessageId.make("message-2"), count: 11 },
+    });
+    await vi.waitFor(() => expect(screen.text()).toContain("11 new since you last looked"));
+    await click(screen.button(/new since you last looked/));
+    await vi.waitFor(() => expect(document.querySelector("[data-new-since-last-seen]")).toBeNull());
+    // The list virtualizes, so the divider mounts only once the jump brings it into range.
+    await vi.waitFor(
+      () => {
+        const divider = document.querySelector("[data-new-messages-divider]");
+        expect(divider).not.toBeNull();
+        expect(divider!.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+        expect(divider!.getBoundingClientRect().top).toBeLessThan(window.innerHeight);
+      },
+      { timeout: 6000 },
+    );
+  });
+
+  it("places the line after a queued message whose timeline row starts later than its record", async () => {
+    setup();
+    const queued = messageAt(1, "queued question", {}, "queued");
+    const entries = [
+      messageAt(0, "prior question"),
+      messageAt(2, "earlier reply", { role: "assistant" }),
+      { ...queued, createdAt: "2026-03-17T19:05:00.000Z" } as Entry,
+      messageAt(6, "fresh reply", { role: "assistant" }),
+    ];
+    await using screen = await renderTimeline(entries, {
+      unseenDivider: { afterMessageId: MessageId.make("queued"), count: 1 },
+    });
+    await vi.waitFor(() =>
+      expect(document.querySelector("[data-new-messages-divider]")).not.toBeNull(),
+    );
+    const top = (text: string) =>
+      [...document.querySelectorAll<HTMLElement>("[data-timeline-row-id]")]
+        .find((row) => row.textContent?.includes(text))!
+        .getBoundingClientRect().top;
+    const divider = document
+      .querySelector("[data-new-messages-divider]")!
+      .getBoundingClientRect().top;
+    expect(divider).toBeGreaterThan(top("queued question"));
+    expect(divider).toBeLessThan(top("fresh reply"));
+  });
+
+  it("dismisses the pill", async () => {
+    setup();
+    await using screen = await renderTimeline(thread(), {
+      unseenDivider: { afterMessageId: MessageId.make("message-2"), count: 3 },
+    });
+    await vi.waitFor(() => expect(screen.text()).toContain("3 new since you last looked"));
+    await click(screen.button("Dismiss new messages"));
+    expect(document.querySelector("[data-new-since-last-seen]")).toBeNull();
+  });
+});
+
 const TASK_ID = ScheduledTaskId.make("task-1");
 const AUTOMATION_PROMPT = "Triage the inbox\n\nLabel every new issue and close duplicates.";
 

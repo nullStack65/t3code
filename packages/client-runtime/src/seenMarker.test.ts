@@ -7,6 +7,7 @@ import {
   createSeenMarkerSession,
   pickNewestMessageId,
   resetSeenMarkersForTest,
+  resolveUnseenDivider,
   type SeenTimers,
 } from "./seenMarker.ts";
 
@@ -189,6 +190,32 @@ describe("catch-up offer", () => {
         seenAt,
       }),
     ).toEqual({ lastSeenMessageId: MessageId.make("missing"), seenAt });
+  });
+});
+
+describe("unseen divider", () => {
+  const thread = [
+    { id: MessageId.make("m1"), role: "user" },
+    { id: MessageId.make("m2"), role: "assistant" },
+    { id: MessageId.make("m3"), role: "user" },
+    { id: MessageId.make("m4"), role: "assistant" },
+    { id: MessageId.make("m5"), role: "assistant", streaming: true },
+  ];
+
+  it("counts settled replies after the stored place and anchors on its id", () => {
+    expect(
+      resolveUnseenDivider({ messages: thread, lastSeenMessageId: MessageId.make("m2") }),
+    ).toEqual({ afterMessageId: MessageId.make("m2"), count: 1 });
+  });
+
+  it("draws nothing when nothing is new or the place is unknown", () => {
+    expect(
+      resolveUnseenDivider({ messages: thread, lastSeenMessageId: MessageId.make("m4") }),
+    ).toBeNull();
+    expect(
+      resolveUnseenDivider({ messages: thread, lastSeenMessageId: MessageId.make("gone") }),
+    ).toBeNull();
+    expect(resolveUnseenDivider({ messages: thread, lastSeenMessageId: null })).toBeNull();
   });
 });
 

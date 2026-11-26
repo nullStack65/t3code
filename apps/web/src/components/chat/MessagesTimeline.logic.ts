@@ -602,7 +602,15 @@ type MessagesTimelineRowContent =
       count: number;
       summary: string;
       expanded: boolean;
-      attention: string | null;
+      /** The run holds a failure or a pending request; the collapsed pill says so. */
+      attention: boolean;
+    }
+  | {
+      /** The line between what the viewer had been shown and what arrived since. */
+      kind: "new-messages-divider";
+      id: string;
+      createdAt: string | null;
+      count: number;
     }
   | {
       kind: "turn-fold";
@@ -2442,6 +2450,7 @@ export function timelineActivityContext(
   runs: Parameters<typeof chatActivityContext>[1],
   includeOtherActivity: boolean,
   decisionRequestedAt?: string,
+  keepLatestReply = false,
 ): ChatActivityContext {
   return chatActivityContext(
     entries.map((entry) => ({
@@ -2463,6 +2472,7 @@ export function timelineActivityContext(
     runs,
     includeOtherActivity,
     decisionRequestedAt,
+    keepLatestReply,
   );
 }
 
@@ -2532,7 +2542,6 @@ export function collapseTimelineActivity(
   rows: MessagesTimelineRow[],
   expandedIds: ReadonlySet<string>,
   context?: ChatActivityContext,
-  dismissedAttention?: ReadonlyMap<string, string>,
 ): MessagesTimelineRow[] {
   const collapsed: MessagesTimelineRow[] = [];
   let hasActivity = false;
@@ -2571,9 +2580,8 @@ export function collapseTimelineActivity(
       createdAt: run[0]!.createdAt,
       count: run.length,
       summary: activityUpdateSummary(run),
-      expanded:
-        expandedIds.has(id) || (attention !== null && dismissedAttention?.get(id) !== attention),
-      attention,
+      expanded: expandedIds.has(id),
+      attention: attention !== null,
     };
     collapsed.push(pill);
     if (pill.expanded) {
@@ -2587,6 +2595,30 @@ export function collapseTimelineActivity(
     }
   }
   return hasActivity ? collapsed : rows;
+}
+
+const NEW_MESSAGES_DIVIDER_ROW_ID = "new-messages-divider";
+
+/** Puts the divider before the first row that appeared after `divider.afterCreatedAt`. */
+export function insertNewMessagesDivider(
+  rows: MessagesTimelineRow[],
+  divider: { readonly afterCreatedAt: string; readonly count: number } | null | undefined,
+): MessagesTimelineRow[] {
+  if (!divider) return rows;
+  const after = Date.parse(divider.afterCreatedAt);
+  if (Number.isNaN(after)) return rows;
+  const index = rows.findIndex((row) => row.createdAt != null && Date.parse(row.createdAt) > after);
+  if (index < 0) return rows;
+  return [
+    ...rows.slice(0, index),
+    {
+      kind: "new-messages-divider",
+      id: NEW_MESSAGES_DIVIDER_ROW_ID,
+      createdAt: rows[index]!.createdAt,
+      count: divider.count,
+    },
+    ...rows.slice(index),
+  ];
 }
 
 /** The pill hiding `entryId`, if one does, so a search hit or a restored scroll position can open it. */
@@ -3083,9 +3115,13 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.createdAt === ba.createdAt &&
         a.count === ba.count &&
         a.summary === ba.summary &&
-        a.expanded === ba.expanded
+        a.expanded === ba.expanded &&
+        a.attention === ba.attention
       );
     }
+
+    case "new-messages-divider":
+      return a.createdAt === (b as typeof a).createdAt && a.count === (b as typeof a).count;
 
     case "message": {
       const bm = b as typeof a;

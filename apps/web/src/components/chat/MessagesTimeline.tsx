@@ -97,6 +97,7 @@ import {
   liveAnswerPreview,
   collapseTimelineActivity,
   activityPillIdForEntry,
+  insertNewMessagesDivider,
   timelineActivityContext,
   type MessagesTimelineRow,
   type TimelineLatestRun,
@@ -111,6 +112,7 @@ import { cn } from "~/lib/utils";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { type HandoffTimelineRun } from "./V2LifecycleRow";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
+import { NewSinceLastSeenPill } from "./TimelineOverlays";
 
 import { forwardWheelToTimeline } from "./timelineMinimapWheel";
 import { TimelineMinimap } from "./TimelineMinimap";
@@ -352,8 +354,12 @@ interface MessagesTimelineProps {
    * Off by default; a standing thread turns it on.
    */
   collapseActivity?: boolean;
+  /** Messages that arrived after the place the viewer had been shown; draws a divider and a jump pill. */
+  unseenDivider?: { readonly afterMessageId: MessageId; readonly count: number } | null;
   includeOtherActivity?: boolean;
   decisionRequestedAt?: string | undefined;
+  /** The thread is filed in a founder's inbox; the newest agent-run reply stays unfolded. */
+  inFounderInbox?: boolean;
   /** Person messages name which founder sent them. */
   sharedThread?: boolean;
 }
@@ -404,8 +410,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
   findNavigationId = 0,
   findSender = null,
   collapseActivity = true,
+  unseenDivider = null,
   includeOtherActivity = false,
   decisionRequestedAt,
+  inFounderInbox = false,
   sharedThread = false,
   latestRun,
   announcedRun = null,
@@ -629,15 +637,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
     preserveDisclosurePosition(row.id);
     setExpandedActivity((existing) => {
       const ids = new Set(existing.threadKey === listIdentityKey ? existing.ids : []);
-      const dismissed = new Map(existing.threadKey === listIdentityKey ? existing.dismissed : []);
-      if (row.expanded) {
-        ids.delete(row.id);
-        if (row.attention !== null) dismissed.set(row.id, row.attention);
-      } else {
-        ids.add(row.id);
-        dismissed.delete(row.id);
-      }
-      return { threadKey: listIdentityKey, ids, dismissed };
+      if (row.expanded) ids.delete(row.id);
+      else ids.add(row.id);
+      return { threadKey: listIdentityKey, ids };
     });
   };
   const onToggleTurnFold = (runId: RunId) => {
@@ -845,23 +847,24 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // kept would hide the very rows it was asked to show.
   const collapseRows = collapseActivity && findSender === null;
   const chatter = collapseRows
-    ? timelineActivityContext(timelineEntries, runsProp, includeOtherActivity, decisionRequestedAt)
+    ? timelineActivityContext(
+        timelineEntries,
+        runsProp,
+        includeOtherActivity,
+        decisionRequestedAt,
+        inFounderInbox,
+      )
     : undefined;
   const [expandedActivity, setExpandedActivity] = useState<{
     readonly threadKey: string;
     readonly ids: ReadonlySet<string>;
-    readonly dismissed: ReadonlyMap<string, string>;
-  }>(() => ({ threadKey: listIdentityKey, ids: new Set(), dismissed: new Map() }));
+  }>(() => ({ threadKey: listIdentityKey, ids: new Set() }));
   // Pill ids repeat across threads (`activity:` plus a message id can coincide,
   // and a live turn's rows share constant ids), so expansion belongs to one thread.
   const expandedActivityIds =
     expandedActivity.threadKey === listIdentityKey ? expandedActivity.ids : new Set<string>();
   if (collapseRows && expandedActivity.threadKey !== listIdentityKey) {
-    setExpandedActivity({
-      threadKey: listIdentityKey,
-      ids: expandedActivityIds,
-      dismissed: new Map(),
-    });
+    setExpandedActivity({ threadKey: listIdentityKey, ids: expandedActivityIds });
   }
   // A search hit or a restored scroll position inside a collapsed run opens that
   // run, the way a find match opens the turn fold that hides it.
@@ -884,14 +887,25 @@ const ConversationTimeline = memo(function ConversationTimeline({
     ids.add(revealedPillId);
     setExpandedActivity({ ...expandedActivity, ids });
   }
-  const rows = collapseRows
-    ? collapseTimelineActivity(
-        senderRows,
-        expandedActivityIds,
-        chatter,
-        expandedActivity.threadKey === listIdentityKey ? expandedActivity.dismissed : undefined,
-      )
-    : senderRows;
+  // Rows carry the time their turn item started, which can trail the message's own stamp (a queued
+  // message), so the line is placed by the anchor's timeline entry rather than the message record.
+  const dividerAnchorAt =
+    unseenDivider === null || findSender !== null
+      ? undefined
+      : timelineEntries.find(
+          (entry) => entry.kind === "message" && entry.message.id === unseenDivider.afterMessageId,
+        )?.createdAt;
+  const rows = insertNewMessagesDivider(
+    collapseRows ? collapseTimelineActivity(senderRows, expandedActivityIds, chatter) : senderRows,
+    unseenDivider === null || dividerAnchorAt === undefined
+      ? null
+      : { afterCreatedAt: dividerAnchorAt, count: unseenDivider.count },
+  );
+  const dividerIndex = rows.findIndex((row) => row.kind === "new-messages-divider");
+  const dividerKey =
+    dividerIndex < 0 || unseenDivider === null
+      ? null
+      : `${listIdentityKey}\0${unseenDivider.afterMessageId}`;
   const matchedApprovalRequestIds = new Set<string>();
   for (const row of pendingApprovalRequestIds.size > 0 ? rows : []) {
     const entries =
@@ -930,6 +944,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const listOpenedOn = nextOpening.mounted ? nextOpening.identity : null;
   const viewportRef = useRef<TimelineViewport | null>(null);
   const navigateTimeline = () => viewportRef.current?.navigate({ releasesFollow: true });
+
   const restoreReady = restoringThreadPosition && rows.length > 0;
   // Z: syncs LegendList's scroll position with which thread it shows. The list
   // is not keyed per thread and reports no "new data" event, and the restore
@@ -1022,6 +1037,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
   const [minimapCurrentIndex, setMinimapCurrentIndex] = useState<number | null>(null);
   const [minimapAtEnd, setMinimapAtEnd] = useState(false);
+  const [dividerPlace, setDividerPlace] = useState<{
+    readonly key: string;
+    readonly place: "above" | "visible" | "below";
+  } | null>(null);
+  // Once the divider has been on screen or the pill was used, the pill stays gone for this visit.
+  const [settledDividerKey, setSettledDividerKey] = useState<string | null>(null);
   const handleAnchorReady = (info: { anchorIndex: number | undefined }) => {
     if (anchorMessageId !== null && info.anchorIndex !== undefined) {
       onAnchorReady(anchorMessageId, info.anchorIndex);
@@ -1050,10 +1071,27 @@ const ConversationTimeline = memo(function ConversationTimeline({
     size: true,
   };
 
+  const showNewSincePill =
+    dividerKey !== null &&
+    unseenDivider !== null &&
+    settledDividerKey !== dividerKey &&
+    dividerPlace?.key === dividerKey &&
+    dividerPlace.place !== "visible";
+  const jumpToNewMessages = () => {
+    if (dividerKey === null) return;
+    setSettledDividerKey(dividerKey);
+    navigateTimeline();
+    void listRef.current?.scrollToIndex({
+      index: dividerIndex,
+      animated: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      viewOffset: TIMELINE_MINIMAP_TARGET_OFFSET,
+    });
+  };
+
   const refreshMinimap = useStableCallback(() => {
     const state = listRef.current?.getState?.();
     if (restoringThreadPosition || state?.data !== rows) return;
-    if (!state || minimapItems.length === 0) {
+    if (!state || (minimapItems.length === 0 && dividerKey === null)) {
       return;
     }
 
@@ -1071,6 +1109,21 @@ const ConversationTimeline = memo(function ConversationTimeline({
           firstBufferedRow.getBoundingClientRect().top
         : state.scroll;
     const visibleRange = resolveTimelineMinimapVisibleRange({ ...state, scroll });
+    if (dividerKey !== null && visibleRange.start !== null && visibleRange.end !== null) {
+      const place =
+        dividerIndex < visibleRange.start
+          ? "above"
+          : dividerIndex > visibleRange.end
+            ? "below"
+            : "visible";
+      setDividerPlace((current) =>
+        current?.key === dividerKey && current.place === place
+          ? current
+          : { key: dividerKey, place },
+      );
+      if (place === "visible") setSettledDividerKey(dividerKey);
+    }
+    if (minimapItems.length === 0) return;
     for (const [index, item] of minimapItems.entries()) {
       const strip = minimapStripMap.get(item.id);
       const inView = isTimelineMinimapTurnVisible(
@@ -1122,6 +1175,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
   useLayoutEffect(() => {
     if (!restoringThreadPosition) scheduleMinimapRefresh();
   }, [restoringThreadPosition, scheduleMinimapRefresh]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a divider that appears or moves needs its place measured without waiting for a scroll
+  useLayoutEffect(() => {
+    if (dividerKey !== null && !restoringThreadPosition) scheduleMinimapRefresh();
+  }, [dividerKey, restoringThreadPosition, scheduleMinimapRefresh]);
 
   // The measurement the last remember wrote, so a follow release can rewrite
   // it without reading render state from a listener.
@@ -1621,6 +1678,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
               ListHeaderComponent={listHeader}
               ListFooterComponent={timelineListFooter}
             />
+            {showNewSincePill ? (
+              <NewSinceLastSeenPill
+                count={unseenDivider.count}
+                direction={dividerPlace.place === "below" ? "down" : "up"}
+                onJump={jumpToNewMessages}
+                onDismiss={() => setSettledDividerKey(dividerKey)}
+              />
+            ) : null}
             <TimelineMinimap
               items={minimapItems}
               hasPersistentGutter={minimapHasPersistentGutter}
@@ -1811,6 +1876,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         </WorkLogBlock>
       ) : null}
       {row.kind === "activity" ? <ActivityTimelineRow row={row} /> : null}
+      {row.kind === "new-messages-divider" ? (
+        <div role="separator" aria-label="New messages" data-new-messages-divider="true">
+          <TimelineSystemDivider label="New messages" tone="danger" />
+        </div>
+      ) : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow key={row.id} row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
@@ -1979,6 +2049,12 @@ function ActivityTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "activ
           )}
         />
         <span className="truncate">{row.summary}</span>
+        {row.attention ? (
+          <span className="flex shrink-0 items-center gap-1 text-warning-foreground">
+            <CircleAlertIcon aria-hidden className="size-3" />
+            <span>Needs attention</span>
+          </span>
+        ) : null}
       </button>
     </div>
   );
