@@ -66,6 +66,7 @@ import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 import { AppConnectionReporter, LinkOnConnectCoordinator } from "../state/peerLinks";
 import { AutoAddLinkedEnvironments } from "../state/knownEnvironments";
 import { LinkedSidebarFromHosts } from "../state/linkedSidebarHost";
+import { AutoSeedFounderInboxOwner } from "../state/founderSessionSeed";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -214,6 +215,7 @@ function RootRouteBranch() {
       <LinkOnConnectCoordinator />
       <AutoAddLinkedEnvironments />
       <LinkedSidebarFromHosts />
+      <AutoSeedFounderInboxOwner />
       <AddProjectToMachineDialogHost />
       <UseInAnotherAppDialogHost />
       {import.meta.env.DEV && primaryEnvironmentAuthenticated ? <DevReplayHost /> : null}

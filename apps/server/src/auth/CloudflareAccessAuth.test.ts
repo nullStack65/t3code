@@ -281,9 +281,11 @@ it.live(
               authenticated: boolean;
               sessionMethod?: string;
               sessionId?: string;
+              founder?: string;
             };
             expect(firstBody.authenticated).toBe(true);
             expect(firstBody.sessionMethod).toBe("browser-session-cookie");
+            expect(firstBody.founder).toBe("kameron");
             const setCookie = first.headers.get("set-cookie");
             expect(setCookie).toBeTruthy();
             expect(setCookie).toContain("HttpOnly");
@@ -308,9 +310,11 @@ it.live(
             const secondBody = (await second.json()) as {
               authenticated: boolean;
               sessionId?: string;
+              founder?: string;
             };
             expect(secondBody.authenticated).toBe(true);
             expect(secondBody.sessionId).toBe(firstBody.sessionId);
+            expect(secondBody.founder).toBe("kameron");
             expect(second.headers.get("set-cookie")).toBeNull();
             expect(jwksFetches).toBe(1);
 

@@ -62,6 +62,7 @@ export interface VerifiedSession {
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly founder?: Founder;
   readonly proofKeyThumbprint?: string;
   readonly runtimeModeCeiling?: RuntimeMode;
   /** An MCP client that is another T3 Code environment's peer link. */
@@ -963,6 +964,7 @@ const make = Effect.gen(function* () {
           expiresAt: row.value.expiresAt,
           subject: row.value.subject,
           scopes: row.value.scopes,
+          ...(row.value.founder ? { founder: row.value.founder } : {}),
         } satisfies VerifiedSession;
       }
       const [encodedPayload, signature] = token.split(".");
@@ -1032,6 +1034,7 @@ const make = Effect.gen(function* () {
         expiresAt: rowHoldsDeadline ? row.value.expiresAt : expiresAt.value,
         subject: claims.sub,
         scopes: row.value.scopes,
+        ...(row.value.founder ? { founder: row.value.founder } : {}),
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
         ...(claims.plk === 1 ? { peerLink: true as const } : {}),

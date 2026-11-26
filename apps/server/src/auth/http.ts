@@ -339,6 +339,7 @@ export const layer = HttpApiBuilder.group(
                   ...authScopeResponse(minted.scopes),
                   sessionMethod: minted.method,
                   sessionId: minted.sessionId,
+                  founder: minted.founder,
                   expiresAt: DateTime.toUtc(minted.expiresAt),
                 } satisfies AuthSessionState;
               }

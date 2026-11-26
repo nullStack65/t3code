@@ -137,13 +137,17 @@ export const verifyCloudflareAccessJwt = Effect.fn("CloudflareAccessAuth.verifyJ
   return yield* denied();
 });
 
+export interface CloudflareAccessMintedSession extends SessionStore.IssuedSession {
+  readonly founder: Founder;
+}
+
 export class CloudflareAccessAuth extends Context.Service<
   CloudflareAccessAuth,
   {
     readonly config: CloudflareAccessConfig | null;
     readonly tryAutoMintBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
-    ) => Effect.Effect<SessionStore.IssuedSession | null>;
+    ) => Effect.Effect<CloudflareAccessMintedSession | null>;
   }
 >()("t3/auth/CloudflareAccessAuth") {}
 
@@ -194,6 +198,10 @@ const make = Effect.fn("CloudflareAccessAuth.make")(function* (options?: {
           scopes: AuthStandardClientScopes,
         })
         .pipe(
+          Effect.map((issued): CloudflareAccessMintedSession => ({
+            ...issued,
+            founder: identity.founder,
+          })),
           Effect.catch((cause) =>
             Effect.logWarning("Failed to issue T3 browser session from Cloudflare Access JWT.", {
               cause,

@@ -559,6 +559,8 @@ export const AuthSessionState = Schema.Struct({
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   /** This client's own session, so it can tell what it did from what another client did. */
   sessionId: Schema.optionalKey(AuthSessionId),
+  /** Founder bound to this session (e.g. Cloudflare Access or founder-paired client), when known. */
+  founder: Schema.optionalKey(Founder),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
