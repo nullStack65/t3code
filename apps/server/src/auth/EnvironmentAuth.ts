@@ -60,6 +60,11 @@ import {
   PEER_LINK_PAIRING_SUBJECT_PREFIX,
 } from "../persistence/AuthPairingLinks.ts";
 import { requestUrl } from "../requestUrl.ts";
+import {
+  CLOUDFLARE_ACCESS_SUBJECT_PREFIX,
+  cloudflareAccessSubjectFor,
+  readCloudflareAccessConfig,
+} from "./CloudflareAccessConfig.ts";
 import { readConfig, subjectFor, WORKOS_SUBJECT_PREFIX } from "./WorkOsConfig.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
@@ -876,6 +881,7 @@ export const make = Effect.gen(function* () {
   const authDescriptor = yield* policy.getDescriptor();
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const workOs = yield* readConfig;
+  const cfAccess = yield* readCloudflareAccessConfig;
   const descriptor =
     workOs && ManagedLimits.allowsRemoteClients(managedPolicy)
       ? { ...authDescriptor, workOsGoogleSignIn: true }
@@ -883,6 +889,55 @@ export const make = Effect.gen(function* () {
   const workOsSubjects = workOs
     ? new Set([subjectFor(workOs, "kameron"), subjectFor(workOs, "jeff")])
     : new Set<string>();
+  const cfAccessSubjects = cfAccess
+    ? new Set([
+        cloudflareAccessSubjectFor(cfAccess, "kameron"),
+        cloudflareAccessSubjectFor(cfAccess, "jeff"),
+      ])
+    : new Set<string>();
+  const assertCloudflareAccessSession = Effect.fn("EnvironmentAuth.assertCloudflareAccessSession")((
+    session: Pick<AuthenticatedSession, "subject" | "method">,
+    request: HttpServerRequest.HttpServerRequest,
+    socket: boolean,
+  ): Effect.Effect<void, ServerAuthInvalidCredentialError> => {
+    if (!session.subject.startsWith(CLOUDFLARE_ACCESS_SUBJECT_PREFIX)) return Effect.void;
+    if (!cfAccess || !cfAccessSubjects.has(session.subject)) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "Cloudflare Access enrollment no longer applies to this session.",
+        }),
+      );
+    }
+    if (!ManagedLimits.allowsRemoteClients(managedPolicy)) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "Your organization's policy does not allow remote clients to sign in.",
+        }),
+      );
+    }
+    if (session.method !== "browser-session-cookie") return Effect.void;
+    const requestOrigin = Option.getOrUndefined(
+      Option.map(requestUrl(request), (url) => url.origin),
+    );
+    const origin = request.headers.origin;
+    const write = request.method !== "GET" && request.method !== "HEAD";
+    if (
+      requestOrigin === undefined ||
+      !cfAccess.allowedOrigins.includes(requestOrigin) ||
+      (socket || write || origin !== undefined
+        ? origin !== requestOrigin
+        : request.headers["sec-fetch-site"] !== undefined &&
+          request.headers["sec-fetch-site"] !== "same-origin" &&
+          request.headers["sec-fetch-site"] !== "none")
+    ) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic: "Cloudflare Access browser sessions require an allowed HTTPS origin.",
+        }),
+      );
+    }
+    return Effect.void;
+  });
   const assertWorkOsSession = Effect.fn("EnvironmentAuth.assertWorkOsSession")((
     session: Pick<AuthenticatedSession, "subject" | "method">,
     request: HttpServerRequest.HttpServerRequest,
@@ -997,6 +1052,7 @@ export const make = Effect.gen(function* () {
     }
     return authenticateToken(credential.token).pipe(
       Effect.tap((session) => assertWorkOsSession(session, request, socket)),
+      Effect.tap((session) => assertCloudflareAccessSession(session, request, socket)),
       Effect.flatMap((session) => {
         if (session.proofKeyThumbprint) {
           if (!dpopToken || dpopToken !== credential.token) {

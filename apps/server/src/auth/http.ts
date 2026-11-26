@@ -1,9 +1,11 @@
 import {
+  authScopeResponse,
   authScopeRequiredResponse,
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthStandardClientScopes,
   AuthGrantScope,
+  type AuthSessionState,
   EnvironmentAuthInvalidError,
   type EnvironmentAuthInvalidReason,
   EnvironmentConnectApprovalPendingError,
@@ -35,6 +37,7 @@ import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
+import * as CloudflareAccessAuth from "./CloudflareAccessAuth.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
@@ -291,6 +294,7 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
+    const cfAccessAuth = yield* Effect.serviceOption(CloudflareAccessAuth.CloudflareAccessAuth);
 
     return handlers
       .handle(
@@ -318,6 +322,26 @@ export const layer = HttpApiBuilder.group(
                 result.expiresAt,
               );
               yield* appendCredentialResponseHeaders;
+            }
+            if (!result.authenticated && Option.isSome(cfAccessAuth)) {
+              const minted = yield* cfAccessAuth.value.tryAutoMintBrowserSession(request);
+              if (minted !== null) {
+                yield* appendSessionCookie(
+                  request,
+                  sessions.cookieName,
+                  minted.token,
+                  minted.expiresAt,
+                );
+                yield* appendCredentialResponseHeaders;
+                return {
+                  authenticated: true,
+                  auth: result.auth,
+                  ...authScopeResponse(minted.scopes),
+                  sessionMethod: minted.method,
+                  sessionId: minted.sessionId,
+                  expiresAt: DateTime.toUtc(minted.expiresAt),
+                } satisfies AuthSessionState;
+              }
             }
             return result;
           },
