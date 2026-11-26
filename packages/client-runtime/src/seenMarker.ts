@@ -1,4 +1,9 @@
-import type { Founder, MessageId, ThreadSeenMarker } from "@t3tools/contracts";
+import type {
+  Founder,
+  MessageId,
+  OrchestrationV2TimelineVisibility,
+  ThreadSeenMarker,
+} from "@t3tools/contracts";
 
 const SEEN_DWELL_MS = 2_000;
 
@@ -54,6 +59,20 @@ export interface SeenMessage {
   id: MessageId;
   role: string;
   streaming?: boolean;
+  /** An explicit `user_timeline` stamp makes a message new to the reader whoever wrote it. */
+  timelineVisibility?: OrchestrationV2TimelineVisibility | undefined;
+}
+
+/**
+ * Whether a message counts as new for "catch me up" and the new-messages line. A model reply
+ * always does. Anything else does only when the server stamped it for the user's own timeline,
+ * such as an agent-sent message, so a person's own sends never count.
+ */
+function isUnseenCandidate(message: SeenMessage): boolean {
+  return (
+    message.streaming !== true &&
+    (message.role === "assistant" || message.timelineVisibility === "user_timeline")
+  );
 }
 
 interface SeenEntry {
@@ -121,9 +140,7 @@ export function catchUpOffer(input: {
   if (input.lastSeenMessageId == null || input.seenAt == null || input.seenAt === "") return null;
   const index = input.messages.findIndex((message) => message.id === input.lastSeenMessageId);
   const after = index < 0 ? input.messages : input.messages.slice(index + 1);
-  const unseen = after.some(
-    (message) => message.role === "assistant" && message.streaming !== true,
-  );
+  const unseen = after.some(isUnseenCandidate);
   if (!unseen) return null;
   return { lastSeenMessageId: input.lastSeenMessageId, seenAt: input.seenAt };
 }
@@ -148,9 +165,7 @@ export function resolveUnseenDivider(input: {
   if (afterMessageId == null) return null;
   const index = input.messages.findIndex((message) => message.id === afterMessageId);
   if (index < 0) return null;
-  const count = input.messages
-    .slice(index + 1)
-    .filter((message) => message.role === "assistant" && message.streaming !== true).length;
+  const count = input.messages.slice(index + 1).filter(isUnseenCandidate).length;
   return count === 0 ? null : { afterMessageId, count };
 }
 

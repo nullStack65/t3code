@@ -1468,6 +1468,24 @@ describe("HTML renders in the timeline", () => {
     expect(turn(send("running")).some((entry) => entry.kind === "sent-message")).toBe(false);
   });
 
+  it("carries the server's timeline stamp from a sent message and from chat messages", () => {
+    const sentMessage = "Draft reply";
+    const stamped = {
+      ...base("render", 2),
+      status: "completed",
+      type: "dynamic_tool",
+      toolName: "mcp__t3-code__send_to_user",
+      input: { message: sentMessage },
+      output: { structuredContent: { sentMessage }, content: [] },
+      timelineVisibility: "user_timeline",
+    } as OrchestrationV2TurnItem;
+    const unstamped = { ...stamped, timelineVisibility: undefined } as OrchestrationV2TurnItem;
+    const sentEntry = (item: OrchestrationV2TurnItem) =>
+      turn(item).find((entry) => entry.kind === "sent-message");
+    expect(sentEntry(stamped)).toMatchObject({ timelineVisibility: "user_timeline" });
+    expect(sentEntry(unstamped)).not.toHaveProperty("timelineVisibility");
+  });
+
   it("hosts a captured MCP app after its tool row, from any provider's tool", () => {
     const mcpApp = {
       attachmentId: "render-thread-app-html",

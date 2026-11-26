@@ -250,3 +250,40 @@ describe("per founder", () => {
     kameron.dispose();
   });
 });
+
+describe("agent messages stamped for the user's timeline", () => {
+  const stamped = MessageId.make("message-agent-sent");
+  const plain = MessageId.make("message-agent-plain");
+  const conversation = [
+    { id: userId, role: "user" },
+    { id: plain, role: "user" },
+    { id: stamped, role: "user", timelineVisibility: "user_timeline" as const },
+  ];
+
+  it("counts a stamped agent-sent message as new, and an unstamped one as before", () => {
+    expect(resolveUnseenDivider({ messages: conversation, lastSeenMessageId: userId })).toEqual({
+      afterMessageId: userId,
+      count: 1,
+    });
+    expect(catchUpOffer({ messages: conversation, lastSeenMessageId: userId, seenAt })).toEqual({
+      lastSeenMessageId: userId,
+      seenAt,
+    });
+    expect(
+      catchUpOffer({ messages: conversation.slice(0, 2), lastSeenMessageId: userId, seenAt }),
+    ).toBeNull();
+  });
+
+  it("keeps counting every finished assistant message, folded or not", () => {
+    const withReplies = [
+      ...conversation.slice(0, 1),
+      { id: assistantId, role: "assistant", timelineVisibility: "agent_fold" as const },
+      { id: laterId, role: "assistant" },
+      { id: MessageId.make("message-streaming"), role: "assistant", streaming: true },
+    ];
+    expect(resolveUnseenDivider({ messages: withReplies, lastSeenMessageId: userId })).toEqual({
+      afterMessageId: userId,
+      count: 2,
+    });
+  });
+});

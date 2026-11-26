@@ -1,6 +1,7 @@
 import { ThreadStalenessWait } from "./waitStaleness.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
+import { OrchestrationV2TimelineVisibility } from "./timelineVisibility.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -2115,6 +2116,8 @@ const OrchestrationV2TurnItemBaseFields = {
       lastOrdinal: NonNegativeInt,
     }),
   ),
+  /** Absent on items stored before the stamp existed; clients then fall back on the run's origin. */
+  timelineVisibility: Schema.optional(OrchestrationV2TimelineVisibility),
   toolNonExecutionKind: Schema.optional(Schema.String),
   toolSurface: Schema.optional(ToolActivitySurface),
   toolIcon: Schema.optional(ToolActivityIcon),

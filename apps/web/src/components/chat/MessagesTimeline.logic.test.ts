@@ -1,3 +1,4 @@
+import type { ChatActivityContext } from "@t3tools/client-runtime/chat-activity";
 import { ScheduledTaskId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
@@ -5487,6 +5488,133 @@ describe("collapsing non-human activity", () => {
       "next-prompt",
     ]);
     expect(activityPillIdForEntry(conversation, "note", context)).toBeUndefined();
+  });
+
+  describe("explicit timeline visibility", () => {
+    const botRun = RunId.make("visibility-run");
+    const stampedToolItem = (
+      id: string,
+      timelineVisibility?: "user_timeline" | "agent_fold",
+    ): OrchestrationV2ProjectedTurnItem =>
+      ({
+        item: {
+          id,
+          type: "dynamic_tool",
+          status: "completed",
+          runId: botRun,
+          ...(timelineVisibility ? { timelineVisibility } : {}),
+        },
+      }) as unknown as OrchestrationV2ProjectedTurnItem;
+    const eventRow = (
+      id: string,
+      second: number,
+      timelineVisibility?: "user_timeline" | "agent_fold",
+    ): Extract<MessagesTimelineRow, { kind: "event" }> => ({
+      kind: "event",
+      id,
+      createdAt: time(second),
+      projectedItem: stampedToolItem(id, timelineVisibility),
+    });
+    const contextFor = (conversation: MessagesTimelineRow[]) =>
+      timelineActivityContext(
+        conversation.flatMap((row): TimelineEntry[] =>
+          row.kind === "message" ? [{ ...row, kind: "message" }] : [],
+        ),
+        [],
+        false,
+      );
+    const idsOf = (conversation: MessagesTimelineRow[], context?: ChatActivityContext) =>
+      collapseTimelineActivity(conversation, new Set(), context).map(({ id }) => id);
+
+    it("breaks the fold for an agent-run reply stamped user_timeline and renders it top-level", () => {
+      const conversation = [
+        messageRow("relay-1", 0, { runId: botRun, createdBy: "agent" }),
+        messageRow("quiet-reply", 1, { runId: botRun, role: "assistant" }),
+        messageRow("surfaced", 2, {
+          runId: botRun,
+          role: "assistant",
+          timelineVisibility: "user_timeline",
+        }),
+        messageRow("relay-2", 3, { runId: botRun, createdBy: "agent" }),
+      ];
+      const context = contextFor(conversation);
+      expect(idsOf(conversation, context)).toEqual([
+        "activity:relay-1",
+        "surfaced",
+        "activity:surfaced",
+      ]);
+      const [first, , second] = collapseTimelineActivity(conversation, new Set(), context);
+      expect(first).toMatchObject({ kind: "activity", count: 2 });
+      expect(second).toMatchObject({ kind: "activity", count: 1 });
+      // The same run without the stamp folds as one group, exactly as before.
+      const legacy = conversation.map((row): MessagesTimelineRow => {
+        if (row.kind !== "message") return row;
+        const { timelineVisibility: _stamp, ...message } = row.message;
+        return { ...row, message };
+      });
+      expect(idsOf(legacy, contextFor(legacy))).toEqual(["activity:relay-1"]);
+    });
+
+    it("breaks a contiguous run of folded rows around a stamped tool item", () => {
+      const conversation = [
+        messageRow("relay", 0, { runId: botRun, createdBy: "agent" }),
+        eventRow("folded-1", 1),
+        eventRow("surfaced-tool", 2, "user_timeline"),
+        eventRow("folded-2", 3),
+      ];
+      expect(idsOf(conversation)).toEqual([
+        "activity:relay",
+        "surfaced-tool",
+        "activity:surfaced-tool",
+      ]);
+    });
+
+    it("keeps contiguous agent_fold rows, stamped or not, in one group", () => {
+      const conversation = [
+        messageRow("relay", 0, { runId: botRun, createdBy: "agent" }),
+        eventRow("folded-1", 1),
+        eventRow("folded-2", 2, "agent_fold"),
+        {
+          kind: "sent-message",
+          id: "sent",
+          createdAt: time(3),
+          text: "x",
+          timelineVisibility: "agent_fold",
+        } as const,
+      ];
+      expect(idsOf(conversation)).toEqual(["activity:relay"]);
+      expect(collapseTimelineActivity(conversation, new Set())[0]).toMatchObject({ count: 4 });
+    });
+
+    it("breaks the fold for a work group holding a stamped tool call", () => {
+      const grouped: Extract<MessagesTimelineRow, { kind: "work" }> = {
+        ...workRow("work-stamped", 2),
+        groupedEntries: [
+          { projectedItem: stampedToolItem("tool-a"), tone: "tool" },
+          { projectedItem: stampedToolItem("tool-b", "user_timeline"), tone: "tool" },
+        ] as unknown as Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"],
+      };
+      const conversation = [
+        messageRow("relay", 0, { runId: botRun, createdBy: "agent" }),
+        workRow("work-plain", 1),
+        grouped,
+      ];
+      expect(idsOf(conversation)).toEqual(["activity:relay", "work-stamped"]);
+    });
+
+    it("keeps a sent message on the timeline by default and with its explicit stamp", () => {
+      const sent = (timelineVisibility?: "user_timeline") =>
+        ({
+          kind: "sent-message",
+          id: "sent",
+          createdAt: time(1),
+          text: "For the user",
+          ...(timelineVisibility ? { timelineVisibility } : {}),
+        }) as const;
+      const relay = messageRow("relay", 0, { runId: botRun, createdBy: "agent" });
+      expect(idsOf([relay, sent()])).toEqual(["activity:relay", "sent"]);
+      expect(idsOf([relay, sent("user_timeline")])).toEqual(["activity:relay", "sent"]);
+    });
   });
 
   it("keeps groups with failed child runs and pending approvals collapsed but marked", () => {

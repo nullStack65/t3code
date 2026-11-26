@@ -6,6 +6,7 @@ import {
   activityItemNeedsAttention,
   chatActivityContext,
   chatActivityGroups,
+  combineTimelineVisibilityStamps,
   isChatActivityMessage,
   summarizeChatActivity,
   type ChatActivityContext,
@@ -27,7 +28,11 @@ import {
   resolveMessageSender,
   sameMessageSender,
 } from "@t3tools/client-runtime/message-sender";
-import type { OrchestrationMessageSenderFilter } from "@t3tools/contracts";
+import {
+  resolveTimelineVisibility,
+  type OrchestrationMessageSenderFilter,
+  type OrchestrationV2TimelineVisibility,
+} from "@t3tools/contracts";
 import { renderCodexDirectivesForCopy } from "~/markdown/markdownText";
 import {
   commandDisplayText,
@@ -717,6 +722,7 @@ type MessagesTimelineRowContent =
       id: string;
       createdAt: string;
       text: string;
+      timelineVisibility?: OrchestrationV2TimelineVisibility;
     }
   | {
       kind: "mcp-app";
@@ -2278,6 +2284,9 @@ export function deriveMessagesTimelineRows(
         id: timelineEntry.id,
         createdAt: timelineEntry.createdAt,
         text: timelineEntry.text,
+        ...(timelineEntry.timelineVisibility !== undefined
+          ? { timelineVisibility: timelineEntry.timelineVisibility }
+          : {}),
       });
       continue;
     }
@@ -2562,7 +2571,48 @@ function activityRowRunIds(row: MessagesTimelineRow): readonly RunId[] {
   }
 }
 
+/**
+ * The server's stamp on what a row carries, if any. Message rows are left out because
+ * `isChatActivityMessage` already reads the stamp on the message itself.
+ */
+function activityRowTimelineVisibility(
+  row: MessagesTimelineRow,
+): OrchestrationV2TimelineVisibility | undefined {
+  switch (row.kind) {
+    case "sent-message":
+      return row.timelineVisibility;
+    case "work":
+    case "work-live":
+      return combineTimelineVisibilityStamps(
+        row.groupedEntries.map((entry) => entry.projectedItem?.item.timelineVisibility),
+      );
+    case "event":
+      return combineTimelineVisibilityStamps(
+        (row.subagents ?? [row.projectedItem]).map(({ item }) => item.timelineVisibility),
+      );
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A row folds into "N agent updates" only when it resolves to `agent_fold`. The run-based rules
+ * below are the default; an explicit stamp on the row's item overrides them, so an agent-started
+ * run can still put one message on the user's timeline.
+ */
 function activityRowIsBoundary(row: MessagesTimelineRow, context?: ChatActivityContext): boolean {
+  return (
+    resolveTimelineVisibility(
+      { timelineVisibility: activityRowTimelineVisibility(row) },
+      defaultActivityRowIsBoundary(row, context) ? "user" : "agent",
+    ) === "user_timeline"
+  );
+}
+
+function defaultActivityRowIsBoundary(
+  row: MessagesTimelineRow,
+  context?: ChatActivityContext,
+): boolean {
   if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return true;
   // A secret or a link is answered only on its own card, so it must not fold away.
   if (

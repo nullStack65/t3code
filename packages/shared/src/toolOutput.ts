@@ -256,6 +256,18 @@ export function sentMessageFromToolItem(item: {
   return output?.isError ? undefined : output?.sentMessage;
 }
 
+/**
+ * The stamp a finished tool call carries when its whole point is to reach the user. `send_to_user`
+ * shows text the agent wants read, so an agent-started run must never fold it into "agent updates".
+ * Other tools get none and keep the run's default.
+ */
+export function explicitTimelineVisibilityFromToolItem(item: {
+  readonly toolName: string | null | undefined;
+  readonly output?: unknown;
+}): "user_timeline" | undefined {
+  return sentMessageFromToolItem(item) === undefined ? undefined : "user_timeline";
+}
+
 /** The thread-owned file `preview_recording_stop` stored for the agent. */
 export function previewRecordingIdFromToolItem(item: {
   readonly toolName: string | null | undefined;

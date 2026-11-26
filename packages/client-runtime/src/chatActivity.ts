@@ -1,14 +1,19 @@
 import * as DateTime from "effect/DateTime";
 import {
   mentionedFounders,
+  resolveTimelineVisibility,
   type OrchestrationV2RunStatus,
+  type OrchestrationV2TimelineVisibility,
   type OrchestrationV2TurnItem,
   type RunId,
 } from "@t3tools/contracts";
 import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import { resolveMessageSender, type MessageSenderInput } from "./messageSender.ts";
 
-type ActivityMessage = MessageSenderInput & { readonly humanNote?: true };
+type ActivityMessage = MessageSenderInput & {
+  readonly humanNote?: true;
+  readonly timelineVisibility?: OrchestrationV2TimelineVisibility | undefined;
+};
 
 export interface ChatActivityEntry {
   readonly createdAt: string;
@@ -118,6 +123,36 @@ export function chatActivityContext(
 export type ChatActivityContext = ReturnType<typeof chatActivityContext>;
 
 export function isChatActivityMessage(
+  message: ActivityMessage,
+  runId: RunId | null,
+  context: ChatActivityContext | undefined,
+): boolean {
+  // Whoever started the run only sets the default; a stamp on the message overrides it.
+  return (
+    resolveTimelineVisibility(
+      message,
+      isChatActivityByDefault(message, runId, context) ? "agent" : "user",
+    ) === "agent_fold"
+  );
+}
+
+/**
+ * One timeline row can carry several items (a tool group, a subagent card). The row stands on its
+ * own if any of them does, because folding it would hide that item; otherwise a stamp that says
+ * `agent_fold` folds it. Undefined means nothing was stamped and the run's default applies.
+ */
+export function combineTimelineVisibilityStamps(
+  stamps: Iterable<OrchestrationV2TimelineVisibility | undefined>,
+): OrchestrationV2TimelineVisibility | undefined {
+  let combined: OrchestrationV2TimelineVisibility | undefined;
+  for (const stamp of stamps) {
+    if (stamp === "user_timeline") return stamp;
+    if (stamp !== undefined) combined = stamp;
+  }
+  return combined;
+}
+
+function isChatActivityByDefault(
   message: ActivityMessage,
   runId: RunId | null,
   context: ChatActivityContext | undefined,
