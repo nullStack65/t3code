@@ -394,7 +394,13 @@ it.each([
       { ...activity, reviewThreads: [thread] },
       "abc123",
     );
-    assert.strictEqual(input.settledReview, `- file.ts (resolved, ghost): ${prefix}${ending}`);
+    assert.match(
+      input.settledReview ?? "",
+      new RegExp(
+        `^<untrusted-pr-comment-[0-9a-f]+>\\n- file\\.ts \\(resolved, ghost\\): ${prefix}${ending}\\n</untrusted-pr-comment-`,
+        "u",
+      ),
+    );
   },
 );
 
