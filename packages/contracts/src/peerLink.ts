@@ -225,6 +225,20 @@ export const PeerLinkThreadItemInput = Schema.Struct({
 });
 export type PeerLinkThreadItemInput = typeof PeerLinkThreadItemInput.Type;
 
+/** Sends a message to a thread on a linked environment, proxied through this server's peer link. */
+export const PeerLinkThreadSendInput = Schema.Struct({
+  ...PeerLinkThreadInput.fields,
+  message: TrimmedNonEmptyString,
+});
+export type PeerLinkThreadSendInput = typeof PeerLinkThreadSendInput.Type;
+
+export const PeerLinkThreadSendResult = Schema.Struct({
+  messageId: Schema.String,
+  runId: Schema.optionalKey(Schema.String),
+  status: Schema.String,
+});
+export type PeerLinkThreadSendResult = typeof PeerLinkThreadSendResult.Type;
+
 /** Why a linked environment's thread could not be read, with the reason in words. */
 export class PeerLinkThreadReadError extends Schema.TaggedError<PeerLinkThreadReadError>()(
   "PeerLinkThreadReadError",

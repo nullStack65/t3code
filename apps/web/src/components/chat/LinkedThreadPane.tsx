@@ -1,7 +1,9 @@
 import { isLinkedThreadWorking, linkedThreadFailure } from "@t3tools/client-runtime/linked-thread";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 import { T, useGT, useMessages, Var } from "gt-react";
-import { EyeIcon, PlugIcon } from "lucide-react";
+import { ArrowUpIcon, EyeIcon, PlugIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { useStableCallback } from "../../hooks/useStableCallback";
@@ -12,6 +14,9 @@ import {
   useConnectLinkedEnvironment,
   useLinkedThreadView,
 } from "../../state/linkedThreadView";
+import { peerLinkEnvironment } from "../../state/peerLinks";
+import { useEnvironmentScope } from "../../state/session";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./ComposerBannerStack";
@@ -27,33 +32,83 @@ import type { MessagesTimelineHistoryControls } from "./MessagesTimeline";
 import { ReadOnlyThreadTimeline } from "./ReadOnlyThreadTimeline";
 
 /**
- * Stands where a composer would: the thread takes no messages from here. `action` is the one way
- * forward it offers, and `notice` what came of it.
+ * Composer area for a linked environment's thread. When `onSend` is provided (the client holds
+ * operate scope on `via`), renders a message input proxied over the hub's peer link; otherwise
+ * renders a read-only status bar.
  */
 function LinkedThreadComposer(props: {
   /** The linked environment the thread is on. */
   readonly label: string;
   /** The environment that reads it. */
   readonly via: string;
+  readonly title: string;
   readonly working: boolean;
+  readonly sending?: boolean;
+  readonly onSend?: ((message: string) => Promise<boolean>) | undefined;
   readonly action?: ReactNode;
   readonly notice?: ComposerBannerStackItem | null;
 }) {
-  const { label, via } = props;
+  const { label, via, title, onSend, sending = false } = props;
   const gt = useGT();
+  const [draft, setDraft] = useState("");
+  const trimmed = draft.trim();
+  const submit = async () => {
+    if (!onSend || sending || trimmed.length === 0) return;
+    const ok = await onSend(trimmed);
+    if (ok) setDraft("");
+  };
   return (
     <div className="chat-composer-lane flex shrink-0 flex-col gap-1 pt-1.5 pb-4 sm:pt-2 sm:pb-5">
       {props.notice ? <ComposerBannerStack items={[props.notice]} detached /> : null}
       <ComposerSurface.Shell>
         <ComposerSurface.Host>
-          <div className="relative z-10">
+          <div className="relative z-10 flex flex-col">
+            {onSend ? (
+              <form
+                className="flex items-end gap-2 px-3 pt-2.5 pb-1.5"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submit();
+                }}
+              >
+                <textarea
+                  rows={1}
+                  value={draft}
+                  disabled={sending}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing
+                    ) {
+                      event.preventDefault();
+                      void submit();
+                    }
+                  }}
+                  placeholder={gt("Message {title}", { title })}
+                  aria-label={gt("Message {title}", { title })}
+                  className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+                />
+                <Button
+                  type="submit"
+                  size="icon-sm"
+                  disabled={sending || trimmed.length === 0}
+                  aria-label={gt("Send message")}
+                >
+                  {sending ? <Spinner size="xs" /> : <ArrowUpIcon className="size-4" />}
+                </Button>
+              </form>
+            ) : null}
             <ReadOnlyComposerBar actions={props.action}>
-              <ReadOnlyComposerLead>
-                <EyeIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 truncate font-medium text-foreground">
-                  <T>Read-only</T>
-                </span>
-              </ReadOnlyComposerLead>
+              {onSend ? null : (
+                <ReadOnlyComposerLead>
+                  <EyeIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 truncate font-medium text-foreground">
+                    <T>Read-only</T>
+                  </span>
+                </ReadOnlyComposerLead>
+              )}
               <ReadOnlyComposerStatus role="status">
                 {props.working
                   ? gt("On {label} via {via} · Working", { label, via })
@@ -93,6 +148,40 @@ export function LinkedThread(props: {
   const [turnItemSource] = useState(() => linkedThreadItemSource(surface));
   const label = surface.label;
   const projection = view?.thread.projection ?? null;
+  const canSend = useEnvironmentScope(surface.viaEnvironmentId, AuthOrchestrationOperateScope);
+  const sendLinkedMessage = useAtomCommand(peerLinkEnvironment.sendThreadMessage, {
+    reportFailure: false,
+  });
+  const [sending, setSending] = useState(false);
+  const resolvedTitle = linkedThreadTitle(
+    { title: projection?.thread.title || surface.title },
+    gt("Thread on {label}", { label }),
+  );
+  const handleSend = useStableCallback(async (message: string): Promise<boolean> => {
+    setSending(true);
+    try {
+      const result = await sendLinkedMessage({
+        environmentId: surface.viaEnvironmentId,
+        input: {
+          environmentId: surface.environmentId,
+          threadId: surface.threadId,
+          message,
+        },
+      });
+      if (AsyncResult.isSuccess(result)) {
+        return true;
+      }
+      const squashed = Cause.squash(result.cause);
+      toastManager.add({
+        type: "error",
+        title: gt("Message not sent"),
+        description: squashed instanceof Error ? squashed.message : String(squashed),
+      });
+      return false;
+    } finally {
+      setSending(false);
+    }
+  });
   const connection = useConnectLinkedEnvironment(panelRef, surface);
   const connectState = connection.state;
   const connecting = connectState.phase === "connecting";
@@ -209,7 +298,10 @@ export function LinkedThread(props: {
           <LinkedThreadComposer
             label={label}
             via={via}
+            title={resolvedTitle}
             working={false}
+            sending={sending}
+            onSend={canSend ? handleSend : undefined}
             notice={connectNotice}
             action={connectAction}
           />
@@ -244,7 +336,10 @@ export function LinkedThread(props: {
               <LinkedThreadComposer
                 label={label}
                 via={via}
+                title={resolvedTitle}
                 working={working}
+                sending={sending}
+                onSend={canSend ? handleSend : undefined}
                 notice={connectNotice}
                 action={connectAction}
               />

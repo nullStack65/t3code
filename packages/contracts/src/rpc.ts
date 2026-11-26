@@ -37,6 +37,8 @@ import {
   PeerLinkThreadInput,
   PeerLinkThreadItemInput,
   PeerLinkThreadReadError,
+  PeerLinkThreadSendInput,
+  PeerLinkThreadSendResult,
 } from "./peerLink.ts";
 import { LinkedSidebarInput, LinkedSidebarResult } from "./linkedSidebar.ts";
 
@@ -618,6 +620,7 @@ export const WS_METHODS = {
   peerLinksSubscribeThread: "peerLinks.subscribeThread",
   peerLinksThreadHistoryPage: "peerLinks.threadHistoryPage",
   peerLinksThreadItem: "peerLinks.threadItem",
+  peerLinksSendThreadMessage: "peerLinks.sendThreadMessage",
   peerLinksPairClient: "peerLinks.pairClient",
   peerLinksPairLink: "peerLinks.pairLink",
   serverGetSettings: "server.getSettings",
@@ -1039,6 +1042,12 @@ const WsPeerLinksThreadItemRpc = Rpc.make(WS_METHODS.peerLinksThreadItem, {
   payload: PeerLinkThreadItemInput,
   success: OrchestrationV2RpcSchemas.getTurnItem.output,
   error: Schema.Union([PeerLinkThreadReadError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerLinksSendThreadMessageRpc = Rpc.make(WS_METHODS.peerLinksSendThreadMessage, {
+  payload: PeerLinkThreadSendInput,
+  success: PeerLinkThreadSendResult,
+  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
 });
 
 const WsPeerLinksPairClientRpc = Rpc.make(WS_METHODS.peerLinksPairClient, {
@@ -2595,6 +2604,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksSubscribeThreadRpc,
   WsPeerLinksThreadHistoryPageRpc,
   WsPeerLinksThreadItemRpc,
+  WsPeerLinksSendThreadMessageRpc,
   WsPeerLinksPairClientRpc,
   WsPeerLinksPairLinkRpc,
   WsServerDiscoverSourceControlRpc,

@@ -155,6 +155,11 @@ export function createPeerLinkEnvironmentAtoms<R, E>(
       tag: WS_METHODS.peerLinksThreadItem,
       idleTtlMs: 0,
     }),
+    /** Sends a message to a linked environment's thread through this server's peer link. */
+    sendThreadMessage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-links:send-thread-message",
+      tag: WS_METHODS.peerLinksSendThreadMessage,
+    }),
     /** Asks for a one-time pairing with a linked environment. Its answer is a credential: never cached. */
     pairClient: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-links:pair-client",
