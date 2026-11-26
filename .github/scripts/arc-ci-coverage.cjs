@@ -120,33 +120,24 @@ function parseWorkflow(source) {
     }
     const stepStart = line.match(/^ {6}- (.*)$/);
     if (stepStart) {
-      current.directory = "";
-      current.stepCondition = null;
-      const inlineIf = stepStart[1].match(/^if:\s*(.+)$/);
-      if (inlineIf) current.stepCondition = unquote(inlineIf[1]);
+      current.step = { directory: "", conditional: false, run: [] };
+      current.steps.push(current.step);
+      if (/^if:/.test(stepStart[1])) current.step.conditional = true;
       continue;
     }
-    const stepIf = line.match(/^ {8}if:\s*(.+)$/);
-    if (stepIf) {
-      current.stepCondition = unquote(stepIf[1]);
+    if (!current.step) continue;
+    if (/^ {8}if:/.test(line)) {
+      current.step.conditional = true;
       continue;
     }
     const directory = line.match(/^ {8}working-directory:\s*(.+)$/);
     if (directory) {
-      current.directory = unquote(directory[1]);
+      current.step.directory = unquote(directory[1]);
       continue;
     }
     const run = line.match(/^ {8}run:\s*(\||>)?\s*$/);
     if (run) {
-      const step = {
-        directory: current.directory ?? "",
-        condition: current.stepCondition ?? null,
-        run: [],
-      };
-      current.steps.push(step);
-      current.run = step.run;
-      current.directory = "";
-      current.stepCondition = null;
+      current.run = current.step.run;
       inRun = true;
       runIndent = 8;
     }
@@ -154,24 +145,14 @@ function parseWorkflow(source) {
   return jobs;
 }
 
-function isFalsyStepCondition(condition) {
-  if (!condition) return false;
-  const unwrapped = condition
-    .trim()
-    .replace(/^\$\{\{\s*/, "")
-    .replace(/\s*\}\}$/, "")
-    .trim()
-    .toLowerCase();
-  return unwrapped === "false" || unwrapped === "0" || unwrapped === "''" || unwrapped === '""' || unwrapped === "!true";
-}
-
 // A test path only counts when a worker actually invokes it. A path that only
-// appears inside a comment or a branch that never runs would otherwise let the
-// guard pass while the required check runs nothing.
+// appears inside a comment, a branch that never runs, or a step with any `if:`
+// would otherwise let the guard pass while the required check runs nothing.
+// Step conditions are not evaluated: no covering step needs one.
 function testsIn(job) {
   const found = [];
   for (const step of job.steps) {
-    if (isFalsyStepCondition(step.condition)) continue;
+    if (step.conditional) continue;
     const prefix = step.directory ? `${step.directory}/` : "";
     let skipping = false;
     for (const line of step.run) {

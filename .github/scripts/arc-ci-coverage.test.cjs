@@ -51,22 +51,35 @@ test("an aggregator that runs on cancellation fails the check", () => {
   );
 });
 
-test("a covering step gated by if: ${{ false }} or if: false fails the check", () => {
+test("a covering step with any step-level if: fails the check", () => {
   const stepAnchor = `            ${REQUIRED_TESTS[0]} \\\n`;
   const idx = workflow.indexOf(stepAnchor);
   assert.ok(idx > 0);
   const runIdx = workflow.lastIndexOf("        run: |", idx);
   assert.ok(runIdx > 0);
+  const stepIdx = workflow.lastIndexOf("      - ", runIdx);
+  const stepEnd = workflow.indexOf("\n      - ", idx);
+  assert.ok(stepIdx > 0 && stepEnd > idx);
 
-  const disabledExpr =
-    workflow.slice(0, runIdx) + "        if: ${{ false }}\n" + workflow.slice(runIdx);
-  assert.ok(
-    checkCoverage(disabledExpr).some((problem) => problem.includes(REQUIRED_TESTS[0])),
+  const conditions = [
+    "if: ${{ false }}",
+    "if: false",
+    "if: false # disabled",
+    "if: ${{ false && github.ref == 'x' }}",
+    "if: github.event_name == 'never'",
+  ];
+  const variants = conditions.flatMap((condition) => [
+    workflow.slice(0, runIdx) + `        ${condition}\n` + workflow.slice(runIdx),
+    workflow.slice(0, stepEnd) + `\n        ${condition}` + workflow.slice(stepEnd),
+  ]);
+  variants.push(
+    workflow.slice(0, stepIdx) + "      - if: false\n        " + workflow.slice(stepIdx + 8),
   );
-
-  const disabledLiteral =
-    workflow.slice(0, runIdx) + "        if: false\n" + workflow.slice(runIdx);
-  assert.ok(
-    checkCoverage(disabledLiteral).some((problem) => problem.includes(REQUIRED_TESTS[0])),
-  );
+  for (const variant of variants) {
+    assert.notEqual(variant, workflow);
+    assert.ok(
+      checkCoverage(variant).some((problem) => problem.includes(REQUIRED_TESTS[0])),
+      variant.slice(stepIdx, stepEnd + 80),
+    );
+  }
 });
