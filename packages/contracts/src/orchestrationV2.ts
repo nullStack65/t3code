@@ -1765,6 +1765,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   /** A human side note. It is stored and shown, and never sent to the provider. */
   humanNote: Schema.optional(Schema.Literal(true)),
   seenMarker: Schema.optional(ThreadSeenMarkerSummary),
+  /** Absent on messages stored before the stamp existed; clients then fall back on the run's origin. */
+  timelineVisibility: Schema.optional(OrchestrationV2TimelineVisibility),
   /**
    * The message is the script a provider-native workflow run executes, not prose. Clients show
    * the workflow's opening instead and keep the script behind a disclosure.

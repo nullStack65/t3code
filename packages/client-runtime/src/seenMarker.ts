@@ -59,20 +59,21 @@ export interface SeenMessage {
   id: MessageId;
   role: string;
   streaming?: boolean;
-  /** An explicit `user_timeline` stamp makes a message new to the reader whoever wrote it. */
+  /** Who created the message (`"user"` vs `"agent"`). Human user messages are never unseen. */
+  createdBy?: string | undefined;
+  /** An explicit `user_timeline` stamp makes an agent/non-user message new to the reader. */
   timelineVisibility?: OrchestrationV2TimelineVisibility | undefined;
 }
 
 /**
  * Whether a message counts as new for "catch me up" and the new-messages line. A model reply
- * always does. Anything else does only when the server stamped it for the user's own timeline,
- * such as an agent-sent message, so a person's own sends never count.
+ * always does. Anything else does only when it is not a human founder's own message and the server
+ * stamped it for the user's own timeline, such as an agent-sent message.
  */
 function isUnseenCandidate(message: SeenMessage): boolean {
-  return (
-    message.streaming !== true &&
-    (message.role === "assistant" || message.timelineVisibility === "user_timeline")
-  );
+  if (message.streaming === true) return false;
+  if (message.role === "assistant") return true;
+  return message.timelineVisibility === "user_timeline" && message.createdBy !== "user";
 }
 
 interface SeenEntry {
