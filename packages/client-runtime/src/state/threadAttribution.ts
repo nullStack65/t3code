@@ -8,6 +8,8 @@ import {
   type ThreadSender,
 } from "@t3tools/contracts";
 import { ThreadAttribution } from "@t3tools/contracts/settings";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 export const THREAD_ATTRIBUTIONS = ThreadAttribution.literals;
 
@@ -122,12 +124,19 @@ export function launchingThreadIdOf(thread: AttributableThread): string | null {
 export function threadSenderLine(
   attribution: ThreadAttribution,
   launcherTitle: string | null,
+  resolve: MFunctionType = mFallback,
 ): { readonly label: string; readonly byAgent: boolean } {
-  const from = launcherTitle ? `, from “${launcherTitle}”` : "";
   if (attribution === "unknown")
     return launcherTitle
-      ? { label: `An agent${from}`, byAgent: true }
-      : { label: "Sender unknown", byAgent: false };
+      ? { label: resolve(msg("An agent, from “{title}”", { title: launcherTitle })), byAgent: true }
+      : { label: resolve(msg("Sender unknown")), byAgent: false };
   const byAgent = attribution.endsWith("-agents");
-  return { label: `${THREAD_ATTRIBUTION_LABELS[attribution]}${byAgent ? from : ""}`, byAgent };
+  const who = THREAD_ATTRIBUTION_LABELS[attribution];
+  return {
+    label:
+      byAgent && launcherTitle
+        ? resolve(msg("{who}, from “{title}”", { who, title: launcherTitle }))
+        : who,
+    byAgent,
+  };
 }

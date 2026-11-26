@@ -46,17 +46,25 @@ export function npmLauncherPackageManifest(version: string, databaseMigration: n
   };
 }
 
-/** Highest server migration id, from the `NNN_Name.ts` files the server registers. */
+/**
+ * Highest server migration id, from the manifest the server runs. File names cannot say: the
+ * Closura fork numbers upstream's later migrations above its own, so a file's number is not
+ * always its id. The manifest lines read `[116+UPSTREAM_MIGRATION_ID_OFFSET, "Name", ...]` there.
+ */
 const latestServerMigrationId = Effect.fn("latestServerMigrationId")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const dir = yield* path.fromFileUrl(
-    new URL("../apps/server/src/persistence/Migrations/", import.meta.url),
+  const source = yield* fs.readFileString(
+    yield* path.fromFileUrl(
+      new URL("../apps/server/src/persistence/Migrations.ts", import.meta.url),
+    ),
   );
-  const ids = (yield* fs.readDirectory(dir)).flatMap((name) => {
-    const id = /^(\d+)_\w+\.ts$/.exec(name)?.[1];
-    return id === undefined ? [] : [Number(id)];
-  });
+  const offset = Number(
+    /export const UPSTREAM_MIGRATION_ID_OFFSET = (\d+);/.exec(source)?.[1] ?? 0,
+  );
+  const ids = [
+    ...source.matchAll(/^ {2}\[(\d+)(\s*\+\s*UPSTREAM_MIGRATION_ID_OFFSET)?,\s*"\w+",\s*\w+\],$/gm),
+  ].map(([, id, shifted]) => Number(id) + (shifted === undefined ? 0 : offset));
   return Math.max(0, ...ids);
 });
 

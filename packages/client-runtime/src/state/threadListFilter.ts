@@ -1,6 +1,8 @@
 import {
   effectiveInboxFilter,
+  type Founder,
   InboxChoice,
+  isHiddenFromFounder,
   matchesPrimaryInbox,
   primaryInbox,
   type EnvironmentId,
@@ -16,11 +18,16 @@ export interface ThreadListFilter {
   readonly inboxes: ReadonlyArray<InboxChoice>;
   readonly hiddenEnvironmentIds: ReadonlyArray<EnvironmentId>;
   readonly hiddenAttributions: ReadonlyArray<ThreadAttribution>;
+  /**
+   * The founder reading this list. Jeff's list never holds Kameron's private threads or bots,
+   * whatever the inbox checkboxes say (`isHiddenFromFounder`). Absent: no founder chosen.
+   */
+  readonly viewingFounder?: Founder | undefined;
 }
 
 interface FilterableThread {
   readonly environmentId: EnvironmentId;
-  /** Set on a standing bot. Those stay listed for both founders. */
+  /** Set on a standing bot. Those bypass the inbox and From checkboxes. */
   readonly standing?: unknown;
   readonly archivedAt?: unknown;
   readonly source: {
@@ -41,6 +48,7 @@ export const threadListFilterOf = (
   inboxes: effectiveInboxFilter(settings),
   hiddenEnvironmentIds: settings.sidebarHiddenEnvironmentIds ?? [],
   hiddenAttributions: settings.sidebarHiddenThreadAttributions ?? [],
+  viewingFounder: settings.founderInboxOwner,
 });
 
 /** Inbox membership from what a thread or an older settled group carries. */
@@ -53,7 +61,7 @@ export const matchesListedInboxes = (
   // Agent-created threads from before inbox routing carry no Agents routing.
   (inboxes.includes("agents") && agentCreated && inbox === null);
 
-/** A non-archived standing bot stays in the list for both founders. */
+/** A non-archived standing bot stays in the list unless it is private to the other founder. */
 export const standingBotBypassesListFilters = (thread: {
   readonly standing?: unknown;
   readonly archivedAt?: unknown;
@@ -66,6 +74,8 @@ export const matchesThreadListFilter = (
   attribution?: ThreadAttribution,
 ) => {
   if (filter.hiddenEnvironmentIds.includes(thread.environmentId)) return false;
+  // Private to the other founder: hidden even for a standing bot, which otherwise bypasses.
+  if (isHiddenFromFounder(thread.source.inbox, filter.viewingFounder)) return false;
   // Inbox and From checkboxes hide ordinary threads. A standing bot is hidden only by
   // archiving it or by hiding its environment. Background attention must not drop it.
   if (standingBotBypassesListFilters(thread)) return true;
@@ -87,6 +97,8 @@ export const matchesOlderSettledGroup = (
   owners: FounderByEnvironmentId,
 ) =>
   !filter.hiddenEnvironmentIds.includes(environmentId) &&
+  // A group counts only its primary inbox, so Kameron-filed groups are the ones Jeff can tell apart.
+  !(filter.viewingFounder === "jeff" && group.inbox === "kameron") &&
   !filter.hiddenAttributions.includes(attributionOfSender(group, owners[environmentId])) &&
   matchesListedInboxes(group.inbox, group.agentCreated, filter.inboxes);
 

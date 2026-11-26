@@ -22,30 +22,39 @@ vi.mock("../../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../state/session")>()),
   readEnvironmentScope: (environmentId: string) => !net.denied.has(environmentId),
 }));
-vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/attachments")>()),
-  verifyPersistedAttachmentUpload: async (input: {
-    readonly environmentId: string;
-    readonly attachmentId: string;
-  }) => {
-    net.verifications.push({
-      environmentId: input.environmentId,
-      attachmentId: input.attachmentId,
-    });
-    return { status: "verified" as const };
-  },
-  runAttachmentUploadCycle: async (input: {
-    readonly environmentId: string;
-    readonly upload: { readonly name: string };
-  }) => {
-    net.cycles.push({ environmentId: input.environmentId, name: input.upload.name });
-    if (net.failNextCycle) {
-      net.failNextCycle = false;
-      return { status: "failed" as const, step: "transfer" as const, error: new Error("lost") };
-    }
-    return { status: "uploaded" as const, attachmentId: `upload-${net.cycles.length}` };
-  },
-}));
+vi.mock("@t3tools/client-runtime/state/attachments", async (importOriginal) => {
+  const { Effect } = await import("effect");
+  return {
+    ...(await importOriginal<typeof import("@t3tools/client-runtime/state/attachments")>()),
+    verifyPersistedAttachmentUpload: (input: {
+      readonly environmentId: string;
+      readonly attachmentId: string;
+    }) =>
+      Effect.sync(() => {
+        net.verifications.push({
+          environmentId: input.environmentId,
+          attachmentId: input.attachmentId,
+        });
+        return { status: "verified" as const };
+      }),
+    runAttachmentUploadCycle: (input: {
+      readonly environmentId: string;
+      readonly upload: { readonly name: string };
+    }) =>
+      Effect.sync(() => {
+        net.cycles.push({ environmentId: input.environmentId, name: input.upload.name });
+        if (net.failNextCycle) {
+          net.failNextCycle = false;
+          return {
+            status: "failed" as const,
+            step: "transfer" as const,
+            error: new Error("lost"),
+          };
+        }
+        return { status: "uploaded" as const, attachmentId: `upload-${net.cycles.length}` };
+      }),
+  };
+});
 // Connection state and session generation per machine, which the test changes.
 const connection = vi.hoisted(() => ({
   state: new Map<string, unknown>(),
@@ -82,7 +91,8 @@ vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => {
       const { environmentId } = target as { environmentId: string };
       net.admissions.push({ environmentId, commandId: admission.commandId! });
       if (net.hold) await net.hold;
-      if (net.origin.answer === "lost") return Result.failure(CauseModule.die("connection lost"));
+      // A lost connection carries no text from the origin; a text would be shown as the reason.
+      if (net.origin.answer === "lost") return Result.failure(CauseModule.die(undefined));
       if (net.origin.answer !== "bound")
         return Result.failure(
           CauseModule.fail(

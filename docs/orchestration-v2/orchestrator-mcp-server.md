@@ -432,6 +432,20 @@ can take a steer without interrupting the tool in progress, and otherwise waits
 for the next run. The stored setting records who changed it. A thread cannot
 change its own: the caller has to be another thread or a client.
 
+`set_redirect` retires a thread behind a replacement: `replacedByThreadId` names
+the replacement, and `null` clears the tombstone. A retired thread takes no
+provider turn. Every `t3_thread_send`, scheduled task, pull request watch and
+event subscription aimed at it goes to the live thread at the end of its chain
+(at most 8 hops) and appends one line to the redirect ledger,
+`<state dir>/retired-thread-redirects.jsonl` unless `RETIRED_REDIRECT_LEDGER`
+names another file. A line holds ids, the source kind and a timestamp, never
+message text. The write is refused for a self-redirect, a missing or deleted
+replacement, or a link that would close a loop or lengthen a chain past the
+limit. A chain that cannot be resolved later fails closed: the wake is dropped
+or refused, never delivered to the retired thread. Work already queued or
+running when the tombstone is written is not cancelled, and a continuation of a
+retired thread's own run is refused rather than redirected.
+
 The result includes the command ID and durable event sequence together with the
 resultant title, title-regeneration marker, and linked pull request. Reusing a
 `clientRequestId` for the same action and thread replays the same command

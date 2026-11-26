@@ -36,6 +36,7 @@ export function CatchMeUpControl(props: {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- capture this founder's place once per open, before this visit advances it
   useEffect(() => {
     if (key === null || !props.shellReady) return;
+    // oxlint-disable-next-line react/set-state-in-effect -- the open captures the founder's place once, before this visit advances it
     setSnapshot((current) =>
       current?.key === key
         ? current

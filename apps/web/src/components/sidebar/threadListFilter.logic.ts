@@ -1,6 +1,7 @@
 import {
   matchesListedInboxes,
   standingBotBypassesListFilters,
+  matchesThreadListFilter,
   type ThreadListFilter,
 } from "@t3tools/client-runtime/state/thread-list-filter";
 import {
@@ -14,6 +15,7 @@ import {
   founderInboxLane,
   Founder,
   InboxChoice,
+  isHiddenFromFounder,
   primaryInbox,
   type EnvironmentId,
   type OrchestrationV2ThreadShell,
@@ -41,6 +43,24 @@ interface FilterableThread {
     readonly inbox?: ThreadInbox | null | undefined;
     readonly createdBy?: string | undefined;
   };
+}
+
+/**
+ * Whether the Inbox menu must keep `Shared` checked: with only the founder's own inbox
+ * plus `Shared` selected, unchecking `Shared` would be a founder-only selection.
+ */
+export function inboxKeepsSharedChecked(
+  inbox: InboxChoice,
+  filter: ThreadListFilter,
+  owner: Founder | undefined,
+) {
+  return (
+    inbox === "shared" &&
+    filter.inboxes.includes("shared") &&
+    owner !== undefined &&
+    filter.inboxes.length === 2 &&
+    filter.inboxes.includes(owner)
+  );
 }
 
 const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -183,10 +203,10 @@ export const SIDEBAR_FILTER_POPUP_CLASS = "w-[40rem] max-w-[calc(100vw-1rem)]";
 /** Labels stay one full line beside the four count columns. */
 export const SIDEBAR_FILTER_OPTION_LABEL_CLASS = "min-w-[16rem] shrink-0 whitespace-nowrap";
 
-/** The chosen founder's inbox first, then Agents, so the common pair sits together. */
+/** The default pair comes first for a founder. */
 export const inboxMenuOrder = (owner: Founder | undefined): ReadonlyArray<InboxChoice> => {
   const first = owner ?? Founder.literals[0];
-  return [first, "agents", ...Founder.literals.filter((founder) => founder !== first), "shared"];
+  return [first, "shared", "agents", ...Founder.literals.filter((founder) => founder !== first)];
 };
 
 /**
@@ -295,6 +315,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
     }
   };
   for (const thread of threads) {
+    if (isHiddenFromFounder(thread.source.inbox, filter.viewingFounder)) continue;
     tally({
       environmentId: thread.environmentId,
       inbox: primaryInbox(thread.source.inbox),
@@ -306,6 +327,7 @@ export function threadListFilterCounts<T extends FilterableThread>(
     });
   }
   for (const group of olderGroups) {
+    if (filter.viewingFounder === "jeff" && group.inbox === "kameron") continue;
     tally({ ...group, bucket: "settled", amount: group.count });
   }
   return { inboxes, environments, from, unclassified };

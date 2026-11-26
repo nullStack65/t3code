@@ -102,6 +102,58 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
       }).pipe(Effect.provide(layerEnvironmentAuth())),
     );
 
+    it.effect(
+      "revokes AuthKit browser sessions when the policy does not allow remote clients",
+      () =>
+        Effect.gen(function* () {
+          const sessions = yield* SessionStore.SessionStore;
+          const browser = yield* sessions.issue({
+            subject: "workos:fixture",
+            method: "browser-session-cookie",
+          });
+          const desktop = yield* sessions.issue({
+            subject: "workos:fixture",
+            method: "bearer-access-token",
+          });
+
+          yield* EnvironmentAuth.make.pipe(
+            Effect.provide(
+              Layer.merge(ManagedPolicy.layerTest(desktopAndLocalOnly), layerServerConfig()),
+            ),
+          );
+
+          const remaining = (yield* sessions.listActive()).map((session) => session.sessionId);
+          assert.notInclude(remaining, browser.sessionId);
+          assert.include(remaining, desktop.sessionId);
+        }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
+    it.effect("keeps AuthKit browser sessions when the policy allows remote clients", () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const browser = yield* sessions.issue({
+          subject: "workos:fixture",
+          method: "browser-session-cookie",
+        });
+
+        yield* EnvironmentAuth.make.pipe(
+          Effect.provide(
+            Layer.merge(
+              ManagedPolicy.layerTest({
+                schemaVersion: 1,
+                organization: "Example Corp",
+                limits: { connect: false },
+              }),
+              layerServerConfig(),
+            ),
+          ),
+        );
+
+        const remaining = (yield* sessions.listActive()).map((session) => session.sessionId);
+        assert.include(remaining, browser.sessionId);
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
     it.effect("revokes only T3 Connect clients when the policy keeps remote clients", () =>
       Effect.gen(function* () {
         const sessions = yield* SessionStore.SessionStore;

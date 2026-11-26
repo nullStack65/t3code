@@ -1,8 +1,11 @@
 import {
+  authScopeResponse,
   authScopeRequiredResponse,
+  AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthStandardClientScopes,
   AuthGrantScope,
+  type AuthSessionState,
   EnvironmentAuthInvalidError,
   type EnvironmentAuthInvalidReason,
   EnvironmentConnectApprovalPendingError,
@@ -34,6 +37,7 @@ import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
+import * as CloudflareAccessAuth from "./CloudflareAccessAuth.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
@@ -192,7 +196,11 @@ export const authenticateMediaRequest =
 
 export const failEnvironmentInternal =
   /* Request instrumentation already owns the span; keep this helper in that context. */
-  Effect.fnUntraced(function* (reason: EnvironmentInternalErrorReason, error?: unknown) {
+  Effect.fnUntraced(function* (
+    reason: EnvironmentInternalErrorReason,
+    error?: unknown,
+    detail?: string,
+  ) {
     const traceId = yield* currentEnvironmentTraceId;
     if (error !== undefined) {
       yield* Effect.logError("environment api operation failed", {
@@ -201,7 +209,12 @@ export const failEnvironmentInternal =
         cause: error,
       });
     }
-    return yield* new EnvironmentInternalError({ code: "internal_error", reason, traceId });
+    return yield* new EnvironmentInternalError({
+      code: "internal_error",
+      reason,
+      traceId,
+      ...(detail === undefined ? {} : { detail }),
+    });
   });
 
 // Plaintext LAN servers still need the cookie; TLS arrives through a proxy that sets X-Forwarded-Proto.
@@ -281,6 +294,7 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
+    const cfAccessAuth = yield* Effect.serviceOption(CloudflareAccessAuth.CloudflareAccessAuth);
 
     return handlers
       .handle(
@@ -308,6 +322,27 @@ export const layer = HttpApiBuilder.group(
                 result.expiresAt,
               );
               yield* appendCredentialResponseHeaders;
+            }
+            if (!result.authenticated && Option.isSome(cfAccessAuth)) {
+              const minted = yield* cfAccessAuth.value.tryAutoMintBrowserSession(request);
+              if (minted !== null) {
+                yield* appendSessionCookie(
+                  request,
+                  sessions.cookieName,
+                  minted.token,
+                  minted.expiresAt,
+                );
+                yield* appendCredentialResponseHeaders;
+                return {
+                  authenticated: true,
+                  auth: result.auth,
+                  ...authScopeResponse(minted.scopes),
+                  sessionMethod: minted.method,
+                  sessionId: minted.sessionId,
+                  founder: minted.founder,
+                  expiresAt: DateTime.toUtc(minted.expiresAt),
+                } satisfies AuthSessionState;
+              }
             }
             return result;
           },
@@ -382,8 +417,7 @@ export const layer = HttpApiBuilder.group(
             if (requestedScopes === null || requestedScopes?.length === 0) {
               return yield* failEnvironmentInvalidRequest("invalid_scope");
             }
-            // Not recorded: a replayer also holds the subject token and could sign its own proof.
-            // Recording would let anyone write replay state to disk.
+            // Bootstrap exchanges leave the proof unrecorded because its key is not always trusted.
             const proof = args.headers.dpop
               ? yield* checkRequestDpopProof({ request }).pipe(
                   Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
@@ -402,6 +436,20 @@ export const layer = HttpApiBuilder.group(
                 )
               : undefined;
             yield* appendCredentialResponseHeaders;
+            if (args.payload.subject_token_type === AuthAccessTokenType) {
+              if (requestedScopes !== undefined) {
+                return yield* failEnvironmentInvalidRequest("invalid_scope");
+              }
+              if (!proof) {
+                yield* appendDpopChallengeHeader;
+                return yield* failEnvironmentAuthInvalid("invalid_credential");
+              }
+              return yield* serverAuth.renewAccessToken(
+                args.payload.subject_token,
+                proof.thumbprint,
+                proof.consume,
+              );
+            }
             return yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
               args.payload.subject_token,
               requestedScopes,

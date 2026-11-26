@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -19,6 +20,34 @@ class ReplayFixtureGitCommandError extends Schema.TaggedError<ReplayFixtureGitCo
   }
 }
 
+// `git commit` otherwise leaves a detached `git maintenance run --auto` behind, which can still
+// be writing into `.git` when a test removes the workspace (ENOTEMPTY).
+const NO_BACKGROUND_MAINTENANCE = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
+
+const REPLAY_GIT_CONFIG: ReadonlyArray<readonly [key: string, value: string]> = [
+  ["core.autocrlf", "false"],
+  ["core.filemode", "false"],
+  ["core.longpaths", "true"],
+  ["commit.gpgsign", "false"],
+  ["tag.gpgsign", "false"],
+  ["init.defaultBranch", "main"],
+];
+
+function cleanGitEnv(inherited: NodeJS.ProcessEnv): Record<string, string | undefined> {
+  return {
+    ...Object.fromEntries(
+      Object.entries(inherited).filter(([name]) => !name.toUpperCase().startsWith("GIT_")),
+    ),
+    GIT_CONFIG_COUNT: String(REPLAY_GIT_CONFIG.length),
+    ...Object.fromEntries(
+      REPLAY_GIT_CONFIG.flatMap(([key, value], index) => [
+        [`GIT_CONFIG_KEY_${index}`, key],
+        [`GIT_CONFIG_VALUE_${index}`, value],
+      ]),
+    ),
+  };
+}
+
 function runGit(
   cwd: string,
   args: ReadonlyArray<string>,
@@ -29,7 +58,14 @@ function runGit(
 > {
   return Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const exitCode = yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }));
+    const inherited = yield* HostProcess.Environment;
+    const exitCode = yield* spawner.exitCode(
+      ChildProcess.make("git", [...NO_BACKGROUND_MAINTENANCE, ...args], {
+        cwd,
+        env: cleanGitEnv(inherited),
+        extendEnv: false,
+      }),
+    );
     if (Number(exitCode) !== 0) {
       return yield* new ReplayFixtureGitCommandError({
         command: `git ${args.join(" ")}`,

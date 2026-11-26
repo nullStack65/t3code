@@ -8,10 +8,13 @@ import {
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitInput,
   OrchestratorMcpThreadWaitResult,
   type PeerLinkAppPairing,
   PeerLinkError,
+  type PeerLinkThreadSendInput,
+  type PeerLinkThreadSendResult,
   RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -127,6 +130,10 @@ export class PeerForwarding extends Context.Service<
     readonly linkedSidebar: (input: {
       readonly catalogEnvironmentIds?: ReadonlyArray<EnvironmentId> | undefined;
     }) => Effect.Effect<LinkedSidebarResult, PeerLinkError>;
+    /** Sends a message to a linked environment's thread over this server's peer link. */
+    readonly sendThreadMessage: (
+      input: PeerLinkThreadSendInput,
+    ) => Effect.Effect<PeerLinkThreadSendResult, PeerLinkError>;
   }
 >()("t3/peer/PeerForwarding") {}
 
@@ -145,6 +152,23 @@ const linkStorageFailure = (error: PeerLinkError) =>
 /** The linked environment a call names, or nothing when it names this one. */
 export const remoteTarget = (scope: Scope, environmentId: EnvironmentId | undefined) =>
   environmentId === scope.environmentId ? undefined : environmentId;
+
+// Older peers reject beforePosition during parameter validation.
+const BEFORE_POSITION_REFUSAL =
+  /^Invalid parameters for tool 't3_thread_read': Unknown arguments? (?:"[^"]+", )*"beforePosition"(?:, "[^"]+")*\. Accepted arguments: /;
+export const refusesBeforePosition = (failure: {
+  readonly code: string;
+  readonly message: string;
+}) => failure.code === "invalid_request" && BEFORE_POSITION_REFUSAL.test(failure.message);
+
+/** A newest-page read, retried as the peer always served it when the peer refuses the cursor. */
+export const readNewestOrRetry = Effect.fn("PeerForwarding.readNewestOrRetry")(function* <A>(
+  read: (args: unknown) => Effect.Effect<A, OrchestratorMcpFailure>,
+  newest: unknown,
+  params: unknown,
+) {
+  return yield* read(newest).pipe(Effect.catchIf(refusesBeforePosition, () => read(params)));
+});
 
 const make = Effect.gen(function* () {
   const peers = yield* PeerMcpClient.PeerMcpClient;
@@ -320,7 +344,29 @@ const make = Effect.gen(function* () {
     Effect.flatMap((enabled) => (enabled ? Effect.void : Effect.fail(linkedEnvironmentsOff))),
   );
 
+  // Older peers page some cursorless reads forward; ask for the newest page, as a read here gets.
+  const newestPage = (toolName: string, params: unknown) => {
+    if (toolName !== "t3_thread_read") return undefined;
+    const input = params as OrchestratorMcpThreadReadInput;
+    return input.afterPosition === undefined && input.beforePosition === undefined
+      ? { ...input, beforePosition: Number.MAX_SAFE_INTEGER }
+      : undefined;
+  };
+
   const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params, options) => {
+    const forwardTool = (
+      args: unknown,
+    ): Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure> =>
+      forward(
+        scope,
+        tool.name,
+        tool.parametersSchema,
+        tool.successSchema,
+        environmentId,
+        args,
+        options?.expectedIncarnation,
+      );
+    const newest = newestPage(tool.name, params);
     const forwarded: Effect.Effect<
       Tool.Success<typeof tool>,
       OrchestratorMcpFailure
@@ -330,15 +376,9 @@ const make = Effect.gen(function* () {
           environmentId,
           params as OrchestratorMcpThreadWaitInput,
         ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
-      : forward(
-          scope,
-          tool.name,
-          tool.parametersSchema,
-          tool.successSchema,
-          environmentId,
-          params,
-          options?.expectedIncarnation,
-        );
+      : newest === undefined
+        ? forwardTool(params)
+        : readNewestOrRetry(forwardTool, newest, params);
     return Effect.andThen(requireEnabled, forwarded);
   };
 
@@ -450,6 +490,48 @@ const make = Effect.gen(function* () {
   const linkedSidebar: PeerForwarding["Service"]["linkedSidebar"] = (input) =>
     readLinkedSidebar({ links, peers, catalogEnvironmentIds: input.catalogEnvironmentIds });
 
+  const sendThreadMessage: PeerForwarding["Service"]["sendThreadMessage"] = Effect.fn(
+    "PeerForwarding.sendThreadMessage",
+  )(function* (input) {
+    if (!(yield* links.enabled)) {
+      return yield* new PeerLinkError({
+        reason: "disabled",
+        message: PeerLinks.LINKED_ENVIRONMENTS_OFF,
+      });
+    }
+    const sent = yield* peers
+      .call({
+        environmentId: input.environmentId,
+        tool: "t3_thread_send",
+        arguments: {
+          threadId: input.threadId,
+          message: input.message,
+          mode: "auto",
+        },
+        limits: { runtimeMode: "full-access", interactionMode: "default" },
+        success: OrchestratorMcpThreadSendResult,
+      })
+      .pipe(
+        Effect.mapError(
+          (failure) =>
+            new PeerLinkError({
+              reason:
+                failure.code === "capability_denied"
+                  ? "pairing_rejected"
+                  : failure.code === "thread_not_found"
+                    ? "unknown_link"
+                    : "unreachable",
+              message: failure.message,
+            }),
+        ),
+      );
+    return {
+      messageId: sent.messageId,
+      ...(sent.runId === undefined ? {} : { runId: sent.runId }),
+      status: sent.status,
+    } satisfies PeerLinkThreadSendResult;
+  });
+
   return PeerForwarding.of({
     addToApp,
     call,
@@ -459,6 +541,7 @@ const make = Effect.gen(function* () {
     waitForThread,
     links: listLinks,
     linkedSidebar,
+    sendThreadMessage,
   });
 });
 
