@@ -812,6 +812,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   return {
     botThreads: sortedBots,
     myBotThreads: botGroups.mine,
+    otherBotThreads: botGroups.others,
     sharedBotThreads: botGroups.shared,
     pinnedThreads:
       optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
@@ -1511,6 +1512,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     workingShelfEnabled,
     botThreads,
     myBotThreads,
+    otherBotThreads,
     sharedBotThreads,
     pinnedThreads,
     draggableThreadKeys,
@@ -3731,7 +3733,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 onContextMenu={handleThreadContextMenu}
               />
               <SidebarBotsGroup
-                label={gt("Shared Bots")}
+                label={gt("Others")}
+                groupId="Others"
+                testId="sidebar-other-bots-group"
+                threads={otherBotThreads}
+                activeThreadKey={routeRowThreadKey}
+                onThreadClick={handleThreadClick}
+                onThreadActivate={navigateToThread}
+                onContextMenu={handleThreadContextMenu}
+              />
+              <SidebarBotsGroup
+                label={gt("Closura")}
                 groupId="Shared Bots"
                 testId="sidebar-shared-bots-group"
                 threads={sharedBotThreads}
