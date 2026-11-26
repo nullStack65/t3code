@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+import { useGT } from "gt-react";
 import { ChevronRightIcon } from "lucide-react";
 import {
   memo,
@@ -54,6 +55,11 @@ export function SidebarBotsGroup(
     readonly activeThreadKey: string | null;
     /** The group's heading; "Bots" keeps the single group for a search or an older list. */
     readonly label?: string;
+    /**
+     * Language-independent id the group's collapsed state is saved under, so a language switch
+     * keeps it; "Bots" is the single group's.
+     */
+    readonly groupId?: string;
     readonly testId?: string;
   },
 ) {
@@ -67,8 +73,9 @@ export function SidebarBotsGroup(
   };
   const botCollapsedById = useUiStateStore((state) => state.botCollapsedById);
   const setBotCollapsed = useUiStateStore((state) => state.setBotCollapsed);
-  const label = props.label ?? "Bots";
-  const groupKey = `group:${label}`;
+  const gt = useGT();
+  const label = props.label ?? gt("Bots");
+  const groupKey = `group:${props.groupId ?? "Bots"}`;
   const groupCollapsed = botCollapsedById[groupKey] === true;
   const rows = visibleBotRows(
     orderBotTree(props.threads),
@@ -161,6 +168,7 @@ const SidebarBotRow = memo(function SidebarBotRow(
     readonly typing: TypingByThread | undefined;
   },
 ) {
+  const gt = useGT();
   const { thread, threadKey } = props;
   const standing = thread.standing!;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
@@ -287,7 +295,11 @@ const SidebarBotRow = memo(function SidebarBotRow(
           <button
             type="button"
             aria-expanded={!props.collapsed}
-            aria-label={`${props.collapsed ? "Expand" : "Collapse"} ${standing.name}'s reports`}
+            aria-label={
+              props.collapsed
+                ? gt("Expand {name}'s reports", { name: standing.name })
+                : gt("Collapse {name}'s reports", { name: standing.name })
+            }
             data-testid="sidebar-bot-toggle"
             className="absolute inset-y-0 left-0 z-10 flex w-6 items-center justify-center rounded-md text-sidebar-foreground/60 outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             onClick={(event) => {

@@ -12,6 +12,7 @@ import {
   type AtomCommandResult,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { msg } from "gt-react";
 
 import {
   type ComposerFileAttachment,
@@ -26,6 +27,7 @@ import {
   reserveDraftPlacement,
   useComposerDraftStore,
 } from "../../composerDraftStore";
+import { m } from "~/i18n/messages";
 import { newCommandId, newMessageId } from "~/lib/utils";
 
 /** What a send asks for, read from the composer at send. */
@@ -207,12 +209,12 @@ export type DraftPlacementOutcome =
 const unsaved = (title: string): DraftPlacementOutcome => ({
   type: "failed",
   title,
-  description: "Nothing was started. Free up browser storage, then send again.",
+  description: m(msg("Nothing was started. Free up browser storage, then send again.")),
 });
 
 const stillOpen = (description: string): DraftPlacementOutcome => ({
   type: "failed",
-  title: "Your last send's placement is still open",
+  title: m(msg("Your last send's placement is still open")),
   description,
 });
 
@@ -254,14 +256,22 @@ export async function placeDraftBeforeSend(input: {
   if (existing) {
     if (existing.intent !== intent)
       return stillOpen(
-        "It may already be running with what you sent then. Send that unchanged to finish it, or start a new draft for different work.",
+        m(
+          msg(
+            "It may already be running with what you sent then. Send that unchanged to finish it, or start a new draft for different work.",
+          ),
+        ),
       );
     if (
       session.environmentId !== existing.admittedOn &&
       session.environmentId !== existing.admission?.environmentId
     )
       return stillOpen(
-        "It was placed from another machine than this draft is on now. Switch back to send it, or start a new draft.",
+        m(
+          msg(
+            "It was placed from another machine than this draft is on now. Switch back to send it, or start a new draft.",
+          ),
+        ),
       );
   }
   // Asked again: until its origin answers this time, its binding authorizes nothing here.
@@ -276,7 +286,7 @@ export async function placeDraftBeforeSend(input: {
     intent,
   };
   if (!existing && !reserveDraftPlacement(draftId, reserved))
-    return unsaved("Could not save this draft before sending");
+    return unsaved(m(msg("Could not save this draft before sending")));
   const result = await input.admit({
     environmentId: reserved.admittedOn,
     input: {
@@ -296,11 +306,11 @@ export async function placeDraftBeforeSend(input: {
       releaseDraftPlacement(draftId, reserved.commandId);
     return {
       type: "failed",
-      title: "Could not place this draft",
+      title: m(msg("Could not place this draft")),
       description:
         error instanceof Error && error.message.length > 0
           ? error.message
-          : "Nothing was started. Send it again.",
+          : m(msg("Nothing was started. Send it again.")),
     };
   }
   const admission = {
@@ -314,10 +324,14 @@ export async function placeDraftBeforeSend(input: {
       reserved.admission.projectId !== admission.projectId
     )
       return stillOpen(
-        "Its machine answered with another destination than it was bound to, so nothing was sent.",
+        m(
+          msg(
+            "Its machine answered with another destination than it was bound to, so nothing was sent.",
+          ),
+        ),
       );
   } else if (!recordDraftPlacementAdmission(draftId, reserved.commandId, admission)) {
-    return unsaved("Could not save where this draft runs");
+    return unsaved(m(msg("Could not save where this draft runs")));
   }
   const current = useComposerDraftStore.getState().getDraftSession(draftId);
   if (
@@ -330,14 +344,20 @@ export async function placeDraftBeforeSend(input: {
   // What is pinned to the machine the draft is on never moves with it.
   if (input.pinnedHere && admission.environmentId !== session.environmentId)
     return stillOpen(
-      "It runs on another machine than the attachments or annotation it now holds. Remove them and add them there, or start a new draft.",
+      m(
+        msg(
+          "It runs on another machine than the attachments or annotation it now holds. Remove them and add them there, or start a new draft.",
+        ),
+      ),
     );
   // The grant to launch there is this client's own, checked again now that it is needed.
   if (!input.canLaunchOn(admission.environmentId)) {
     return {
       type: "failed",
-      title: "This machine no longer accepts your launches",
-      description: "Its sign-in changed while the draft was being placed. Nothing was started.",
+      title: m(msg("This machine no longer accepts your launches")),
+      description: m(
+        msg("Its sign-in changed while the draft was being placed. Nothing was started."),
+      ),
     };
   }
   reconciledThisPage.add(reconciledKey(reserved.commandId, admission));

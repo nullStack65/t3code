@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/reactivity";
 
+import { m } from "../i18n/messages";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentSummaries } from "./presentation";
 import { environmentProjects } from "./projects";
@@ -56,7 +57,7 @@ const linkedSidebarSupplementAtom = Atom.make((get) => {
   const environments = [...get(linkedSidebarByHostAtom).values()].flatMap(
     (result) => result.environments,
   );
-  const next = sidebarFromServerLinks({ catalogEnvironmentIds: catalog, environments });
+  const next = sidebarFromServerLinks({ catalogEnvironmentIds: catalog, environments }, m);
   const previous = Option.getOrNull(get.self<ReturnType<typeof sidebarFromServerLinks>>());
   if (
     previous !== null &&

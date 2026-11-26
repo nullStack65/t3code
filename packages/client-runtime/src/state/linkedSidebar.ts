@@ -11,6 +11,8 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 import {
   type EnvironmentProject,
@@ -138,10 +140,13 @@ const projectShell = (
         environmentId,
       };
 
-export function sidebarFromServerLinks(input: {
-  readonly catalogEnvironmentIds: ReadonlySet<EnvironmentId> | ReadonlyArray<EnvironmentId>;
-  readonly environments: ReadonlyArray<LinkedSidebarEnvironment>;
-}): {
+export function sidebarFromServerLinks(
+  input: {
+    readonly catalogEnvironmentIds: ReadonlySet<EnvironmentId> | ReadonlyArray<EnvironmentId>;
+    readonly environments: ReadonlyArray<LinkedSidebarEnvironment>;
+  },
+  resolve: MFunctionType = mFallback,
+): {
   readonly identities: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly label: string;
@@ -183,7 +188,7 @@ export function sidebarFromServerLinks(input: {
       projects.push(
         projectShell(environment.environmentId, {
           id: thread.projectId,
-          title: "Untitled project",
+          title: resolve(msg("Untitled project")),
           workspaceRoot: ".",
           defaultModelSelection: null,
           scripts: [],

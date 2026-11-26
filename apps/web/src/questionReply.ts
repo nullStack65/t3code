@@ -85,6 +85,7 @@ function formatQuestionQuote(question: string): string {
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");
+  // oxlint-disable-next-line t3code/no-untranslated-copy -- the quote is composer text sent to the agent, which stays English
   return `> Question:\n${body}\n\n`;
 }
 

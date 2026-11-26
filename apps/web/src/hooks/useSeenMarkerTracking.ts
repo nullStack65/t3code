@@ -144,10 +144,10 @@ export function useSeenMarkerTracking(input: {
   const { threadKey, founder = null, messages, onRecorded } = input;
   const getScrollNode = useEffectEvent(() => input.getScrollNode());
   const getMessages = useEffectEvent(() => messages);
-  const onRecordedRef = useRef(onRecorded);
-  onRecordedRef.current = onRecorded;
-  const notBeforeRef = useRef(input.notBeforeMessageId);
-  notBeforeRef.current = input.notBeforeMessageId;
+  const notBefore = useEffectEvent(() => input.notBeforeMessageId);
+  const recorded = useEffectEvent((messageId: MessageId, seenAt: string) =>
+    onRecorded?.(messageId, seenAt),
+  );
   const samplingRef = useRef<ReturnType<typeof startSeenMarkerSampling> | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window focus, visibility and scroll listeners plus the dwell timer for this thread
@@ -159,8 +159,8 @@ export function useSeenMarkerTracking(input: {
       founder,
       getScrollNode,
       getMessages,
-      notBefore: () => notBeforeRef.current,
-      onRecorded: (messageId, seenAt) => onRecordedRef.current?.(messageId, seenAt),
+      notBefore,
+      onRecorded: recorded,
     });
     samplingRef.current = sampling;
     return () => {

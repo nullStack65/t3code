@@ -60,13 +60,9 @@ function headroom(
 
 /**
  * Callers supply only connected machines hosting the project and selected provider. Headless
- * machines take work first; an interactive machine is chosen only when no headless one has room,
- * its person is not using it, and it stays well clear of its limits. A machine that does not
- * report its role, such as one on an older release, counts as someone's computer in use.
- *
- * Within a tier the lowest `rank` with room wins, then the most room. A `cap` refuses a machine
- * at its lane count or memory floor, and one that cannot report its lanes. When nothing has room
- * the answer is null, never the machine the work started on.
+ * machines take work first; an interactive one only when none has room and its person is away.
+ * A machine that does not report its role counts as someone's computer in use. Within a tier the
+ * lowest `rank` with room wins, then the most room; null means nothing has room.
  */
 export function chooseLoadBalancedEnvironment(
   candidates: ReadonlyArray<{
