@@ -71,6 +71,7 @@ export interface ProjectionThreadDetailQuery {
    * the activity query. Omit this option to preserve the full detail response.
    */
   readonly activityKinds?: ReadonlyArray<string>;
+  readonly unboundedActivities?: boolean;
 }
 
 /**

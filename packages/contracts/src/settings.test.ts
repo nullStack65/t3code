@@ -1026,6 +1026,33 @@ describe("ServerSettingsPatch string normalization", () => {
   });
 });
 
+describe("session spend guard", () => {
+  it("enforces the idle and session ceilings by default", () => {
+    expect(decodeServerSettings({}).sessionSpendGuard).toMatchObject({
+      mode: "enforce",
+      idleFlagUsd: 25,
+      idleStopUsd: 50,
+      sessionCeilingUsd: 200,
+      fallbackRate: {
+        inputCostPerMillionTokens: 10,
+        outputCostPerMillionTokens: 50,
+        cacheReadCostPerMillionTokens: 1,
+        cacheWriteCostPerMillionTokens: 12.5,
+      },
+    });
+  });
+
+  it("patches one field and rejects a non-positive amount", () => {
+    expect(decodeServerSettingsPatch({ sessionSpendGuard: { mode: "flag" } })).toEqual({
+      sessionSpendGuard: { mode: "flag" },
+    });
+    expect(() => decodeServerSettings({ sessionSpendGuard: { idleStopUsd: 0 } })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ sessionSpendGuard: { sessionCeilingUsd: -1 } }),
+    ).toThrow();
+  });
+});
+
 describe("ServerSettings environment icon", () => {
   it("defaults to null", () => {
     expect(decodeServerSettings({}).environmentIcon).toBeNull();
