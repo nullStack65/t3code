@@ -5,6 +5,7 @@ import {
   type ThreadStandingAccent,
   type ThreadStandingAvatarId,
 } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { useEffect, useId, useState } from "react";
 import { create } from "zustand";
 
@@ -69,6 +70,7 @@ export function BotPersonaDialogHost() {
 }
 
 function BotPersonaDialog(props: { readonly request: Request }) {
+  const gt = useGT();
   const id = useId();
   const { initial, isNew } = props.request;
   const [name, setName] = useState(initial.name);
@@ -99,9 +101,11 @@ function BotPersonaDialog(props: { readonly request: Request }) {
           }}
         >
           <DialogHeader>
-            <DialogTitle>{isNew ? "Make standing bot" : "Edit bot persona"}</DialogTitle>
+            <DialogTitle>{isNew ? gt("Make standing bot") : gt("Edit bot persona")}</DialogTitle>
             <DialogDescription>
-              A standing bot is a long-lived lane. It lists under Bots, apart from pinned threads.
+              <T>
+                A standing bot is a long-lived lane. It lists under Bots, apart from pinned threads.
+              </T>
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
@@ -109,14 +113,16 @@ function BotPersonaDialog(props: { readonly request: Request }) {
               <div className="flex items-center gap-3">
                 <BotAvatar avatarId={avatarId} accent={accent} size="lg" />
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{trimmedName || "Bot"}</div>
+                  <div className="truncate text-sm font-medium">{trimmedName || gt("Bot")}</div>
                   <div className="truncate text-xs text-muted-foreground">
-                    {trimmedRole || "No role line"}
+                    {trimmedRole || gt("No role line")}
                   </div>
                 </div>
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor={`${id}-name`}>Name</Label>
+                <Label htmlFor={`${id}-name`}>
+                  <T>Name</T>
+                </Label>
                 <Input
                   id={`${id}-name`}
                   value={name}
@@ -127,17 +133,21 @@ function BotPersonaDialog(props: { readonly request: Request }) {
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor={`${id}-role`}>Role</Label>
+                <Label htmlFor={`${id}-role`}>
+                  <T>Role</T>
+                </Label>
                 <Input
                   id={`${id}-role`}
                   value={role}
                   maxLength={80}
-                  placeholder="Shown when the bot has nothing newer to say"
+                  placeholder={gt("Shown when the bot has nothing newer to say")}
                   onChange={(event) => setRole(event.currentTarget.value)}
                 />
               </div>
               <fieldset className="flex flex-col gap-1.5">
-                <legend className="mb-1.5 text-sm font-medium">Avatar</legend>
+                <legend className="mb-1.5 text-sm font-medium">
+                  <T>Avatar</T>
+                </legend>
                 <div className="grid grid-cols-5 gap-1.5">
                   {THREAD_STANDING_AVATAR_IDS.map((candidate) => (
                     <button
@@ -159,7 +169,9 @@ function BotPersonaDialog(props: { readonly request: Request }) {
                 </div>
               </fieldset>
               <fieldset className="flex flex-col gap-1.5">
-                <legend className="mb-1.5 text-sm font-medium">Accent</legend>
+                <legend className="mb-1.5 text-sm font-medium">
+                  <T>Accent</T>
+                </legend>
                 <div className="flex flex-wrap gap-2">
                   {THREAD_STANDING_ACCENTS.map((candidate) => (
                     <button
@@ -181,10 +193,10 @@ function BotPersonaDialog(props: { readonly request: Request }) {
           </DialogPanel>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => finish(null)}>
-              Cancel
+              <T>Cancel</T>
             </Button>
             <Button type="submit" disabled={trimmedName.length === 0}>
-              {isNew ? "Make bot" : "Save"}
+              {isNew ? gt("Make bot") : gt("Save")}
             </Button>
           </DialogFooter>
         </form>

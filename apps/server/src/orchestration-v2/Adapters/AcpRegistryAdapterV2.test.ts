@@ -20,9 +20,9 @@ import * as Fiber from "effect/Fiber";
 import * as DateTime from "effect/DateTime";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -597,6 +597,7 @@ describe("AcpRegistryAdapterV2", () => {
               used: 100,
               size: 1000,
             }),
+            claudeMarker("reply ended"),
           ],
           gate,
           true,
@@ -627,10 +628,14 @@ describe("AcpRegistryAdapterV2", () => {
         // The model can be silent longer than the finalize debounce before it goes on.
         yield* TestClock.adjust("10 seconds");
         gate.release("reply");
-        const output = yield* session.until(
-          (event) => event.type === "message.updated" && event.message.text === "Command approved.",
+        // The closing usage_update must be handled before the clock moves, or its debounce never fires.
+        const output = yield* session.throughMarker("reply ended");
+        assert.isTrue(
+          output.some(
+            (event) =>
+              event.type === "message.updated" && event.message.text === "Command approved.",
+          ),
         );
-        assert.isTrue(output.some((event) => event.type === "message.updated"));
         assert.isFalse(output.some((event) => event.type === "turn.terminal"));
         yield* TestClock.adjust("3 seconds");
         assert.equal((yield* session.terminal).status, "completed");
@@ -1004,16 +1009,16 @@ describe("AcpRegistryAdapterV2", () => {
             })),
             [
               { models: ["hermes", "auto", "default"], current: "default" },
-              { models: ["hermes", "auto", "default"], current: "hermes" },
-              { models: ["hermes", "auto", "default"], current: null },
-              { models: ["hermes", "auto", "default"], current: "auto" },
-              { models: ["hermes", "auto", "default"], current: "default" },
+              { models: [], current: "hermes" },
+              { models: [], current: null },
+              { models: [], current: "auto" },
+              { models: [], current: "default" },
               { models: ["auto"], current: null },
-              { models: ["auto"], current: null },
+              { models: [], current: null },
               { models: ["default"], current: null },
-              { models: ["default"], current: null },
+              { models: [], current: null },
               { models: ["hermes", "auto", "default"], current: "default" },
-              { models: ["hermes", "auto", "default"], current: "hermes" },
+              { models: [], current: "hermes" },
             ],
           );
         }).pipe(Effect.provide(layerTest)),

@@ -166,4 +166,65 @@ describe("createRunningThreadKeepAliveAtom", () => {
     h.registry.set(h.environmentIds, [LOCAL]);
     expect(h.openStreams()).toEqual([]);
   });
+
+  it("respects shouldKeepRunning filter and maxThreadsForEnvironment cap", () => {
+    const tasks: Array<() => void> = [];
+    const registry = AtomRegistry.make({
+      scheduleTask: (task) => {
+        tasks.push(task);
+        return () => {};
+      },
+    });
+    const flush = () => {
+      for (let task = tasks.shift(); task !== undefined; task = tasks.shift()) task();
+    };
+    const environmentIds = Atom.make<ReadonlyArray<EnvironmentId>>([REMOTE]).pipe(Atom.keepAlive);
+    const threads = Atom.family((_environmentId: EnvironmentId) =>
+      Atom.make<
+        ReadonlyArray<
+          Pick<OrchestrationV2ThreadShell, "id" | "status"> &
+            Partial<Pick<OrchestrationV2ThreadShell, "inbox" | "lineage">>
+        >
+      >([]).pipe(Atom.keepAlive),
+    );
+    const keys = new Set<string>();
+    const states = Atom.family((_key: string) =>
+      Atom.make<AsyncResult.AsyncResult<EnvironmentThreadState>>(
+        AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE),
+      ),
+    );
+    const stateAtom = (environmentId: EnvironmentId, threadId: string) => {
+      const key = `${environmentId}:${threadId}`;
+      keys.add(key);
+      return states(key);
+    };
+    const keepAlive = createRunningThreadKeepAliveAtom({
+      environmentIdsAtom: environmentIds,
+      threadsAtom: threads,
+      stateAtom,
+      shouldKeepRunning: (_env, thread) =>
+        thread.inbox?.audience !== "agent-only" && thread.lineage?.parentThreadId == null,
+      maxThreadsForEnvironment: () => 2,
+    });
+    registry.mount(keepAlive);
+
+    registry.set(threads(REMOTE), [
+      { id: ThreadId.make("agent-1"), status: "running", inbox: { audience: "agent-only" } as any },
+      {
+        id: ThreadId.make("sub-1"),
+        status: "running",
+        lineage: {
+          parentThreadId: ThreadId.make("p"),
+          rootThreadId: ThreadId.make("p"),
+          relationshipToParent: "subagent",
+        },
+      },
+      { id: ThreadId.make("user-1"), status: "running" },
+      { id: ThreadId.make("user-2"), status: "running" },
+      { id: ThreadId.make("user-3"), status: "running" },
+    ]);
+    flush();
+    const open = [...keys].filter((key) => registry.getNodes().has(states(key))).toSorted();
+    expect(open).toEqual(["remote:user-1", "remote:user-2"]);
+  });
 });

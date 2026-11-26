@@ -14,6 +14,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   PullRequestHostRequiredError,
+  PullRequestRepositoryInvalidError,
   PullRequestTargetIncompleteError,
   PullRequestUrlInvalidError,
   PullRequestUrlUnavailableError,
@@ -28,12 +29,12 @@ const unavailable = () =>
 
 type WatchPullRequestError =
   | PullRequestWatchService.PullRequestWatchFailedError
-  | PullRequestWatchService.PullRequestNotOpenError
   | PullRequestWatchService.PullRequestWatchFromSubagentError
   | PullRequestWatchService.PullRequestWatchThreadNotFoundError
   | PullRequestUrlInvalidError
   | PullRequestTargetIncompleteError
   | PullRequestHostRequiredError
+  | PullRequestRepositoryInvalidError
   | PullRequestUrlUnavailableError
   | PullRequestUnavailableError;
 

@@ -1,5 +1,9 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
-import { SEND_TO_USER_MAX_LENGTH, SEND_TO_USER_TOOL_NAME } from "@t3tools/shared/toolOutput";
+import {
+  SEND_TO_USER_MAX_LENGTH,
+  SEND_TO_USER_TOOL_NAME,
+  SILENT_ACK_TOOL_NAME,
+} from "@t3tools/shared/toolOutput";
 import * as Schema from "effect/Schema";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
 
@@ -37,4 +41,32 @@ const SendToUserTool = Tool.make(SEND_TO_USER_TOOL_NAME, {
   // Claude Code defers MCP tools behind ToolSearch; Anthropic says to declare this from the first request.
   .annotate(Tool.Meta, { "anthropic/alwaysLoad": true });
 
-export const MessageToolkit = Toolkit.make(SendToUserTool);
+const SilentAckTool = Tool.make(SILENT_ACK_TOOL_NAME, {
+  description:
+    "Acknowledge an agent or automation wake with nothing to deliver to the user or another agent. Keeps this turn folded out of the user's timeline.",
+  parameters: Schema.Struct({
+    reason: Schema.optional(
+      Schema.String.check(Schema.isMaxLength(256)).annotate({
+        description: "Optional brief note for the folded audit log.",
+      }),
+    ),
+  }),
+  success: Schema.Struct({
+    acknowledged: Schema.Literal(true),
+    message: Schema.String,
+  }),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+  ],
+})
+  .annotate(Tool.Title, "Acknowledge silently")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+
+export const MessageToolkit = Toolkit.make(SendToUserTool, SilentAckTool);
