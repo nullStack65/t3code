@@ -192,6 +192,12 @@ const sendRoute = HttpRouter.add(
     const admitted = yield* admitLink;
     if (HttpServerResponse.isHttpServerResponse(admitted)) return admitted;
     if (admitted.access === "read-only") return refusal(403, "read_only_link");
+    if (
+      admitted.access !== "full-access" &&
+      admitted.shell.linkOrigin?.sessionId !== admitted.sessionId
+    ) {
+      return refusal(403, "link_fence_denied");
+    }
     if (runtimeModeRank(admitted.shell.runtimeMode) > runtimeModeRank(admitted.access)) {
       return refusal(403, "runtime_mode_ceiling_exceeded");
     }

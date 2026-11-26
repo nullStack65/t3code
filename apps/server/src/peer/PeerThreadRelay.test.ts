@@ -368,6 +368,15 @@ it.effect("sends a user-origin message with founder attribution and refuses read
         },
       });
 
+      // A link paired below full-access cannot send into a thread started outside that link.
+      yield* a.links.unlink(box.environmentId);
+      yield* linkTo(a.links, b, "auto");
+      const fenced = yield* a.relay
+        .send({ ...input, message: "Should be fenced" })
+        .pipe(Effect.flip);
+      expect(fenced).toMatchObject({ reason: "pairing_rejected" });
+      expect(b.sentCalls).toHaveLength(1);
+
       // A read-only link cannot send messages.
       yield* a.links.unlink(box.environmentId);
       yield* linkTo(a.links, b, "read-only");

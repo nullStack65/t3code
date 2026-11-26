@@ -79,7 +79,8 @@ function LinkedThreadComposer(props: {
                   ref={textareaRef}
                   rows={1}
                   value={draft}
-                  disabled={sending}
+                  readOnly={sending}
+                  aria-busy={sending}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
                     if (

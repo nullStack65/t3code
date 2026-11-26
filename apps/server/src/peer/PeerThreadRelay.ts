@@ -338,7 +338,9 @@ const make = Effect.gen(function* () {
               ? new PeerLinkError({
                   reason: "pairing_rejected",
                   message:
-                    code === "read_only_link" || code === "runtime_mode_ceiling_exceeded"
+                    code === "read_only_link" ||
+                    code === "runtime_mode_ceiling_exceeded" ||
+                    code === "link_fence_denied"
                       ? `${label} refused the message because this link does not grant enough access.`
                       : code === "linked_environments_off"
                         ? `${label} has Linked environments turned off. Turn it on in its Settings → Labs.`
