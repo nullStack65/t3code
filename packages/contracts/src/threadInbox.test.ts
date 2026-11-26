@@ -129,14 +129,12 @@ describe("shared fleet organizational inbox", () => {
       [jeff, kameron],
       [kameron, jeff],
     ] as const) {
-      expect(
-        creatorInboxOrigin(preference, { founder: bound.id, deviceType: "mobile" }),
-      ).toEqual(bound);
+      expect(creatorInboxOrigin(preference, { founder: bound.id, deviceType: "mobile" })).toEqual(
+        bound,
+      );
     }
     expect(creatorInboxOrigin(jeff, { founder: null, deviceType: "desktop" })).toEqual(jeff);
-    expect(
-      creatorInboxOrigin(undefined, { founder: null, deviceType: "mobile" }),
-    ).toBeUndefined();
+    expect(creatorInboxOrigin(undefined, { founder: null, deviceType: "mobile" })).toBeUndefined();
     expect(creatorInboxOrigin(bot, { founder: "jeff", deviceType: "bot" })).toEqual(bot);
     // The current device cannot safely supply a founder for existing unclassified history.
     for (const view of ["kameron", "jeff", "agents", "shared"] as const) {
