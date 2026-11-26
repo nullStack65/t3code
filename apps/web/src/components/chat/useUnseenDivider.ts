@@ -29,9 +29,19 @@ export function useUnseenDivider(input: {
     setPlace({ key, messageId: input.lastSeenMessageId });
   }
   const anchorId = place?.key === key ? place.messageId : null;
-  if (anchorId === null) return null;
-  return resolveUnseenDivider({
-    messages: input.messages ?? NO_MESSAGES,
-    lastSeenMessageId: anchorId,
-  });
+  const messages = input.messages ?? NO_MESSAGES;
+  const [divider, setDivider] = useState<UnseenDivider | null>(null);
+  const next =
+    anchorId === null
+      ? null
+      : resolveUnseenDivider({
+          messages,
+          lastSeenMessageId: anchorId,
+        });
+  const changed =
+    divider?.afterMessageId !== next?.afterMessageId || divider?.count !== next?.count;
+  if (changed) {
+    setDivider(next);
+  }
+  return changed ? next : divider;
 }

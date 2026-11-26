@@ -54,6 +54,17 @@ export function turnItemUpdateCanEndBackgroundWork(
   return BACKGROUND_TURN_ITEM_TYPES.has(item.type) && !isOrchestrationV2WorkActive(item.status);
 }
 
+export function turnItemCanChangeThreadWait(item: OrchestrationV2TurnItem): boolean {
+  if (item.type !== "dynamic_tool") return false;
+  const tool = resolveT3McpToolId(item.toolName);
+  return (
+    tool === "t3_thread_wait" ||
+    (tool === "delegate_task" &&
+      Predicate.isObject(item.input) &&
+      Reflect.get(item.input, "mode") === "wait")
+  );
+}
+
 export function deriveBlockedOnThreadWait(input: {
   readonly activeRun: Pick<OrchestrationV2Run, "id" | "status"> | null;
   readonly turnItems: ReadonlyArray<OrchestrationV2TurnItem>;

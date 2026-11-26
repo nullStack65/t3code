@@ -691,34 +691,36 @@ export function createEnvironmentThreadShellAtoms(input: {
     return previousThreadShells;
   }).pipe(Atom.withLabel("environment-thread-shell-list"));
 
-  // Point reads and threadShellsAtom stay complete, so code that asks whether a thread
-  // exists (outboxes, drafts, removals) never mistakes a hidden thread for a missing one.
+  // Point reads and threadShellsAtom stay complete so outboxes/drafts never mistake a hidden thread
+  // for missing; stabilize Set identity while preserving cross-environment delegation hiding.
   let previousHiddenThreadKeys: ReadonlySet<string> = NO_HIDDEN_THREADS;
   const hiddenThreadKeysAtom = Atom.make((get) => {
     const viewer = viewerOf(get);
-    const environments = Array.from(
-      enabledEnvironmentIds(get(input.catalogValueAtom)),
-      (environmentId) => ({
-        environmentId,
-        hiddenTags: get(input.hiddenThreadTagsAtom(environmentId)),
-      }),
-    );
-    // Read shells only while some environment hides tags or Jeff is viewing, so streaming ticks
-    // cost nothing otherwise. Jeff's lists also leave out Kameron's private threads.
-    if (viewer !== "jeff" && !environments.some((environment) => environment.hiddenTags !== null)) {
+    const environmentIds = [...enabledEnvironmentIds(get(input.catalogValueAtom))];
+    const anyHiding =
+      viewer === "jeff" ||
+      environmentIds.some(
+        (environmentId) => get(input.hiddenThreadTagsAtom(environmentId)) !== null,
+      );
+    if (!anyHiding) {
       previousHiddenThreadKeys = NO_HIDDEN_THREADS;
       return NO_HIDDEN_THREADS;
     }
     const next = hiddenThreadKeys(
-      environments.map((environment) => ({
-        ...environment,
-        threads: get(environmentThreadsAtom(environment.environmentId)),
+      environmentIds.map((environmentId) => ({
+        environmentId,
+        hiddenTags: get(input.hiddenThreadTagsAtom(environmentId)),
+        threads: get(environmentThreadsAtom(environmentId)),
       })),
       undefined,
       undefined,
       undefined,
       viewer,
     );
+    if (next.size === 0) {
+      previousHiddenThreadKeys = NO_HIDDEN_THREADS;
+      return NO_HIDDEN_THREADS;
+    }
     if (
       next.size === previousHiddenThreadKeys.size &&
       [...next].every((key) => previousHiddenThreadKeys.has(key))
