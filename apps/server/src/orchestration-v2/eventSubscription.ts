@@ -40,23 +40,20 @@ export const emptyCursor = (): SubscriptionCursor => ({
   deliveredSignatures: {},
 });
 
-export function canonicalAuthor(login: string): string {
+function canonicalAuthor(login: string): string {
   return login
     .trim()
     .toLowerCase()
     .replace(/\[bot\]$/i, "");
 }
 
-export function authorIgnored(
-  login: string | null | undefined,
-  ignore: readonly string[],
-): boolean {
+function authorIgnored(login: string | null | undefined, ignore: readonly string[]): boolean {
   if (login == null || login.trim() === "") return false;
   const key = canonicalAuthor(login);
   return ignore.some((entry) => canonicalAuthor(entry) === key);
 }
 
-export function normalizePullRequestUrl(raw: string): string {
+function normalizePullRequestUrl(raw: string): string {
   const url = new URL(raw);
   url.hash = "";
   url.search = "";
@@ -95,7 +92,7 @@ export interface DeliveryInput {
   readonly maxWakesPerHour?: number | null | undefined;
 }
 
-export function normalizeDelivery(
+function normalizeDelivery(
   input: DeliveryInput | undefined,
 ):
   | { readonly ok: true; readonly delivery: EventDeliveryPolicy }
@@ -159,7 +156,7 @@ function validateQuietHours(hours: QuietHours): string | null {
 }
 
 /** Minutes from midnight in the zone. Throws when the zone is invalid. */
-export function minutesInZone(nowMs: number, timeZone: string): number {
+function minutesInZone(nowMs: number, timeZone: string): number {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hour: "2-digit",
@@ -419,6 +416,8 @@ function summaryOf(change: PullRequestWatchChange): string {
     }
     case "checks-passed":
       return change.required ? "Required checks passed" : "Checks passed";
+    case "checks-finished":
+      return `Every check has finished: ${change.passed} passed, ${change.failing.length} still failing: ${change.failing.map((check) => check.name).join(", ")}`;
     case "checks-awaiting-approval":
       return `Checks awaiting approval: ${change.checks.map((check) => check.name).join(", ")}`;
     case "remarks":
@@ -476,6 +475,12 @@ export function selectWatchChanges(
         if (remarks.length > 0) selected.push({ kind: "remarks", remarks });
         break;
       }
+      case "checks-finished":
+        // Closura: the wake that follows a failure, so a `checks.failed` subscriber receives it.
+        if (events === null || events.some((event) => event.name === "checks.failed")) {
+          selected.push(change);
+        }
+        break;
       case "conflicting":
         if (events === null || events.some((event) => event.name === "conflict.detected")) {
           selected.push(change);

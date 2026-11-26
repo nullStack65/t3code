@@ -455,20 +455,38 @@ export function founderInboxLane(inbox: ThreadInbox | null | undefined, founder:
 }
 
 /**
- * The inboxes the sidebar lists: the chosen ones, else the chosen founder's plus Agents and
- * Shared, else every inbox so unclassified history stays visible. Shared is a default so both
- * founders see shared bots without opening the filter.
+ * Whether a thread is private to Kameron, so Jeff's lists must leave it out. Asymmetric: Kameron
+ * and a client with no founder see everything. Hidden for Jeff: audience Kameron, or Kameron-owned
+ * and filed neither Shared nor to Jeff. A thread without an inbox stays visible.
+ */
+export function isHiddenFromFounder(
+  inbox:
+    | {
+        readonly owner?: Founder | null | undefined;
+        readonly audience?: string | null | undefined;
+      }
+    | null
+    | undefined,
+  viewer: Founder | null | undefined,
+): boolean {
+  if (viewer !== "jeff" || !inbox) return false;
+  if (inbox.audience === "kameron") return true;
+  return inbox.owner === "kameron" && inbox.audience !== "shared" && inbox.audience !== "jeff";
+}
+
+/**
+ * The inboxes the sidebar lists: the chosen ones, else the chosen founder's own plus Shared, else
+ * every inbox so unclassified history stays visible. Autonomous Agents work is opt-in.
  */
 export const effectiveInboxFilter = (settings: {
   readonly founderInboxFilter?: ReadonlyArray<InboxChoice> | undefined;
   readonly founderInboxOwner?: Founder | undefined;
-}): ReadonlyArray<InboxChoice> =>
-  // An empty choice, from another client or a hand edit, would blank the list; treat it as unset.
-  settings.founderInboxFilter !== undefined && settings.founderInboxFilter.length > 0
-    ? settings.founderInboxFilter
-    : settings.founderInboxOwner === undefined
-      ? InboxChoice.literals
-      : [settings.founderInboxOwner, "agents", "shared"];
+}): ReadonlyArray<InboxChoice> => {
+  const { founderInboxFilter: filter, founderInboxOwner: owner } = settings;
+  // Older clients could persist the founder alone and silently hide the company desks.
+  if (filter?.length && !(filter.length === 1 && filter[0] === owner)) return filter;
+  return owner === undefined ? InboxChoice.literals : [owner, "shared"];
+};
 
 /** Choosing every inbox means All, which also keeps unclassified history. */
 const isAllInboxes = (filter: ReadonlyArray<InboxChoice>) =>
@@ -509,7 +527,7 @@ export const matchesInboxFilter = (
   filter: ReadonlyArray<InboxChoice>,
 ) => matchesPrimaryInbox(primaryInbox(inbox), filter);
 
-/** New work is attributed only to a chosen founder; otherwise it stays unclassified (All). */
+/** The founder selected by this client, when one has been chosen. */
 export const inboxOriginFor = (settings: {
   readonly founderInboxOwner?: Founder | undefined;
 }): InboxActor | undefined =>

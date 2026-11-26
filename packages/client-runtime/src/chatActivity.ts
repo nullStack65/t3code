@@ -1,14 +1,19 @@
 import * as DateTime from "effect/DateTime";
 import {
   mentionedFounders,
+  resolveTimelineVisibility,
   type OrchestrationV2RunStatus,
+  type OrchestrationV2TimelineVisibility,
   type OrchestrationV2TurnItem,
   type RunId,
 } from "@t3tools/contracts";
 import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import { resolveMessageSender, type MessageSenderInput } from "./messageSender.ts";
 
-type ActivityMessage = MessageSenderInput & { readonly humanNote?: true };
+type ActivityMessage = MessageSenderInput & {
+  readonly humanNote?: true;
+  readonly timelineVisibility?: OrchestrationV2TimelineVisibility | undefined;
+};
 
 export interface ChatActivityEntry {
   readonly createdAt: string;
@@ -51,6 +56,11 @@ export function chatActivityContext(
   runs: ReadonlyArray<{ id: RunId; status?: OrchestrationV2RunStatus }>,
   includeOtherActivity: boolean,
   decisionRequestedAt?: string,
+  /**
+   * The thread sits in a founder's inbox, so the newest reply of an agent-started run is what put
+   * it there. Folding it would leave the inbox row looking empty until the founder expands it.
+   */
+  keepLatestReply = false,
 ) {
   const agentRuns = new Set<RunId>();
   const directRuns = new Set<RunId>();
@@ -62,6 +72,7 @@ export function chatActivityContext(
     else attentionByRun.set(runId, new Set([id]));
   };
   let firstReplyAfterDecision: RunId | undefined;
+  let latestReplyRun: RunId | undefined;
   let pendingDecision: { runId: RunId; startedAt: string } | undefined;
   for (const { createdAt, runId, message, item } of entries) {
     if (!runId) continue;
@@ -89,6 +100,7 @@ export function chatActivityContext(
         pendingDecision = { runId, startedAt };
       }
     }
+    if (message?.role === "assistant" && !message.humanNote) latestReplyRun = runId;
     if (decisionRequestedAt && message?.role === "assistant" && createdAt >= decisionRequestedAt) {
       firstReplyAfterDecision ??= runId;
     }
@@ -101,6 +113,7 @@ export function chatActivityContext(
     }
   }
   for (const id of directRuns) agentRuns.delete(id);
+  if (keepLatestReply && latestReplyRun !== undefined) decisionRuns.add(latestReplyRun);
   for (const run of runs) {
     if (run.status === "failed") addAttention(run.id, run.id);
   }
@@ -110,6 +123,36 @@ export function chatActivityContext(
 export type ChatActivityContext = ReturnType<typeof chatActivityContext>;
 
 export function isChatActivityMessage(
+  message: ActivityMessage,
+  runId: RunId | null,
+  context: ChatActivityContext | undefined,
+): boolean {
+  // Whoever started the run only sets the default; a stamp on the message overrides it.
+  return (
+    resolveTimelineVisibility(
+      message,
+      isChatActivityByDefault(message, runId, context) ? "agent" : "user",
+    ) === "agent_fold"
+  );
+}
+
+/**
+ * One timeline row can carry several items (a tool group, a subagent card). The row stands on its
+ * own if any of them does, because folding it would hide that item; otherwise a stamp that says
+ * `agent_fold` folds it. Undefined means nothing was stamped and the run's default applies.
+ */
+export function combineTimelineVisibilityStamps(
+  stamps: Iterable<OrchestrationV2TimelineVisibility | undefined>,
+): OrchestrationV2TimelineVisibility | undefined {
+  let combined: OrchestrationV2TimelineVisibility | undefined;
+  for (const stamp of stamps) {
+    if (stamp === "user_timeline") return stamp;
+    if (stamp !== undefined) combined = stamp;
+  }
+  return combined;
+}
+
+function isChatActivityByDefault(
   message: ActivityMessage,
   runId: RunId | null,
   context: ChatActivityContext | undefined,

@@ -14,7 +14,6 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
-import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
@@ -72,7 +71,10 @@ export const make = Effect.gen(function* () {
   const watchFor = (run: OrchestrationV2Run): RunWatch => {
     const existing = watches.get(run.id);
     if (existing !== undefined) return existing;
-    const created = { seen: new Set<string>(), stats: run.delegationNudge ?? emptyDelegationNudgeStats() };
+    const created = {
+      seen: new Set<string>(),
+      stats: run.delegationNudge ?? emptyDelegationNudgeStats(),
+    };
     watches.set(run.id, created);
     return created;
   };
@@ -83,19 +85,19 @@ export const make = Effect.gen(function* () {
     stats: RunDelegationNudgeStats,
   ) {
     const now = yield* DateTime.now;
-      yield* eventSink.write({
-        events: [
-          {
-            id: yield* ids.allocate.event({ threadId }),
-            type: "run.delegation-nudge-recorded",
-            threadId,
-            runId: run.id,
-            providerInstanceId: run.providerInstanceId,
-            occurredAt: now,
-            payload: { runId: run.id, stats },
-          },
-        ],
-      });
+    yield* eventSink.write({
+      events: [
+        {
+          id: yield* ids.allocate.event({ threadId }),
+          type: "run.delegation-nudge-recorded",
+          threadId,
+          runId: run.id,
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: { runId: run.id, stats },
+        },
+      ],
+    });
   });
 
   const deliver = Effect.fn("DelegationNudgeReactor.deliver")(function* (
@@ -104,52 +106,52 @@ export const make = Effect.gen(function* () {
     stats: RunDelegationNudgeStats,
     note: string,
   ) {
-      const records = yield* projections.getThreadRecords(threadId, [
-        "providerThreads",
-        "providerTurns",
-        "providerSessions",
-      ]);
-      const providerThread = records.providerThreads.find((row) => row.id === run.providerThreadId);
-      const turnRunning = records.providerTurns.some(
-        (turn) => turn.runAttemptId === run.activeAttemptId && turn.status === "running",
-      );
-      // Capabilities are projected with the session, so a reminder can decide
-      // without the process-local session the steer effect loads later.
-      const turns = records.providerSessions.find(
-        (session) => session.id === providerThread?.providerSessionId,
-      )?.capabilities.turns;
-      // A steer that cancels the running tool, or one the policy would turn into an
-      // interrupt-and-restart, waits for the next run instead of stopping this one.
-      const canSteer =
-        turnRunning &&
-        turns?.supportsActiveSteering === true &&
-        turns.activeSteeringInterruptsTools !== true &&
-        turns.supportsSteeringByInterruptRestart !== true;
-      if (canSteer) {
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(`server:delegation-nudge:${run.id}:${stats.nudgesFired}`),
-          threadId,
-          messageId: MessageId.make(`message:delegation-nudge:${run.id}:${stats.nudgesFired}`),
-          text: note,
-          notification: {
-            source: { kind: "system" },
-            outcome: "updated",
-            summary: "Delegation reminder",
-          },
-          attachments: [],
-          // Queued, like every other server notice: the planner refuses a
-          // notification that arrives already steering, then steers this one
-          // into the running turn when the provider can take it.
-          dispatchMode: { type: "queue_after_active" },
-          createdBy: "agent",
-          creationSource: "server",
-        });
-        // The note reached this turn, so the next run must not carry it again.
-        const { deferredNote: _delivered, ...delivered } = stats;
-        return { ...delivered, deferredNote: undefined };
-      }
-      return { ...stats, deferredNote: note };
+    const records = yield* projections.getThreadRecords(threadId, [
+      "providerThreads",
+      "providerTurns",
+      "providerSessions",
+    ]);
+    const providerThread = records.providerThreads.find((row) => row.id === run.providerThreadId);
+    const turnRunning = records.providerTurns.some(
+      (turn) => turn.runAttemptId === run.activeAttemptId && turn.status === "running",
+    );
+    // Capabilities are projected with the session, so a reminder can decide
+    // without the process-local session the steer effect loads later.
+    const turns = records.providerSessions.find(
+      (session) => session.id === providerThread?.providerSessionId,
+    )?.capabilities.turns;
+    // A steer that cancels the running tool, or one the policy would turn into an
+    // interrupt-and-restart, waits for the next run instead of stopping this one.
+    const canSteer =
+      turnRunning &&
+      turns?.supportsActiveSteering === true &&
+      turns.activeSteeringInterruptsTools !== true &&
+      turns.supportsSteeringByInterruptRestart !== true;
+    if (canSteer) {
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`server:delegation-nudge:${run.id}:${stats.nudgesFired}`),
+        threadId,
+        messageId: MessageId.make(`message:delegation-nudge:${run.id}:${stats.nudgesFired}`),
+        text: note,
+        notification: {
+          source: { kind: "system" },
+          outcome: "updated",
+          summary: "Delegation reminder",
+        },
+        attachments: [],
+        // Queued, like every other server notice: the planner refuses a
+        // notification that arrives already steering, then steers this one
+        // into the running turn when the provider can take it.
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      });
+      // The note reached this turn, so the next run must not carry it again.
+      const { deferredNote: _delivered, ...delivered } = stats;
+      return { ...delivered, deferredNote: undefined };
+    }
+    return { ...stats, deferredNote: note };
   });
 
   const consider = Effect.fn("DelegationNudgeReactor.consider")(function* (
@@ -215,7 +217,11 @@ export const make = Effect.gen(function* () {
   });
 
   const worker = yield* makeDrainableWorker(
-    (input: { readonly threadId: ThreadId; readonly runId: RunId; readonly item: OrchestrationV2TurnItem | null }) =>
+    (input: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly item: OrchestrationV2TurnItem | null;
+    }) =>
       consider(input.threadId, input.runId, input.item).pipe(
         Effect.catchCauseIf(
           (cause) => !Cause.hasInterruptsOnly(cause),
@@ -282,4 +288,3 @@ function apply(watch: RunWatch, item: OrchestrationV2TurnItem): void {
   const name = countedToolName(item);
   if (name !== null) watch.stats = recordCountedTool(watch.stats, name);
 }
-

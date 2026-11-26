@@ -47,6 +47,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { ProviderExhaustion } from "./ProviderExhaustion.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 import {
   cursorOf,
   planThreadSubscription,
@@ -166,6 +167,9 @@ export const ModelAlertState = Schema.Struct({
   incidentSentAt: Schema.Record(Schema.String, Schema.Number).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  failureWakeSentAt: Schema.Record(Schema.String, Schema.Number).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   outbox: Schema.Array(Delivery),
 });
 export type ModelAlertState = typeof ModelAlertState.Type;
@@ -176,11 +180,13 @@ export const EMPTY_MODEL_ALERT_STATE: ModelAlertState = {
   reported: {},
   resuming: {},
   incidentSentAt: {},
+  failureWakeSentAt: {},
   outbox: [],
 };
 
 const MAX_DEGRADED_THREADS = 1_000;
 const MAX_REPORTED = 2_000;
+const FAILURE_WAKE_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_OUTBOX = 200;
 const MAX_RESUMING = 2_000;
 const MAX_INCIDENT_GROUPS = 200;
@@ -531,6 +537,12 @@ const lateMembers = (stored: UsageLimitIncident, sent: UsageLimitIncident) =>
       ),
   );
 
+export function failureWakeHold(sentAt: number | undefined, nowMs: number) {
+  if (sentAt === undefined) return null;
+  const until = sentAt + FAILURE_WAKE_INTERVAL_MS;
+  return until > nowMs ? until : null;
+}
+
 /**
  * The state after one delivery attempt: a delivered entry leaves, a failed one waits longer. An
  * incident that gained members while it was being sent keeps those for a later digest.
@@ -554,6 +566,17 @@ export function afterDeliveryAttempt(
   return {
     ...state,
     incidentSentAt,
+    failureWakeSentAt:
+      delivered && entry.destination === "watcher" && isFailureWake(entry.alert)
+        ? {
+            ...Object.fromEntries(
+              Object.entries(state.failureWakeSentAt).filter(
+                ([, sentAt]) => sentAt + FAILURE_WAKE_INTERVAL_MS > nowMs,
+              ),
+            ),
+            [entry.alert.threadId]: nowMs,
+          }
+        : state.failureWakeSentAt,
     reported: delivered
       ? recordStrandedDelivery(markLinkDelivered(state.reported, entry), entry, true)
       : state.reported,
@@ -675,6 +698,40 @@ export function busyWatcherHold(
   const deadline = createdAt + BUSY_WATCHER_MAX_HOLD_MS;
   if (nowMs >= deadline) return null;
   return Math.min(nowMs + BUSY_WATCHER_RECHECK_MS, deadline);
+}
+
+export type WatcherView = {
+  readonly status: string;
+  readonly providerInstanceId: string | null;
+  /** Null when unknown, as for a remote watcher. */
+  readonly usageLimited: boolean | null;
+  readonly resetAt: string | null;
+};
+
+/**
+ * When the watcher's own thread is stopped at the same account limit, the time to look again.
+ * Anything sent now would only queue a turn that fails the same way.
+ */
+export function watcherLimitHold(view: WatcherView | null, alert: WatcherAlert, nowMs: number) {
+  const providerInstanceId =
+    alert.type === "usage-limit-incident" ||
+    (alert.type === "model-degraded" && alert.reasons.includes("usage_limit"))
+      ? alert.providerInstanceId
+      : isFailureWake(alert)
+        ? (view?.providerInstanceId ?? null)
+        : null;
+  if (providerInstanceId === null || view === null) return null;
+  // A remote watcher counts as down only while the reset this alert reports is still ahead.
+  const down =
+    view.status === "failed" &&
+    view.providerInstanceId === providerInstanceId &&
+    view.usageLimited !== false;
+  const resetAt = view.resetAt ?? (alert.type === "usage-limit-incident" ? alert.resetAt : null);
+  if (!down) return null;
+  // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
+  const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
+  return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
 }
 
 /**
@@ -820,6 +877,11 @@ export const watcherAlertMessage = (alert: WatcherAlert) => {
   }
 };
 
+const isFailureWake = (
+  alert: WatcherAlert,
+): alert is ThreadEventAlert & { kind: "thread-failed" } =>
+  alert.type === "thread-event" && alert.kind === "thread-failed";
+
 /** Alerts ride in the watcher's next digest; a newer alert on the same subject replaces an older one. */
 function alertDelivery(alert: WatcherAlert): {
   readonly coalesceKey: string;
@@ -854,6 +916,8 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
     readonly dispatch: Orchestrator.OrchestratorV2["Service"]["dispatch"];
     readonly call: PeerMcpClient.PeerMcpClient["Service"]["call"];
     readonly sha256Hex: (identity: string) => Effect.Effect<string>;
+    /** Reads a thread's redirect tombstone; an alert for a retired watcher goes to its replacement. */
+    readonly getThreadShell?: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
   },
   alert: WatcherAlert,
   watcher: ModelAlertWatcher,
@@ -868,16 +932,33 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   const expiresAt = DateTime.makeUnsafe(
     expiresAtMs ?? DateTime.toEpochMillis(yield* DateTime.now) + ALERT_DIGEST_TTL_MS,
   );
+  const deliveryClass = isFailureWake(alert) ? "next_turn" : "digest";
   if (watcher.environmentId === here) {
+    // A retired watcher never takes a turn: the alert follows its redirect, or is dropped with a
+    // warning when the chain cannot be resolved.
+    const target =
+      deps.getThreadShell === undefined
+        ? watcher.threadId
+        : yield* resolveWakeTarget(deps.getThreadShell, watcher.threadId, {
+            sourceKind: "event",
+          }).pipe(
+            Effect.map((wake) => wake.threadId),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("alert for retired watcher dropped", { cause }).pipe(
+                Effect.as(null),
+              ),
+            ),
+          );
+    if (target === null) return;
     yield* deps.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`server:${key}`),
-      threadId: watcher.threadId,
+      threadId: target,
       messageId: MessageId.make(`message:${key}`),
       text: message,
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
-      delivery: { class: "digest", coalesceKey, expiresAt, category },
+      delivery: { class: deliveryClass, coalesceKey, expiresAt, category },
       createdBy: "agent",
       creationSource: "server",
     });
@@ -891,7 +972,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
       message,
       mode: "queue",
       clientRequestId: key,
-      deliveryClass: "digest",
+      deliveryClass,
       coalesceKey,
       expiresAt: DateTime.formatIso(expiresAt),
       digestCategory: category,
@@ -986,20 +1067,18 @@ export const make = Effect.gen(function* () {
     expiresAtMs: number,
   ) =>
     deliverAlertToWatcher(
-      { dispatch: engine.dispatch, call: peers.call, sha256Hex },
+      {
+        dispatch: engine.dispatch,
+        call: peers.call,
+        sha256Hex,
+        getThreadShell: (threadId) => engine.getThreadShell(threadId),
+      },
       alert,
       watcher,
       here,
       expiresAtMs,
     );
 
-  type WatcherView = {
-    readonly status: string;
-    readonly providerInstanceId: string | null;
-    /** Null when unknown, as for a remote watcher. */
-    readonly usageLimited: boolean | null;
-    readonly resetAt: string | null;
-  };
   const WatcherThreadStatus = Schema.Struct({
     thread: Schema.Struct({ status: Schema.String, providerInstanceId: Schema.String }),
   });
@@ -1215,30 +1294,6 @@ export const make = Effect.gen(function* () {
       );
   });
 
-  /**
-   * When the watcher's own thread is stopped at the same account limit, the time to look again.
-   * Anything sent now would only queue a turn that fails the same way.
-   */
-  const holdUntil = (view: WatcherView | null, alert: WatcherAlert, nowMs: number) => {
-    const providerInstanceId =
-      alert.type === "usage-limit-incident" ||
-      (alert.type === "model-degraded" && alert.reasons.includes("usage_limit"))
-        ? alert.providerInstanceId
-        : null;
-    if (providerInstanceId === null || view === null) return null;
-    // A remote watcher counts as down only while the reset this alert reports is still ahead.
-    const down =
-      view.status === "failed" &&
-      view.providerInstanceId === providerInstanceId &&
-      view.usageLimited !== false;
-    const resetAt = view.resetAt ?? (alert.type === "usage-limit-incident" ? alert.resetAt : null);
-    if (!down) return null;
-    // Past the reset the limit is over: whatever keeps the watcher down, a message may restart it.
-    const resetMs = resetAt === null ? Number.NaN : Date.parse(resetAt);
-    if (!Number.isFinite(resetMs) || resetMs <= nowMs) return null;
-    return Math.min(resetMs, nowMs + HOLD_RECHECK_MS);
-  };
-
   type DeliveryResult =
     | { readonly _tag: "sent" }
     | { readonly _tag: "dropped" }
@@ -1274,16 +1329,29 @@ export const make = Effect.gen(function* () {
       return { _tag: "sent" } satisfies DeliveryResult;
     }
     const watcher = current.modelAlertWatcher;
-    const target = alert.type === "thread-event" ? (alert.recipient ?? null) : watcher;
+    const target =
+      alert.type === "thread-event" && !isFailureWake(alert) ? (alert.recipient ?? null) : watcher;
+    if (
+      isFailureWake(alert) &&
+      (target === null ||
+        (target.environmentId === alert.environmentId && target.threadId === alert.threadId))
+    ) {
+      return { _tag: "dropped" } satisfies DeliveryResult;
+    }
     if (target === null) return { _tag: "sent" } satisfies DeliveryResult;
     const here = yield* environment.getEnvironmentId;
     const nowMs = yield* Clock.currentTimeMillis;
+    if (isFailureWake(alert)) {
+      const sentAt = (yield* Ref.get(state)).failureWakeSentAt[alert.threadId];
+      const until = failureWakeHold(sentAt, nowMs);
+      if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
+    }
     const view =
       target.environmentId === watcher?.environmentId && target.threadId === watcher.threadId
         ? yield* watcherView
         : yield* readWatcher(target, here).pipe(Effect.catchCause(() => Effect.succeed(null)));
     const until =
-      holdUntil(view, alert, nowMs) ??
+      watcherLimitHold(view, alert, nowMs) ??
       busyWatcherHold(view?.status ?? null, entry.createdAt, nowMs);
     if (until !== null) return { _tag: "held", until } satisfies DeliveryResult;
     yield* deliverToWatcher(
@@ -1339,35 +1407,50 @@ export const make = Effect.gen(function* () {
     if (decision.action === "wake") {
       eventWakeSeq += 1;
       const seq = eventWakeSeq;
-      yield* engine
-        .dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make(`server:event-sub:${subscription.id}:${seq}`),
-          threadId: subscription.subscriberThreadId,
-          messageId: MessageId.make(`message:event-sub:${subscription.id}:${seq}`),
-          text: [
-            `Update on thread ${title} (${watchedThreadId}), which you subscribed to:`,
-            ...decision.summaries,
-          ].join("\n"),
-          notification: {
-            source: { kind: "monitor" },
-            outcome: "updated",
-            summary: decision.summaries[0] ?? "thread event",
-          },
-          attachments: [],
-          dispatchMode: { type: "queue_after_active" },
-          createdBy: "agent",
-          creationSource: "server",
-        })
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("event subscription wake failed", {
-              id: subscription.id,
-              threadId: subscription.subscriberThreadId,
-              cause,
-            }),
-          ),
-        );
+      const wakeTarget = yield* resolveWakeTarget(
+        (threadId) => engine.getThreadShell(threadId),
+        subscription.subscriberThreadId,
+        { sourceKind: "event", subscriptionId: subscription.id },
+      ).pipe(
+        Effect.map((wake) => wake.threadId),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription wake dropped", {
+            id: subscription.id,
+            threadId: subscription.subscriberThreadId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (wakeTarget !== null)
+        yield* engine
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`server:event-sub:${subscription.id}:${seq}`),
+            threadId: wakeTarget,
+            messageId: MessageId.make(`message:event-sub:${subscription.id}:${seq}`),
+            text: [
+              `Update on thread ${title} (${watchedThreadId}), which you subscribed to:`,
+              ...decision.summaries,
+            ].join("\n"),
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "updated",
+              summary: decision.summaries[0] ?? "thread event",
+            },
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("event subscription wake failed", {
+                id: subscription.id,
+                threadId: subscription.subscriberThreadId,
+                cause,
+              }),
+            ),
+          );
     }
     if (decision.expire) {
       yield* store.remove(subscription.subscriberThreadId, subscription.id).pipe(
@@ -1670,14 +1753,13 @@ export const make = Effect.gen(function* () {
     });
     const label = (yield* environment.getDescriptor).label;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
-    const recipient = yield* launchingThread(shell, here);
-    const destinations = threadEventDestinations(recipient, current.modelAlertWebhookUrl);
+    const launcher = yield* launchingThread(shell, here);
     if (
       !selfWatch &&
       !noGlobalDestination &&
-      recipient === null &&
-      destinations.length === 0 &&
-      judged.findings.length > 0
+      launcher === null &&
+      current.modelAlertWebhookUrl.trim() === "" &&
+      judged.findings.some((finding) => finding.kind !== "thread-failed")
     ) {
       yield* Effect.logWarning("a thread event has no launching thread and no webhook", {
         threadId,
@@ -1687,23 +1769,34 @@ export const make = Effect.gen(function* () {
     const enqueued =
       selfWatch || noGlobalDestination
         ? false
-        : yield* update((state) => {
-            const result = recordThreadEvents(
-              state,
-              { threadId, ...judged, ...context },
-              (finding) =>
-                threadEventAlert({
-                  environmentId: here,
-                  environmentLabel: label,
-                  shell,
-                  finding,
-                  occurredAt,
-                  recipient,
-                }),
-              destinations,
-              nowMs,
-            );
-            return [result.enqueued, result.state];
+        : yield* update((initial) => {
+            let state = initial;
+            let queued = false;
+            for (const kind of judged.evaluated) {
+              const recipient = kind === "thread-failed" ? watcher : launcher;
+              const destinations = threadEventDestinations(
+                recipient,
+                kind === "thread-failed" ? "" : current.modelAlertWebhookUrl,
+              );
+              const result = recordThreadEvents(
+                state,
+                { threadId, evaluated: [kind], findings: judged.findings, ...context },
+                (finding) =>
+                  threadEventAlert({
+                    environmentId: here,
+                    environmentLabel: label,
+                    shell,
+                    finding,
+                    occurredAt,
+                    recipient,
+                  }),
+                destinations,
+                nowMs,
+              );
+              state = result.state;
+              queued ||= result.enqueued;
+            }
+            return [queued, state];
           });
     if (enqueued) yield* Queue.offer(wake, undefined);
     yield* Effect.forEach(

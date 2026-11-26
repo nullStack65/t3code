@@ -15,6 +15,8 @@ import {
   ServerAuthSessionMethod,
 } from "@t3tools/contracts";
 
+import { CLOUDFLARE_ACCESS_SUBJECT_PREFIX } from "../auth/CloudflareAccessConfig.ts";
+import { WORKOS_SUBJECT_PREFIX } from "../auth/WorkOsConfig.ts";
 import {
   type AuthSessionRepositoryError,
   PersistenceDecodeError,
@@ -56,7 +58,7 @@ export const CreateAuthSessionInput = Schema.Struct({
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
   proofKeyThumbprint: Schema.optionalKey(Schema.String),
-  /** The founder the session's pairing code enrolled. */
+  /** The founder the session's pairing code or verified sign-in enrolled. */
   founder: Schema.optionalKey(Founder),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
@@ -90,6 +92,8 @@ export const ExtendAuthSessionInput = Schema.Struct({
   sessionId: AuthSessionId,
   expiresAt: Schema.DateTimeUtcFromString,
   now: Schema.DateTimeUtcFromString,
+  /** When set, only a row whose expiry is at or before this is moved. */
+  onlyIfExpiresBy: Schema.optional(Schema.DateTimeUtcFromString),
 });
 export type ExtendAuthSessionInput = typeof ExtendAuthSessionInput.Type;
 
@@ -139,7 +143,7 @@ export class AuthSessionRepository extends Context.Service<
     readonly revoke: (
       input: RevokeAuthSessionInput,
     ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
-    /** Moves a live session's expiry; false when it is revoked, expired or unknown. */
+    /** Moves a live session's expiry; false when it is revoked, expired, missing or past `onlyIfExpiresBy`. */
     readonly extend: (
       input: ExtendAuthSessionInput,
     ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
@@ -384,6 +388,8 @@ export const make = Effect.gen(function* () {
           AND revoked_at IS NULL
           AND expires_at > ${now}
           AND client_device_type IS NOT 'bot'
+          AND subject NOT GLOB ${WORKOS_SUBJECT_PREFIX + "*"}
+          AND subject NOT GLOB ${CLOUDFLARE_ACCESS_SUBJECT_PREFIX + "*"}
         RETURNING session_id AS "sessionId"
       `,
   });
@@ -464,13 +470,14 @@ export const make = Effect.gen(function* () {
   const extendSessionRows = SqlSchema.findAll({
     Request: ExtendAuthSessionInput,
     Result: Schema.Struct({ sessionId: AuthSessionId }),
-    execute: ({ sessionId, expiresAt, now }) =>
+    execute: ({ sessionId, expiresAt, now, onlyIfExpiresBy }) =>
       sql`
         UPDATE auth_sessions
         SET expires_at = ${expiresAt}
         WHERE session_id = ${sessionId}
           AND revoked_at IS NULL
           AND expires_at > ${now}
+          AND (${onlyIfExpiresBy ?? null} IS NULL OR expires_at <= ${onlyIfExpiresBy ?? null})
         RETURNING session_id AS "sessionId"
       `,
   });

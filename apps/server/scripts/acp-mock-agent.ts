@@ -159,6 +159,9 @@ process.once("SIGINT", () => {
 });
 
 function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
+  if (process.env.T3_ACP_OMIT_MODEL_OPTIONS === "1") {
+    return [];
+  }
   if (antigravityProfile) {
     return [
       {
@@ -1347,6 +1350,15 @@ const program = Effect.gen(function* () {
           },
           {
             sessionUpdate: "tool_call_update",
+            toolCallId: "structured-search-grep-output",
+            title: "Grep",
+            kind: "search",
+            status: "completed",
+            rawInput: { pattern: "needle", path: "src" },
+            rawOutput: "src/a.ts:3:const needle = 1;\nsrc/b.ts:9:needle();",
+          },
+          {
+            sessionUpdate: "tool_call_update",
             toolCallId: "structured-search-query-no-output",
             title: "Grep",
             kind: "search",
@@ -1488,8 +1500,27 @@ const program = Effect.gen(function* () {
             status: "in_progress",
           },
         });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "native-failed-tool",
+            title: "Failing command",
+            kind: "execute",
+            status: "in_progress",
+          },
+        });
         yield* Deferred.await(nativeCancelRequested);
         yield* Deferred.await(nativeCancelRelease);
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "native-failed-tool",
+            status: "failed",
+            content: [{ type: "content", content: { type: "text", text: "Permission denied" } }],
+          },
+        });
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,
           update: {
@@ -1497,6 +1528,26 @@ const program = Effect.gen(function* () {
             toolCallId: "native-cancel-tool",
             status: "failed",
             content: [{ type: "content", content: { type: "text", text: "Cancelled." } }],
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "native-unseen-cancel-tool",
+            title: "Cancelled command",
+            kind: "execute",
+            status: "failed",
+            content: [{ type: "content", content: { type: "text", text: "Cancelled." } }],
+          },
+        });
+        // A later output-only update must not undo the interrupted status.
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "native-cancel-tool",
+            content: [{ type: "content", content: { type: "text", text: "Cancelled. exit 130" } }],
           },
         });
         yield* agent.client.sessionUpdate({

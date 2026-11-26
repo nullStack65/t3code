@@ -1,14 +1,22 @@
 import {
   CommandId,
+  isOrchestrationV2WorkActive,
   MessageId,
   type OrchestrationV2Notification,
   type PullRequestActivity,
   type PullRequestComment,
+  type PullRequestDetail,
   type PullRequestRef,
   type PullRequestThreadCommentsResult,
+  type ThreadId,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
 } from "@t3tools/contracts";
+import { commandIndicatesFailure } from "@t3tools/shared/toolOutput";
+import {
+  changeRequestsClosedBy,
+  isChangeRequestCloseCommand,
+} from "../sourceControl/sourceControlDefinitions.ts";
 import {
   normalizeThreadPullRequestKey,
   threadPullRequestKeyOf,
@@ -37,10 +45,12 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { isTerminalRunStatus } from "./ThreadManagementService.ts";
 import {
   combinePullRequestWatchWakes,
   evaluatePullRequestWatch,
   PULL_REQUEST_WATCH_NO_CHECKS_MS,
+  pullRequestWatchEndMessage,
   pullRequestWatchMessage,
   stalePullRequestWatch,
   pullRequestWatchStaleness,
@@ -54,6 +64,7 @@ import {
   withCursor,
 } from "./eventSubscription.ts";
 import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
+import { resolveWakeTarget } from "./RetiredThreadRedirect.ts";
 import type { EventSubscription } from "@t3tools/contracts";
 
 /** Checks take minutes; faster sweeps waste the account's shared host quota. */
@@ -116,6 +127,8 @@ interface Wake {
   readonly notification: OrchestrationV2Notification;
   readonly includesRemarks?: boolean;
   readonly staleProgressAt?: string;
+  /** Set when an event subscription row, not the plain watch, produced this wake. */
+  readonly subscriptionId?: string;
 }
 
 /** A wake a pass holds back so each thread gets one for everything the pass found. */
@@ -233,7 +246,8 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.wakes === right.wakes &&
     left.awaitingBaseline === right.awaitingBaseline &&
     left.checksAwaitedSince === right.checksAwaitedSince &&
-    left.checksPending === right.checksPending
+    left.checksPending === right.checksPending &&
+    left.until === right.until
   );
 }
 
@@ -307,6 +321,17 @@ export const make = Effect.gen(function* () {
   // A pass reads watches and records new ones, so passes must not overlap.
   const passes = Semaphore.makeUnsafe(1);
   const lastReads = new Map<string, LastRead>();
+  /**
+   * Each thread's merge and close commands, by item, with the pull requests each names. One counts
+   * while it runs and, if it succeeded, until the read at its end is done.
+   */
+  const agentEnds = new Map<ThreadId, Map<string, ReadonlySet<number> | "any">>();
+  // The agent needs no wake for a merge or close it made itself. Anything ending later, as a
+  // `--auto` merge does, is news.
+  const endedByAgent = (target: WatchTarget) =>
+    [...(agentEnds.get(target.thread.id)?.values() ?? [])].some(
+      (named) => named === "any" || named.has(target.link.number),
+    );
   const threadTails = new Map<
     string,
     {
@@ -336,7 +361,8 @@ export const make = Effect.gen(function* () {
     endedWatch?: ThreadPullRequestWatch,
   ) {
     const uuid = yield* random.uuidV4();
-    return yield* engine.dispatch({
+    const route = wake === undefined ? undefined : yield* routeWake(target, wake);
+    const synced = yield* engine.dispatch({
       type: "thread.pull-request-watch.sync",
       commandId: CommandId.make(`server:pr-watch:${target.thread.id}:${uuid}`),
       threadId: target.thread.id,
@@ -351,31 +377,101 @@ export const make = Effect.gen(function* () {
             ...(wake.staleProgressAt === undefined
               ? {}
               : { staleProgressAt: wake.staleProgressAt }),
-            wake: {
-              text: wake.text,
-              notification: wake.notification,
-              ...(wake.includesRemarks === undefined
-                ? {}
-                : { includesRemarks: wake.includesRemarks }),
-              messageId: MessageId.make(`message:pr-watch:${uuid}`),
-            },
+            // A retired thread's wake is delivered below, so the sync only advances its cursor.
+            ...(route === "here"
+              ? {
+                  wake: {
+                    text: wake.text,
+                    notification: wake.notification,
+                    ...(wake.includesRemarks === undefined
+                      ? {}
+                      : { includesRemarks: wake.includesRemarks }),
+                    messageId: MessageId.make(`message:pr-watch:${uuid}`),
+                  },
+                }
+              : {}),
           }),
     });
+    if (wake !== undefined && route !== undefined && route !== "here" && route !== "dropped") {
+      // Sent after the sync commits, so a watch that ended while it was read sends nothing. The
+      // wake has no pull request stamp: the replacement thread does not watch this pull request.
+      yield* engine
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`server:pr-watch-redirect:${route.threadId}:${uuid}`),
+          threadId: route.threadId,
+          messageId: MessageId.make(`message:pr-watch:${uuid}`),
+          text: wake.text,
+          notification: wake.notification,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("redirected pull request wake was not delivered", {
+              retiredThreadId: target.thread.id,
+              redirectedToThreadId: route.threadId,
+              cause,
+            }),
+          ),
+        );
+    }
+    return synced;
   });
 
-  const giveUp = (target: WatchTarget) =>
-    record(target, null, {
-      text: `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request only if it is still open.`,
+  /**
+   * Where a wake for this watch goes: `here`, or the live replacement of a retired thread. A
+   * retired thread's chain that loops or dead-ends drops the wake (`dropped`) with a warning; it
+   * never starts a turn on the retired thread.
+   */
+  const routeWake = (target: WatchTarget, wake: Wake) =>
+    resolveWakeTarget(
+      (threadId) => engine.getThreadShell(threadId),
+      target.thread.id,
+      wake.subscriptionId === undefined
+        ? { sourceKind: "pr_watch", prUrl: target.link.url }
+        : { sourceKind: "event", subscriptionId: wake.subscriptionId, prUrl: target.link.url },
+    ).pipe(
+      Effect.map((resolved) => (resolved.redirected ? resolved : ("here" as const))),
+      Effect.catchTag("ThreadRedirectError", (error) =>
+        Effect.logWarning("pull request wake dropped: retired thread has no live replacement", {
+          threadId: target.thread.id,
+          reason: error.reason,
+        }).pipe(Effect.as("dropped" as const)),
+      ),
+    );
+
+  const isRetired = (threadId: ThreadId) =>
+    engine.getThreadShell(threadId).pipe(
+      Effect.map((shell) => shell?.replacedByThreadId != null),
+      Effect.orElseSucceed(() => false),
+    );
+
+  const giveUp = (target: WatchTarget, cause: Cause.Cause<PullRequestService.PullRequestError>) => {
+    const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+    // The message is the host's own setup instruction, never the subprocess output in `cause`.
+    const unusable =
+      error?._tag === "PullRequestUnavailableError" && error.reason !== "provider-unsupported"
+        ? error.message
+        : null;
+    return record(target, null, {
+      text:
+        unusable === null
+          ? `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request only if it is still open.`
+          : `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because the T3 Code server cannot use the host: ${unusable} Fix that on the server, then call watch_pull_request only if it is still open.`,
       notification: {
         source: { kind: "monitor" },
         outcome: "failed",
-        summary: `#${target.link.number}: stopped watching, could not read it`,
+        summary: `#${target.link.number}: stopped watching, ${unusable === null ? "could not read it" : "host not set up on the server"}`,
       },
     }).pipe(
       Effect.tap(() => woke(target)),
       Effect.catch(() => record(target, null)),
       Effect.tap(() => ended(target, "unreadable")),
     );
+  };
 
   const readRemarks = Effect.fn("PullRequestWatchReactor.readRemarks")(
     function* (
@@ -546,35 +642,52 @@ export const make = Effect.gen(function* () {
         rest.length === 0
           ? sendOne(first!)
           : // A watch that ended or moved during the pass fails the whole command; each then
-            // goes on its own, as the orchestrator decides for it alone.
-            sendTogether([first!, ...rest]).pipe(
-              Effect.catchCauseIf(
-                (cause) => !Cause.hasInterruptsOnly(cause),
-                () => Effect.forEach([first!, ...rest], sendOne, { discard: true }),
+            // goes on its own, as the orchestrator decides for it alone. A retired thread's
+            // wakes always go one by one, each to the replacement.
+            isRetired(first!.target.thread.id).pipe(
+              Effect.flatMap((retired) =>
+                retired
+                  ? Effect.forEach([first!, ...rest], sendOne, { discard: true })
+                  : sendTogether([first!, ...rest]).pipe(
+                      Effect.catchCauseIf(
+                        (cause) => !Cause.hasInterruptsOnly(cause),
+                        () => Effect.forEach([first!, ...rest], sendOne, { discard: true }),
+                      ),
+                    ),
               ),
             ),
       { discard: true },
     );
   });
 
-  const closed = (groupKey: string, target: WatchTarget, pending: readonly string[] = []) =>
-    hold({
-      groupKey,
-      target,
-      next: null,
-      wake: {
-        text: [
-          `Pull request #${target.link.number} (${target.link.url}) was closed, so T3 Code stopped watching it. Call watch_pull_request if it reopens.`,
-          ...pending,
-        ].join("\n"),
-        notification: {
-          source: { kind: "monitor" },
-          outcome: "updated",
-          summary: `#${target.link.number}: closed, stopped watching`,
-        },
-      },
-      reason: "closed",
+  const finished = (
+    groupKey: string,
+    target: WatchTarget,
+    detail: Pick<PullRequestDetail, "state" | "baseBranch" | "mergeCommitSha" | "mergedBy">,
+    pending: readonly string[] = [],
+    subscriptionId?: string,
+  ) => {
+    const reason = detail.state === "merged" ? "merged" : "closed";
+    const message = pullRequestWatchEndMessage({
+      number: target.link.number,
+      url: target.link.url,
+      detail,
     });
+    return endedByAgent(target)
+      ? record(target, null).pipe(Effect.tap(() => ended(target, reason)))
+      : hold({
+          groupKey,
+          target,
+          next: null,
+          // Summaries a subscription was holding go out with the end, so none is lost.
+          wake: {
+            ...(subscriptionId === undefined ? {} : { subscriptionId }),
+            ...message,
+            ...(pending.length === 0 ? {} : { text: [message.text, ...pending].join("\n") }),
+          },
+          reason,
+        });
+  };
 
   const loadSubscription = Effect.fnUntraced(function* (target: WatchTarget) {
     if (Option.isNone(subscriptions)) return { mode: "absent" as const };
@@ -628,20 +741,33 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const finishClosed = Effect.fnUntraced(function* (groupKey: string, target: WatchTarget) {
+  const finishClosed = Effect.fnUntraced(function* (
+    groupKey: string,
+    target: WatchTarget,
+    detail: Pick<PullRequestDetail, "state" | "baseBranch" | "mergeCommitSha" | "mergedBy">,
+  ) {
     const loaded = yield* loadSubscription(target);
     const pending = loaded.mode === "row" ? loaded.row.pendingSummaries : [];
-    yield* closed(groupKey, target, pending);
+    yield* finished(
+      groupKey,
+      target,
+      detail,
+      pending,
+      loaded.mode === "row" ? loaded.row.id : undefined,
+    );
     if (loaded.mode === "row" && loaded.row.delivery.autoExpireOnClose) {
       yield* dropSubscription(loaded.row);
     }
   });
 
-  const finishMerged = Effect.fnUntraced(function* (target: WatchTarget) {
+  const finishMerged = Effect.fnUntraced(function* (
+    groupKey: string,
+    target: WatchTarget,
+    detail: Pick<PullRequestDetail, "state" | "baseBranch" | "mergeCommitSha" | "mergedBy">,
+  ) {
     const loaded = yield* loadSubscription(target);
     if (loaded.mode === "absent") {
-      yield* record(target, null);
-      yield* ended(target, "merged");
+      yield* finished(groupKey, target, detail);
       return;
     }
     const subscription =
@@ -658,22 +784,14 @@ export const make = Effect.gen(function* () {
       state: cursorOf(subscription),
       terminal: "merged",
     });
-    yield* record(
+    yield* finished(
+      groupKey,
       target,
-      null,
-      decision.action === "wake"
-        ? {
-            ...subscriptionWake({
-              number: target.link.number,
-              url: target.link.url,
-              summaries: decision.summaries,
-            }),
-            includesRemarks: false,
-          }
-        : undefined,
+      detail,
+      decision.action === "wake" ? decision.summaries : [],
+      loaded.mode === "row" ? loaded.row.id : undefined,
     );
     if (loaded.mode === "row" && decision.expire) yield* dropSubscription(loaded.row);
-    yield* ended(target, "merged");
   });
 
   const expireOnSettle = Effect.fnUntraced(function* (target: WatchTarget) {
@@ -683,14 +801,13 @@ export const make = Effect.gen(function* () {
     }
   });
 
-  const endsWithoutRead = ({ thread, link }: WatchTarget): WatchEndReason | undefined =>
-    link.snapshot?.state === "merged"
-      ? "merged"
-      : thread.settledOverride === "settled" || thread.settledAt !== null
-        ? "settled"
-        : thread.lineage.relationshipToParent === "subagent"
-          ? "subagent"
-          : undefined;
+  // A merged snapshot still gets one read, so the wake can name the merge commit.
+  const endsWithoutRead = ({ thread }: WatchTarget): WatchEndReason | undefined =>
+    thread.settledOverride === "settled" || thread.settledAt !== null
+      ? "settled"
+      : thread.lineage.relationshipToParent === "subagent"
+        ? "subagent"
+        : undefined;
 
   const eachTarget = <E>(
     group: WatchGroup,
@@ -708,6 +825,16 @@ export const make = Effect.gen(function* () {
         }),
       ),
     ).pipe(Effect.map((landed) => landed.every(Boolean)));
+
+  // A merged PR's watch holds its thread from settling, so it must not wait out the host.
+  const endMergedSnapshots = (group: WatchGroup) => {
+    const merged = group.targets.filter((target) => target.link.snapshot?.state === "merged");
+    return eachTarget({ ...group, targets: merged }, (target) =>
+      target.link.snapshot ? finished(group.key, target, target.link.snapshot) : Effect.void,
+    ).pipe(
+      Effect.as({ ...group, targets: group.targets.filter((target) => !merged.includes(target)) }),
+    );
+  };
 
   const referenceOf = (group: WatchGroup) => {
     const first = group.targets[0]!;
@@ -799,6 +926,11 @@ export const make = Effect.gen(function* () {
       if (Cause.hasInterruptsOnly(detailRead.cause))
         return yield* Effect.failCause(detailRead.cause);
       lastReads.delete(group.key);
+      const unended = yield* endMergedSnapshots(group);
+      if (unended.targets.length === 0) {
+        readFailures.delete(group.key);
+        return;
+      }
       const reason = providerFailureReason(detailRead.cause);
       if (reason === "rate-limited") return yield* checkStaleness(group, now, "unavailable");
       // Transport and host failures can outlast the failure limit; keep the watch for recovery.
@@ -808,7 +940,10 @@ export const make = Effect.gen(function* () {
       }
       const failures = (readFailures.get(group.key) ?? 0) + 1;
       readFailures.set(group.key, failures);
-      if (failures >= READ_FAILURE_LIMIT && (yield* eachTarget(group, giveUp))) {
+      if (
+        failures >= READ_FAILURE_LIMIT &&
+        (yield* eachTarget(unended, (target) => giveUp(target, detailRead.cause)))
+      ) {
         readFailures.delete(group.key);
       }
       return yield* Effect.failCause(detailRead.cause);
@@ -831,7 +966,9 @@ export const make = Effect.gen(function* () {
     if (detail.state !== "open") {
       lastReads.delete(group.key);
       return yield* eachTarget(group, (target) =>
-        detail.state === "closed" ? finishClosed(group.key, target) : finishMerged(target),
+        detail.state === "closed"
+          ? finishClosed(group.key, target, detail)
+          : finishMerged(group.key, target, detail),
       );
     }
 
@@ -955,6 +1092,7 @@ export const make = Effect.gen(function* () {
               summaries: decision.summaries,
             }),
             includesRemarks: decision.includesRemarks,
+            ...(loaded.mode === "row" ? { subscriptionId: loaded.row.id } : {}),
           };
           const endForComments = report.exhausted && decision.includesRemarks;
           yield* hold(
@@ -1024,13 +1162,9 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       ending,
       ([target, reason]) =>
-        (reason === "merged"
-          ? finishMerged(target)
-          : record(target, null).pipe(
-              Effect.tap(() => (reason === "settled" ? expireOnSettle(target) : Effect.void)),
-              Effect.tap(() => ended(target, reason)),
-            )
-        ).pipe(
+        record(target, null).pipe(
+          Effect.tap(() => (reason === "settled" ? expireOnSettle(target) : Effect.void)),
+          Effect.tap(() => ended(target, reason)),
           Effect.catchCause(
             logFailure("pull request watch stop failed", {
               threadId: target.thread.id,
@@ -1071,8 +1205,13 @@ export const make = Effect.gen(function* () {
           }),
           Effect.flatMap((fingerprint) =>
             fingerprint === "paused"
-              ? Clock.currentTimeMillis.pipe(
-                  Effect.flatMap((now) => checkStaleness(group, now, "unavailable")),
+              ? endMergedSnapshots(group).pipe(
+                  Effect.andThen(
+                    Clock.currentTimeMillis.pipe(
+                      Effect.flatMap((now) => checkStaleness(group, now, "unavailable")),
+                    ),
+                  ),
+                  Effect.asVoid,
                 )
               : reads.withPermit(
                   readGroup(group, fingerprint).pipe(
@@ -1107,9 +1246,75 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("PullRequestWatchReactor.readOnChange"),
     );
 
+  // A full read, since an unchanged fingerprint or snapshot would otherwise skip the detail.
+  const readThreadWatches = (threadId: ThreadId) =>
+    projections.getThreadsWithPullRequests(threadId).pipe(
+      Effect.flatMap((threads) =>
+        Effect.forEach(
+          threads.flatMap((thread) =>
+            visibleThreadPullRequests(thread.pullRequests ?? [])
+              .filter((link) => link.watch !== undefined)
+              .map((link) => [thread.projectId, threadPullRequestKeyOf(link)] as const),
+          ),
+          ([projectId, pullRequest]) =>
+            // After any pass in flight, which could record a read from before the merge.
+            passes
+              .withPermit(Effect.sync(() => lastReads.delete(`${projectId} ${pullRequest}`)))
+              .pipe(Effect.andThen(readOnChange(pullRequest))),
+          { discard: true },
+        ),
+      ),
+      Effect.catchCause(logFailure("pull request watch read after a merge failed", { threadId })),
+    );
+
   const start: PullRequestWatchReactor["Service"]["start"] = Effect.fn(
     "PullRequestWatchReactor.start",
   )(function* () {
+    // Reading a thread's watches as its agent's merge or close ends lets them end at once.
+    const agentReads = yield* FiberMap.make<string>();
+    const finished = new Set<string>();
+    yield* forkParked(
+      Stream.runForEach(engine.streamDomainEvents, (event) => {
+        if (event.type === "run.updated") {
+          // A run can stop before its command reports that it ended.
+          const commands = agentEnds.get(event.threadId);
+          if (commands === undefined || !isTerminalRunStatus(event.payload.status)) {
+            return Effect.void;
+          }
+          for (const id of commands.keys()) if (!finished.has(id)) commands.delete(id);
+          if (commands.size === 0) agentEnds.delete(event.threadId);
+          return Effect.void;
+        }
+        if (event.type !== "turn-item.updated") return Effect.void;
+        const item = event.payload;
+        if (
+          item.type !== "command_execution" ||
+          finished.has(item.id) ||
+          !isChangeRequestCloseCommand(item.input)
+        ) {
+          return Effect.void;
+        }
+        const commands = agentEnds.get(event.threadId) ?? new Map();
+        agentEnds.set(event.threadId, commands);
+        commands.set(item.id, changeRequestsClosedBy(item.input));
+        if (isOrchestrationV2WorkActive(item.status)) return Effect.void;
+        finished.add(item.id);
+        const done = Effect.sync(() => {
+          commands.delete(item.id);
+          if (commands.size === 0 && agentEnds.get(event.threadId) === commands) {
+            agentEnds.delete(event.threadId);
+          }
+        });
+        // Some providers report a command that failed as completed.
+        return Effect.andThen(
+          item.status === "completed" && !commandIndicatesFailure(item) ? Effect.void : done,
+          FiberMap.run(
+            agentReads,
+            item.id,
+          )(readThreadWatches(event.threadId).pipe(Effect.ensuring(done))),
+        );
+      }).pipe(Effect.catchCause(logFailure("pull request watch command stream failed", {}))),
+    );
     // One feed per pull request: the host keeps one subscription per pull request and account.
     const feeds = yield* FiberMap.make<string>();
     const follow = Effect.gen(function* () {
@@ -1136,11 +1341,10 @@ export const make = Effect.gen(function* () {
     yield* forkParked(
       Stream.runForEach(engine.streamDomainEvents, (event) => {
         if (event.type !== "thread.pull-request-synced") return Effect.void;
-        const unread = visibleThreadPullRequests(event.payload.pullRequests ?? []).flatMap(
-          (link) =>
-            link.watch === undefined || lives.has(lifeKeyOf(event.threadId, link, link.watch))
-              ? []
-              : [threadPullRequestKeyOf(link)],
+        const unread = visibleThreadPullRequests(event.payload.pullRequests ?? []).flatMap((link) =>
+          link.watch === undefined || lives.has(lifeKeyOf(event.threadId, link, link.watch))
+            ? []
+            : [threadPullRequestKeyOf(link)],
         );
         return Effect.forEach(new Set(unread), readOnChange, { discard: true });
       }).pipe(Effect.catchCause(logFailure("pull request watch event stream failed", {}))),

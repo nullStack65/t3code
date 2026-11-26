@@ -1,5 +1,6 @@
 import { resolveMachineOwners } from "@t3tools/client-runtime/state/thread-attribution";
 import { AuthSettingsWriteScope, type EnvironmentId, type Founder } from "@t3tools/contracts";
+import { T, useGT, Var } from "gt-react";
 
 import {
   getClientSettings,
@@ -13,17 +14,21 @@ import { useEnvironmentScope } from "../../state/session";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { useSearchableSetting } from "./settingsSearch";
 
 const OWNER_LABELS = { kameron: "Kameron", jeff: "Jeff" } as const;
 
 /** Which founder new threads from this device are filed under; the sidebar filter only views. */
 export function NewThreadInboxRow() {
+  const gt = useGT();
+  const searchableSetting = useSearchableSetting();
   const owner = useClientSettings((settings) => settings.founderInboxOwner);
   return (
     <SettingsRow
       {...searchableSetting("new-thread-inbox")}
-      description="Threads you start on this device go to this inbox. Until you choose, they stay unfiled."
+      description={gt(
+        "Threads you start on this device go to this inbox. Until you choose, they stay unfiled.",
+      )}
       control={
         <div className="w-full sm:w-40">
           <Select
@@ -33,12 +38,20 @@ export function NewThreadInboxRow() {
                 void updateClientSettings({ founderInboxOwner: value });
             }}
           >
-            <SelectTrigger size="sm" className="w-full min-w-0" aria-label="New threads belong to">
-              <SelectValue>{owner ? OWNER_LABELS[owner] : "Not set"}</SelectValue>
+            <SelectTrigger
+              size="sm"
+              className="w-full min-w-0"
+              aria-label={gt("New threads belong to")}
+            >
+              <SelectValue>{owner ? OWNER_LABELS[owner] : gt("Not set")}</SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
-              <SelectItem value="kameron">Kameron</SelectItem>
-              <SelectItem value="jeff">Jeff</SelectItem>
+              <SelectItem value="kameron">
+                <T>Kameron</T>
+              </SelectItem>
+              <SelectItem value="jeff">
+                <T>Jeff</T>
+              </SelectItem>
             </SelectPopup>
           </Select>
         </div>
@@ -54,6 +67,8 @@ const UNSET = "unset";
  * stores it, so every app agrees; servers too old to store it use this device's own map.
  */
 export function MachineOwnersRow() {
+  const gt = useGT();
+  const searchableSetting = useSearchableSetting();
   const environments = useEnvironmentIdentities();
   const serverConfigs = useServerConfigs();
   const legacyOwners = useClientSettings((settings) => settings.founderByEnvironmentId);
@@ -61,7 +76,9 @@ export function MachineOwnersRow() {
   return (
     <SettingsRow
       {...searchableSetting("machine-owners")}
-      description="Older threads without sender details are credited to the machine's owner, in every app connected to it. Unset machines show as Unknown."
+      description={gt(
+        "Older threads without sender details are credited to the machine's owner, in every app connected to it. Unset machines show as Unknown.",
+      )}
     >
       <div className="flex flex-col gap-2 pt-2">
         {environments.map(({ environmentId, label }) => (
@@ -88,6 +105,7 @@ function MachineOwnerRow(props: {
   deviceChoice: Founder | undefined;
 }) {
   const { environmentId, label, owner, reportsOwner } = props;
+  const gt = useGT();
   // An upgraded machine with no owner yet: offer this device's earlier choice, never push it,
   // so devices with different maps do not overwrite each other.
   const migratable = reportsOwner && owner === undefined ? props.deviceChoice : undefined;
@@ -108,14 +126,16 @@ function MachineOwnerRow(props: {
         <span className="truncate text-sm">{label}</span>
         {migratable ? (
           <span className="flex items-center gap-1 text-muted-foreground text-xs">
-            This device chose {OWNER_LABELS[migratable]}.
+            <T>
+              This device chose <Var>{OWNER_LABELS[migratable]}</Var>.
+            </T>
             <Button
               variant="link"
               size="xs"
               disabled={!canWrite}
               onClick={() => setOwner(migratable)}
             >
-              Set on machine
+              <T>Set on machine</T>
             </Button>
           </span>
         ) : null}
@@ -133,16 +153,22 @@ function MachineOwnerRow(props: {
             className="w-full min-w-0"
             aria-label={
               reportsOwner && !canWrite
-                ? `Owner of ${label}; this connection cannot change it`
-                : `Owner of ${label}`
+                ? gt("Owner of {label}; this connection cannot change it", { label })
+                : gt("Owner of {label}", { label })
             }
           >
-            <SelectValue>{owner ? OWNER_LABELS[owner] : "Not set"}</SelectValue>
+            <SelectValue>{owner ? OWNER_LABELS[owner] : gt("Not set")}</SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
-            <SelectItem value={UNSET}>Not set</SelectItem>
-            <SelectItem value="kameron">Kameron</SelectItem>
-            <SelectItem value="jeff">Jeff</SelectItem>
+            <SelectItem value={UNSET}>
+              <T>Not set</T>
+            </SelectItem>
+            <SelectItem value="kameron">
+              <T>Kameron</T>
+            </SelectItem>
+            <SelectItem value="jeff">
+              <T>Jeff</T>
+            </SelectItem>
           </SelectPopup>
         </Select>
       </div>

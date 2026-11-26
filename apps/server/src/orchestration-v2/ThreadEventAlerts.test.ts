@@ -105,7 +105,10 @@ it.each(["failed", "interrupted"] as const)(
   "a %s run on a thread a person created is not a lane event",
   (status) => {
     const { findings } = judge(shellWith({ status, createdBy: "user" } as never), "run-ended");
-    assert.deepEqual(findings, []);
+    assert.deepEqual(
+      findings.map((finding) => finding.kind),
+      status === "failed" ? ["thread-failed"] : [],
+    );
     const stuck = judge(
       shellWith({
         createdBy: "user",
@@ -155,6 +158,23 @@ it("lane-ended with open pull requests dedupes by open-PR set across runs, and c
   assert.deepEqual(
     settled.findings.filter((finding) => finding.kind === "lane-ended"),
     [],
+  );
+});
+
+it.each([
+  { settledOverride: "settled" },
+  { archivedAt: at(1) },
+  { delegatedFrom: { threadId: "remote-parent" } },
+  { lineage: { parentThreadId: "parent", relationshipToParent: "fork" } },
+  { lineage: { parentThreadId: null, sideChat: true } },
+  { status: "interrupted" },
+  { activeRunId: "next" },
+  { inbox: { origin: { kind: "agent", id: "thread:launcher" } } },
+  { inbox: { requestedBy: { kind: "agent", id: "thread:archived-launcher" } } },
+])("excludes ineligible failed threads from watcher wakes: %j", (override) => {
+  const shell = shellWith({ status: "failed", ...override } as never);
+  assert.isFalse(
+    judge(shell, "run-ended").findings.some((finding) => finding.kind === "thread-failed"),
   );
 });
 
@@ -466,6 +486,7 @@ it("a thread event still holds when delivery waited past the recent-run window",
 it("each trigger evaluates only the kinds it can change", () => {
   assert.deepEqual(judge(shellWith(), "run-ended").evaluated, [
     "lane-ended",
+    "thread-failed",
     "promise-without-wake",
   ]);
   assert.deepEqual(judge(shellWith(), "sweep").evaluated, ["stuck"]);

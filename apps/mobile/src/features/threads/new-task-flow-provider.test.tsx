@@ -15,7 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
-import { act, useLayoutEffect } from "react";
+import { act, useEffect, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { ComposerDraft } from "../../state/use-composer-drafts";
@@ -57,6 +57,7 @@ vi.mock("../../state/entities", () => ({
 vi.mock("../../state/vcs", () => ({
   vcsEnvironment: { status: mocks.status, listRefs: mocks.refs },
 }));
+vi.mock("../../state/filesystem", () => ({ filesystemEnvironment: {} }));
 vi.mock("../../state/projects", () => ({
   projectEnvironment: { readFile: mocks.readFile, openScratch: {} },
 }));
@@ -226,11 +227,15 @@ function setup() {
   mocks.writeSettings.mockImplementation(write);
   mocks.writeText.mockImplementation((key, text) => write(key, { text }));
   let current: ReturnType<typeof useNewTaskFlow>;
-  function Probe() {
+  function Probe(props: { readonly pickOnMount?: EnvironmentProject }) {
     const value = useNewTaskFlow();
     useLayoutEffect(() => {
       current = value;
     });
+    // Mirrors the draft screen applying its route project on mount, before the provider's effects run.
+    useEffect(() => {
+      if (props.pickOnMount) value.setProject(props.pickOnMount);
+    }, []);
     return null;
   }
   const root = createRoot(document.createElement("div"));
@@ -264,6 +269,7 @@ function setup() {
         readonly routeEntry?: { readonly environmentId: string; readonly projectId: string };
         readonly routeDraftId?: string;
       } = {},
+      pickOnMount?: EnvironmentProject,
     ) {
       await act(async () =>
         root.render(
@@ -274,11 +280,16 @@ function setup() {
               routeEntry={route.routeEntry}
               routeDraftId={route.routeDraftId}
             >
-              <Probe />
+              <Probe pickOnMount={pickOnMount} />
             </NewTaskFlowProvider>
           </RegistryContext.Provider>,
         ),
       );
+      // The draft screen applies a project whenever it shows without a draft.
+      // An explicit machine entry waits for its own project instead of taking the first one.
+      if (active && current.draftKey === null && route.routeEntry === undefined) {
+        await act(async () => current.setProject(projects[0]!));
+      }
     },
     async emit(cwd: string, branch: string, isRepo = true) {
       await act(async () => emitters.get(cwd)!(branch, isRepo));
@@ -293,6 +304,16 @@ function setup() {
     },
   };
 }
+
+it("keeps the draft on a project the screen picks as it mounts", async () => {
+  using screen = setup();
+  await screen.render(true, {}, screen.projects[2]);
+  expect(screen.current.selectedProject).toEqual(screen.projects[2]);
+  expect(screen.snapshot(screen.current.draftKey).project).toEqual({
+    environmentId: "two",
+    projectId: "b",
+  });
+});
 
 it("owns a status stream only while the draft is active, retaining draft choices on reopen", async () => {
   using screen = setup();
