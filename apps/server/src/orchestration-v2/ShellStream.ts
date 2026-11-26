@@ -551,8 +551,15 @@ export function shouldPublishShellApplicationEvent(
     // Replay and the live tail overlap; keep known IDs so late events stay filtered.
     return true;
   }
-  if (event.type === "turn-item.updated" && turnItemCanChangeUserWait(event.payload)) {
-    return true;
+  if (event.type === "turn-item.updated") {
+    if (turnItemCanChangeUserWait(event.payload)) {
+      return true;
+    }
+    // Streaming running turn items (token chunks, reasoning, command output) do not change
+    // sidebar/shell-visible fields; skipping them avoids redundant SQLite shell refetches.
+    if (event.payload.status === "running") {
+      return false;
+    }
   }
   return !(
     subagentThreadIds.has(event.threadId) &&

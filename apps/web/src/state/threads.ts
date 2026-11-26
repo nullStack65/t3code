@@ -14,6 +14,7 @@ import {
 } from "@t3tools/client-runtime/state/threads";
 import {
   inboxOriginFor,
+  PRIMARY_LOCAL_ENVIRONMENT_ID,
   type EnvironmentId,
   type Founder,
   type OrchestrationV2ThreadShell,
@@ -101,23 +102,50 @@ function isDetailDone<E>(result: AsyncResult.AsyncResult<EnvironmentThreadState,
   );
 }
 
+const MAX_LOCAL_KEEP_ALIVE_THREADS = 8;
+const MAX_REMOTE_KEEP_ALIVE_THREADS = 4;
+
+type KeepAliveThreadShell = Pick<OrchestrationV2ThreadShell, "id" | "status"> &
+  Partial<Pick<OrchestrationV2ThreadShell, "inbox" | "lineage">>;
+
+function shouldKeepRunningThreadAlive(
+  environmentId: EnvironmentId,
+  thread: KeepAliveThreadShell,
+): boolean {
+  if (thread.inbox?.audience === "agent-only") return false;
+  if (environmentId !== PRIMARY_LOCAL_ENVIRONMENT_ID && thread.lineage?.parentThreadId != null) {
+    return false;
+  }
+  return true;
+}
+
 /** Keeps stopped threads mounted until their independent detail stream is live and also reports stopped. */
 export function createRunningThreadKeepAliveAtom<E>(input: {
   readonly environmentIdsAtom: Atom.Atom<ReadonlyArray<EnvironmentId>>;
   readonly threadsAtom: (
     environmentId: EnvironmentId,
-  ) => Atom.Atom<ReadonlyArray<Pick<OrchestrationV2ThreadShell, "id" | "status">>>;
+  ) => Atom.Atom<ReadonlyArray<KeepAliveThreadShell>>;
   readonly stateAtom: (
     environmentId: EnvironmentId,
     threadId: ThreadId,
   ) => Atom.Atom<AsyncResult.AsyncResult<EnvironmentThreadState, E>>;
+  readonly shouldKeepRunning?: (
+    environmentId: EnvironmentId,
+    thread: KeepAliveThreadShell,
+  ) => boolean;
+  readonly maxThreadsForEnvironment?: (environmentId: EnvironmentId) => number;
 }) {
   const runningThreadIdsAtom = Atom.family((environmentId: EnvironmentId) => {
     let previous: ReadonlyArray<ThreadId> = [];
     return Atom.make((get) => {
-      const running = get(input.threadsAtom(environmentId)).flatMap((thread) =>
-        isRunning(thread.status) ? [thread.id] : [],
-      );
+      const cap = input.maxThreadsForEnvironment?.(environmentId) ?? Number.POSITIVE_INFINITY;
+      const running: ThreadId[] = [];
+      for (const thread of get(input.threadsAtom(environmentId))) {
+        if (running.length >= cap) break;
+        if (!isRunning(thread.status)) continue;
+        if (input.shouldKeepRunning && !input.shouldKeepRunning(environmentId, thread)) continue;
+        running.push(thread.id);
+      }
       if (arrayElementsEqual(previous, running)) return previous;
       previous = running;
       return running;
@@ -152,4 +180,9 @@ export const runningThreadKeepAliveAtom = createRunningThreadKeepAliveAtom({
   ]),
   threadsAtom: environmentThreadShells.environmentThreadsAtom,
   stateAtom: environmentThreads.stateAtom,
+  shouldKeepRunning: shouldKeepRunningThreadAlive,
+  maxThreadsForEnvironment: (environmentId) =>
+    environmentId === PRIMARY_LOCAL_ENVIRONMENT_ID
+      ? MAX_LOCAL_KEEP_ALIVE_THREADS
+      : MAX_REMOTE_KEEP_ALIVE_THREADS,
 });
