@@ -1,17 +1,29 @@
 {
   "customNotices": [
     {
-      "bundles": ["desktop", "web"],
+      "bundles": ["desktop", "mobile"],
       "license": "MIT",
-      "name": "Standing bot avatars",
-      "sourceUrl": "https://github.com/nullStack65/t3code/blob/main/apps/web/src/components/bots/BotAvatar.tsx",
+      "name": "Apple Speech engine (adapted from @react-native-ai/apple)",
+      "sourceUrl": "https://github.com/callstackincubator/ai",
       "generatedNotices": [
         {
           "licenseId": "MIT",
-          "copyrights": ["Copyright (c) 2026 T3 Tools Inc."],
-          "preamble": [
-            "The standing bot avatars in apps/web/src/components/bots/BotAvatar.tsx are original line drawings made for this project. They copy no third-party avatar set, icon pack or character art, and ship under this repository's MIT license."
+          "copyrights": [
+            "Copyright (c) 2024-2025 Szymon Rybczak",
+            "Copyright (c) 2025-present Callstack"
           ]
+        }
+      ]
+    },
+    {
+      "bundles": ["desktop", "mobile", "web"],
+      "license": "MIT",
+      "name": "GitHub gemoji alias data",
+      "sourceUrl": "https://github.com/github/gemoji/blob/fadaeaf1f1a9be82b321316a6c5502e43138b2f6/db/emoji.json",
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2019 GitHub, Inc."]
         }
       ]
     },
@@ -163,7 +175,7 @@
       "generatedNotices": [
         {
           "licenseId": "Apache-2.0",
-          "copyrights": ["Copyright 2009, 2010, 2013 Andr\u00e9 Berg"]
+          "copyrights": ["Copyright 2009, 2010, 2013 André Berg"]
         }
       ]
     },
@@ -238,6 +250,21 @@
           ],
           "preamble": [
             "Unmodified KaTeX_* mathematical fonts. Reserved Font Names include KaTeX_Main, KaTeX_Math, KaTeX_AMS, and KaTeX_Caligraphic."
+          ]
+        }
+      ]
+    },
+    {
+      "bundles": ["desktop", "web"],
+      "license": "MIT",
+      "name": "Standing bot avatars",
+      "sourceUrl": "https://github.com/nullStack65/t3code/blob/main/apps/web/src/components/bots/BotAvatar.tsx",
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2026 T3 Tools Inc."],
+          "preamble": [
+            "The standing bot avatars in apps/web/src/components/bots/BotAvatar.tsx are original line drawings made for this project. They copy no third-party avatar set, icon pack or character art, and ship under this repository's MIT license."
           ]
         }
       ]
@@ -336,7 +363,9 @@
       "version": "0.4.0",
       "license": "Apache-2.0 AND OFL-1.1",
       "generatedNotices": [
-        { "licenseId": "Apache-2.0" },
+        {
+          "licenseId": "Apache-2.0"
+        },
         {
           "licenseId": "OFL-1.1",
           "copyrights": [
@@ -350,7 +379,9 @@
       "version": "0.4.0",
       "license": "Apache-2.0 AND OFL-1.1",
       "generatedNotices": [
-        { "licenseId": "Apache-2.0" },
+        {
+          "licenseId": "Apache-2.0"
+        },
         {
           "licenseId": "OFL-1.1",
           "copyrights": [
@@ -609,17 +640,6 @@
       "generatedNotice": {
         "licenseId": "MIT",
         "copyrights": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
-      }
-    },
-    {
-      "name": "@react-native-ai/apple",
-      "sourceUrl": "https://github.com/callstackincubator/ai",
-      "generatedNotice": {
-        "licenseId": "MIT",
-        "copyrights": [
-          "Copyright (c) 2024-2025 Szymon Rybczak",
-          "Copyright (c) 2025-present Callstack"
-        ]
       }
     },
     {

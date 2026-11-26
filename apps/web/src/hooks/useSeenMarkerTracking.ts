@@ -22,6 +22,9 @@ export interface SeenSamplingHost {
 }
 
 export interface SeenScrollNode {
+  readonly scrollTop?: number;
+  readonly scrollHeight?: number;
+  readonly clientHeight?: number;
   getBoundingClientRect(): SeenRect;
   querySelectorAll(selector: string): Iterable<{
     getBoundingClientRect(): SeenRect;
@@ -39,6 +42,18 @@ export function visibleMessageIds(node: SeenScrollNode): MessageId[] {
     if (rect.bottom > viewport.top && rect.top < viewport.bottom) ids.push(id as MessageId);
   }
   return ids;
+}
+
+const SCROLLED_TO_END_SLACK_PX = 8;
+
+/** Reaching the bottom shows the newest message even when a collapsed group hides it from the DOM. */
+function isScrolledToEnd(node: SeenScrollNode) {
+  const { scrollTop, scrollHeight, clientHeight } = node;
+  if (scrollTop === undefined || scrollHeight === undefined || clientHeight === undefined) {
+    return false;
+  }
+  // A zero-height (hidden) container is not "at the bottom".
+  return clientHeight > 0 && scrollHeight - scrollTop - clientHeight <= SCROLLED_TO_END_SLACK_PX;
 }
 
 export function startSeenMarkerSampling(input: {
@@ -71,7 +86,14 @@ export function startSeenMarkerSampling(input: {
   const sample = () => {
     const node = input.getScrollNode();
     const active = doc.visibilityState === "visible" && doc.hasFocus();
-    session.update({ active, visibleIds: active && node ? visibleMessageIds(node) : [] });
+    const visibleIds =
+      active && node
+        ? [
+            ...visibleMessageIds(node),
+            ...(isScrolledToEnd(node) ? input.getMessages().map((message) => message.id) : []),
+          ]
+        : [];
+    session.update({ active, visibleIds });
   };
   const requestSample = () => {
     if (frame !== null) return;
@@ -122,10 +144,10 @@ export function useSeenMarkerTracking(input: {
   const { threadKey, founder = null, messages, onRecorded } = input;
   const getScrollNode = useEffectEvent(() => input.getScrollNode());
   const getMessages = useEffectEvent(() => messages);
-  const onRecordedRef = useRef(onRecorded);
-  onRecordedRef.current = onRecorded;
-  const notBeforeRef = useRef(input.notBeforeMessageId);
-  notBeforeRef.current = input.notBeforeMessageId;
+  const notBefore = useEffectEvent(() => input.notBeforeMessageId);
+  const recorded = useEffectEvent((messageId: MessageId, seenAt: string) =>
+    onRecorded?.(messageId, seenAt),
+  );
   const samplingRef = useRef<ReturnType<typeof startSeenMarkerSampling> | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window focus, visibility and scroll listeners plus the dwell timer for this thread
@@ -137,8 +159,8 @@ export function useSeenMarkerTracking(input: {
       founder,
       getScrollNode,
       getMessages,
-      notBefore: () => notBeforeRef.current,
-      onRecorded: (messageId, seenAt) => onRecordedRef.current?.(messageId, seenAt),
+      notBefore,
+      onRecorded: recorded,
     });
     samplingRef.current = sampling;
     return () => {

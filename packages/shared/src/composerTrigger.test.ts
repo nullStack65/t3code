@@ -1,6 +1,6 @@
 import remarkParse from "remark-parse";
 import { unified } from "unified";
-import { describe, expect, it } from "vite-plus/test";
+import { assert, describe, expect, it } from "vite-plus/test";
 
 import {
   detectComposerTrigger,
@@ -8,6 +8,7 @@ import {
   parseSideChatCommand,
   serializeComposerFileLink,
 } from "./composerTrigger.ts";
+import { resolveMarkdownFileLinkTarget } from "./markdownLinks.ts";
 
 interface MarkdownNode {
   readonly type: string;
@@ -65,6 +66,50 @@ describe("detectComposerTrigger", () => {
     (text) => expect(detectComposerTrigger(text, text.length)).toBeNull(),
   );
 
+  it.each([
+    ["", "", ""],
+    ["Compare ", "8737", ""],
+    ["Compare (", "", ")"],
+    ["Compare(", "fix-name", ")"],
+    ["((", "fix_name", "))"],
+    ["[", "8737", "]"],
+    ["{", "8737", "}"],
+    ["【", "修正", "】"],
+  ])("keeps brackets outside the PR range after %j", (prefix, query, suffix) => {
+    const text = `${prefix}#${query}`;
+    expect(detectComposerTrigger(`${text}${suffix}`, text.length)).toEqual({
+      kind: "pull-request",
+      query,
+      rangeStart: prefix.length,
+      rangeEnd: text.length,
+    });
+  });
+
+  it.each([
+    "# Heading",
+    "issue#123",
+    "https://example.com/#123",
+    "(#123)",
+    "[issue#123",
+    "[#_fix",
+    "]#123",
+  ])("does not detect a pull request in %j", (text) => {
+    expect(detectComposerTrigger(text, text.length)).toBeNull();
+  });
+
+  it.each([
+    ["@src/(#1", "path", "src/(#1"],
+    ["$review(#1", "skill", "review(#1"],
+  ])("keeps explicit completion for %j", (token, kind, query) => {
+    const text = `Use ${token}`;
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind,
+      query,
+      rangeStart: 4,
+      rangeEnd: text.length,
+    });
+  });
+
   it.each(["$", "€", "𑿝"])("detects %s skill prefixes and their source range", (prefix) => {
     const text = `Use ${prefix}review`;
     expect(detectComposerTrigger(text, text.length)).toEqual({
@@ -100,6 +145,16 @@ describe("serializeComposerFileLink", () => {
     expect(serializeComposerFileLink("docs/My File (draft).md")).toBe(
       "[My File (draft).md](docs/My%20File%20%28draft%29.md)",
     );
+  });
+
+  it("preserves literal HTML entities in the file label and destination", () => {
+    const path = "docs/R&copy;.md";
+    const paragraph = unified().use(remarkParse).parse(serializeComposerFileLink(path)).children[0];
+    assert(paragraph?.type === "paragraph");
+    const link = paragraph.children[0];
+    assert(link?.type === "link");
+    expect(link.children).toMatchObject([{ type: "text", value: "R&copy;.md" }]);
+    expect(resolveMarkdownFileLinkTarget(link.url, "/workspace")).toBe(`/workspace/${path}`);
   });
 
   it("supports windows paths", () => {

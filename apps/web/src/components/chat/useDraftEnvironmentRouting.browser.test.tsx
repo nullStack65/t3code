@@ -124,6 +124,7 @@ function setup() {
             enabled: true,
           },
           connection: { phase: "connected", error: null, traceId: null },
+          refusedRouteIds: [],
           serverConfig: null,
         },
       ]),

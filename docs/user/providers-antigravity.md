@@ -85,9 +85,10 @@ Use Antigravity's native `/plan` command for planning. Tool approvals follow [Pe
 Questions with fixed choices still need one of the offered answers, even in
 **Full access**.
 
-T3 Code keeps conversation history and file diffs, but Antigravity cannot rewind
-its conversation. Reverting a thread or editing and resubmitting an earlier turn
-is unavailable. Continue with a follow-up message or start a new thread.
+On web and desktop, [Edit from here](./composer.md#edit-an-earlier-prompt) works with
+Antigravity. Antigravity cannot rewind its own conversation, so the next turn
+starts a fresh Antigravity session and T3 Code sends it the kept conversation,
+without the turns you removed.
 
 Use `/compact` to summarize a long conversation when your Antigravity runtime
 offers that command. If it is unavailable, update Antigravity in provider settings
@@ -134,6 +135,8 @@ runtimes are shared on the environment.
 
 All three keep thread history and workspace files. Sending `/logout` by itself in
 a thread signs out its instance, including stopping that instance's other sessions.
+That needs a client allowed to manage providers, and it has to be your own message:
+`/logout` from an agent or a scheduled task is refused.
 Sign out, then sign in again to replace an account.
 
 Before removing a managed runtime, disable its instances and cancel any active

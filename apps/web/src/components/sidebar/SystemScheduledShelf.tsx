@@ -1,6 +1,7 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { CircleAlertIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
@@ -17,24 +18,25 @@ export function SystemScheduledShelf(props: {
   readonly onToggle: () => void;
   readonly onOpen: (threadRef: ScopedThreadRef) => void;
 }) {
+  const gt = useGT();
   if (props.threads.length === 0 && !props.revealed) return null;
   const rows = props.revealed
     ? [...props.threads].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     : [];
   return (
     <section
-      aria-label="System / Scheduled"
+      aria-label={gt("System / Scheduled")}
       data-testid="sidebar-system-scheduled"
       className="mx-0.5 mt-1"
     >
       <CollapsibleSectionHeader
         data-testid="sidebar-system-scheduled-toggle"
-        aria-label="System / Scheduled"
+        aria-label={gt("System / Scheduled")}
         expanded={props.revealed}
         onClick={props.onToggle}
         accessory={<span className="font-normal tabular-nums">{props.threads.length}</span>}
       >
-        System / Scheduled
+        <T>System / Scheduled</T>
       </CollapsibleSectionHeader>
       {props.revealed ? (
         <ul
@@ -55,7 +57,11 @@ export function SystemScheduledShelf(props: {
                   data-failed={failed ? "true" : "false"}
                   aria-current={props.activeThreadKey === key ? "page" : undefined}
                   aria-label={
-                    failed ? `${thread.title}, failed${error ? `: ${error}` : ""}` : thread.title
+                    failed
+                      ? error
+                        ? gt("{title}, failed: {error}", { title: thread.title, error })
+                        : gt("{title}, failed", { title: thread.title })
+                      : thread.title
                   }
                   onClick={() => props.onOpen(scopeThreadRef(thread.environmentId, thread.id))}
                   className={cn(
@@ -69,7 +75,7 @@ export function SystemScheduledShelf(props: {
                   {failed ? (
                     <span className="inline-flex max-w-[45%] shrink-0 items-center gap-1 text-xs text-destructive-foreground">
                       <CircleAlertIcon aria-hidden className="size-3.5 shrink-0" />
-                      <span className="truncate">{error || "Failed"}</span>
+                      <span className="truncate">{error || gt("Failed")}</span>
                     </span>
                   ) : null}
                 </button>

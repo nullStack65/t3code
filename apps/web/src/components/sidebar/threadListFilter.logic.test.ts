@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   changedThreadListFilters,
+  inboxKeepsSharedChecked,
   sidebarFilterIconClass,
   inboxMenuOrder,
   matchesThreadListFilter,
@@ -32,12 +33,12 @@ const jeff = { kind: "human", id: "jeff" } as const;
 const bot = { kind: "agent", id: "lead" } as const;
 
 describe("thread list filter", () => {
-  it("shows a founder their own and agent threads, in the environments they keep", () => {
+  it("shows a founder their own and shared threads, in the environments they keep", () => {
     const filter = threadListFilterOf({ founderInboxOwner: "kameron" });
     const visible = (candidate: ReturnType<typeof thread>) =>
       matchesThreadListFilter(candidate, filter);
     expect(visible(thread(laptop, kameron))).toBe(true);
-    expect(visible(thread(laptop, bot))).toBe(true);
+    expect(visible(thread(laptop, bot))).toBe(false);
     // Shared threads stay visible without opening the filter.
     expect(
       visible({
@@ -49,13 +50,40 @@ describe("thread list filter", () => {
       }),
     ).toBe(true);
     // Agent threads from before inbox routing count as Agents.
-    expect(visible(thread(laptop, null, "agent"))).toBe(true);
+    expect(
+      matchesThreadListFilter(thread(laptop, null, "agent"), { ...filter, inboxes: ["agents"] }),
+    ).toBe(true);
     expect(visible(thread(laptop, jeff))).toBe(false);
     expect(visible(thread(laptop, null))).toBe(false);
     const hidingCrown = { ...filter, hiddenEnvironmentIds: [crown] };
     expect(matchesThreadListFilter(thread(crown, kameron), hidingCrown)).toBe(false);
     expect(matchesThreadListFilter(thread(laptop, kameron), hidingCrown)).toBe(true);
   });
+
+  it.each(["jeff", "kameron"] as const)(
+    "shows %s their personal and shared standing bots, asymmetrically",
+    (owner) => {
+      const filter = threadListFilterOf({ founderInboxOwner: owner });
+      const visible = (audience: "kameron" | "jeff" | "shared") =>
+        matchesThreadListFilter(
+          {
+            ...thread(laptop, bot),
+            standing: {},
+            source: {
+              inbox: makeThreadInbox({
+                actor: bot,
+                routing: { audience, attentionKind: "background" },
+              }),
+            },
+          },
+          filter,
+        );
+      expect(visible(owner)).toBe(true);
+      expect(visible("shared")).toBe(true);
+      // Jeff never lists Kameron's private bots; Kameron keeps listing Jeff's.
+      expect(visible(owner === "jeff" ? "kameron" : "jeff")).toBe(owner === "kameron");
+    },
+  );
 
   it("counts each section within the other sections' selection", () => {
     const finished = { runtime: { status: "completed" }, latestRun: { status: "completed" } };
@@ -114,7 +142,7 @@ describe("thread list filter", () => {
       environments: false,
       from: false,
     });
-    const reordered = { ...unchanged, inboxes: ["agents", "jeff", "shared"] as const };
+    const reordered = { ...unchanged, inboxes: ["shared", "jeff"] as const };
     expect(changedThreadListFilters(reordered, "jeff", environments).inboxes).toBe(false);
     // A hidden environment that was since removed is not a visible filter.
     const removed = { ...unchanged, hiddenEnvironmentIds: [EnvironmentId.make("gone")] };
@@ -130,7 +158,7 @@ describe("thread list filter", () => {
 
   it("toggles in menu order and never unchecks the last option", () => {
     const order = inboxMenuOrder("jeff");
-    expect(order).toEqual(["jeff", "agents", "kameron", "shared"]);
+    expect(order).toEqual(["jeff", "shared", "agents", "kameron"]);
     expect(toggleFilterOption(["agents"], "jeff", order)).toEqual(["jeff", "agents"]);
     expect(toggleFilterOption(["jeff", "agents"], "jeff", order)).toEqual(["agents"]);
     expect(toggleFilterOption(["agents"], "agents", order)).toEqual(["agents"]);
@@ -360,7 +388,7 @@ describe("thread list filter", () => {
     expect(counts.inboxes.get("kameron")?.settled).toBe(1 + 40 + 1);
     expect(counts.inboxes.get("jeff")?.settled).toBe(7);
     expect(counts.inboxes.get("agents")?.settled).toBe(3);
-    expect(counts.environments.get(laptop)?.settled).toBe(1 + 40 + 3);
+    expect(counts.environments.get(laptop)?.settled).toBe(1 + 40);
     expect(counts.environments.get(crown)?.settled).toBe(1);
     expect(counts.unclassified).toBe(5);
   });
@@ -445,6 +473,35 @@ describe("standing bots bypass the inbox and From checkboxes", () => {
       needsMe: 0,
       settled: 0,
     });
+  });
+});
+
+describe("inboxKeepsSharedChecked", () => {
+  const filterOf = (inboxes: ReadonlyArray<"kameron" | "jeff" | "shared" | "agents">) => ({
+    inboxes: [...inboxes],
+    hiddenEnvironmentIds: [],
+    hiddenAttributions: [],
+  });
+
+  it("locks Shared only while it is checked beside just the founder's own inbox", () => {
+    expect(inboxKeepsSharedChecked("shared", filterOf(["jeff", "shared"]), "jeff")).toBe(true);
+    expect(inboxKeepsSharedChecked("jeff", filterOf(["jeff", "shared"]), "jeff")).toBe(false);
+    expect(inboxKeepsSharedChecked("shared", filterOf(["jeff", "shared"]), undefined)).toBe(false);
+  });
+
+  it("lets Shared be unchecked and re-checked once Agents is also selected", () => {
+    const withAgents = filterOf(["jeff", "shared", "agents"]);
+    expect(inboxKeepsSharedChecked("shared", withAgents, "jeff")).toBe(false);
+    const order = inboxMenuOrder("jeff");
+    const unchecked = filterOf(toggleFilterOption(withAgents.inboxes, "shared", order));
+    expect(unchecked.inboxes).toEqual(["jeff", "agents"]);
+    // Unchecked Shared must stay enabled so it can be checked again.
+    expect(inboxKeepsSharedChecked("shared", unchecked, "jeff")).toBe(false);
+    expect(toggleFilterOption(unchecked.inboxes, "shared", order)).toEqual([
+      "jeff",
+      "shared",
+      "agents",
+    ]);
   });
 });
 
