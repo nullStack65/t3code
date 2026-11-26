@@ -691,11 +691,8 @@ export function createEnvironmentThreadShellAtoms(input: {
     return previousThreadShells;
   }).pipe(Atom.withLabel("environment-thread-shell-list"));
 
-  // Point reads and threadShellsAtom stay complete, so code that asks whether a thread
-  // exists (outboxes, drafts, removals) never mistakes a hidden thread for a missing one.
-  // Keep cross-environment hiddenThreadKeys semantics intact (cross-env delegatedFrom parents
-  // and orphan-child rules), while preserving the fast-path early return and Set identity
-  // stabilization so unchanged streaming ticks do not churn downstream atoms.
+  // Point reads and threadShellsAtom stay complete so outboxes/drafts never mistake a hidden thread
+  // for missing; stabilize Set identity while preserving cross-environment delegation hiding.
   let previousHiddenThreadKeys: ReadonlySet<string> = NO_HIDDEN_THREADS;
   const hiddenThreadKeysAtom = Atom.make((get) => {
     const viewer = viewerOf(get);
