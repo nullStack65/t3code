@@ -19,6 +19,7 @@ import {
 import { resolveT3McpToolId } from "./t3McpToolPresentation.ts";
 
 export const SEND_TO_USER_TOOL_NAME = "send_to_user";
+export const SILENT_ACK_TOOL_NAME = "silent_ack";
 // 4,000 UTF-16 units stay inside MAX_PARSED_BYTES even as 3-byte characters.
 export const SEND_TO_USER_MAX_LENGTH = 4_000;
 

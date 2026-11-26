@@ -247,6 +247,7 @@ import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementSer
 import * as CompactionLoopGuard from "./orchestration-v2/CompactionLoopGuard.ts";
 import * as IdleCompactionService from "./orchestration-v2/IdleCompactionService.ts";
 import * as SessionSpendGuardReactor from "./orchestration-v2/SessionSpendGuardReactor.ts";
+import * as AgentOutputGateReactor from "./orchestration-v2/AgentOutputGateReactor.ts";
 import * as DelegationNudgeReactor from "./orchestration-v2/DelegationNudgeReactor.ts";
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as ThreadIssueService from "./orchestration-v2/ThreadIssueService.ts";
@@ -727,6 +728,14 @@ const layerDelegationNudgeWorker = Layer.effectDiscard(
   ),
 );
 
+const layerAgentOutputGateWorker = Layer.effectDiscard(
+  AgentOutputGateReactor.make.pipe(Effect.flatMap((service) => service.start())),
+).pipe(
+  Layer.provide(
+    Layer.mergeAll(ProjectionStoreV2.layer, RuntimeLayer.layerEventSink, IdAllocator.layer),
+  ),
+);
+
 const layerCompactionLoopGuard = Layer.effectDiscard(
   CompactionLoopGuard.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(ProjectionStoreV2.layer));
@@ -789,6 +798,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerIdleCompactionWorker,
   layerSessionSpendGuardWorker,
   layerDelegationNudgeWorker,
+  layerAgentOutputGateWorker,
   layerCompactionLoopGuard,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   DatabaseStorage.layer.pipe(

@@ -286,4 +286,31 @@ describe("agent messages stamped for the user's timeline", () => {
       count: 2,
     });
   });
+
+  it("never counts a human user's own message as unseen even if stamped user_timeline", () => {
+    const founderStamped = MessageId.make("message-founder-stamped");
+    const agentStamped = MessageId.make("message-agent-stamped");
+    const thread = [
+      { id: userId, role: "user", createdBy: "user" },
+      {
+        id: founderStamped,
+        role: "user",
+        createdBy: "user",
+        timelineVisibility: "user_timeline" as const,
+      },
+      {
+        id: agentStamped,
+        role: "user",
+        createdBy: "agent",
+        timelineVisibility: "user_timeline" as const,
+      },
+    ];
+    expect(resolveUnseenDivider({ messages: thread, lastSeenMessageId: userId })).toEqual({
+      afterMessageId: userId,
+      count: 1,
+    });
+    expect(
+      catchUpOffer({ messages: thread.slice(0, 2), lastSeenMessageId: userId, seenAt }),
+    ).toBeNull();
+  });
 });
