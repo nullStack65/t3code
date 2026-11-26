@@ -8,6 +8,7 @@ import type {
   OrchestrationV2ProviderThread,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { withMessageSenderNote } from "@t3tools/contracts";
 
 import * as Config from "effect/Config";
 
@@ -138,7 +139,7 @@ export function historicalMessage(
   switch (item.type) {
     case "user_message":
       if (item.humanNote) return null;
-      text = item.text;
+      text = withMessageSenderNote(item, item.text);
       break;
     case "assistant_message":
       text = item.text;

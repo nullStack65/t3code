@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { T, useGT } from "gt-react";
 import { ChevronDownIcon, ChevronUpIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
 import { cn } from "~/lib/utils";
 import {
@@ -12,7 +14,9 @@ import { THREAD_DETAILS_CARD_GAP } from "./threadDetailsCardLayout";
 import type { OrchestrationMessageSenderFilter } from "@t3tools/contracts";
 import { MESSAGE_SENDER_FILTER_LABELS } from "@t3tools/client-runtime/message-sender";
 
-const SENDER_FILTERS = Object.keys(MESSAGE_SENDER_FILTER_LABELS) as OrchestrationMessageSenderFilter[];
+const SENDER_FILTERS = Object.keys(
+  MESSAGE_SENDER_FILTER_LABELS,
+) as OrchestrationMessageSenderFilter[];
 
 interface ThreadFindBarProps {
   readonly open: boolean;
@@ -40,6 +44,7 @@ export const THREAD_FIND_BAR_RESERVED_HEIGHT = 36 + THREAD_DETAILS_CARD_GAP;
 
 export function ThreadFindBar(props: ThreadFindBarProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const gt = useGT();
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses and selects the input DOM node when the bar opens or a find shortcut fires
   useEffect(() => {
@@ -58,8 +63,8 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
   if (hasQuery) {
     label = props.counting ? "1/…" : formatThreadFindCount(props.activeIndex, props.matchCount);
   }
-  if (props.status === "loading") label = "Searching…";
-  if (props.status === "error") label = "Search failed";
+  if (props.status === "loading") label = gt("Searching…");
+  if (props.status === "error") label = gt("Search failed");
   const [storedAnnouncement, setAnnouncement] = useState<ThreadFindAnnouncement | null>(null);
   const announcement = nextThreadFindAnnouncement(storedAnnouncement, {
     navigationId: props.navigationId,
@@ -93,7 +98,7 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
         size="lg"
         onContextMenu={(event) => event.stopPropagation()}
         role="search"
-        aria-label="Find in thread"
+        aria-label={gt("Find in thread")}
         aria-busy={props.status === "loading" || props.counting === true}
         className="w-full"
       >
@@ -103,8 +108,8 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
           size="sm"
           className="min-w-24"
           value={props.query}
-          aria-label="Find in thread"
-          placeholder="Find in thread"
+          aria-label={gt("Find in thread")}
+          placeholder={gt("Find in thread")}
           maxLength={200}
           spellCheck={false}
           autoComplete="off"
@@ -113,26 +118,32 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
         />
         <InputGroupAddon align="inline-end" inset="pill">
           {props.onSenderChange ? (
-            <select
-              aria-label="From"
-              title="Show only messages from"
-              data-thread-find-sender
-              className="h-6 w-20 shrink rounded-md bg-transparent px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none"
-              value={props.sender ?? ""}
-              onChange={(event) => {
-                const value = event.target.value;
-                props.onSenderChange?.(
-                  value === "" ? null : (value as OrchestrationMessageSenderFilter),
-                );
-              }}
-            >
-              <option value="">From anyone</option>
-              {SENDER_FILTERS.map((filter) => (
-                <option key={filter} value={filter}>
-                  {MESSAGE_SENDER_FILTER_LABELS[filter]}
-                </option>
-              ))}
-            </select>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <select
+                    aria-label={gt("From")}
+                    data-thread-find-sender
+                    className="h-6 w-20 shrink rounded-md bg-transparent px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none"
+                    value={props.sender ?? ""}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      props.onSenderChange?.(
+                        value === "" ? null : (value as OrchestrationMessageSenderFilter),
+                      );
+                    }}
+                  />
+                }
+              >
+                <option value="">{gt("From anyone")}</option>
+                {SENDER_FILTERS.map((filter) => (
+                  <option key={filter} value={filter}>
+                    {MESSAGE_SENDER_FILTER_LABELS[filter]}
+                  </option>
+                ))}
+              </TooltipTrigger>
+              <TooltipPopup side="bottom">{gt("Show only messages from")}</TooltipPopup>
+            </Tooltip>
           ) : null}
           <span aria-live="polite" className="sr-only">
             {announcement.text}
@@ -148,13 +159,13 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
           </span>
           {props.status === "error" ? (
             <Button size="xs" variant="ghost" onClick={props.onRetry}>
-              Retry
+              <T>Retry</T>
             </Button>
           ) : null}
           <Button
             size="icon-xs"
             variant="ghost"
-            aria-label="Previous match"
+            aria-label={gt("Previous match")}
             disabled={navigationDisabled}
             onClick={props.onPrevious}
           >
@@ -163,13 +174,18 @@ export function ThreadFindBar(props: ThreadFindBarProps) {
           <Button
             size="icon-xs"
             variant="ghost"
-            aria-label="Next match"
+            aria-label={gt("Next match")}
             disabled={navigationDisabled}
             onClick={props.onNext}
           >
             <ChevronDownIcon />
           </Button>
-          <Button size="icon-xs" variant="ghost" aria-label="Close find" onClick={props.onClose}>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            aria-label={gt("Close find")}
+            onClick={props.onClose}
+          >
             <XIcon />
           </Button>
         </InputGroupAddon>

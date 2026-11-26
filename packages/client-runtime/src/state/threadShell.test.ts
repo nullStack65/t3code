@@ -126,6 +126,35 @@ describe("asymmetric founder visibility in thread shell lists", () => {
 });
 
 describe("v2 thread shell lists", () => {
+  it("builds no child index while no child asks for input", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    let parentIdReads = 0;
+    const child = {
+      ...v2ThreadShell,
+      id: ThreadId.make("child"),
+      creationSource: "mcp" as const,
+      lineage: {
+        rootThreadId: v2ThreadShell.id,
+        relationshipToParent: "subagent" as const,
+        // Nothing is pending, so only the child index would read parent ids.
+        get parentThreadId() {
+          parentIdReads++;
+          return v2ThreadShell.id;
+        },
+      },
+    };
+    const inputs = threads.childThreadInputsAtom({ environmentId, threadId: v2ThreadShell.id });
+    const dispose = registry.mount(inputs);
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [v2ThreadShell, child],
+    });
+    expect(registry.get(inputs)).toEqual([]);
+    expect(parentIdReads).toBe(0);
+    dispose();
+    registry.dispose();
+  });
+
   it("preserves ordered reference arrays when a middle thread changes", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const snapshot = {
@@ -225,6 +254,8 @@ describe("v2 thread shell lists", () => {
       threads: [root, { ...legacyChild, status: "completed" as const }],
     });
     expect(registry.get(inputs)).toEqual([]);
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [root, child] });
+    expect(registry.get(inputs).map((thread) => thread.id)).toEqual([child.id]);
     dispose();
     registry.dispose();
   });
@@ -744,6 +775,58 @@ describe("v2 thread shell lists", () => {
       expect(harness.registry.get(listAtom)[0]?.title).toBe("Renamed");
     } finally {
       dispose();
+      harness.registry.dispose();
+    }
+  });
+
+  it("hides cross-environment delegated children of Kameron's private threads from Jeff", () => {
+    const envA = EnvironmentId.make("environment-a");
+    const envB = EnvironmentId.make("environment-b");
+    const parentId = ThreadId.make("kameron-private-parent");
+    const childId = ThreadId.make("delegated-child-on-b");
+    const viewer = Atom.make<Founder | null>("jeff");
+    const harness = makeHarness([envA, envB], viewer);
+    harness.registry.set(harness.snapshotAtom(envA), {
+      ...v2ShellSnapshot,
+      snapshotSequence: 1,
+      threads: [
+        {
+          ...v2ThreadShell,
+          id: parentId,
+          inbox: { ...makeThreadInbox({ actor: null }), owner: "kameron", audience: "kameron" },
+        },
+      ],
+    });
+    harness.registry.set(harness.snapshotAtom(envB), {
+      ...v2ShellSnapshot,
+      snapshotSequence: 1,
+      threads: [
+        {
+          ...v2ThreadShell,
+          id: childId,
+          inbox: { ...makeThreadInbox({ actor: null }), owner: "kameron", audience: "agent-only" },
+          delegatedFrom: {
+            environmentId: envA,
+            threadId: parentId,
+            title: "Parent",
+          },
+        },
+      ],
+    });
+    const disposers = [
+      harness.registry.mount(harness.threads.hiddenThreadKeysAtom),
+      harness.registry.mount(harness.threads.visibleThreadShellsAtom),
+    ];
+    try {
+      const hidden = harness.registry.get(harness.threads.hiddenThreadKeysAtom);
+      expect(hidden.size).toBe(2);
+      const visibleIds = harness.registry
+        .get(harness.threads.visibleThreadShellsAtom)
+        .map((thread) => thread.id);
+      expect(visibleIds).not.toContain(parentId);
+      expect(visibleIds).not.toContain(childId);
+    } finally {
+      for (const dispose of disposers) dispose();
       harness.registry.dispose();
     }
   });

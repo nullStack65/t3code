@@ -1,3 +1,4 @@
+import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -73,17 +74,28 @@ describe("sortBotThreads", () => {
 
 describe("splitStandingThreads", () => {
   it("sends bots to their own group whatever their pin, settle or snooze state", () => {
-    const persona = { name: "Ops" };
+    const persona = { name: "Ops", role: null, accent: "sky", avatarId: "bolt" } as const;
+    const lineage = {
+      parentThreadId: null,
+      rootThreadId: ThreadId.make("root"),
+      relationshipToParent: null,
+    };
     const threads = [
-      { id: "a", standing: null, pinnedAt: "2026-11-19T00:00:00Z" },
-      { id: "b", standing: persona, pinnedAt: "2026-11-19T00:00:00Z" },
-      { id: "c", standing: persona, settledOverride: "settled" },
-      { id: "d", standing: persona, snoozedAt: "2026-11-19T00:00:00Z" },
-      { id: "e", standing: null },
+      { id: "a", standing: null, lineage, pinnedAt: "2026-11-19T00:00:00Z" },
+      { id: "b", standing: persona, lineage, pinnedAt: "2026-11-19T00:00:00Z" },
+      { id: "c", standing: persona, lineage, settledOverride: "settled" },
+      { id: "d", standing: persona, lineage, snoozedAt: "2026-11-19T00:00:00Z" },
+      { id: "e", standing: null, lineage },
+      { id: "f", standing: persona, lineage: { ...lineage, parentThreadId: ThreadId.make("b") } },
+      {
+        id: "g",
+        standing: persona,
+        lineage: { ...lineage, relationshipToParent: "subagent" as const },
+      },
     ];
     const { bots, rest } = splitStandingThreads(threads);
     expect(bots.map((thread) => thread.id)).toEqual(["b", "c", "d"]);
-    expect(rest.map((thread) => thread.id)).toEqual(["a", "e"]);
+    expect(rest.map((thread) => thread.id)).toEqual(["a", "e", "f", "g"]);
   });
 });
 
@@ -96,16 +108,22 @@ describe("partitionBotGroups", () => {
     id,
     source: { inbox: { owner, audience } },
   });
-  it("puts shared-inbox bots in their own group and leaves the rest as mine", () => {
+  it("puts company/shared/agent-only/open bots in Closura (shared) and personal bots in mine when viewer is unset", () => {
     expect(
-      partitionBotGroups([thread("shared", "shared"), thread("jeff", "jeff"), thread("open")]),
+      partitionBotGroups([
+        thread("shared", "shared"),
+        thread("agents", "agent-only"),
+        thread("jeff", "jeff"),
+        thread("open"),
+      ]),
     ).toEqual({
-      shared: [thread("shared", "shared")],
-      mine: [thread("jeff", "jeff"), thread("open")],
+      shared: [thread("shared", "shared"), thread("agents", "agent-only"), thread("open")],
+      mine: [thread("jeff", "jeff")],
+      others: [],
     });
   });
 
-  it("keeps Jeff's personal bots in Kameron's lists beside his own and shared ones", () => {
+  it("puts Kameron's own in My Bots, Jeff's personal bots in Others, and company bots in Closura", () => {
     const threads = [
       thread("shared", "shared"),
       thread("mine", "kameron"),
@@ -115,12 +133,8 @@ describe("partitionBotGroups", () => {
     ];
     expect(partitionBotGroups(threads, "kameron")).toEqual({
       mine: [thread("mine", "kameron")],
-      shared: [
-        thread("shared", "shared"),
-        thread("other", "jeff"),
-        thread("agents", "agent-only"),
-        thread("open"),
-      ],
+      others: [thread("other", "jeff")],
+      shared: [thread("shared", "shared"), thread("agents", "agent-only"), thread("open")],
     });
   });
 
@@ -138,6 +152,7 @@ describe("partitionBotGroups", () => {
     ];
     expect(partitionBotGroups(threads, "jeff")).toEqual({
       mine: [thread("cos-jeff", "jeff"), owned("kameron-jeff", "kameron", "jeff")],
+      others: [],
       shared: [
         thread("shared", "shared"),
         thread("agents", "agent-only"),

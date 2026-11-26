@@ -70,9 +70,9 @@ describe("a placed task's stored envelope", () => {
     expect(() => decodeAsOlderBuild(encodeQueuedThreadMessage(placed))).toThrow();
   });
 
-  it("keeps legacy writes flat at version 3 and reads versions 1 to 4", () => {
+  it("writes ordinary records flat at the current version 4 and reads versions 1 to 4", () => {
     expect(encodeQueuedThreadMessage(fixed)).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       environmentId: "laptop",
     });
     for (const schemaVersion of [1, 2, 3, 4]) {

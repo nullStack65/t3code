@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
@@ -73,6 +74,22 @@ describe("provider compatibility", () => {
       assert.strictEqual(advisory?.status, expected, `OpenCode ${version} on 0.0.45`);
       assert.strictEqual(advisory?.recommendedVersion, "1.14.19");
     }
+    // The current policy rates a prerelease or build by its base version.
+    for (const [version, expected] of [
+      ["1.13.0-beta.1", "broken"],
+      ["1.13.0+abc123", "broken"],
+      ["2.1.0-rc.1", "supported"],
+    ] as const) {
+      assert.strictEqual(
+        resolveProviderCompatibility(
+          ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
+          opencode,
+          version,
+        )?.status,
+        expected,
+        `OpenCode ${version}`,
+      );
+    }
     assert.isUndefined(
       resolveProviderCompatibility(
         ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
@@ -88,6 +105,7 @@ describe("provider compatibility", () => {
     const cursorPolicy: ProviderCompatibilityPolicy = {
       driver: cursor,
       t3CodeRange: policy.t3CodeRange,
+      versionPattern: "^(\\d{4}\\.\\d{2}\\.\\d{2})-[a-f0-9]+$",
       ranges: [
         { range: "<2026.05.09", status: "unsupported" },
         { range: ">=2026.05.09", status: "supported" },
@@ -313,6 +331,8 @@ it.effect("a remote policy refresh preserves a newer health result on the regist
           ),
         ),
       ),
+      // A login shell that prints nothing, so the refresh never takes PATH from the developer's profile.
+      Effect.provideService(HostProcess.Environment, { ...process.env, SHELL: "/usr/bin/true" }),
     );
   }),
 );
