@@ -31,7 +31,7 @@ export function ScrollToEndButton(props: {
 }) {
   return (
     <div
-      className="chat-scroll-to-bottom pointer-events-none absolute right-4 z-30 flex justify-end py-1.5"
+      className="chat-scroll-to-bottom pointer-events-none absolute z-30 flex justify-end py-1.5 pe-3 sm:pe-12"
       style={{ bottom: props.bottom }}
     >
       <Button
