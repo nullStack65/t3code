@@ -1,11 +1,17 @@
 import {
+  CommandId,
+  Founder,
+  MessageId,
   OrchestrationV2GetTurnItemResult,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadStreamItem,
   PEER_LINK_THREAD_HISTORY_ROUTE,
   PEER_LINK_THREAD_ITEM_ROUTE,
+  PEER_LINK_THREAD_SEND_ROUTE,
   PEER_LINK_THREAD_STREAM_ROUTE,
+  PeerLinkThreadSendResult,
   ThreadId,
+  TrimmedNonEmptyString,
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -15,10 +21,12 @@ import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { eventStreamResponse } from "../eventStreamResponse.ts";
+import { runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -68,6 +76,9 @@ const admitLink = Effect.gen(function* () {
   }
   return {
     threadId: shell.value.id,
+    shell: shell.value,
+    access: client.value.access,
+    sessionId: client.value.sessionId,
     params,
     linkExpiresAt: client.value.linkExpiresAt,
     /** Completes once the link's session or the beta no longer admits it. */
@@ -158,5 +169,70 @@ const itemRoute = HttpRouter.add(
   }),
 );
 
+const decodeSendBody = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    message: TrimmedNonEmptyString,
+    founder: Schema.optionalKey(Schema.NullOr(Founder)),
+    device: Schema.optionalKey(Schema.String),
+    deviceType: Schema.optionalKey(
+      Schema.Literals(["bot", "desktop", "mobile", "tablet", "unknown"]),
+    ),
+  }),
+);
+
+/**
+ * Accepts a human user-origin message proxied from a linked hub environment. Enforces the link's
+ * operate/runtime-mode ceiling and records `createdBy: "user"` + founder attribution so the peer
+ * does not treat the message as an MCP agent wake.
+ */
+const sendRoute = HttpRouter.add(
+  "POST",
+  PEER_LINK_THREAD_SEND_ROUTE,
+  Effect.gen(function* () {
+    const admitted = yield* admitLink;
+    if (HttpServerResponse.isHttpServerResponse(admitted)) return admitted;
+    if (admitted.access === "read-only") return refusal(403, "read_only_link");
+    if (runtimeModeRank(admitted.shell.runtimeMode) > runtimeModeRank(admitted.access)) {
+      return refusal(403, "runtime_mode_ceiling_exceeded");
+    }
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = yield* request.json.pipe(Effect.flatMap(decodeSendBody), Effect.option);
+    if (body._tag === "None") return refusal(400, "invalid_request");
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const random = yield* SecureRandom.SecureRandom;
+    const messageId = MessageId.make(yield* random.uuidV4());
+    const commandId = CommandId.make(yield* random.uuidV4());
+    const sent = yield* threads
+      .sendToThread({
+        projectId: admitted.shell.projectId,
+        commandId,
+        threadId: admitted.threadId,
+        messageId,
+        text: body.value.message,
+        attachments: [],
+        mode: "auto",
+        createdBy: "user",
+        creationSource: "web",
+        sentBy: {
+          sessionId: admitted.sessionId,
+          device: body.value.device ?? "",
+          deviceType: body.value.deviceType ?? "unknown",
+          founder: body.value.founder ?? null,
+        },
+      })
+      .pipe(Effect.option);
+    if (sent._tag === "None") return refusal(500, "thread_send_failed");
+    const responseBody: PeerLinkThreadSendResult = {
+      messageId,
+      runId: sent.value.run.id,
+      status: sent.value.run.status,
+    };
+    return withLinkExpiry(
+      HttpServerResponse.jsonUnsafe(responseBody, { headers: NO_STORE }),
+      admitted.linkExpiresAt,
+    );
+  }),
+);
+
 /** What an environment serves of its threads to the environments linked to it. */
-export const layer = Layer.mergeAll(streamRoute, historyRoute, itemRoute);
+export const layer = Layer.mergeAll(streamRoute, historyRoute, itemRoute, sendRoute);

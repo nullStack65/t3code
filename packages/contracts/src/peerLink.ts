@@ -201,6 +201,7 @@ const PEER_LINK_THREAD_ROUTE_PREFIX = "/api/links/thread";
 export const PEER_LINK_THREAD_STREAM_ROUTE = `${PEER_LINK_THREAD_ROUTE_PREFIX}/stream`;
 export const PEER_LINK_THREAD_HISTORY_ROUTE = `${PEER_LINK_THREAD_ROUTE_PREFIX}/history`;
 export const PEER_LINK_THREAD_ITEM_ROUTE = `${PEER_LINK_THREAD_ROUTE_PREFIX}/item`;
+export const PEER_LINK_THREAD_SEND_ROUTE = `${PEER_LINK_THREAD_ROUTE_PREFIX}/send`;
 
 /** A thread on a linked environment, as a client of this environment names it. */
 export const PeerLinkThreadInput = Schema.Struct({

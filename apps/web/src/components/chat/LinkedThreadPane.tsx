@@ -4,7 +4,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { T, useGT, useMessages, Var } from "gt-react";
 import { ArrowUpIcon, EyeIcon, PlugIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { type LinkedThreadSurface, linkedThreadTitle } from "../../linkedThreadSurface";
@@ -51,11 +51,15 @@ function LinkedThreadComposer(props: {
   const { label, via, title, onSend, sending = false } = props;
   const gt = useGT();
   const [draft, setDraft] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const trimmed = draft.trim();
   const submit = async () => {
     if (!onSend || sending || trimmed.length === 0) return;
     const ok = await onSend(trimmed);
-    if (ok) setDraft("");
+    if (ok) {
+      setDraft("");
+      textareaRef.current?.focus();
+    }
   };
   return (
     <div className="chat-composer-lane flex shrink-0 flex-col gap-1 pt-1.5 pb-4 sm:pt-2 sm:pb-5">
@@ -72,6 +76,7 @@ function LinkedThreadComposer(props: {
                 }}
               >
                 <textarea
+                  ref={textareaRef}
                   rows={1}
                   value={draft}
                   disabled={sending}

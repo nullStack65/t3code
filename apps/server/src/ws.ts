@@ -3063,7 +3063,14 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.peerLinksSendThreadMessage]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-            Effect.andThen(peerForwarding.sendThreadMessage(input)),
+            Effect.andThen(
+              messageSender.pipe(
+                Effect.orElseSucceed(() => undefined),
+                Effect.flatMap((sentBy) =>
+                  peerThreadRelay.send(input, sentBy === undefined ? undefined : { sentBy }),
+                ),
+              ),
+            ),
           ),
         [WS_METHODS.peerLinksPairClient]: (input) =>
           peerClientPairing.request(input, currentSession),
