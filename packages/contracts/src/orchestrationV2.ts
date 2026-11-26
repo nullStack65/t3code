@@ -4342,6 +4342,16 @@ const OrchestrationV2InternalCommand = Schema.Union([
     runId: RunId,
     value: Schema.Json,
   }),
+  // Server-only 1-line audit notice appended to a thread without starting a run (e.g., ask_agent).
+  Schema.Struct({
+    type: Schema.Literal("thread.audit-notice.append"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    title: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    level: Schema.optional(OrchestrationV2SystemNoticeLevel),
+    timelineVisibility: Schema.optional(OrchestrationV2TimelineVisibility),
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),

@@ -706,6 +706,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.issue.unlink":
     case "thread.pull-request.watch":
     case "thread.wait-staleness.update":
+    case "thread.audit-notice.append":
     case "thread.pull-request-watch.sync":
     case "thread.pull-request-watch.checks-reopen":
     case "thread.pull-request.sync":
@@ -12228,6 +12229,67 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return completionPlan.parentRun?.id;
   });
 
+  const dispatchThreadAuditNoticeAppend = Effect.fn("orchestrationV2.dispatch.auditNoticeAppend")(
+    function* (
+      command: Extract<
+        OrchestrationV2ServerCommand,
+        { readonly type: "thread.audit-notice.append" }
+      >,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, ["turnItems"])
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorProjectionError({
+                threadId: command.threadId,
+                cause,
+              }),
+          ),
+        );
+      if (projection.thread.deletedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} was deleted.`,
+        });
+      }
+      const now = yield* DateTime.now;
+      const nextOrdinal = projection.turnItems.reduce(
+        (max, item) => (item.ordinal >= max ? item.ordinal + 1 : max),
+        0,
+      );
+      const emitEvent = emit(events, command);
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        providerInstanceId: projection.thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          type: "system_notice",
+          id: TurnItemId.make(`turn-item:audit:${command.commandId}`),
+          threadId: command.threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: nextOrdinal,
+          status: "completed",
+          title: command.title ?? null,
+          message: command.message,
+          level: command.level ?? "info",
+          timelineVisibility: command.timelineVisibility ?? "agent_fold",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    },
+  );
+
   const dispatchCreatedThreadRecord = Effect.fn("orchestrationV2.dispatch.createdThreadRecord")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "thread.created.record" }>,
@@ -17749,6 +17811,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.created.record":
         yield* dispatchCreatedThreadRecord(command, events);
+        break;
+      case "thread.audit-notice.append":
+        yield* dispatchThreadAuditNoticeAppend(command, events);
         break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);

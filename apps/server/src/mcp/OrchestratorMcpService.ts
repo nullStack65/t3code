@@ -53,6 +53,8 @@ import {
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   type OrchestratorMcpThreadRun,
+  type OrchestratorMcpAskAgentInput,
+  type OrchestratorMcpAskAgentResult,
   type OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadSendResult,
   type OrchestratorMcpThreadTimelineItem,
@@ -252,6 +254,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
   ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
+  readonly askAgent: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpAskAgentInput,
+  ) => Effect.Effect<OrchestratorMcpAskAgentResult, OrchestratorMcpFailure>;
   readonly waitForThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadWaitInput,
@@ -4069,6 +4075,267 @@ const make = Effect.gen(function* () {
         delivery: result.delivery,
         ...(deliveryClass === undefined ? {} : { deliveryClass }),
       } satisfies OrchestratorMcpThreadSendResult;
+    }),
+    askAgent: Effect.fn("OrchestratorMcpService.askAgent")(function* (scope, input) {
+      const {
+        parent,
+        limits,
+        target: requested,
+      } = yield* loadScopedThread(scope, input.threadId, ["runs"]);
+      yield* assertLiveCallerForOtherThread(scope, parent, requested);
+      yield* assertTargetWithinLimits(limits, requested.thread);
+      const resolved = yield* resolveActiveThreadTargetWith(
+        (id) => threadManagement.getThreadShell(id),
+        input.threadId,
+      ).pipe(Effect.mapError(threadManagementFailure));
+      const target =
+        resolved.hopCount === 0
+          ? requested
+          : parent !== undefined && resolved.threadId === parent.thread.id
+            ? parent
+            : yield* loadTargetThread(scope, resolved.threadId);
+      if (resolved.hopCount > 0) {
+        yield* assertLiveCallerForOtherThread(scope, parent, target);
+        yield* assertTargetWithinLimits(limits, target.thread);
+      }
+
+      const key = yield* requestKey(input.clientRequestId);
+      const forkCommandId = stableCommandId({
+        scope,
+        requestKey: key,
+        operation: "ask-agent-fork",
+      });
+      const sideThreadId = ThreadId.make(`${forkCommandId}:ask`);
+      yield* threadManagement
+        .dispatch({
+          type: "thread.fork",
+          commandId: forkCommandId,
+          sourceThreadId: target.thread.id,
+          targetThreadId: sideThreadId,
+          sourcePoint: { type: "latest_stable" },
+          sideChat: true,
+          title: "Side-channel question",
+          createdBy: "agent",
+          creationSource: "mcp",
+        })
+        .pipe(
+          Effect.catch((error) =>
+            typeof error === "object" &&
+            error !== null &&
+            "_tag" in error &&
+            error._tag === "OrchestratorThreadAlreadyExistsError"
+              ? Effect.void
+              : Effect.fail(
+                  isThreadManagementError(error)
+                    ? threadManagementFailure(error)
+                    : failure(
+                        "orchestration_error",
+                        `Unable to start side-channel fork for ${target.thread.id}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                      ),
+                ),
+          ),
+        );
+
+      const messageId = stableOperationMessageId({
+        scope,
+        requestKey: key,
+        operation: "ask-agent-send",
+      });
+      const deleteSideThread = threadManagement
+        .dispatch({
+          type: "thread.delete",
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "ask-agent-delete",
+          }),
+          threadId: sideThreadId,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("ask_agent could not delete disposable side-channel fork", {
+              threadId: target.thread.id,
+              sideThreadId,
+              cause,
+            }),
+          ),
+        );
+      const stopSideThread = (reason: string) =>
+        threadManagement
+          .dispatch({
+            type: "thread.stop",
+            commandId: stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "ask-agent-stop",
+            }),
+            threadId: sideThreadId,
+            reason,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("ask_agent could not stop side-channel fork", {
+                threadId: target.thread.id,
+                sideThreadId,
+                cause,
+              }),
+            ),
+          );
+
+      // Enforce read-only / non-mutating execution on the disposable side-channel fork so Q&A
+      // turns cannot mutate the target workspace without git checkpoints (Tool.Readonly = true).
+      const setReadOnlyMode = Effect.gen(function* () {
+        yield* threadManagement.dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "ask-agent-interaction-mode",
+          }),
+          threadId: sideThreadId,
+          interactionMode: "plan",
+        });
+        yield* threadManagement.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "ask-agent-runtime-mode",
+          }),
+          threadId: sideThreadId,
+          runtimeMode: "approval-required",
+        });
+      }).pipe(
+        Effect.mapError((error) =>
+          isThreadManagementError(error)
+            ? threadManagementFailure(error)
+            : failure(
+                "orchestration_error",
+                `Unable to restrict side-channel fork for ${target.thread.id}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+              ),
+        ),
+      );
+
+      let sideTurnSettled = false;
+      const { sent, waited, status, answer } = yield* Effect.gen(function* () {
+        yield* setReadOnlyMode;
+        const sent = yield* threadManagement
+          .sendToThread({
+            projectId: target.thread.projectId,
+            commandId: stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "ask-agent-send",
+            }),
+            threadId: sideThreadId,
+            ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
+            ...(parent === undefined && scope.client?.senderThread !== undefined
+              ? { linkedSender: scope.client.senderThread }
+              : {}),
+            messageId,
+            text: input.prompt,
+            attachments: [],
+            mode: "auto",
+            createdBy: "agent",
+            creationSource: "mcp",
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              isThreadManagementError(error)
+                ? threadManagementFailure(error)
+                : failure(
+                    "orchestration_error",
+                    `Unable to send side-channel question to ${target.thread.id}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                  ),
+            ),
+          );
+
+        const timeoutMs = Math.min(
+          MAX_WAIT_TIMEOUT_MS,
+          Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+        );
+        const waited = yield* threadManagement
+          .waitForThread({
+            projectId: target.thread.projectId,
+            threadId: sideThreadId,
+            runId: sent.run.id,
+            timeoutMs,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+
+        const finalRun = waited.run ?? sent.run;
+        const status = runOutcome(finalRun);
+        let answer: string | null = null;
+        if (!waited.timedOut) {
+          sideTurnSettled = true;
+          const records = yield* threadManagement
+            .getThreadRecords(sideThreadId, ["messages"], {
+              messageRoles: ["assistant"],
+              messageRunIds: [sent.run.id],
+            })
+            .pipe(Effect.mapError(threadManagementFailure));
+          const parts = records.messages
+            .filter((message) => message.role === "assistant" && message.runId === sent.run.id)
+            .map((message) => message.text.trim())
+            .filter((text) => text.length > 0);
+          if (parts.length > 0) {
+            answer = parts.join("\n\n");
+          }
+        }
+        return { sent, waited, status, answer };
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            if (!sideTurnSettled) {
+              yield* stopSideThread("Side-channel question timed out or aborted (ask_agent)");
+            }
+            yield* deleteSideThread;
+          }),
+        ),
+      );
+
+      const callerLabel =
+        parent?.thread.title?.trim() ||
+        scope.client?.senderThread?.title?.trim() ||
+        "another agent";
+      const auditMessage = waited.timedOut
+        ? `Side-channel question from ${callerLabel} timed out (ask_agent)`
+        : status === "completed"
+          ? `Answered side-channel question from ${callerLabel} (ask_agent)`
+          : `Side-channel question from ${callerLabel} ended with ${status} (ask_agent)`;
+      yield* threadManagement
+        .dispatch({
+          type: "thread.audit-notice.append",
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "ask-agent-audit",
+          }),
+          threadId: target.thread.id,
+          title: "Side-channel question",
+          message: auditMessage,
+          level: "info",
+          timelineVisibility: "agent_fold",
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("ask_agent could not record audit notice on target thread", {
+              threadId: target.thread.id,
+              sideThreadId,
+              cause,
+            }),
+          ),
+        );
+
+      return {
+        threadId: target.thread.id,
+        link: threadLinkFor(scope, target.thread.id, target.thread.title),
+        sideThreadId,
+        runId: sent.run.id,
+        status,
+        timedOut: waited.timedOut,
+        answer,
+      } satisfies OrchestratorMcpAskAgentResult;
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {
       const { parent, target } = yield* loadScopedThread(scope, input.threadId, []);

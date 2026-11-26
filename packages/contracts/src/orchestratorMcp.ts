@@ -639,6 +639,28 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 
+export const OrchestratorMcpAskAgentInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
+  threadId: ThreadId.annotate({
+    description: "Target agent thread ID to query on an off-timeline side channel.",
+  }),
+  prompt: OrchestratorMcpPrompt,
+  timeoutMs: Schema.optional(Schema.Finite),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpAskAgentInput = typeof OrchestratorMcpAskAgentInput.Type;
+
+export const OrchestratorMcpAskAgentResult = Schema.Struct({
+  threadId: ThreadId,
+  link: Schema.optional(Schema.String),
+  sideThreadId: ThreadId,
+  runId: RunId,
+  status: OrchestrationV2RunStatus,
+  timedOut: Schema.Boolean,
+  answer: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpAskAgentResult = typeof OrchestratorMcpAskAgentResult.Type;
+
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,

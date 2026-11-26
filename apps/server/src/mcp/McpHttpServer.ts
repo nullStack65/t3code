@@ -1051,6 +1051,7 @@ const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "create_threads",
   "t3_thread_launch",
   "t3_thread_send",
+  "ask_agent",
   "t3_thread_send_attachments",
   "schedule_task",
   "run_scheduled_task_now",
