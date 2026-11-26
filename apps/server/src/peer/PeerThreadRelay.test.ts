@@ -67,6 +67,7 @@ const archived = (sequence: number): OrchestrationV2StoredEvent => ({
 const serveBox = Effect.gen(function* () {
   const live = yield* Queue.unbounded<OrchestrationV2StoredEvent, Cause.Done>();
   const closed = yield* Deferred.make<void>();
+  const sentCalls: Array<ThreadManagement.ThreadManagementSendInput> = [];
   const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: (threadId) => Effect.succeed(threadId === boxThread ? boxShell : null),
     ensureLegacyTranscript: () => Effect.void,
@@ -77,13 +78,20 @@ const serveBox = Effect.gen(function* () {
     getThreadHistoryPage: (_threadId, cursor) =>
       Effect.succeed({ snapshotSequence: 7, items: [], hasMoreHistory: false, nextCursor: cursor }),
     getTurnItem: () => Effect.succeed({ item: null }),
+    sendToThread: (sendInput) => {
+      sentCalls.push(sendInput);
+      return Effect.succeed({
+        run: { id: "run-1", status: "running" },
+        delivery: "started",
+      } as never);
+    },
   });
   const peer = yield* servePeer(box, Layer.empty, LinkThreadHttp.layer).pipe(
     Effect.provide(
       Layer.merge(threads, Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({})),
     ),
   );
-  return { ...peer, live, closed };
+  return { ...peer, live, closed, sentCalls };
 });
 
 /** A, holding the link and relaying B's threads to its own clients. */
@@ -325,6 +333,58 @@ it.effect("gives up on an answer whose body never arrives", () =>
       expect(yield* Queue.take(a.answered)).toBe(403);
       yield* TestClock.adjust(Duration.seconds(10));
       expect(yield* Fiber.join(page)).toMatchObject({ reason: "rejected", label: "Box" });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("sends a user-origin message with founder attribution and refuses read-only links", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const b = yield* serveBox;
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "full-access");
+
+      const result = yield* a.relay.send(
+        { ...input, message: "Hello from mobile" },
+        {
+          sentBy: {
+            sessionId: "session-mobile" as never,
+            device: "iPhone",
+            deviceType: "mobile",
+            founder: "kameron",
+          },
+        },
+      );
+      expect(result.status).toBe("running");
+      expect(b.sentCalls).toHaveLength(1);
+      expect(b.sentCalls[0]).toMatchObject({
+        threadId: boxThread,
+        text: "Hello from mobile",
+        createdBy: "user",
+        creationSource: "web",
+        sentBy: {
+          device: "iPhone",
+          founder: "kameron",
+        },
+      });
+
+      // A link paired below full-access cannot send into a thread started outside that link.
+      yield* a.links.unlink(box.environmentId);
+      yield* linkTo(a.links, b, "auto");
+      const fenced = yield* a.relay
+        .send({ ...input, message: "Should be fenced" })
+        .pipe(Effect.flip);
+      expect(fenced).toMatchObject({ reason: "pairing_rejected" });
+      expect(b.sentCalls).toHaveLength(1);
+
+      // A read-only link cannot send messages.
+      yield* a.links.unlink(box.environmentId);
+      yield* linkTo(a.links, b, "read-only");
+      const refused = yield* a.relay
+        .send({ ...input, message: "Should be blocked" })
+        .pipe(Effect.flip);
+      expect(refused).toMatchObject({ reason: "pairing_rejected" });
+      expect(b.sentCalls).toHaveLength(1);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

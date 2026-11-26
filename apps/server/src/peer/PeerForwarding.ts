@@ -8,10 +8,13 @@ import {
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitInput,
   OrchestratorMcpThreadWaitResult,
   type PeerLinkAppPairing,
   PeerLinkError,
+  type PeerLinkThreadSendInput,
+  type PeerLinkThreadSendResult,
   RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -127,6 +130,10 @@ export class PeerForwarding extends Context.Service<
     readonly linkedSidebar: (input: {
       readonly catalogEnvironmentIds?: ReadonlyArray<EnvironmentId> | undefined;
     }) => Effect.Effect<LinkedSidebarResult, PeerLinkError>;
+    /** Sends a message to a linked environment's thread over this server's peer link. */
+    readonly sendThreadMessage: (
+      input: PeerLinkThreadSendInput,
+    ) => Effect.Effect<PeerLinkThreadSendResult, PeerLinkError>;
   }
 >()("t3/peer/PeerForwarding") {}
 
@@ -483,6 +490,48 @@ const make = Effect.gen(function* () {
   const linkedSidebar: PeerForwarding["Service"]["linkedSidebar"] = (input) =>
     readLinkedSidebar({ links, peers, catalogEnvironmentIds: input.catalogEnvironmentIds });
 
+  const sendThreadMessage: PeerForwarding["Service"]["sendThreadMessage"] = Effect.fn(
+    "PeerForwarding.sendThreadMessage",
+  )(function* (input) {
+    if (!(yield* links.enabled)) {
+      return yield* new PeerLinkError({
+        reason: "disabled",
+        message: PeerLinks.LINKED_ENVIRONMENTS_OFF,
+      });
+    }
+    const sent = yield* peers
+      .call({
+        environmentId: input.environmentId,
+        tool: "t3_thread_send",
+        arguments: {
+          threadId: input.threadId,
+          message: input.message,
+          mode: "auto",
+        },
+        limits: { runtimeMode: "full-access", interactionMode: "default" },
+        success: OrchestratorMcpThreadSendResult,
+      })
+      .pipe(
+        Effect.mapError(
+          (failure) =>
+            new PeerLinkError({
+              reason:
+                failure.code === "capability_denied"
+                  ? "pairing_rejected"
+                  : failure.code === "thread_not_found"
+                    ? "unknown_link"
+                    : "unreachable",
+              message: failure.message,
+            }),
+        ),
+      );
+    return {
+      messageId: sent.messageId,
+      ...(sent.runId === undefined ? {} : { runId: sent.runId }),
+      status: sent.status,
+    } satisfies PeerLinkThreadSendResult;
+  });
+
   return PeerForwarding.of({
     addToApp,
     call,
@@ -492,6 +541,7 @@ const make = Effect.gen(function* () {
     waitForThread,
     links: listLinks,
     linkedSidebar,
+    sendThreadMessage,
   });
 });
 

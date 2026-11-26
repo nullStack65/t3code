@@ -22,7 +22,12 @@ import {
 } from "../state/entities";
 import { environmentUnreachableAtom } from "../state/presentation";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { readLinkedSidebarThreadShell, useLinkedOnlyEnvironment } from "../state/linkedSidebar";
+import {
+  readLinkedSidebarThreadShell,
+  useLinkedOnlyEnvironment,
+  useLinkedOnlyEnvironmentHost,
+} from "../state/linkedSidebar";
+import { LinkedThreadPage } from "./chat/LinkedThreadPage";
 import { useEnvironmentShellStatus } from "../state/shell";
 import { environmentThreadShells, threadFamilies, useEnvironmentThread } from "../state/threads";
 import {
@@ -97,6 +102,7 @@ export function ThreadRouteView({
   );
   const serverThreadRef = target.kind === "server" ? target.threadRef : null;
   const linkedOnlyEnvironment = useLinkedOnlyEnvironment(serverThreadRef?.environmentId ?? null);
+  const linkedOnlyHost = useLinkedOnlyEnvironmentHost(serverThreadRef?.environmentId ?? null);
   const serverThreadShell = useQuietThreadShell(serverThreadRef);
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
@@ -194,12 +200,19 @@ export function ThreadRouteView({
   let view: React.ReactNode = null;
   let redirect: React.ReactNode = null;
   if (target.kind === "server" && linkedOnlyEnvironment !== null) {
-    view = (
-      <LinkedOnlyThreadNotice
-        hostLabel={linkedOnlyEnvironment.label}
-        title={readLinkedSidebarThreadShell(target.threadRef)?.title ?? null}
-      />
-    );
+    view =
+      linkedOnlyHost !== null ? (
+        <LinkedThreadPage
+          viaEnvironmentId={linkedOnlyHost}
+          environmentId={target.threadRef.environmentId}
+          threadId={target.threadRef.threadId}
+        />
+      ) : (
+        <LinkedOnlyThreadNotice
+          hostLabel={linkedOnlyEnvironment.label}
+          title={readLinkedSidebarThreadShell(target.threadRef)?.title ?? null}
+        />
+      );
   } else if (target.kind === "draft") {
     if (
       draftSession &&

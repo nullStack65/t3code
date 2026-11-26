@@ -138,6 +138,20 @@ export function useLinkedOnlyEnvironment(environmentId: EnvironmentId | null) {
     : (identities.find((identity) => identity.environmentId === environmentId) ?? null);
 }
 
+/** The connected host whose server-side peer link surfaces `environmentId`, if any. */
+export function useLinkedOnlyEnvironmentHost(
+  environmentId: EnvironmentId | null,
+): EnvironmentId | null {
+  const byHost = useAtomValue(linkedSidebarByHostAtom);
+  if (environmentId === null) return null;
+  for (const [hostId, result] of byHost) {
+    if (result.environments.some((env) => env.environmentId === environmentId)) {
+      return hostId;
+    }
+  }
+  return null;
+}
+
 export function useSidebarEnvironmentIdentities() {
   return useAtomValue(sidebarEnvironmentIdentitiesAtom);
 }

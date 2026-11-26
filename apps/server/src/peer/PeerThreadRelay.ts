@@ -1,15 +1,19 @@
 import {
   OrchestrationV2GetTurnItemResult,
+  type OrchestrationV2MessageSentBy,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadStreamItem,
   PEER_LINK_THREAD_HISTORY_ROUTE,
   PEER_LINK_THREAD_ITEM_ROUTE,
+  PEER_LINK_THREAD_SEND_ROUTE,
   PEER_LINK_THREAD_STREAM_ROUTE,
-  type PeerLinkError,
+  PeerLinkError,
   type PeerLinkThreadHistoryInput,
   type PeerLinkThreadInput,
   type PeerLinkThreadItemInput,
   PeerLinkThreadReadError,
+  type PeerLinkThreadSendInput,
+  PeerLinkThreadSendResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -55,6 +59,11 @@ export class PeerThreadRelay extends Context.Service<
     readonly item: (
       input: PeerLinkThreadItemInput,
     ) => Effect.Effect<OrchestrationV2GetTurnItemResult, PeerLinkThreadReadError>;
+    /** Sends a user-origin message to a linked environment's thread over this server's peer link. */
+    readonly send: (
+      input: PeerLinkThreadSendInput,
+      options?: { readonly sentBy?: OrchestrationV2MessageSentBy },
+    ) => Effect.Effect<PeerLinkThreadSendResult, PeerLinkError>;
   }
 >()("t3/peer/PeerThreadRelay") {}
 
@@ -65,6 +74,7 @@ const decodeHistoryPage = Schema.decodeUnknownEffect(
   Schema.toCodecJson(OrchestrationV2ThreadHistoryPage),
 );
 const decodeItem = Schema.decodeUnknownEffect(Schema.toCodecJson(OrchestrationV2GetTurnItemResult));
+const decodeSendResult = Schema.decodeUnknownEffect(PeerLinkThreadSendResult);
 const decodeRefusal = Schema.decodeUnknownOption(Schema.Struct({ error: Schema.String }));
 
 const unreachable = (label: string, cause?: unknown) =>
@@ -258,6 +268,113 @@ const make = Effect.gen(function* () {
       ),
     ).pipe(Stream.withSpan("PeerThreadRelay.subscribe"));
 
+  const send: PeerThreadRelay["Service"]["send"] = Effect.fn("PeerThreadRelay.send")(function* (
+    input: PeerLinkThreadSendInput,
+    options?: { readonly sentBy?: OrchestrationV2MessageSentBy },
+  ) {
+    if (!(yield* links.enabled)) {
+      return yield* new PeerLinkError({
+        reason: "disabled",
+        message: PeerLinks.LINKED_ENVIRONMENTS_OFF,
+      });
+    }
+    const link = yield* links.get(input.environmentId);
+    if (Option.isNone(link)) {
+      return yield* new PeerLinkError({
+        reason: "unknown_link",
+        message: "This environment is no longer linked to the one this thread is on.",
+      });
+    }
+    const { label } = link.value;
+    const resolved = yield* links.resolve(input.environmentId);
+    const timeout = PeerLinks.probeTimeout(resolved.url);
+    const query = new URLSearchParams({ thread: input.threadId });
+    const payload = {
+      message: input.message,
+      ...(options?.sentBy?.founder === undefined ? {} : { founder: options.sentBy.founder }),
+      ...(options?.sentBy?.device ? { device: options.sentBy.device } : {}),
+      ...(options?.sentBy?.deviceType ? { deviceType: options.sentBy.deviceType } : {}),
+    };
+    const response = yield* HttpClient.withScope(httpClient)
+      .execute(
+        HttpClientRequest.post(`${resolved.url}${PEER_LINK_THREAD_SEND_ROUTE}?${query}`).pipe(
+          HttpClientRequest.setHeaders({ authorization: `Bearer ${resolved.token}` }),
+          HttpClientRequest.bodyJsonUnsafe(payload),
+        ),
+      )
+      .pipe(
+        Effect.timeout(timeout),
+        Effect.mapError(
+          (error) =>
+            new PeerLinkError({
+              reason: "unreachable",
+              message: `${label} did not answer.`,
+              cause: error,
+            }),
+        ),
+        Effect.tapError((error) =>
+          links.recordOutcome(input.environmentId, { error: error.message }),
+        ),
+      );
+    if (response.status !== 200) {
+      const refusal = yield* response.json.pipe(
+        Effect.timeout(timeout),
+        Effect.map(decodeRefusal),
+        Effect.orElseSucceed(() => Option.none()),
+      );
+      const code = Option.getOrUndefined(refusal)?.error;
+      const failure =
+        response.status === 404 && code === "thread_not_found"
+          ? new PeerLinkError({
+              reason: "unknown_link",
+              message: `That thread is no longer on ${label}.`,
+            })
+          : response.status === 404
+            ? new PeerLinkError({
+                reason: "incompatible",
+                message: `${label} runs a T3 Code version that does not accept messages over a link. Update it to send messages from here.`,
+              })
+            : response.status === 401 || response.status === 403
+              ? new PeerLinkError({
+                  reason: "pairing_rejected",
+                  message:
+                    code === "read_only_link" ||
+                    code === "runtime_mode_ceiling_exceeded" ||
+                    code === "link_fence_denied"
+                      ? `${label} refused the message because this link does not grant enough access.`
+                      : code === "linked_environments_off"
+                        ? `${label} has Linked environments turned off. Turn it on in its Settings → Labs.`
+                        : `${label} refused the message. Its link may have been revoked there; link it again.`,
+                })
+              : new PeerLinkError({
+                  reason: "unreachable",
+                  message: `${label} could not deliver the message (HTTP ${response.status}).`,
+                });
+      yield* links.recordOutcome(input.environmentId, {
+        error: code === "thread_not_found" ? null : failure.message,
+      });
+      return yield* failure;
+    }
+    yield* links.recordOutcome(input.environmentId, { error: null });
+    const renewed = Option.flatMap(
+      Option.fromNullishOr(response.headers[McpInvocationContext.LINK_EXPIRES_AT_HEADER]),
+      DateTime.make,
+    );
+    if (Option.isSome(renewed)) yield* links.recordExpiry(input.environmentId, renewed.value);
+    return yield* response.json.pipe(
+      Effect.timeout(timeout),
+      Effect.flatMap(decodeSendResult),
+      Effect.mapError(
+        (error) =>
+          new PeerLinkError({
+            reason: "incompatible",
+            message: `${label} answered in a shape this version does not understand.`,
+            cause: error,
+          }),
+      ),
+    );
+  }, Effect.scoped);
+
   return PeerThreadRelay.of({
     subscribe,
     historyPage: Effect.fn("PeerThreadRelay.historyPage")((input) =>
@@ -269,6 +386,7 @@ const make = Effect.gen(function* () {
     item: Effect.fn("PeerThreadRelay.item")((input) =>
       readJson(open(input, PEER_LINK_THREAD_ITEM_ROUTE, { item: input.itemId }), decodeItem),
     ),
+    send,
   });
 });
 

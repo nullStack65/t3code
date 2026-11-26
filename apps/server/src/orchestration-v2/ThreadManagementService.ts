@@ -212,6 +212,7 @@ export interface ThreadManagementSendInput {
   readonly outputSchema?: Readonly<Record<string, Schema.Json>>;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  readonly sentBy?: OrchestrationV2MessageSentBy;
 }
 
 export interface ThreadManagementSendResult {
@@ -1173,6 +1174,7 @@ const make = Effect.gen(function* () {
       ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
       createdBy: input.createdBy,
       creationSource: input.creationSource,
+      ...(input.sentBy === undefined ? {} : { sentBy: input.sentBy }),
     });
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
