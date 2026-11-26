@@ -176,6 +176,7 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as AuthHttp from "./auth/http.ts";
+import * as CloudflareAccessAuth from "./auth/CloudflareAccessAuth.ts";
 import * as WorkOsAuth from "./auth/WorkOsAuth.ts";
 import * as WorkOsHttp from "./auth/workOsHttp.ts";
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
@@ -912,6 +913,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerRepositoryIdentityResolver),
   Layer.provideMerge(CodexManagedTokenBroker.layer),
   Layer.provideMerge(layerServerEnvironment),
+  Layer.provideMerge(CloudflareAccessAuth.layer),
   Layer.provideMerge(WorkOsAuth.layer),
   Layer.provideMerge(layerAuth),
   Layer.provideMerge(
