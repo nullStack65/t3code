@@ -123,7 +123,9 @@ describe("sidebarFromServerLinks", () => {
     );
   });
 
-  it("lists one copy when two hosts report the same server-only link", () => {
+  it("lists one copy of a standing bot reported by two hosts", () => {
+    const standing = { name: "CoS (Jeff)", role: null, avatarId: "bolt", accent: "sky" } as const;
+    const bot = { ...jeffThread, standing };
     const listed = sidebarFromServerLinks({
       catalogEnvironmentIds: [laptop],
       environments: [
@@ -131,18 +133,19 @@ describe("sidebarFromServerLinks", () => {
           environmentId: omarcy,
           label: "omarcy-desktop",
           projects: [],
-          threads: [jeffThread],
+          threads: [bot],
         },
         {
           environmentId: omarcy,
           label: "omarcy-desktop",
           projects: [],
-          threads: [jeffThread],
+          threads: [bot],
         },
       ],
     });
     expect(listed.identities).toEqual([{ environmentId: omarcy, label: "omarcy-desktop" }]);
     expect(listed.threads.map((thread) => thread.id)).toEqual([threadId]);
+    expect(listed.threads[0]?.standing).toEqual(standing);
     expect(listed.projects).toHaveLength(1);
   });
 

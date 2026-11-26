@@ -1,9 +1,4 @@
-import {
-  effectiveInboxFilter,
-  type EnvironmentId,
-  type Founder,
-  type InboxChoice,
-} from "@t3tools/contracts";
+import { type EnvironmentId, type Founder, type InboxChoice } from "@t3tools/contracts";
 import {
   THREAD_ATTRIBUTION_LABELS,
   THREAD_ATTRIBUTIONS,
@@ -35,6 +30,7 @@ import {
   sidebarFilterIconClass,
   EMPTY_THREAD_LIST_FILTER_BUCKETS,
   inboxMenuOrder,
+  inboxKeepsSharedChecked,
   type olderSettledFilterCounts,
   SIDEBAR_FILTER_OPTION_LABEL_CLASS,
   threadListFilterCounts,
@@ -154,13 +150,14 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
         {inboxOrder.map((inbox) => {
           const checked = filter.inboxes.includes(inbox);
           const isLast = checked && filter.inboxes.length === 1;
+          const keepsShared = inboxKeepsSharedChecked(inbox, filter, owner);
           const count = counts.inboxes.get(inbox) ?? EMPTY_THREAD_LIST_FILTER_BUCKETS;
           return (
             <MenuCheckboxItem
               key={inbox}
               checked={checked}
-              disabled={isLast}
-              aria-label={`${INBOX_LABELS[inbox]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : ""}`}
+              disabled={isLast || keepsShared}
+              aria-label={`${INBOX_LABELS[inbox]}, ${stateCountPhrase(count)}${isLast ? LAST_OPTION_NOTE : keepsShared ? ", stays checked with the founder-only selection" : ""}`}
               onCheckedChange={() =>
                 void updateClientSettings({
                   founderInboxFilter: toggleFilterOption(filter.inboxes, inbox, inboxOrder),
@@ -264,7 +261,7 @@ function SidebarThreadFilterOptions<T extends CountedThread>({
           <MenuItem
             onClick={() =>
               void updateClientSettings({
-                founderInboxFilter: effectiveInboxFilter({ founderInboxOwner: owner }),
+                founderInboxFilter: [],
                 sidebarHiddenEnvironmentIds: [],
                 sidebarHiddenThreadAttributions: [],
               })
@@ -299,7 +296,7 @@ function FilterOptionRow({
   indicator?: ReactNode;
 }) {
   return (
-    <span className="flex min-w-0 items-center gap-2">
+    <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5">
       {indicator}
       <span className={SIDEBAR_FILTER_OPTION_LABEL_CLASS}>{label}</span>
       <span className="grid shrink-0 grid-cols-4 gap-x-1.5 text-center">

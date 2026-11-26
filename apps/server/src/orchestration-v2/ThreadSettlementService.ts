@@ -175,6 +175,8 @@ export function settlesFinishedAgentWork(
   >,
 ): boolean {
   if (thread.standing != null || thread.inbox?.audience !== "agent-only") return false;
+  // An unattributed conversation uses Agents for routing without becoming autonomous work.
+  if (thread.inbox.origin === null) return false;
   if (!FINISHED_AGENT_RUN_STATUSES.has(thread.status)) return false;
   return !agentBackgroundWorkPending(thread);
 }

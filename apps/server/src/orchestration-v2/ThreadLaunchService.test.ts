@@ -3516,6 +3516,27 @@ it.effect(
         ...launchInput({ command: "inbox-launch", thread: "inbox-thread" }),
         inboxOrigin: { kind: "human" as const, id: "jeff" as const },
       };
+      const unrouted = yield* launches.launch(
+        launchInput({ command: "no-inbox", thread: "no-inbox" }),
+      );
+      const shell = yield* threads.getThreadShell(unrouted.threadId);
+      assert.equal(shell?.inbox?.audience, "agent-only");
+      assert.equal(shell?.inbox?.origin, null);
+      for (const founder of ["jeff", "kameron"] as const) {
+        const own = yield* launches.launch({
+          ...launchInput({ command: `inbox-${founder}`, thread: `inbox-${founder}` }),
+          inboxOrigin: { kind: "human", id: founder },
+        });
+        const inbox = (yield* threads.getThreadShell(own.threadId))?.inbox;
+        assert.equal(inbox?.owner, founder);
+        assert.equal(inbox?.audience, founder);
+      }
+      const shared = yield* launches.launch({
+        ...launchInput({ command: "shared-inbox", thread: "shared-inbox" }),
+        inboxOrigin: { kind: "human", id: "jeff" },
+        inboxRouting: { audience: "shared" },
+      });
+      assert.equal((yield* threads.getThreadShell(shared.threadId))?.inbox?.audience, "shared");
       const launched = yield* launches.launch(input);
       const original = (yield* threads.getThreadProjection(launched.threadId)).thread.inbox;
       assert.equal(original?.owner, "jeff");

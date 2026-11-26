@@ -38,7 +38,13 @@ const sameThread = (left: EnvironmentThreadShell, right: EnvironmentThreadShell)
   left.snoozedUntil === right.snoozedUntil &&
   left.runtime?.status === right.runtime?.status &&
   left.lastVisitedAt === right.lastVisitedAt &&
+  left.standing?.name === right.standing?.name &&
+  left.standing?.role === right.standing?.role &&
+  left.standing?.avatarId === right.standing?.avatarId &&
+  left.standing?.accent === right.standing?.accent &&
   left.latestRun?.completedAt === right.latestRun?.completedAt &&
+  left.lineage.parentThreadId === right.lineage.parentThreadId &&
+  left.lineage.relationshipToParent === right.lineage.relationshipToParent &&
   left.source.inbox?.owner === right.source.inbox?.owner &&
   left.source.inbox?.audience === right.source.inbox?.audience &&
   left.source.inbox?.attentionKind === right.source.inbox?.attentionKind;

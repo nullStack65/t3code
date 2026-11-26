@@ -1,3 +1,4 @@
+import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -73,17 +74,28 @@ describe("sortBotThreads", () => {
 
 describe("splitStandingThreads", () => {
   it("sends bots to their own group whatever their pin, settle or snooze state", () => {
-    const persona = { name: "Ops" };
+    const persona = { name: "Ops", role: null, accent: "sky", avatarId: "bolt" } as const;
+    const lineage = {
+      parentThreadId: null,
+      rootThreadId: ThreadId.make("root"),
+      relationshipToParent: null,
+    };
     const threads = [
-      { id: "a", standing: null, pinnedAt: "2026-11-19T00:00:00Z" },
-      { id: "b", standing: persona, pinnedAt: "2026-11-19T00:00:00Z" },
-      { id: "c", standing: persona, settledOverride: "settled" },
-      { id: "d", standing: persona, snoozedAt: "2026-11-19T00:00:00Z" },
-      { id: "e", standing: null },
+      { id: "a", standing: null, lineage, pinnedAt: "2026-11-19T00:00:00Z" },
+      { id: "b", standing: persona, lineage, pinnedAt: "2026-11-19T00:00:00Z" },
+      { id: "c", standing: persona, lineage, settledOverride: "settled" },
+      { id: "d", standing: persona, lineage, snoozedAt: "2026-11-19T00:00:00Z" },
+      { id: "e", standing: null, lineage },
+      { id: "f", standing: persona, lineage: { ...lineage, parentThreadId: ThreadId.make("b") } },
+      {
+        id: "g",
+        standing: persona,
+        lineage: { ...lineage, relationshipToParent: "subagent" as const },
+      },
     ];
     const { bots, rest } = splitStandingThreads(threads);
     expect(bots.map((thread) => thread.id)).toEqual(["b", "c", "d"]);
-    expect(rest.map((thread) => thread.id)).toEqual(["a", "e"]);
+    expect(rest.map((thread) => thread.id)).toEqual(["a", "e", "f", "g"]);
   });
 });
 

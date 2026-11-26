@@ -1054,6 +1054,9 @@ describe("ThreadSettlementServiceV2 worker", () => {
       });
       const idle = makeThread("idle-agent", { inbox: agent, status: "idle" });
       const already = done("already", "completed", { settledOverride: "settled" });
+      const unboundHuman = done("unbound-human", "completed", {
+        inbox: makeThreadInbox({ actor: null }),
+      });
       const standing = done("standing", "completed", {
         standing: { name: "Ops", role: null, avatarId: "bolt", accent: "sky" },
       });
@@ -1077,6 +1080,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
         asked,
         idle,
         already,
+        unboundHuman,
         standing,
         human("kameron"),
         human("jeff"),

@@ -5088,8 +5088,9 @@ describe("OrchestratorMcpService thread list", () => {
         ]
       : [],
   });
+  const standing = { name: "Ops", role: "Operations", avatarId: "bolt", accent: "sky" } as const;
   const shells = [
-    shell("thread:a-snoozed", "project:a", true),
+    { ...shell("thread:a-snoozed", "project:a", true), standing },
     shell("thread:a-awake", "project:a", false),
     shell("thread:b-snoozed", "project:b", true, true, true),
     {
@@ -5168,6 +5169,7 @@ describe("OrchestratorMcpService thread list", () => {
         listed.threads.map((thread) => thread.pinned),
         [false, true],
       );
+      assert.deepStrictEqual(listed.threads[0]?.standing, standing);
       assert.deepStrictEqual(
         listed.threads.map((thread) => [thread.blockedOnThreadWait, thread.pendingBackgroundTasks]),
         [
