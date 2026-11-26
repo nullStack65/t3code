@@ -108,16 +108,22 @@ describe("partitionBotGroups", () => {
     id,
     source: { inbox: { owner, audience } },
   });
-  it("puts shared-inbox bots in their own group and leaves the rest as mine", () => {
+  it("puts company/shared/agent-only/open bots in Closura (shared) and personal bots in mine when viewer is unset", () => {
     expect(
-      partitionBotGroups([thread("shared", "shared"), thread("jeff", "jeff"), thread("open")]),
+      partitionBotGroups([
+        thread("shared", "shared"),
+        thread("agents", "agent-only"),
+        thread("jeff", "jeff"),
+        thread("open"),
+      ]),
     ).toEqual({
-      shared: [thread("shared", "shared")],
-      mine: [thread("jeff", "jeff"), thread("open")],
+      shared: [thread("shared", "shared"), thread("agents", "agent-only"), thread("open")],
+      mine: [thread("jeff", "jeff")],
+      others: [],
     });
   });
 
-  it("keeps Jeff's personal bots in Kameron's lists beside his own and shared ones", () => {
+  it("puts Kameron's own in My Bots, Jeff's personal bots in Others, and company bots in Closura", () => {
     const threads = [
       thread("shared", "shared"),
       thread("mine", "kameron"),
@@ -127,12 +133,8 @@ describe("partitionBotGroups", () => {
     ];
     expect(partitionBotGroups(threads, "kameron")).toEqual({
       mine: [thread("mine", "kameron")],
-      shared: [
-        thread("shared", "shared"),
-        thread("other", "jeff"),
-        thread("agents", "agent-only"),
-        thread("open"),
-      ],
+      others: [thread("other", "jeff")],
+      shared: [thread("shared", "shared"), thread("agents", "agent-only"), thread("open")],
     });
   });
 
@@ -150,6 +152,7 @@ describe("partitionBotGroups", () => {
     ];
     expect(partitionBotGroups(threads, "jeff")).toEqual({
       mine: [thread("cos-jeff", "jeff"), owned("kameron-jeff", "kameron", "jeff")],
+      others: [],
       shared: [
         thread("shared", "shared"),
         thread("agents", "agent-only"),

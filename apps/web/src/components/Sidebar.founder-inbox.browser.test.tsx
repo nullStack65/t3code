@@ -142,17 +142,18 @@ it.each(["jeff", "kameron"] as const)(
       </AppAtomRegistryProvider>,
     );
     const mine = screen.getByRole("region", { name: "My Bots" });
-    const company = screen.getByRole("region", { name: "Shared Bots" });
+    const company = screen.getByRole("region", { name: "Closura" });
     const jeff = owner === "jeff";
-    // Asymmetric: Jeff never lists Kameron's private bots, while Kameron keeps Jeff's visible.
+    // Asymmetric: Jeff never lists Kameron's private bots, while Kameron sees Jeff's under Others.
     for (const name of jeff ? ["CoS (Jeff)", "Personal Finance"] : ["CoS"]) {
       await expect.element(mine.getByText(name, { exact: true })).toBeVisible();
     }
     if (jeff) {
       await expect.element(screen.getByText("CoS", { exact: true })).not.toBeInTheDocument();
     } else {
+      const others = screen.getByRole("region", { name: "Others" });
       for (const name of ["CoS (Jeff)", "Personal Finance"]) {
-        await expect.element(company.getByText(name, { exact: true })).toBeVisible();
+        await expect.element(others.getByText(name, { exact: true })).toBeVisible();
       }
     }
     for (const name of shared) {
