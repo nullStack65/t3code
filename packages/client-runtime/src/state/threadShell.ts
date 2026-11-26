@@ -693,41 +693,9 @@ export function createEnvironmentThreadShellAtoms(input: {
 
   // Point reads and threadShellsAtom stay complete, so code that asks whether a thread
   // exists (outboxes, drafts, removals) never mistakes a hidden thread for a missing one.
-  // Memoize per environment so streaming ticks on one host do not rescan unchanged hosts.
-  const hiddenThreadKeysForEnvironmentAtom = Atom.family((environmentId: EnvironmentId) => {
-    let previous: ReadonlySet<string> = NO_HIDDEN_THREADS;
-    return Atom.make((get): ReadonlySet<string> => {
-      const viewer = viewerOf(get);
-      const hiddenTags = get(input.hiddenThreadTagsAtom(environmentId));
-      if (viewer !== "jeff" && hiddenTags === null) {
-        previous = NO_HIDDEN_THREADS;
-        return NO_HIDDEN_THREADS;
-      }
-      const next = hiddenThreadKeys(
-        [
-          {
-            environmentId,
-            hiddenTags,
-            threads: get(environmentThreadsAtom(environmentId)),
-          },
-        ],
-        undefined,
-        undefined,
-        undefined,
-        viewer,
-      );
-      if (next.size === 0) {
-        previous = NO_HIDDEN_THREADS;
-        return NO_HIDDEN_THREADS;
-      }
-      if (next.size === previous.size && [...next].every((key) => previous.has(key))) {
-        return previous;
-      }
-      previous = next;
-      return next;
-    }).pipe(Atom.withLabel(`environment-hidden-thread-keys:${environmentId}`));
-  });
-
+  // Keep cross-environment hiddenThreadKeys semantics intact (cross-env delegatedFrom parents
+  // and orphan-child rules), while preserving the fast-path early return and Set identity
+  // stabilization so unchanged streaming ticks do not churn downstream atoms.
   let previousHiddenThreadKeys: ReadonlySet<string> = NO_HIDDEN_THREADS;
   const hiddenThreadKeysAtom = Atom.make((get) => {
     const viewer = viewerOf(get);
@@ -741,23 +709,20 @@ export function createEnvironmentThreadShellAtoms(input: {
       previousHiddenThreadKeys = NO_HIDDEN_THREADS;
       return NO_HIDDEN_THREADS;
     }
-    const perEnvSets: Array<ReadonlySet<string>> = [];
-    for (const environmentId of environmentIds) {
-      const envSet = get(hiddenThreadKeysForEnvironmentAtom(environmentId));
-      if (envSet.size > 0) perEnvSets.push(envSet);
-    }
-    if (perEnvSets.length === 0) {
+    const next = hiddenThreadKeys(
+      environmentIds.map((environmentId) => ({
+        environmentId,
+        hiddenTags: get(input.hiddenThreadTagsAtom(environmentId)),
+        threads: get(environmentThreadsAtom(environmentId)),
+      })),
+      undefined,
+      undefined,
+      undefined,
+      viewer,
+    );
+    if (next.size === 0) {
       previousHiddenThreadKeys = NO_HIDDEN_THREADS;
       return NO_HIDDEN_THREADS;
-    }
-    if (perEnvSets.length === 1) {
-      const single = perEnvSets[0]!;
-      previousHiddenThreadKeys = single;
-      return single;
-    }
-    const next = new Set<string>();
-    for (const envSet of perEnvSets) {
-      for (const key of envSet) next.add(key);
     }
     if (
       next.size === previousHiddenThreadKeys.size &&

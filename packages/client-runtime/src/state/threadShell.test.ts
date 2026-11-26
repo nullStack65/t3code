@@ -778,6 +778,58 @@ describe("v2 thread shell lists", () => {
       harness.registry.dispose();
     }
   });
+
+  it("hides cross-environment delegated children of Kameron's private threads from Jeff", () => {
+    const envA = EnvironmentId.make("environment-a");
+    const envB = EnvironmentId.make("environment-b");
+    const parentId = ThreadId.make("kameron-private-parent");
+    const childId = ThreadId.make("delegated-child-on-b");
+    const viewer = Atom.make<Founder | null>("jeff");
+    const harness = makeHarness([envA, envB], viewer);
+    harness.registry.set(harness.snapshotAtom(envA), {
+      ...v2ShellSnapshot,
+      snapshotSequence: 1,
+      threads: [
+        {
+          ...v2ThreadShell,
+          id: parentId,
+          inbox: { ...makeThreadInbox({ actor: null }), owner: "kameron", audience: "kameron" },
+        },
+      ],
+    });
+    harness.registry.set(harness.snapshotAtom(envB), {
+      ...v2ShellSnapshot,
+      snapshotSequence: 1,
+      threads: [
+        {
+          ...v2ThreadShell,
+          id: childId,
+          inbox: { ...makeThreadInbox({ actor: null }), owner: "kameron", audience: "agent-only" },
+          delegatedFrom: {
+            environmentId: envA,
+            threadId: parentId,
+            title: "Parent",
+          },
+        },
+      ],
+    });
+    const disposers = [
+      harness.registry.mount(harness.threads.hiddenThreadKeysAtom),
+      harness.registry.mount(harness.threads.visibleThreadShellsAtom),
+    ];
+    try {
+      const hidden = harness.registry.get(harness.threads.hiddenThreadKeysAtom);
+      expect(hidden.size).toBe(2);
+      const visibleIds = harness.registry
+        .get(harness.threads.visibleThreadShellsAtom)
+        .map((thread) => thread.id);
+      expect(visibleIds).not.toContain(parentId);
+      expect(visibleIds).not.toContain(childId);
+    } finally {
+      for (const dispose of disposers) dispose();
+      harness.registry.dispose();
+    }
+  });
 });
 
 describe("resolveListedAncestorThreadRef", () => {

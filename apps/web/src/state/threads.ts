@@ -104,6 +104,7 @@ function isDetailDone<E>(result: AsyncResult.AsyncResult<EnvironmentThreadState,
 
 const MAX_LOCAL_KEEP_ALIVE_THREADS = 8;
 const MAX_REMOTE_KEEP_ALIVE_THREADS = 4;
+const MAX_TOTAL_KEEP_ALIVE_THREADS = 8;
 
 type KeepAliveThreadShell = Pick<OrchestrationV2ThreadShell, "id" | "status"> &
   Partial<Pick<OrchestrationV2ThreadShell, "inbox" | "lineage">>;
@@ -134,6 +135,7 @@ export function createRunningThreadKeepAliveAtom<E>(input: {
     thread: KeepAliveThreadShell,
   ) => boolean;
   readonly maxThreadsForEnvironment?: (environmentId: EnvironmentId) => number;
+  readonly maxTotalThreads?: number;
 }) {
   const runningThreadIdsAtom = Atom.family((environmentId: EnvironmentId) => {
     let previous: ReadonlyArray<ThreadId> = [];
@@ -155,9 +157,18 @@ export function createRunningThreadKeepAliveAtom<E>(input: {
   return Atom.make((get): KeptThreads => {
     const previous = Option.getOrUndefined(get.self<KeptThreads>());
     const kept = new Map<EnvironmentId, ReadonlySet<ThreadId>>();
+    const totalCap = input.maxTotalThreads ?? Number.POSITIVE_INFINITY;
+    let remainingTotal = totalCap;
     for (const environmentId of get(input.environmentIdsAtom)) {
-      const threadIds = new Set(get(runningThreadIdsAtom(environmentId)));
+      const envCap = input.maxThreadsForEnvironment?.(environmentId) ?? Number.POSITIVE_INFINITY;
+      const limit = Math.min(envCap, remainingTotal);
+      const threadIds = new Set<ThreadId>();
+      for (const threadId of get(runningThreadIdsAtom(environmentId))) {
+        if (threadIds.size >= limit) break;
+        threadIds.add(threadId);
+      }
       for (const threadId of previous?.get(environmentId) ?? []) {
+        if (threadIds.size >= limit) break;
         if (threadIds.has(threadId)) continue;
         const stateAtom = input.stateAtom(environmentId, threadId);
         // A get dependency would hold stopped streams open until another change rebuilds this atom.
@@ -167,6 +178,7 @@ export function createRunningThreadKeepAliveAtom<E>(input: {
           if (isDetailDone(state)) get.refreshSelf();
         });
       }
+      remainingTotal = Math.max(0, remainingTotal - threadIds.size);
       for (const threadId of threadIds) get.mount(input.stateAtom(environmentId, threadId));
       kept.set(environmentId, threadIds);
     }
@@ -185,4 +197,5 @@ export const runningThreadKeepAliveAtom = createRunningThreadKeepAliveAtom({
     environmentId === PRIMARY_LOCAL_ENVIRONMENT_ID
       ? MAX_LOCAL_KEEP_ALIVE_THREADS
       : MAX_REMOTE_KEEP_ALIVE_THREADS,
+  maxTotalThreads: MAX_TOTAL_KEEP_ALIVE_THREADS,
 });

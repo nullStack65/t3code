@@ -4,7 +4,7 @@ import {
   type UnseenDivider,
 } from "@t3tools/client-runtime/seen-marker";
 import type { Founder, MessageId } from "@t3tools/contracts";
-import { useMemo, useRef, useState } from "react";
+import { useState } from "react";
 
 const NO_MESSAGES: ReadonlyArray<SeenMessage> = [];
 
@@ -30,27 +30,18 @@ export function useUnseenDivider(input: {
   }
   const anchorId = place?.key === key ? place.messageId : null;
   const messages = input.messages ?? NO_MESSAGES;
-  const previousRef = useRef<UnseenDivider | null>(null);
-
-  return useMemo(() => {
-    if (anchorId === null) {
-      previousRef.current = null;
-      return null;
-    }
-    const next = resolveUnseenDivider({
-      messages,
-      lastSeenMessageId: anchorId,
-    });
-    const prev = previousRef.current;
-    if (
-      prev !== null &&
-      next !== null &&
-      prev.afterMessageId === next.afterMessageId &&
-      prev.count === next.count
-    ) {
-      return prev;
-    }
-    previousRef.current = next;
-    return next;
-  }, [anchorId, messages]);
+  const [divider, setDivider] = useState<UnseenDivider | null>(null);
+  const next =
+    anchorId === null
+      ? null
+      : resolveUnseenDivider({
+          messages,
+          lastSeenMessageId: anchorId,
+        });
+  const changed =
+    divider?.afterMessageId !== next?.afterMessageId || divider?.count !== next?.count;
+  if (changed) {
+    setDivider(next);
+  }
+  return changed ? next : divider;
 }

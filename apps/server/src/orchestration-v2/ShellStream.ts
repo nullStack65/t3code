@@ -18,6 +18,7 @@ import {
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
 import { turnItemCanChangeUserWait } from "@t3tools/shared/agentAwareness";
+import { turnItemCanChangeThreadWait } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - a synchronous digest of a few project rows.
 import * as NodeCrypto from "node:crypto";
@@ -552,7 +553,7 @@ export function shouldPublishShellApplicationEvent(
     return true;
   }
   if (event.type === "turn-item.updated") {
-    if (turnItemCanChangeUserWait(event.payload)) {
+    if (turnItemCanChangeUserWait(event.payload) || turnItemCanChangeThreadWait(event.payload)) {
       return true;
     }
     // Streaming running turn items (token chunks, reasoning, command output) do not change
