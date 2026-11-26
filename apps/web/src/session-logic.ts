@@ -9,6 +9,7 @@ import {
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2RunAttempt,
+  type OrchestrationV2TimelineVisibility,
   type OrchestrationV2TurnItem,
   type RunId,
   type ToolActivitySurface,
@@ -132,6 +133,7 @@ export type TimelineEntry = (
       readonly createdAt: string;
       readonly runId: RunId | null;
       readonly text: string;
+      readonly timelineVisibility?: OrchestrationV2TimelineVisibility;
     }
   | {
       readonly id: string;
@@ -645,6 +647,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
           : {}),
         runId: item.runId,
         streaming: item.type === "assistant_message" && item.streaming,
+        ...(item.timelineVisibility !== undefined
+          ? { timelineVisibility: item.timelineVisibility }
+          : {}),
         ...(item.type === "user_message"
           ? {
               createdBy: item.createdBy,
@@ -723,6 +728,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         createdAt,
         runId: item.runId,
         text: sentMessage,
+        ...(item.timelineVisibility !== undefined
+          ? { timelineVisibility: item.timelineVisibility }
+          : {}),
         ...attemptMetadata,
       });
       continue;
