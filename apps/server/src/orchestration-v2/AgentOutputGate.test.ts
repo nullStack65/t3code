@@ -41,10 +41,20 @@ const userMsgId = MessageId.make("msg:user-1");
 const agentMsgId = MessageId.make("msg:agent-1");
 
 const baseThread = (
-  overrides: Partial<Pick<OrchestrationV2AppThread, "deletedAt" | "archivedAt" | "lineage">> = {},
-): Pick<OrchestrationV2AppThread, "deletedAt" | "archivedAt" | "lineage"> => ({
+  overrides: Partial<
+    Pick<
+      OrchestrationV2AppThread,
+      "deletedAt" | "archivedAt" | "lineage" | "replacedByThreadId" | "settledOverride"
+    >
+  > = {},
+): Pick<
+  OrchestrationV2AppThread,
+  "deletedAt" | "archivedAt" | "lineage" | "replacedByThreadId" | "settledOverride"
+> => ({
   deletedAt: null,
   archivedAt: null,
+  replacedByThreadId: null,
+  settledOverride: null,
   lineage: {
     rootThreadId: threadId,
     parentThreadId: null,
@@ -136,10 +146,16 @@ describe("AgentOutputGate policy", () => {
     assert.isTrue(isExplicitChannelToolName("mcp__t3-code__send_to_user"));
     assert.isTrue(isExplicitChannelToolName("silent_ack"));
     assert.isTrue(isExplicitChannelToolName("mcp__t3-code__silent_ack"));
+    assert.isTrue(isExplicitChannelToolName("mcp_t3-code_silent_ack"));
+    assert.isTrue(isExplicitChannelToolName("t3-code.silent_ack"));
+    assert.isTrue(isExplicitChannelToolName("t3-code-thread123_silent_ack"));
     assert.isTrue(isExplicitChannelToolName("t3_thread_send"));
     assert.isTrue(isExplicitChannelToolName("mcp__t3-code__t3_thread_send"));
     assert.isTrue(isExplicitChannelToolName("ask_agent"));
     assert.isTrue(isExplicitChannelToolName("mcp__t3-code__ask_agent"));
+    assert.isTrue(isExplicitChannelToolName("mcp_t3-code_ask_agent"));
+    assert.isTrue(isExplicitChannelToolName("t3-code.ask_agent"));
+    assert.isTrue(isExplicitChannelToolName("t3-code-thread123_ask_agent"));
     assert.isFalse(isExplicitChannelToolName("t3_thread_read"));
     assert.isFalse(isExplicitChannelToolName(null));
   });
@@ -212,6 +228,39 @@ describe("AgentOutputGate policy", () => {
     assert.deepEqual(decision, { action: "bounce", prompt: OUTPUT_GATE_BOUNCE_PROMPT });
   });
 
+  it("does not treat an error-returning channel tool call as a valid delivery (F2)", () => {
+    const failedChannelCall: Extract<OrchestrationV2TurnItem, { readonly type: "dynamic_tool" }> = {
+      ...toolItem("t-err", "mcp__t3-code__t3_thread_send"),
+      output: { isError: true, content: [{ type: "text", text: "thread_not_found" }] },
+    };
+    const decision = evaluateAgentOutputGate({
+      thread: baseThread(),
+      run: baseRun(),
+      userMessage: userMessage("agent"),
+      turnItems: [failedChannelCall, assistantItem("a1", "Could not send, here is the update.")],
+    });
+    assert.deepEqual(decision, { action: "bounce", prompt: OUTPUT_GATE_BOUNCE_PROMPT });
+  });
+
+  it("fails open to agent_fold on settled threads (F4) or when a newer run is active (F3)", () => {
+    const settled = evaluateAgentOutputGate({
+      thread: baseThread({ settledOverride: "settled" }),
+      run: baseRun(),
+      userMessage: userMessage("agent"),
+      turnItems: [assistantItem("a1", "Done.")],
+    });
+    assert.deepEqual(settled, { action: "fail_open_fold", reason: "thread_settled" });
+
+    const superseded = evaluateAgentOutputGate({
+      thread: baseThread(),
+      run: baseRun(),
+      userMessage: userMessage("agent"),
+      turnItems: [assistantItem("a1", "Done.")],
+      hasNewerOrActiveRun: true,
+    });
+    assert.deepEqual(superseded, { action: "fail_open_fold", reason: "superseded_by_newer_run" });
+  });
+
   it("fails open into agent_fold on a bounce run that still ends unrouted (never loops >1)", () => {
     const decision = evaluateAgentOutputGate({
       thread: baseThread(),
@@ -271,6 +320,11 @@ describe("AgentOutputGateReactor", () => {
               ),
           }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadShell: () =>
+              Effect.succeed({
+                activeRunId: null,
+                latestRunId: runId,
+              } as never),
             getThreadRecords: (_id, _fields, filter) =>
               Effect.succeed(makeRecords(filter?.runIds?.[0] ?? runId) as never),
             getMessagesById: () => Effect.succeed(new Map()),

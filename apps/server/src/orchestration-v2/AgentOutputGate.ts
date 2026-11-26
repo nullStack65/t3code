@@ -8,7 +8,11 @@ import {
   type RunId,
 } from "@t3tools/contracts";
 import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
-import { SEND_TO_USER_TOOL_NAME, SILENT_ACK_TOOL_NAME } from "@t3tools/shared/toolOutput";
+import {
+  compactDynamicToolOutput,
+  SEND_TO_USER_TOOL_NAME,
+  SILENT_ACK_TOOL_NAME,
+} from "@t3tools/shared/toolOutput";
 
 const OUTPUT_GATE_BOUNCE_MESSAGE_PREFIX = "message:output-gate-bounce:";
 
@@ -88,12 +92,15 @@ export type AgentOutputGateDecision =
         | "no_plain_text";
     }
   | { readonly action: "bounce"; readonly prompt: string }
-  | { readonly action: "fail_open_fold"; readonly reason: "bounce_exhausted" };
+  | {
+      readonly action: "fail_open_fold";
+      readonly reason: "bounce_exhausted" | "thread_settled" | "superseded_by_newer_run";
+    };
 
 export function evaluateAgentOutputGate(input: {
   readonly thread: Pick<
     OrchestrationV2AppThread,
-    "deletedAt" | "archivedAt" | "lineage" | "replacedByThreadId"
+    "deletedAt" | "archivedAt" | "lineage" | "replacedByThreadId" | "settledOverride"
   >;
   readonly run: Pick<OrchestrationV2Run, "id" | "status" | "userMessageId">;
   readonly userMessage:
@@ -111,6 +118,8 @@ export function evaluateAgentOutputGate(input: {
   readonly assistantMessages?: ReadonlyArray<
     Pick<OrchestrationV2ConversationMessage, "role" | "runId" | "text">
   >;
+  /** True when another run is already active or queued after this completed run. */
+  readonly hasNewerOrActiveRun?: boolean;
 }): AgentOutputGateDecision {
   if (input.run.status !== "completed") {
     return { action: "allow", reason: "not_completed" };
@@ -137,7 +146,8 @@ export function evaluateAgentOutputGate(input: {
     (item) =>
       item.type === "dynamic_tool" &&
       item.status === "completed" &&
-      isExplicitChannelToolName(item.toolName),
+      isExplicitChannelToolName(item.toolName) &&
+      compactDynamicToolOutput(item.output)?.isError !== true,
   );
   if (usedExplicitChannel) {
     return { action: "allow", reason: "explicit_channel" };
@@ -156,6 +166,12 @@ export function evaluateAgentOutputGate(input: {
     return { action: "allow", reason: "no_plain_text" };
   }
 
+  if (input.thread.settledOverride === "settled") {
+    return { action: "fail_open_fold", reason: "thread_settled" };
+  }
+  if (input.hasNewerOrActiveRun === true) {
+    return { action: "fail_open_fold", reason: "superseded_by_newer_run" };
+  }
   if (isOutputGateBounceMessageId(input.run.userMessageId)) {
     return { action: "fail_open_fold", reason: "bounce_exhausted" };
   }

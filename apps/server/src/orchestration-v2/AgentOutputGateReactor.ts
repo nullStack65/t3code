@@ -96,12 +96,19 @@ export const make = Effect.gen(function* () {
             run.userMessageId,
           ));
 
+    const shell = yield* projections.getThreadShell(signal.threadId);
+    const hasNewerOrActiveRun =
+      shell !== null &&
+      (shell.activeRunId !== null ||
+        (shell.latestRunId !== null && shell.latestRunId !== signal.runId));
+
     const decision = evaluateAgentOutputGate({
       thread: records.thread,
       run,
       userMessage,
       turnItems: records.turnItems,
       assistantMessages: records.messages,
+      hasNewerOrActiveRun,
     });
 
     if (decision.action === "allow") return;
@@ -114,8 +121,10 @@ export const make = Effect.gen(function* () {
           threadId: signal.threadId,
           messageId: outputGateBounceMessageId(run.id),
           text: decision.prompt,
+          // Use `monitor` (not `system`) so Orchestrator never classifies this bounce as a
+          // delegationReminder and never promotes it to `steer_active` into a racing newer turn.
           notification: {
-            source: { kind: "system" },
+            source: { kind: "monitor" },
             outcome: "updated",
             summary: "Output routing reminder",
           },
