@@ -9,6 +9,7 @@ import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import { FetchHttpClient, HttpRouter, HttpServerRequest } from "effect/http";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
@@ -440,6 +441,61 @@ it.effect("attributes founder on minted cf-access session and rejects it on orig
       ),
     );
     expect(wrongOriginState.authenticated).toBe(false);
+
+    // Founder attribution on cf-access sessions cannot be overwritten via setFounder.
+    const overwritten = yield* sessions.setFounder(minted!.sessionId, "kameron");
+    expect(overwritten).toBe(false);
+    const activeAfter = yield* sessions.listActive();
+    expect(activeAfter.find((row) => row.sessionId === minted!.sessionId)?.founder).toBe("jeff");
+
+    // WebSocket ticket minted from a cf-access session must also enforce allowed origin on upgrade.
+    const authenticated = yield* envAuth.authenticateHttpRequest(
+      HttpServerRequest.fromWeb(
+        new Request("http://127.0.0.1/api/auth/session", {
+          method: "GET",
+          headers: {
+            host: "t3code.closura.ai",
+            "x-forwarded-proto": "https",
+            cookie: `${sessions.cookieName}=${minted!.token}`,
+          },
+        }),
+      ),
+    );
+    const ticket = yield* envAuth.issueWebSocketTicket(authenticated);
+
+    const ticketValue = Redacted.value(ticket.ticket);
+
+    const allowedWs = yield* envAuth.authenticateWebSocketUpgrade(
+      HttpServerRequest.fromWeb(
+        new Request(`http://127.0.0.1/ws?wsTicket=${encodeURIComponent(ticketValue)}`, {
+          method: "GET",
+          headers: {
+            host: "t3code.closura.ai",
+            "x-forwarded-proto": "https",
+            origin: "https://t3code.closura.ai",
+          },
+        }),
+      ),
+      "rpc",
+    );
+    expect(allowedWs.sessionId).toBe(minted!.sessionId);
+
+    const wrongOriginWs = yield* envAuth
+      .authenticateWebSocketUpgrade(
+        HttpServerRequest.fromWeb(
+          new Request(`http://127.0.0.1/ws?wsTicket=${encodeURIComponent(ticketValue)}`, {
+            method: "GET",
+            headers: {
+              host: "other.closura.ai",
+              "x-forwarded-proto": "https",
+              origin: "https://other.closura.ai",
+            },
+          }),
+        ),
+        "rpc",
+      )
+      .pipe(Effect.exit);
+    expect(wrongOriginWs._tag).toBe("Failure");
   }),
 );
 

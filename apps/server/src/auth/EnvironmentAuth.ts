@@ -1806,6 +1806,7 @@ export const make = Effect.gen(function* () {
             .verifyWebSocketToken(websocketTicket)
             .pipe(mapSessionVerificationErrors, Effect.flatMap(rejectMcpClientAudience));
           yield* assertWorkOsSession(session, request, true);
+          yield* assertCloudflareAccessSession(session, request, true);
           if (session.audience !== undefined && session.audience !== use) {
             return yield* new ServerAuthInvalidCredentialError({
               diagnostic: `WebSocket ticket was issued for the ${session.audience} route.`,
@@ -2069,9 +2070,10 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   const sessions = (yield* stores.sessions.listActive()).filter(
     (session) =>
       disallowed.has(session.subject) ||
-      // AuthKit browsers sign in from wherever the configured origin is reachable.
+      // AuthKit and Cloudflare Access browsers sign in from wherever the configured origin is reachable.
       (!remoteAllowed &&
-        session.subject.startsWith(WORKOS_SUBJECT_PREFIX) &&
+        (session.subject.startsWith(WORKOS_SUBJECT_PREFIX) ||
+          session.subject.startsWith(CLOUDFLARE_ACCESS_SUBJECT_PREFIX)) &&
         session.method === "browser-session-cookie") ||
       // The startup link also pairs browsers on this machine; only a device elsewhere goes.
       (!remoteAllowed &&

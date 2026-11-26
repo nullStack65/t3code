@@ -15,6 +15,7 @@ import {
   ServerAuthSessionMethod,
 } from "@t3tools/contracts";
 
+import { CLOUDFLARE_ACCESS_SUBJECT_PREFIX } from "../auth/CloudflareAccessConfig.ts";
 import { WORKOS_SUBJECT_PREFIX } from "../auth/WorkOsConfig.ts";
 import {
   type AuthSessionRepositoryError,
@@ -388,6 +389,7 @@ export const make = Effect.gen(function* () {
           AND expires_at > ${now}
           AND client_device_type IS NOT 'bot'
           AND subject NOT GLOB ${WORKOS_SUBJECT_PREFIX + "*"}
+          AND subject NOT GLOB ${CLOUDFLARE_ACCESS_SUBJECT_PREFIX + "*"}
         RETURNING session_id AS "sessionId"
       `,
   });
