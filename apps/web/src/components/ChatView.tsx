@@ -404,6 +404,7 @@ import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { observeResize } from "~/lib/observeResize";
 import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
+import { useUnseenDivider } from "./chat/useUnseenDivider";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
@@ -1759,6 +1760,16 @@ export default function ChatView(props: ChatViewProps) {
         ? null
         : (activeThreadShell?.source.seenMessageByFounder?.[viewerFounder] ?? null),
     onRecorded: recordSeenPlace,
+  });
+  const unseenDivider = useUnseenDivider({
+    threadKey: isServerThread ? activeThreadKey : null,
+    viewer: viewerFounder,
+    shellReady: activeThreadShell != null,
+    lastSeenMessageId:
+      viewerFounder == null
+        ? null
+        : (activeThreadShell?.source.seenMessageByFounder?.[viewerFounder] ?? null),
+    messages: serverProjection?.messages,
   });
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const {
@@ -3811,9 +3822,14 @@ export default function ChatView(props: ChatViewProps) {
                   draftEntries={isServerThread ? null : draftTimelineEntries}
                   activeThreadKey={activeThreadKey}
                   collapseActivity={activityCollapsed}
+                  unseenDivider={unseenDivider}
                   includeOtherActivity={isStandingBot}
                   decisionRequestedAt={
                     activeThreadShell?.source.inbox?.decisionRequest?.requestedAt
+                  }
+                  inFounderInbox={
+                    activeThreadShell?.source.inbox !== undefined &&
+                    activeThreadShell.source.inbox.audience !== "agent-only"
                   }
                   sharedThread={activeThreadShell?.source.inbox?.audience === "shared"}
                   syncing={threadSyncPhase !== null}

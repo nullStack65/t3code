@@ -130,6 +130,30 @@ export function catchUpOffer(input: {
 
 export const CATCH_ME_UP_TEXT = "Catch me up";
 
+/** Where "new since you last looked" starts: after the message `afterMessageId`. */
+export interface UnseenDivider {
+  readonly afterMessageId: MessageId;
+  readonly count: number;
+}
+
+/**
+ * The line between what this founder had been shown and what arrived since. A place the
+ * thread no longer holds draws nothing, since guessing would mislabel old messages as new.
+ */
+export function resolveUnseenDivider(input: {
+  readonly messages: ReadonlyArray<SeenMessage>;
+  readonly lastSeenMessageId: MessageId | null | undefined;
+}): UnseenDivider | null {
+  const afterMessageId = input.lastSeenMessageId;
+  if (afterMessageId == null) return null;
+  const index = input.messages.findIndex((message) => message.id === afterMessageId);
+  if (index < 0) return null;
+  const count = input.messages
+    .slice(index + 1)
+    .filter((message) => message.role === "assistant" && message.streaming !== true).length;
+  return count === 0 ? null : { afterMessageId, count };
+}
+
 export function buildSeenMarker(
   threadKey: string,
   founder?: Founder | null,

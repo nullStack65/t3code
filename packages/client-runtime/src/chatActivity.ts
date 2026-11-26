@@ -51,6 +51,11 @@ export function chatActivityContext(
   runs: ReadonlyArray<{ id: RunId; status?: OrchestrationV2RunStatus }>,
   includeOtherActivity: boolean,
   decisionRequestedAt?: string,
+  /**
+   * The thread sits in a founder's inbox, so the newest reply of an agent-started run is what put
+   * it there. Folding it would leave the inbox row looking empty until the founder expands it.
+   */
+  keepLatestReply = false,
 ) {
   const agentRuns = new Set<RunId>();
   const directRuns = new Set<RunId>();
@@ -62,6 +67,7 @@ export function chatActivityContext(
     else attentionByRun.set(runId, new Set([id]));
   };
   let firstReplyAfterDecision: RunId | undefined;
+  let latestReplyRun: RunId | undefined;
   let pendingDecision: { runId: RunId; startedAt: string } | undefined;
   for (const { createdAt, runId, message, item } of entries) {
     if (!runId) continue;
@@ -89,6 +95,7 @@ export function chatActivityContext(
         pendingDecision = { runId, startedAt };
       }
     }
+    if (message?.role === "assistant" && !message.humanNote) latestReplyRun = runId;
     if (decisionRequestedAt && message?.role === "assistant" && createdAt >= decisionRequestedAt) {
       firstReplyAfterDecision ??= runId;
     }
@@ -101,6 +108,7 @@ export function chatActivityContext(
     }
   }
   for (const id of directRuns) agentRuns.delete(id);
+  if (keepLatestReply && latestReplyRun !== undefined) decisionRuns.add(latestReplyRun);
   for (const run of runs) {
     if (run.status === "failed") addAttention(run.id, run.id);
   }

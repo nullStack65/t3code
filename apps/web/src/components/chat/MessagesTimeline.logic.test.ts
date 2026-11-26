@@ -33,6 +33,7 @@ import {
   collapseTimelineActivity,
   activityUpdateSummary,
   activityPillIdForEntry,
+  insertNewMessagesDivider,
   timelineActivityContext,
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
@@ -5421,6 +5422,43 @@ describe("collapsing non-human activity", () => {
     ).toBe("1 agent update · 1 system notice · 1 automation");
   });
 
+  it("puts the new-messages divider before the first row after the stored place", () => {
+    const base = [
+      messageRow("seen", 0, person("kameron")),
+      messageRow("later", 2, { role: "assistant" }),
+      messageRow("latest", 3, { role: "assistant" }),
+    ];
+    const withDivider = insertNewMessagesDivider(base, { afterCreatedAt: time(1), count: 2 });
+    expect(withDivider.map(({ id }) => id)).toEqual([
+      "seen",
+      "new-messages-divider",
+      "later",
+      "latest",
+    ]);
+    expect(withDivider[1]).toMatchObject({ kind: "new-messages-divider", count: 2 });
+    expect(insertNewMessagesDivider(base, { afterCreatedAt: time(3), count: 1 })).toBe(base);
+    expect(insertNewMessagesDivider(base, null)).toBe(base);
+  });
+
+  it("keeps the newest agent-run reply unfolded in a founder's inbox", () => {
+    const botRun = RunId.make("inbox-run");
+    const conversation = [
+      messageRow("brief", 0, { runId: botRun, createdBy: "agent" }),
+      messageRow("audit", 1, { runId: botRun, role: "assistant" }),
+    ];
+    const entries = conversation.flatMap((row): TimelineEntry[] =>
+      row.kind === "message" ? [{ ...row, kind: "message" }] : [],
+    );
+    const ids = (keepLatestReply: boolean) =>
+      collapseTimelineActivity(
+        conversation,
+        new Set(),
+        timelineActivityContext(entries, [], false, undefined, keepLatestReply),
+      ).map(({ id }) => id);
+    expect(ids(false)).toEqual(["activity:brief"]);
+    expect(ids(true)).toEqual(["activity:brief", "audit"]);
+  });
+
   it("keeps direct replies, notes, sent messages and founder mentions outside bot runs", () => {
     const botRun = RunId.make("bot-run");
     const conversation = [
@@ -5451,7 +5489,7 @@ describe("collapsing non-human activity", () => {
     expect(activityPillIdForEntry(conversation, "note", context)).toBeUndefined();
   });
 
-  it("opens for newly failed child runs and pending approvals, including grouped items", () => {
+  it("keeps groups with failed child runs and pending approvals collapsed but marked", () => {
     const event = (
       id: string,
       item: Partial<OrchestrationV2TurnItem>,
@@ -5470,20 +5508,17 @@ describe("collapsing non-human activity", () => {
         child.projectedItem,
       ],
     };
-    const folded = collapseTimelineActivity([rows[2]!, group], new Set());
-    const pill = folded[0]!;
-    expect(pill).toMatchObject({ id: "activity:agent-1", expanded: true });
-    if (pill.kind !== "activity" || pill.attention === null)
-      throw new Error("Expected attention pill");
-    const dismissed = new Map([[pill.id, pill.attention]]);
+    expect(collapseTimelineActivity([rows[2]!, group], new Set())).toMatchObject([
+      { id: "activity:agent-1", expanded: false, attention: true },
+    ]);
     expect(
-      collapseTimelineActivity([rows[2]!, group], new Set(), undefined, dismissed),
-    ).toHaveLength(1);
-    expect(
-      collapseTimelineActivity([rows[2]!, group, approval], new Set(), undefined, dismissed).map(
+      collapseTimelineActivity([rows[2]!, group, approval], new Set(["activity:agent-1"])).map(
         ({ id }) => id,
       ),
-    ).toEqual([pill.id, "agent-1", "child", "approval"]);
+    ).toEqual(["activity:agent-1", "agent-1", "child", "approval"]);
+    expect(collapseTimelineActivity([rows[2]!], new Set())).toMatchObject([
+      { expanded: false, attention: false },
+    ]);
   });
 
   it("reveals a failed bot run and keeps the reply that raises a founder decision visible", () => {
@@ -5526,13 +5561,13 @@ describe("collapsing non-human activity", () => {
     const entries = [relay, decision];
     const failed = timelineActivityContext(entries, [{ id: botRun, status: "failed" }], false);
     expect(collapseTimelineActivity(entries, new Set(), failed)[0]).toMatchObject({
-      expanded: true,
+      expanded: false,
+      attention: true,
     });
 
     const pending = timelineActivityContext(entries, [], false, time(1));
     expect(collapseTimelineActivity(entries, new Set(), pending).map(({ id }) => id)).toEqual([
       "activity:relay",
-      "relay",
       "reply",
     ]);
   });
