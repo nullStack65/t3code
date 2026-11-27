@@ -106,10 +106,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The image has no fonts of its own. The libraries downloaded above pull in
+          # fonts-dejavu-core as a dependency, extracted under the job temp dir.
+          dirs=(/usr/share/fonts "$RUNNER_TEMP/chromium-libs/root/usr/share/fonts")
           mkdir -p "$RUNNER_TEMP/fontconfig-cache"
-          printf '<?xml version="1.0"?>\n<fontconfig><dir>/usr/share/fonts</dir><cachedir>%s</cachedir></fontconfig>\n' \
-            "$RUNNER_TEMP/fontconfig-cache" > "$RUNNER_TEMP/fonts.conf"
-          fonts=$(find /usr/share/fonts -name '*.ttf' 2>/dev/null | wc -l)
+          {
+            printf '<?xml version="1.0"?>\n<fontconfig>\n'
+            for dir in "${dirs[@]}"; do printf '<dir>%s</dir>\n' "$dir"; done
+            printf '<cachedir>%s</cachedir>\n</fontconfig>\n' "$RUNNER_TEMP/fontconfig-cache"
+          } > "$RUNNER_TEMP/fonts.conf"
+          fonts=0
+          for dir in "${dirs[@]}"; do
+            if test -d "$dir"; then fonts=$((fonts + $(find "$dir" -name '*.ttf' | wc -l))); fi
+          done
           if test "$fonts" -eq 0; then
             echo "::error::No fonts for headless Chromium, so text has no size and is never visible."
             exit 1
