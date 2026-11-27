@@ -90,12 +90,18 @@ feature("layout.sidebar-toggle", "sidebar hides and shows", async ({ page, qa })
   const nav = page.getByRole("navigation", { name: "Threads" });
   const toggle = page.getByRole("button", { name: "Toggle main sidebar" });
   const shown = (await toggle.getAttribute("aria-pressed")) === "true";
+  // Collapsed, the sidebar is off screen on desktop and absent on a phone.
+  const onScreen = async () => {
+    if ((await nav.count()) === 0) return false;
+    const box = await nav.first().boundingBox();
+    return box !== null && box.width > 0 && box.x + box.width > 1;
+  };
+  await expect.poll(onScreen).toBe(shown);
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-pressed", String(!shown));
-  await expect(nav)
-    .toBeInViewport({ ratio: 0.5 })
-    .catch(() => undefined);
+  await expect.poll(onScreen).toBe(!shown);
   await qa.shot("toggled");
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-pressed", String(shown));
+  await expect.poll(onScreen).toBe(shown);
 });

@@ -82,9 +82,11 @@ jobs:
       - name: Feature map matches the specs, and this PR updates the entries it touches
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          base="${{ github.base_ref }}"
+          base="$BASE_REF"
           unshallow=()
           if [ -f .git/shallow ]; then unshallow=(--unshallow); fi
           git fetch --no-tags --filter=blob:none "${unshallow[@]}" origin "$base:refs/remotes/origin/$base"
@@ -130,11 +132,13 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
           T3_QA_BASELINES: ci
           T3_QA_UPDATE_BASELINES: ${{ inputs.update_baselines && '1' || '0' }}
+          PROJECTS_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.projects || '' }}
         run: |
           set -euo pipefail
           # A PR runs one desktop and one phone project in opposite color schemes, which covers both
           # widths and both schemes; a manual run takes the list it was given.
-          projects="${{ github.event_name == 'workflow_dispatch' && inputs.projects || 'desktop-light,phone-dark' }}"
+          projects="${PROJECTS_INPUT:-desktop-light,phone-dark}"
+          case "$projects" in *[!a-z,-]*) echo "::error::projects may only hold project names and commas"; exit 1;; esac
           args=(--project "$projects")
           if [ "$T3_QA_UPDATE_BASELINES" = 1 ]; then args+=(--update-snapshots); fi
           node qa/verify.ts --skip-build "${args[@]}"

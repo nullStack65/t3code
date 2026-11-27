@@ -46,7 +46,9 @@ if (changedIndex !== -1) {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
     });
-  const changed = git("diff", "--name-only", `${base}...HEAD`).split("\n").filter(Boolean);
+  const changed = git("diff", "--name-only", "--no-renames", `${base}...HEAD`)
+    .split("\n")
+    .filter(Boolean);
   const isTest = (file: string) =>
     /\.(test|browser\.test)\.[cm]?[jt]sx?$/.test(file) || file.includes("/test/");
   const code = changed.filter(
@@ -67,10 +69,11 @@ if (changedIndex !== -1) {
       const next = starts.find((start) => start > at + 1) ?? source.length;
       return [at + 1, next - 1];
     }
-    // Entries built from the settings table share one range.
+    // Entries built from the settings table share the whole table, its rows through its template.
     if (id.startsWith("settings.")) {
-      const from = source.findIndex((line) => line.includes("id: `settings.${slug}`"));
-      return from === -1 ? undefined : [Math.max(1, from - 6), from + 10];
+      const rows = source.findIndex((line) => line.includes('["general",'));
+      const template = source.findIndex((line) => line.includes("_chat.settings.${slug}.tsx"));
+      return rows === -1 || template === -1 ? undefined : [rows + 1, template + 3];
     }
     return undefined;
   };

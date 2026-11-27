@@ -13,6 +13,7 @@ interface Entry {
   readonly sha: string;
   readonly date: string;
   readonly reason?: string;
+  readonly visual?: "pending";
   readonly projects: Record<string, string>;
   readonly errors?: Record<string, string>;
 }
@@ -20,6 +21,7 @@ interface Status {
   readonly sha: string;
   readonly date: string;
   readonly target: string;
+  readonly dirty?: boolean;
   readonly features: Record<string, Entry>;
 }
 
@@ -34,7 +36,7 @@ const label = (entry: Entry | undefined, reason: string | undefined) =>
   entry === undefined
     ? `unverified: ${reason ?? "not yet swept"}`
     : entry.status === "verified"
-      ? `verified: ${entry.sha} ${entry.date}`
+      ? `verified: ${entry.sha} ${entry.date}${entry.visual === "pending" ? " (clicks only; visual baselines pending)" : ""}`
       : entry.status === "broken"
         ? `broken: ${entry.sha} ${entry.date}`
         : `unverified: ${entry.reason ?? reason ?? "no result"}`;
@@ -54,7 +56,7 @@ export const renderReport = () => {
     "Each entry is a user-facing feature: how a user reaches it, how an agent drives it with Playwright, the observable state that means it works, and `verified: <sha> <date>` (every viewport and color scheme passed on that commit), `broken: <sha> <date>` (a run failed), or `unverified: <reason>`. The name-level site map of every label and shortcut is [feature-map.md](../.agents/skills/test-t3-app/references/feature-map.md); the ids here follow it.",
     "",
     status
-      ? `Last sweep: ${status.sha} on ${status.date}, target: ${status.target}. Projects: desktop (1440×900) and phone (390×844), each in light and dark.`
+      ? `Last sweep: ${status.sha}${status.dirty ? " (dirty tree)" : ""} on ${status.date}, target: ${status.target}. Projects: desktop (1440×900) and phone (390×844), each in light and dark.`
       : "Not swept yet.",
     "",
   ];
@@ -125,7 +127,7 @@ h1{margin:0 0 4px}h2{margin:32px 0 12px;border-bottom:1px solid var(--line);padd
 .badge{font-size:12px;color:var(--warn)}.badge.verified{color:var(--ok)}.badge.broken{color:var(--bad)}.title{font-weight:600;margin:6px 0 0}.path{color:var(--mut);margin:2px 0 6px}
 .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:8px}.shots a{color:var(--mut);font-size:11px;text-decoration:none}.shots img{width:100%;border:1px solid var(--line);border-radius:4px;display:block}
 pre.errors{white-space:pre-wrap;color:var(--bad);font-size:12px}
-</style></head><body><h1>T3 Code feature status</h1><p>${status ? `Sweep ${escape(status.sha)} on ${escape(status.date)}. Target: ${escape(status.target)}. Desktop 1440 and phone 390, light and dark.` : "Not swept yet."}</p>
+</style></head><body><h1>T3 Code feature status</h1><p>${status ? `Sweep ${escape(status.sha)}${status.dirty ? " (dirty tree)" : ""} on ${escape(status.date)}. Target: ${escape(status.target)}. Desktop 1440 and phone 390, light and dark.` : "Not swept yet."}</p>
 <div class="sum"><span><b style="color:var(--ok)">${total.verified}</b> verified</span><span><b style="color:var(--bad)">${total.broken}</b> broken</span><span><b style="color:var(--warn)">${total.unverified}</b> unverified</span><span>of ${FEATURES.length}</span></div>
 ${html.join("\n")}</body></html>`,
   );

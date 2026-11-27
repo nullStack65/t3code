@@ -61,7 +61,12 @@ feature("timeline.command-output", "command and output are readable", async ({ p
     .getByRole("button", { name: /agent updates?$/ })
     .first()
     .click();
-  await expect(page.getByRole("region", { name: "Conversation" })).toContainText(/\w{4,}/);
+  await expect(
+    page
+      .getByRole("region", { name: "Conversation" })
+      .getByText("The command printed one JSON line.")
+      .first(),
+  ).toBeVisible();
   await qa.shot("command");
 });
 

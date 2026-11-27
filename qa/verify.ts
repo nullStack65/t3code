@@ -49,6 +49,10 @@ NodeFS.rmSync(NodePath.join(QA, "report", "shots"), { recursive: true, force: tr
 const projects = args
   .flatMap((arg, index) => (arg === "--project" ? (args[index + 1] ?? "").split(",") : []))
   .filter(Boolean);
+const ALL_PROJECTS = ["desktop-light", "phone-light", "desktop-dark", "phone-dark"];
+// Only a run of all four projects can say a feature is verified, so a partial run reports and exits
+// without touching status.json or docs/FEATURES.md.
+const partial = projects.length > 0 && !ALL_PROJECTS.every((project) => projects.includes(project));
 const run = NodeChildProcess.spawnSync(
   NodePath.join(QA, "node_modules/.bin/playwright"),
   [
@@ -83,7 +87,7 @@ interface Suite {
 type Outcome = "passed" | "failed" | "skipped";
 const byFeature = new Map<
   string,
-  Map<string, { outcome: Outcome; error?: string; notApplicable: boolean }>
+  Map<string, { outcome: Outcome; error?: string; notApplicable: boolean; visualPending: boolean }>
 >();
 if (NodeFS.existsSync(resultsFile)) {
   const walk = (suite: Suite) => {
@@ -101,6 +105,9 @@ if (NodeFS.existsSync(resultsFile)) {
           outcome,
           notApplicable: test.annotations.some(
             (annotation) => annotation.type === "not-applicable",
+          ),
+          visualPending: test.annotations.some(
+            (annotation) => annotation.type === "baseline-pending",
           ),
           ...(outcome === "failed"
             ? {
@@ -131,6 +138,8 @@ const features: Record<
     sha: string;
     date: string;
     reason?: string;
+    /** A visual comparison had no baseline in some project, so only the clicks were proven there. */
+    visual?: "pending";
     projects: Record<string, Outcome>;
     errors?: Record<string, string>;
   }
@@ -146,6 +155,7 @@ for (const feature of FEATURES) {
     [...(ran ?? [])].flatMap(([name, result]) => (result.error ? [[name, result.error]] : [])),
   );
   const outcomes = Object.values(projectsOf);
+  const visualPending = [...(ran ?? [])].some(([, result]) => result.visualPending);
   if (feature.unverified !== undefined) {
     features[feature.id] = {
       status: "unverified",
@@ -157,7 +167,13 @@ for (const feature of FEATURES) {
   } else if (outcomes.includes("failed")) {
     features[feature.id] = { status: "broken", sha, date, projects: projectsOf, errors };
   } else if (outcomes.length > 0 && outcomes.every((outcome) => outcome === "passed")) {
-    features[feature.id] = { status: "verified", sha, date, projects: projectsOf };
+    features[feature.id] = {
+      status: "verified",
+      sha,
+      date,
+      projects: projectsOf,
+      ...(visualPending ? { visual: "pending" as const } : {}),
+    };
   } else {
     features[feature.id] = {
       status: "unverified",
@@ -172,30 +188,20 @@ for (const feature of FEATURES) {
   }
 }
 
-// A partial run (--project) must not downgrade features it did not run: keep their previous entry.
-const statusFile = NodePath.join(QA, "status.json");
-const previous = NodeFS.existsSync(statusFile)
-  ? (JSON.parse(NodeFS.readFileSync(statusFile, "utf8")) as { features: typeof features }).features
-  : {};
-if (projects.length > 0) {
-  for (const [id, entry] of Object.entries(features)) {
-    if (
-      entry.status === "unverified" &&
-      previous[id] &&
-      FEATURES.find((feature) => feature.id === id)?.unverified === undefined
-    )
-      features[id] = previous[id]!;
-  }
+const summary = { sha, date, dirty, target: remote ?? "local build", features };
+if (partial) {
+  NodeFS.writeFileSync(
+    NodePath.join(QA, "test-results", "status-partial.json"),
+    `${JSON.stringify({ ...summary, projects }, null, 2)}\n`,
+  );
+} else {
+  NodeFS.writeFileSync(NodePath.join(QA, "status.json"), `${JSON.stringify(summary, null, 2)}\n`);
+  renderReport();
 }
-NodeFS.writeFileSync(
-  statusFile,
-  `${JSON.stringify({ sha, date, dirty, target: remote ?? "local build", features }, null, 2)}\n`,
-);
-renderReport();
 
 const counts: Record<string, number> = {};
 for (const entry of Object.values(features)) counts[entry.status] = (counts[entry.status] ?? 0) + 1;
 console.log(
-  `\nverified ${counts.verified ?? 0}, broken ${counts.broken ?? 0}, unverified ${counts.unverified ?? 0} of ${FEATURES.length} (sha ${sha}${dirty ? ", dirty tree" : ""})`,
+  `\nverified ${counts.verified ?? 0}, broken ${counts.broken ?? 0}, unverified ${counts.unverified ?? 0} of ${FEATURES.length} (sha ${sha}${dirty ? ", dirty tree" : ""})${partial ? `; partial run (${projects.join(", ")}), status.json and docs/FEATURES.md left as they were` : ""}`,
 );
-process.exit((counts.broken ?? 0) > 0 || (run.status ?? 1) > 1 ? 1 : 0);
+process.exit((counts.broken ?? 0) > 0 || run.status !== 0 ? 1 : 0);

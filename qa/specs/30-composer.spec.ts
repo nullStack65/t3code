@@ -45,6 +45,7 @@ feature("composer.model-picker", "model picker opens and closes", async ({ page,
   await expect(page.getByRole("option", { name: /^Write approval/ })).toBeVisible();
   await qa.shot("picker");
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("toolbar", { name: "Providers" })).toBeHidden();
   await expect(page.getByRole("button", { name: "Showcase", exact: true })).toBeVisible();
 });
 
@@ -74,6 +75,11 @@ feature("composer.attachments", "attach a file and remove it", async ({ page, qa
       .first(),
   ).toBeVisible();
   await qa.shot("attached");
+  await page
+    .getByRole("button", { name: /remove/i })
+    .first()
+    .click();
+  await expect(page.getByRole("button", { name: /remove/i })).toHaveCount(0);
 });
 
 feature("composer.dictation", "voice input control is present", async ({ page, qa }) => {

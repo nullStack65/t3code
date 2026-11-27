@@ -65,20 +65,20 @@ feature("terminal.drawer", "terminal drawer opens and closes", async ({ page, qa
   await qa.open(qa.thread("showcase"));
   const toggle = page.getByRole("button", { name: "Toggle terminal drawer" });
   await toggle.click();
-  await expect(
-    page
-      .getByRole("region", { name: /terminal/i })
-      .or(page.locator(".xterm"))
-      .first(),
-  ).toBeVisible();
+  const terminal = page
+    .getByRole("region", { name: /terminal/i })
+    .or(page.locator(".xterm"))
+    .first();
+  await expect(terminal).toBeVisible();
   await qa.shot("terminal");
   await toggle.click();
+  await expect(terminal).toBeHidden();
 });
 
 feature("palette.open", "palette finds a thread and opens it", async ({ page, qa }) => {
   await qa.open("/");
   await page.keyboard.press("ControlOrMeta+k");
-  const input = page.getByRole("combobox").or(page.getByRole("textbox")).last();
+  const input = page.getByRole("dialog", { name: "Command palette" }).getByRole("combobox");
   await input.fill("QA todo");
   await expect(page.getByRole("option", { name: /QA todo list/ }).first()).toBeVisible();
   await qa.shot("palette");
@@ -89,7 +89,7 @@ feature("palette.open", "palette finds a thread and opens it", async ({ page, qa
 feature("palette.add-project", "add project options", async ({ page, qa }) => {
   await qa.open("/");
   await page.keyboard.press("ControlOrMeta+k");
-  const input = page.getByRole("combobox").or(page.getByRole("textbox")).last();
+  const input = page.getByRole("dialog", { name: "Command palette" }).getByRole("combobox");
   await input.fill("Add project");
   await page
     .getByRole("option", { name: /Add project/ })
