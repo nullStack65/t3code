@@ -25,8 +25,10 @@ interface Status {
   readonly features: Record<string, Entry>;
 }
 
-const loadStatus = (): Status | undefined => {
-  const file = NodePath.join(QA, "status.json");
+const loadStatus = (partial: boolean): Status | undefined => {
+  const file = partial
+    ? NodePath.join(QA, "test-results", "status-partial.json")
+    : NodePath.join(QA, "status.json");
   return NodeFS.existsSync(file)
     ? (JSON.parse(NodeFS.readFileSync(file, "utf8")) as Status)
     : undefined;
@@ -44,8 +46,10 @@ const label = (entry: Entry | undefined, reason: string | undefined) =>
 const escape = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-export const renderReport = () => {
-  const status = loadStatus();
+/** A partial run renders only qa/report/index.html, marked as partial; docs/FEATURES.md stays as it was. */
+export const renderReport = (partialProjects?: ReadonlyArray<string>) => {
+  const partial = partialProjects !== undefined;
+  const status = loadStatus(partial);
   const areas = [...new Set(FEATURES.map((feature) => feature.area))];
 
   const md = [
@@ -112,8 +116,10 @@ export const renderReport = () => {
     html.push("</div>");
   }
 
-  NodeFS.mkdirSync(NodePath.join(ROOT, "docs"), { recursive: true });
-  NodeFS.writeFileSync(NodePath.join(ROOT, "docs", "FEATURES.md"), `${md.join("\n")}\n`);
+  if (!partial) {
+    NodeFS.mkdirSync(NodePath.join(ROOT, "docs"), { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(ROOT, "docs", "FEATURES.md"), `${md.join("\n")}\n`);
+  }
   NodeFS.mkdirSync(NodePath.join(QA, "report"), { recursive: true });
   NodeFS.writeFileSync(
     NodePath.join(QA, "report", "index.html"),
@@ -127,7 +133,7 @@ h1{margin:0 0 4px}h2{margin:32px 0 12px;border-bottom:1px solid var(--line);padd
 .badge{font-size:12px;color:var(--warn)}.badge.verified{color:var(--ok)}.badge.broken{color:var(--bad)}.title{font-weight:600;margin:6px 0 0}.path{color:var(--mut);margin:2px 0 6px}
 .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:8px}.shots a{color:var(--mut);font-size:11px;text-decoration:none}.shots img{width:100%;border:1px solid var(--line);border-radius:4px;display:block}
 pre.errors{white-space:pre-wrap;color:var(--bad);font-size:12px}
-</style></head><body><h1>T3 Code feature status</h1><p>${status ? `Sweep ${escape(status.sha)}${status.dirty ? " (dirty tree)" : ""} on ${escape(status.date)}. Target: ${escape(status.target)}. Desktop 1440 and phone 390, light and dark.` : "Not swept yet."}</p>
+</style></head><body><h1>T3 Code feature status</h1>${partial ? `<p><b>Partial run (${escape((partialProjects ?? []).join(", "))}): not the full sweep. A feature marked verified here passed in only these projects.</b></p>` : ""}<p>${status ? `Sweep ${escape(status.sha)}${status.dirty ? " (dirty tree)" : ""} on ${escape(status.date)}. Target: ${escape(status.target)}. Desktop 1440 and phone 390, light and dark.` : "Not swept yet."}</p>
 <div class="sum"><span><b style="color:var(--ok)">${total.verified}</b> verified</span><span><b style="color:var(--bad)">${total.broken}</b> broken</span><span><b style="color:var(--warn)">${total.unverified}</b> unverified</span><span>of ${FEATURES.length}</span></div>
 ${html.join("\n")}</body></html>`,
   );

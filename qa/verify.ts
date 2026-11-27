@@ -44,15 +44,28 @@ if (
 
 const resultsFile = NodePath.join(QA, "test-results", "results.json");
 NodeFS.rmSync(resultsFile, { force: true });
-NodeFS.rmSync(NodePath.join(QA, "report", "shots"), { recursive: true, force: true });
 // `--project a --project b`, or `--project a,b`.
 const projects = args
   .flatMap((arg, index) => (arg === "--project" ? (args[index + 1] ?? "").split(",") : []))
   .filter(Boolean);
 const ALL_PROJECTS = ["desktop-light", "phone-light", "desktop-dark", "phone-dark"];
-// Only a run of all four projects can say a feature is verified, so a partial run reports and exits
-// without touching status.json or docs/FEATURES.md.
+// Only a run of all four projects can say a feature is verified. A partial run writes
+// test-results/status-partial.json and a report page marked partial, and leaves status.json and
+// docs/FEATURES.md alone.
 const partial = projects.length > 0 && !ALL_PROJECTS.every((project) => projects.includes(project));
+// A full run recreates every screenshot; a partial run recreates only its own projects'.
+const shotsRoot = NodePath.join(QA, "report", "shots");
+if (partial) {
+  for (const feature of NodeFS.existsSync(shotsRoot) ? NodeFS.readdirSync(shotsRoot) : []) {
+    const dir = NodePath.join(shotsRoot, feature);
+    for (const file of NodeFS.readdirSync(dir)) {
+      if (projects.some((project) => file.startsWith(`${project}--`)))
+        NodeFS.rmSync(NodePath.join(dir, file));
+    }
+  }
+} else {
+  NodeFS.rmSync(shotsRoot, { recursive: true, force: true });
+}
 const run = NodeChildProcess.spawnSync(
   NodePath.join(QA, "node_modules/.bin/playwright"),
   [
@@ -192,8 +205,9 @@ const summary = { sha, date, dirty, target: remote ?? "local build", features };
 if (partial) {
   NodeFS.writeFileSync(
     NodePath.join(QA, "test-results", "status-partial.json"),
-    `${JSON.stringify({ ...summary, projects }, null, 2)}\n`,
+    `${JSON.stringify({ ...summary, partial: true, projects }, null, 2)}\n`,
   );
+  renderReport(projects);
 } else {
   NodeFS.writeFileSync(NodePath.join(QA, "status.json"), `${JSON.stringify(summary, null, 2)}\n`);
   renderReport();
