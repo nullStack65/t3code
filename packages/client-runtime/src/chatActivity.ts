@@ -128,6 +128,9 @@ export function chatActivityContext(
     if (surfacesToUser) userSurfacingRuns.add(runId);
     if (message?.humanNote) userSurfacingRuns.add(runId);
     if (message?.timelineVisibility === "user_timeline") userSurfacingRuns.add(runId);
+    if (message && !message.humanNote && mentionedFounders(message.text).length > 0) {
+      userSurfacingRuns.add(runId);
+    }
     if (message?.role === "user" && !message.humanNote) {
       const sender = resolveMessageSender(message);
       if (sender.kind === "person" || sender.kind === "guest") {

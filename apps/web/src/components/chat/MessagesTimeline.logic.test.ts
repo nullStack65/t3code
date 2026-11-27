@@ -5799,6 +5799,31 @@ describe("collapsing non-human activity", () => {
         collapseTimelineActivity(conversation, new Set(), context).map(({ id }) => id),
       ).toEqual(["user-msg", "user-send-tool", "user-ack-tool", "assistant-reply"]);
     });
+
+    it("keeps an agent-triggered turn visible when it calls t3_thread_send and @-mentions a founder", () => {
+      const mentionRun = RunId.make("founder-mention-turn");
+      const threadSend = toolWorkEntry("send-tool", 1, mentionRun, "t3_thread_send");
+      const conversation: MessagesTimelineRow[] = [
+        messageRow("wake", 0, { runId: mentionRun, createdBy: "agent" }),
+        threadSend.row,
+        messageRow("mention-reply", 2, {
+          runId: mentionRun,
+          role: "assistant",
+          text: "@kameron this needs your call",
+        }),
+      ];
+      const context = timelineActivityContext(
+        buildEntries(conversation, [threadSend.entry]),
+        [],
+        false,
+        undefined,
+        true,
+      );
+      expect(context.hiddenSilentRuns.has(mentionRun)).toBe(false);
+      expect(
+        collapseTimelineActivity(conversation, new Set(), context).map(({ id }) => id),
+      ).toEqual(["activity:wake", "mention-reply"]);
+    });
   });
 
   it("keeps groups with failed child runs and pending approvals collapsed but marked", () => {

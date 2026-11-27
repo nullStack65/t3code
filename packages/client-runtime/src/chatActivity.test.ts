@@ -209,4 +209,39 @@ describe("hiddenSilentRuns", () => {
     expect(ctx.decisionRuns.has(silentRun)).toBe(false);
     expect(ctx.decisionRuns.has(visibleRun)).toBe(true);
   });
+
+  it("never hides a silent/routed run whose wake or reply @-mentions a founder", () => {
+    const replyMentionRun = RunId.make("reply-mention-run");
+    const wakeMentionRun = RunId.make("wake-mention-run");
+    const ctx = chatActivityContext(
+      [
+        { createdAt: at, runId: replyMentionRun, message: relay },
+        {
+          createdAt: at,
+          runId: replyMentionRun,
+          item: toolItem("t1", replyMentionRun, "t3_thread_send"),
+        },
+        {
+          createdAt: at,
+          runId: replyMentionRun,
+          message: { role: "assistant", text: "@kameron this needs your call." },
+        },
+        {
+          createdAt: at,
+          runId: wakeMentionRun,
+          message: { ...relay, text: "@jeff please take a look" },
+        },
+        {
+          createdAt: at,
+          runId: wakeMentionRun,
+          item: toolItem("t2", wakeMentionRun, "silent_ack"),
+        },
+      ],
+      [],
+      false,
+    );
+
+    expect(ctx.hiddenSilentRuns.has(replyMentionRun)).toBe(false);
+    expect(ctx.hiddenSilentRuns.has(wakeMentionRun)).toBe(false);
+  });
 });
