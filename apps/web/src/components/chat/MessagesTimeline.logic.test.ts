@@ -1,4 +1,7 @@
-import type { ChatActivityContext } from "@t3tools/client-runtime/chat-activity";
+import {
+  chatActivityContext,
+  type ChatActivityContext,
+} from "@t3tools/client-runtime/chat-activity";
 import { ScheduledTaskId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
@@ -5856,6 +5859,83 @@ describe("collapsing non-human activity", () => {
     expect(collapseTimelineActivity([rows[2]!], new Set())).toMatchObject([
       { expanded: false, attention: false },
     ]);
+  });
+
+  describe("failed tool calls", () => {
+    const toolEvent = (
+      id: string,
+      second: number,
+      status: "failed" | "completed",
+    ): Extract<MessagesTimelineRow, { kind: "event" }> => ({
+      kind: "event",
+      id,
+      createdAt: time(second),
+      projectedItem: {
+        item: { id, runId, type: "command_execution", status, input: "pnpm test" },
+      } as unknown as OrchestrationV2ProjectedTurnItem,
+    });
+    const pillFor = (tools: ReadonlyArray<Extract<MessagesTimelineRow, { kind: "event" }>>) => {
+      const relay = messageRow("agent-start", 0, { createdBy: "agent" });
+      if (relay.kind !== "message") throw new Error("Expected a message");
+      const all = [relay, ...tools];
+      const context = chatActivityContext(
+        [
+          { createdAt: relay.createdAt, runId, message: relay.message },
+          ...tools.map((tool) => ({
+            createdAt: tool.createdAt,
+            runId,
+            item: tool.projectedItem.item,
+          })),
+        ],
+        [],
+        false,
+      );
+      return collapseTimelineActivity(all, new Set(), context)[0];
+    };
+
+    it("does not badge a failure that a later call in the turn recovered", () => {
+      expect(
+        pillFor([toolEvent("fail", 1, "failed"), toolEvent("retry", 2, "completed")]),
+      ).toMatchObject({ kind: "activity", attention: false });
+    });
+
+    it("badges a failure that ends the turn", () => {
+      expect(
+        pillFor([toolEvent("ok", 1, "completed"), toolEvent("fail", 2, "failed")]),
+      ).toMatchObject({ kind: "activity", attention: true });
+    });
+
+    it("badges only while some failure is still unrecovered", () => {
+      const recovered = [
+        toolEvent("fail-1", 1, "failed"),
+        toolEvent("ok-1", 2, "completed"),
+        toolEvent("fail-2", 3, "failed"),
+        toolEvent("ok-2", 4, "completed"),
+      ];
+      expect(pillFor(recovered)).toMatchObject({ attention: false });
+      expect(pillFor(recovered.slice(0, 3))).toMatchObject({ attention: true });
+    });
+
+    it("badges a recovered failure when the run itself failed", () => {
+      const relay = messageRow("agent-start", 0, { createdBy: "agent" });
+      if (relay.kind !== "message") throw new Error("Expected a message");
+      const tools = [toolEvent("fail", 1, "failed"), toolEvent("retry", 2, "completed")];
+      const context = chatActivityContext(
+        [
+          { createdAt: relay.createdAt, runId, message: relay.message },
+          ...tools.map((tool) => ({
+            createdAt: tool.createdAt,
+            runId,
+            item: tool.projectedItem.item,
+          })),
+        ],
+        [{ id: runId, status: "failed" }],
+        false,
+      );
+      expect(collapseTimelineActivity([relay, ...tools], new Set(), context)[0]).toMatchObject({
+        attention: true,
+      });
+    });
   });
 
   it("reveals a failed bot run and keeps the reply that raises a founder decision visible", () => {

@@ -200,6 +200,69 @@ describe("pending timeline messages", () => {
     expect(folded.map((row) => row.type)).toEqual(["activity-fold", "sent-message"]);
   });
 
+  describe("work-toggle failure recovery", () => {
+    const run = RunId.make("tool-run");
+    const tool = (id: string, status: "failed" | "completed", extra: object = {}) =>
+      ({
+        type: "activity-group",
+        id: `group-${id}`,
+        createdAt: "2026-09-06T10:00:01.000Z",
+        runId: run,
+        activities: [
+          {
+            createdAt: "2026-09-06T10:00:01.000Z",
+            projectedItem: {
+              item: { id, runId: run, type: "command_execution", status, ...extra },
+            } as unknown as OrchestrationV2ProjectedTurnItem,
+          },
+        ],
+      }) as unknown as ThreadFeedEntry;
+    const attentionFor = (tools: ReadonlyArray<ThreadFeedEntry>) => {
+      const input = appendPendingThreadMessages([], [], [pending("agent-input")])[0];
+      if (input?.type !== "message") throw new Error("Expected message");
+      const message = {
+        ...input,
+        message: { ...input.message, runId: run, createdBy: "agent" as const },
+      };
+      const toggle = {
+        type: "work-toggle",
+        id: "toggle",
+        createdAt: "2026-09-06T10:00:01.000Z",
+        runId: run,
+        hasFailure: true,
+      } as unknown as ThreadFeedEntry;
+      const folded = foldThreadFeedActivity([message, toggle], [message, ...tools], {
+        open: {},
+        dismissed: new Map(),
+        revealedMessageId: null,
+        latestRun: null,
+      });
+      const fold = folded.find((row) => row.type === "activity-fold");
+      if (fold?.type !== "activity-fold") throw new Error("Expected activity fold");
+      return fold.attention;
+    };
+
+    it("clears a failed toggle once a later call in the run succeeded", () => {
+      expect(attentionFor([tool("fail", "failed"), tool("ok", "completed")])).toBeNull();
+      expect(
+        attentionFor([tool("fail", "completed", { exitCode: 1 }), tool("ok", "completed")]),
+      ).toBeNull();
+    });
+
+    it("keeps a failed toggle when a trailing call fails again", () => {
+      expect(
+        attentionFor([tool("fail", "failed"), tool("ok", "completed"), tool("late", "failed")]),
+      ).not.toBeNull();
+      expect(
+        attentionFor([
+          tool("fail", "failed"),
+          tool("ok", "completed"),
+          tool("late", "completed", { exitCode: 2 }),
+        ]),
+      ).not.toBeNull();
+    });
+  });
+
   it("keeps unchanged row identities while text streams and updates adjacent grouping", () => {
     const group = createThreadFeedGrouping();
     const [first, second, third] = appendPendingThreadMessages(

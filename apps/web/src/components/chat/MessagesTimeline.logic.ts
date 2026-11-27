@@ -79,6 +79,7 @@ import {
   type OrchestrationV2IdleCompaction,
   type WorktreeSetupSnapshot,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2TurnItem,
   type RunAttemptId,
   type RuntimeRequestId,
   RunId,
@@ -2711,18 +2712,18 @@ export function collapseTimelineActivity(
       for (const runId of activityRowRunIds(row)) {
         for (const key of context?.attentionByRun.get(runId) ?? []) attentionIds.add(key);
       }
+      const unrecovered = (item: OrchestrationV2TurnItem) =>
+        activityItemNeedsAttention(item) && !context?.recoveredItemIds.has(item.id);
       if (
-        (row.kind === "work-toggle" && row.hasFailure) ||
+        (row.kind === "work-toggle" &&
+          row.hasFailure &&
+          !(row.runId && context?.recoveredRuns.has(row.runId))) ||
         (row.kind === "context-compaction" && row.failed) ||
         (row.kind === "event" &&
-          (row.subagents ?? [row.projectedItem]).some(({ item }) =>
-            activityItemNeedsAttention(item),
-          )) ||
+          (row.subagents ?? [row.projectedItem]).some(({ item }) => unrecovered(item))) ||
         ((row.kind === "work" || row.kind === "work-live") &&
           row.groupedEntries.some((entry) =>
-            entry.projectedItem
-              ? activityItemNeedsAttention(entry.projectedItem.item)
-              : entry.tone === "error",
+            entry.projectedItem ? unrecovered(entry.projectedItem.item) : entry.tone === "error",
           ))
       )
         attentionIds.add(row.id);
