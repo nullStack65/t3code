@@ -51,6 +51,30 @@ export function activityItemNeedsAttention(item: OrchestrationV2TurnItem): boole
   );
 }
 
+type ToolCallItem = Extract<
+  OrchestrationV2TurnItem,
+  { type: "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" }
+>;
+
+function isToolCallItem(item: OrchestrationV2TurnItem): item is ToolCallItem {
+  return (
+    item.type === "command_execution" ||
+    item.type === "file_change" ||
+    item.type === "file_search" ||
+    item.type === "web_search" ||
+    item.type === "dynamic_tool"
+  );
+}
+
+/** A finished tool call that neither failed nor reported a failing result. */
+function toolCallSucceeded(item: ToolCallItem): boolean {
+  if (item.status !== "completed") return false;
+  return (
+    item.type !== "command_execution" ||
+    (item.outputIndicatesFailure !== true && (item.exitCode ?? 0) === 0)
+  );
+}
+
 export function chatActivityContext(
   entries: Iterable<ChatActivityEntry>,
   runs: ReadonlyArray<{ id: RunId; status?: OrchestrationV2RunStatus }>,
@@ -66,6 +90,10 @@ export function chatActivityContext(
   const directRuns = new Set<RunId>();
   const decisionRuns = new Set<RunId>();
   const attentionByRun = new Map<RunId, Set<string>>();
+  // A failed tool call needs attention only until a later call in the same run succeeds.
+  const unrecoveredByRun = new Map<RunId, string[]>();
+  const recoveredItemIds = new Set<string>();
+  const recoveredRuns = new Set<RunId>();
   const addAttention = (runId: RunId, id: string) => {
     const ids = attentionByRun.get(runId);
     if (ids) ids.add(id);
@@ -88,7 +116,22 @@ export function chatActivityContext(
       }
     }
     if (item?.type === "notification") agentRuns.add(runId);
-    if (item && activityItemNeedsAttention(item)) addAttention(runId, item.id);
+    if (item && isToolCallItem(item) && toolCallSucceeded(item)) {
+      const failed = unrecoveredByRun.get(runId);
+      if (failed?.length) {
+        for (const id of failed) recoveredItemIds.add(id);
+        recoveredRuns.add(runId);
+        unrecoveredByRun.delete(runId);
+      }
+    } else if (item && activityItemNeedsAttention(item)) {
+      if (isToolCallItem(item)) {
+        const failed = unrecoveredByRun.get(runId);
+        if (failed) failed.push(item.id);
+        else unrecoveredByRun.set(runId, [item.id]);
+      } else {
+        addAttention(runId, item.id);
+      }
+    }
     if (isDecisionRequestItem(item)) {
       decisionRuns.add(runId);
       const startedAt = item.startedAt === null ? createdAt : DateTime.formatIso(item.startedAt);
@@ -112,12 +155,20 @@ export function chatActivityContext(
       addAttention(runId, decisionRequestedAt);
     }
   }
+  for (const [runId, ids] of unrecoveredByRun) for (const id of ids) addAttention(runId, id);
   for (const id of directRuns) agentRuns.delete(id);
   if (keepLatestReply && latestReplyRun !== undefined) decisionRuns.add(latestReplyRun);
   for (const run of runs) {
     if (run.status === "failed") addAttention(run.id, run.id);
   }
-  return { agentRuns, decisionRuns, attentionByRun, includeOtherActivity };
+  return {
+    agentRuns,
+    decisionRuns,
+    attentionByRun,
+    recoveredItemIds,
+    recoveredRuns,
+    includeOtherActivity,
+  };
 }
 
 export type ChatActivityContext = ReturnType<typeof chatActivityContext>;

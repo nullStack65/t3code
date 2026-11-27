@@ -154,7 +154,11 @@ export function foldThreadFeedActivity(
       row.type === "work-toggle" || row.type === "run-fold" ? (row.settledTaskIds ?? []) : [],
     );
     const attentionIds = new Set(
-      items.filter(activityItemNeedsAttention).map(({ id }) => String(id)),
+      items
+        .filter(
+          (item) => activityItemNeedsAttention(item) && !context.recoveredItemIds.has(item.id),
+        )
+        .map(({ id }) => String(id)),
     );
     for (const row of group.rows) {
       const runId = row.type === "message" ? row.message.runId : "runId" in row ? row.runId : null;
