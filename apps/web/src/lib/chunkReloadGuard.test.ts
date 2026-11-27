@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { isChunkLoadError, reloadForChunkLoadError } from "./chunkReloadGuard";
+import {
+  chunkLoadState,
+  handleChunkLoadErrors,
+  isChunkLoadError,
+  reloadForChunkLoadError,
+} from "./chunkReloadGuard";
 
 function createStorageStub(): Storage {
   const store = new Map<string, string>();
@@ -33,14 +38,34 @@ describe("reloadForChunkLoadError", () => {
     expect(reload.mock.calls.map(([delay]) => delay)).toEqual([750, 1500, 2250]);
   });
 
+  it("keeps a load that fails slowly, every 20 seconds, from reloading forever", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    const outcomes = [0, 20_000, 40_000, 60_000, 80_000].map((now) =>
+      reloadForChunkLoadError(() => storage, reload, "1.0.0", now),
+    );
+
+    expect(outcomes).toEqual([true, true, true, false, false]);
+  });
+
   it("reloads again once the window has passed", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
     for (const now of [0, 1_000, 2_000])
       reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
 
-    expect(reloadForChunkLoadError(() => storage, reload, "1.0.0", 70_000)).toBe(true);
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.0", 11 * 60_000)).toBe(true);
     expect(reload).toHaveBeenCalledTimes(4);
+  });
+
+  it("ignores stamps from a clock that has since moved back", () => {
+    const storage = createStorageStub();
+    storage.setItem(
+      "t3code:chunk-load-reloaded",
+      JSON.stringify({ build: "1.0.0", at: [1_000_000, 1_001_000, 1_002_000] }),
+    );
+
+    expect(reloadForChunkLoadError(() => storage, vi.fn(), "1.0.0", 0)).toBe(true);
   });
 
   it("reloads again once a deploy changed the build", () => {
@@ -68,6 +93,34 @@ describe("reloadForChunkLoadError", () => {
 
     expect(reloadForChunkLoadError(blocked, reload)).toBe(false);
     expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleChunkLoadErrors", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    chunkLoadState.reloadScheduled = false;
+  });
+
+  it("spends one reload on the many preload errors one failed load raises", () => {
+    vi.useFakeTimers();
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    const page = Object.assign(new EventTarget(), {
+      sessionStorage: storage,
+      location: { reload },
+    });
+    vi.stubGlobal("window", page);
+    handleChunkLoadErrors();
+
+    const events = [1, 2, 3, 4].map(() => new Event("vite:preloadError", { cancelable: true }));
+    for (const event of events) page.dispatchEvent(event);
+    vi.advanceTimersByTime(5_000);
+
+    expect(events.every((event) => event.defaultPrevented)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(storage.getItem("t3code:chunk-load-reloaded") ?? "{}").at).toHaveLength(1);
   });
 });
 

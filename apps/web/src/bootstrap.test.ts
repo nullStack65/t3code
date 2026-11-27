@@ -32,8 +32,12 @@ function createStorageStub(initial: Record<string, string> = {}): Storage {
   };
 }
 
+const NOW = 1_700_000_000_000;
+
 async function bootWithFailingMainChunk(storage: Storage) {
   vi.resetModules();
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
   mocks.showBootError.mockClear();
   const reload = vi.fn().mockName("location.reload");
   vi.stubGlobal(
@@ -43,23 +47,31 @@ async function bootWithFailingMainChunk(storage: Storage) {
   try {
     const { boot } = await import("./bootstrap");
     await boot;
+    // The reload waits a moment for the network to settle.
+    await vi.advanceTimersByTimeAsync(5_000);
     return { reload, showBootError: mocks.showBootError };
   } finally {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   }
 }
 
 describe("bootstrap", () => {
-  it("reloads once instead of showing the boot error when the main chunk fails to load", async () => {
+  it("reloads, once for the whole failed load, instead of showing the boot error when the main chunk fails", async () => {
     const { reload, showBootError } = await bootWithFailingMainChunk(createStorageStub());
 
     expect(reload).toHaveBeenCalledTimes(1);
     expect(showBootError).not.toHaveBeenCalled();
   });
 
-  it("shows the boot error when the main chunk fails again after the reload", async () => {
+  it("shows the boot error once the reloads are used up and the main chunk still fails", async () => {
     const { reload, showBootError } = await bootWithFailingMainChunk(
-      createStorageStub({ "t3code:chunk-load-reloaded": import.meta.env.APP_VERSION }),
+      createStorageStub({
+        "t3code:chunk-load-reloaded": JSON.stringify({
+          build: import.meta.env.APP_VERSION,
+          at: [NOW - 3_000, NOW - 2_000, NOW - 1_000],
+        }),
+      }),
     );
 
     expect(reload).not.toHaveBeenCalled();
