@@ -234,6 +234,15 @@ import { makeInterruptResultTurnItem } from "./runInterruptResult.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
 import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
+import {
+  type MailboxRoles,
+  type MailboxSenderRole,
+  mailboxFold,
+  mailboxPriority,
+  mailboxSenderRole,
+  managerTurnOverBudget,
+  rankQueuedRunsByMailbox,
+} from "./StandingMailbox.ts";
 import { isRuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
   endOrphanedNativeSubagent,
@@ -1152,10 +1161,13 @@ const TOOL_TURN_ITEM_TYPES: ReadonlySet<string> = new Set([
 /** Digests never start a turn, and when_idle messages wait behind every other queued one. */
 function nextQueuedRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+  roles?: MailboxRoles,
 ): OrchestrationV2Run | undefined {
-  const startable = queuedRunsInDeliveryOrder(projection).filter(
+  const ordered = queuedRunsInDeliveryOrder(projection).filter(
     (run) => run.queueHeld !== true && run.delivery?.class !== "digest",
   );
+  // A standing manager answers the founder first, then the CEO (CLO-1303).
+  const startable = roles === undefined ? ordered : rankQueuedRunsByMailbox(ordered, roles);
   return startable.find((run) => run.delivery?.class !== "when_idle") ?? startable[0];
 }
 
@@ -2814,6 +2826,62 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
   });
 
+  // Standing manager mailbox (CLO-1303): who sent a message decides its place in the queue.
+  const messageSenderRole = (
+    message: Pick<
+      OrchestrationV2ConversationMessage,
+      "createdBy" | "scheduledTaskId" | "senderThreadId"
+    >,
+  ) =>
+    message.createdBy === "user" || message.senderThreadId === undefined
+      ? Effect.succeed(mailboxSenderRole(message, null))
+      : projectionStore.getThreadShell(message.senderThreadId).pipe(
+          Effect.map((shell) => mailboxSenderRole(message, shell?.standing?.name)),
+          Effect.orElseSucceed((): MailboxSenderRole => "agent"),
+        );
+  const standingMailboxRoles = Effect.fn("Orchestrator.standingMailboxRoles")(function* (
+    projection: OrchestrationV2ThreadProjection,
+  ) {
+    if (projection.thread.standing == null) return undefined;
+    const roles = new Map<MessageId, MailboxSenderRole>();
+    for (const run of projection.runs) {
+      if (run.status !== "queued") continue;
+      const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+      if (message !== undefined) roles.set(message.id, yield* messageSenderRole(message));
+    }
+    return roles as MailboxRoles;
+  });
+  // Flag a standing-manager turn that ran past five minutes: managers dispatch, workers work.
+  const flaggedManagerTurns = new Set<RunId>();
+  const flagSlowManagerTurn = (
+    projection: OrchestrationV2ThreadProjection,
+    runId: RunId | undefined,
+  ) => {
+    const run = projection.runs.find((candidate) => candidate.id === runId);
+    if (
+      projection.thread.standing == null ||
+      run?.startedAt == null ||
+      run.completedAt == null ||
+      flaggedManagerTurns.has(run.id) ||
+      !managerTurnOverBudget(
+        DateTime.toEpochMillis(run.startedAt),
+        DateTime.toEpochMillis(run.completedAt),
+      )
+    ) {
+      return Effect.void;
+    }
+    if (flaggedManagerTurns.size >= 1024) flaggedManagerTurns.clear();
+    flaggedManagerTurns.add(run.id);
+    return Effect.logWarning("standing manager turn exceeded 300 seconds", {
+      threadId: projection.thread.id,
+      standing: projection.thread.standing.name,
+      runId: run.id,
+      providerInstanceId: run.providerInstanceId,
+      seconds: Math.round(
+        (DateTime.toEpochMillis(run.completedAt) - DateTime.toEpochMillis(run.startedAt)) / 1000,
+      ),
+    });
+  };
   const startNextQueuedRunOnce = Effect.fn("Orchestrator.startNextQueuedRun")(
     function* (
       threadId: ThreadId,
@@ -2827,6 +2895,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     ) {
       let projection = yield* readCommandProjection(threadId);
+      yield* flagSlowManagerTurn(
+        projection,
+        options?.latestRunEnded === true
+          ? latestExecutedRun(projection.runs)?.id
+          : options?.endedRunId,
+      );
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
@@ -2867,9 +2941,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection = yield* readCommandProjection(threadId);
       }
       if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
+      const mailboxRoles = yield* standingMailboxRoles(projection);
       let storedQueuedRun =
         options?.queuedRunId === undefined
-          ? nextQueuedRun(projection)
+          ? nextQueuedRun(projection, mailboxRoles)
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
@@ -2904,7 +2979,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           queuedRunCancellationEvents(projection, storedQueuedRun, checkedAt),
         );
         projection = yield* readCommandProjection(threadId);
-        storedQueuedRun = nextQueuedRun(projection);
+        storedQueuedRun = nextQueuedRun(projection, mailboxRoles);
       }
       if (storedQueuedRun !== undefined && currentWake !== undefined) {
         const now = yield* DateTime.now;
@@ -3475,6 +3550,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const fold = carriesDigest(queuedRun, queuedMessage)
         ? digestFold(projection, now)
         : undefined;
+      // A standing manager answers every waiting agent message in this one turn (CLO-1303).
+      const mailbox =
+        mailboxRoles === undefined || fold === undefined || queuedRun.outputSchema !== undefined
+          ? undefined
+          : mailboxFold(projection, queuedRun, mailboxRoles, now);
       const startingRun: OrchestrationV2Run = {
         ...queuedRun,
         providerThreadId: queuedProviderThread.id,
@@ -3484,6 +3564,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         startedAt: null,
         contextHandoffId: activeHandoff?.id ?? null,
         ...(fold === undefined || fold.digest.length === 0 ? {} : { digest: fold.digest }),
+        ...(mailbox === undefined || mailbox.mailbox.length === 0
+          ? {}
+          : { mailbox: mailbox.mailbox }),
         ...wakeWorkStartedAt(
           projection,
           {
@@ -3629,9 +3712,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       for (const expiredRun of fold?.expired ?? []) yield* logExpiredDelivery(expiredRun);
       yield* writeSystemEvents(
         [
-          ...(fold === undefined ? [] : [...fold.folded, ...fold.expired]).flatMap((spent) =>
-            queuedRunCancellationEvents(projection, spent, now),
-          ),
+          ...[
+            ...(fold === undefined ? [] : [...fold.folded, ...fold.expired]),
+            ...(mailbox?.folded ?? []),
+          ].flatMap((spent) => queuedRunCancellationEvents(projection, spent, now)),
           ...(selectionChanged
             ? [
                 {
@@ -8778,6 +8862,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             attachments: command.attachments,
           })
         : resolveMessageDispatchIntent(projection, requestedMode, requestedIntent);
+    // Standing manager mailbox (CLO-1303): a founder message steers a turn it outranks, a CEO
+    // message steers only an agent-started turn, and agent messages wait. Steering only, never
+    // an interrupt-restart.
+    if (
+      projection.thread.standing != null &&
+      goalCommand === null &&
+      deliveryClass === undefined &&
+      requestedIntent === undefined &&
+      dispatchMode.type === "queue_after_active" &&
+      command.notification === undefined
+    ) {
+      const activeRun = projection.runs.findLast(isActiveRun);
+      const activeMessage = projection.messages.find(
+        (message) => message.id === activeRun?.userMessageId,
+      );
+      if (activeMessage !== undefined) {
+        const senderPriority = mailboxPriority(
+          yield* messageSenderRole({
+            createdBy: command.createdBy ?? "user",
+            scheduledTaskId: command.scheduledTaskId,
+            senderThreadId: command.senderThreadId,
+          }),
+        );
+        const activePriority = mailboxPriority(yield* messageSenderRole(activeMessage));
+        if (senderPriority < activePriority && senderPriority <= mailboxPriority("ceo")) {
+          const preempt = resolveMessageDispatch(projection, {
+            dispatchMode: requestedMode,
+            deliveryIntent: "auto",
+            text: command.text,
+            attachments: command.attachments,
+          });
+          if (preempt.type === "steer_active") dispatchMode = preempt;
+        }
+      }
+    }
     if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
       const targetRunId = dispatchMode.targetRunId;
       const target = projection.runs.find((run) => run.id === targetRunId);
