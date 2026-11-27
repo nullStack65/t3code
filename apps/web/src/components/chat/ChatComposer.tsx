@@ -2120,7 +2120,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       if (item.command === "side" || item.command === "btw" || item.command === "note") {
         if (item.command !== "note" && props.sideChatDisabledReason) return;
-        if (item.command === "note" && props.noteDisabledReason) return;
+        if (item.command === "note" && props.noteDisabledReason) {
+          toastManager.add({
+            type: "warning",
+            title: gt("/note is unavailable"),
+            description: props.noteDisabledReason,
+          });
+          return;
+        }
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,
