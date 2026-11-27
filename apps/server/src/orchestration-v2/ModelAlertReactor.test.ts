@@ -327,6 +327,30 @@ it("deduplicates a stranded queue until the queue advances or drains", () => {
   assert.isTrue(step("queued:3", true, 11));
 });
 
+it("an open-PR lane-ended report dropped undelivered can report again on the next run end", () => {
+  const judged = {
+    threadId: "thread:fleet",
+    evaluated: ["lane-ended"] as const,
+    findings: [finding("lane-ended", "open-prs:github.com/o/r#7")],
+  };
+  const first = recordThreadEvents(EMPTY_MODEL_ALERT_STATE, judged, eventAlert, ["watcher"], 0);
+  assert.isTrue(first.enqueued);
+  // A later run with the same open pull requests shares the report while it is queued.
+  assert.isFalse(recordThreadEvents(first.state, judged, eventAlert, ["watcher"], 1).enqueued);
+  const [queued] = first.state.outbox;
+  assert.isDefined(queued);
+  const dropped = afterDrop(first.state, queued, 2);
+  assert.deepEqual(dropped.outbox, []);
+  assert.isTrue(recordThreadEvents(dropped, judged, eventAlert, ["watcher"], 3).enqueued);
+  // A run-keyed report keeps its dedupe after a drop: that run will not end again.
+  const failedRun = { ...judged, findings: [finding("lane-ended", "run:1")] };
+  const failed = recordThreadEvents(EMPTY_MODEL_ALERT_STATE, failedRun, eventAlert, ["watcher"], 0);
+  const afterFailedDrop = afterDrop(failed.state, failed.state.outbox[0]!, 1);
+  assert.isFalse(
+    recordThreadEvents(afterFailedDrop, failedRun, eventAlert, ["watcher"], 2).enqueued,
+  );
+});
+
 it("a thread holding a question and an inbox flip reports each once, not on every trigger", () => {
   const both = [finding("needs-person", "request:1"), finding("needs-person", "inbox:kameron")];
   let state = EMPTY_MODEL_ALERT_STATE;

@@ -10,7 +10,9 @@ import {
   threadEventStillHolds,
   type ThreadEventTrigger,
   type WatchedShell,
+  withPullRequestStates,
 } from "./ThreadEventAlerts.ts";
+import { threadPullRequestKeyOf } from "../sourceControl/threadPullRequests.ts";
 
 const NOW = Date.parse("2026-11-19T05:00:00.000Z");
 const at = (minutesAgo: number) => DateTime.makeUnsafe(NOW - minutesAgo * 60_000);
@@ -132,11 +134,19 @@ it("lane-ended stays quiet for a failure the model alert already reported as a u
 
 it("lane-ended with open pull requests dedupes by open-PR set across runs, and clears on settle", () => {
   const run1 = judge(
-    shellWith({ status: "completed", latestRunId: "run:1", pullRequests: [openPullRequest] } as never),
+    shellWith({
+      status: "completed",
+      latestRunId: "run:1",
+      pullRequests: [openPullRequest],
+    } as never),
     "run-ended",
   );
   const run2 = judge(
-    shellWith({ status: "completed", latestRunId: "run:2", pullRequests: [openPullRequest] } as never),
+    shellWith({
+      status: "completed",
+      latestRunId: "run:2",
+      pullRequests: [openPullRequest],
+    } as never),
     "run-ended",
   );
   const finding1 = run1.findings.find((finding) => finding.kind === "lane-ended");
@@ -425,6 +435,18 @@ const asking = {
   pendingRuntimeRequest: { id: "request:9", kind: "approval", userOnly: false },
 } as never;
 const promised = { status: "idle", latestVisibleMessage: assistantSays(FLEET_PROMISE) } as never;
+
+it("an open-PR lane-ended alert stops holding once a host reread finds its pull request merged", () => {
+  const alert = fired(openWithPr, "run-ended");
+  const stored = shellWith(openWithPr);
+  const key = threadPullRequestKeyOf(openPullRequest);
+  const reread = (state: "open" | "merged") =>
+    withPullRequestStates(stored, new Map([[key, state]]));
+  assert.isTrue(threadEventStillHolds({ alert, shell: reread("open"), stuckMinutes: 20 }));
+  assert.isFalse(threadEventStillHolds({ alert, shell: reread("merged"), stuckMinutes: 20 }));
+  // A newer run that ended the same way keeps the open-PR report, so it is not superseded.
+  assert.isTrue(stillHolds(alert, { latestRunId: "run:8" } as never, openWithPr));
+});
 
 it.each([
   ["lane-ended, nothing changed", failed, "run-ended", {}, true],

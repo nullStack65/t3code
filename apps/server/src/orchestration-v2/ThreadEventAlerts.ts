@@ -1,11 +1,14 @@
 import {
   type EnvironmentId,
+  type PullRequestState,
+  type ThreadPullRequestLink,
   isListedThreadLineage,
   isDelegatedAppThread,
   ModelAlertWatcher,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
+import { threadPullRequestKeyOf } from "../sourceControl/threadPullRequests.ts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -98,10 +101,37 @@ const timeMs = (value: DateTime.Utc | null | undefined) =>
 const isLive = (shell: WatchedShell) =>
   shell.activeRunId !== null || (shell.activityRunStatus ?? null) !== null;
 
+const OPEN_PR_SIGNATURE_PREFIX = "open-prs:";
+/** A lane-ended report keyed by its open pull requests, not its run, so later runs share it. */
+export const isOpenPrLaneEndedSignature = (signature: string) =>
+  signature.startsWith(OPEN_PR_SIGNATURE_PREFIX);
+
 const openPullRequests = (shell: WatchedShell) =>
   visibleThreadPullRequests(shell.pullRequests ?? []).filter(
     (link) => link.snapshot === null || link.snapshot.state === "open",
   );
+
+/** The links a lane-ended re-judge should reread from the host: the ones it counts as open. */
+export const openPullRequestLinks = (shell: Pick<WatchedShell, "pullRequests">) =>
+  openPullRequests(shell as WatchedShell);
+
+/**
+ * The shell as fresh host reads (keyed by `threadPullRequestKeyOf`) say it is. A link no longer
+ * open leaves the open set; one with no snapshot yet has none to amend, so it is left out unless
+ * a watch on it still counts as a wake handle.
+ */
+export function withPullRequestStates<S extends Pick<WatchedShell, "pullRequests">>(
+  shell: S,
+  states: ReadonlyMap<string, PullRequestState>,
+): S {
+  const links = (shell.pullRequests ?? []).flatMap((link): ThreadPullRequestLink[] => {
+    const state = states.get(threadPullRequestKeyOf(link));
+    if (state === undefined || state === "open") return [link];
+    if (link.snapshot !== null) return [{ ...link, snapshot: { ...link.snapshot, state } }];
+    return link.watch === undefined ? [] : [link];
+  });
+  return { ...shell, pullRequests: links };
+}
 
 /** A pending task, a watching PR, a delegated task or a snooze that will bring the thread back. */
 function hasWakeHandle(shell: WatchedShell, remoteTaskCount: number, nowMs: number) {
@@ -215,14 +245,11 @@ export function judgeThread(input: {
         prs.length > 0 &&
         !hasWakeHandle(shell, remoteTaskCount, nowMs)
       ) {
-        const openPrSignature = prs
-          .map((link) => `${link.host ?? "github.com"}/${link.repository}#${link.number}`)
-          .toSorted()
-          .join(",");
+        const openPrSignature = prs.map(threadPullRequestKeyOf).toSorted().join(",");
         findings.push({
           kind: "lane-ended",
           detail: `its last run completed with ${prs.length} open pull request${prs.length === 1 ? "" : "s"} and nothing tracked that will wake it`,
-          signature: `open-prs:${openPrSignature}`,
+          signature: `${OPEN_PR_SIGNATURE_PREFIX}${openPrSignature}`,
         });
       }
     }

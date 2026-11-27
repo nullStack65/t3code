@@ -881,7 +881,7 @@ export const make = Effect.gen(function* () {
             // Every reaction skips a running command, so only an ended one forks.
             return active ? Effect.void : inThreadOrder(event.threadId, reaction);
           }
-          // Settled threads are not swept, so read their links once to settle with fresh status.
+          // Settling reads the links at once rather than waiting for the slow settled cadence.
           case "thread.settled":
             return inThreadOrder(event.threadId, refreshUnmergedLinks(event.threadId));
           case "run.updated":
