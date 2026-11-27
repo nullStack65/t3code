@@ -2543,6 +2543,11 @@ export function timelineActivityContext(
           : entry.kind === "event" || entry.kind === "message"
             ? entry.projectedItem?.item
             : undefined,
+      surfacesToUser:
+        entry.kind === "sent-message" ||
+        entry.kind === "proposed-plan" ||
+        entry.kind === "html-render" ||
+        entry.kind === "mcp-app",
     })),
     runs,
     includeOtherActivity,
@@ -2558,9 +2563,14 @@ function activityRowRunIds(row: MessagesTimelineRow): readonly RunId[] {
       return row.message.runId ? [row.message.runId] : [];
     case "work":
     case "work-live":
-      return row.groupedEntries.flatMap((entry) => (entry.runId ? [entry.runId] : []));
+      return row.groupedEntries.flatMap((entry) => {
+        const id = entry.runId ?? entry.projectedItem?.item.runId;
+        return id ? [id] : [];
+      });
     case "event":
-      return row.projectedItem.item.runId ? [row.projectedItem.item.runId] : [];
+      return (row.subagents ?? [row.projectedItem]).flatMap(({ item }) =>
+        item.runId ? [item.runId] : [],
+      );
     case "work-toggle":
       return row.runId ? [row.runId] : [];
     case "turn-fold":
@@ -2569,6 +2579,27 @@ function activityRowRunIds(row: MessagesTimelineRow): readonly RunId[] {
     default:
       return [];
   }
+}
+
+/**
+ * Rows belonging solely to a `silent_ack` or pure agent-routed turn are omitted completely when
+ * collapsing activity, leaving zero fold pill on founder timelines.
+ */
+function isHiddenSilentRow(row: MessagesTimelineRow, context?: ChatActivityContext): boolean {
+  if (!context || context.hiddenSilentRuns.size === 0) return false;
+  if (KEPT_ACTIVITY_ROW_KINDS.has(row.kind)) return false;
+  if (
+    row.kind === "event" &&
+    (row.projectedItem.item.type === "secret_request" ||
+      row.projectedItem.item.type === "link_request")
+  ) {
+    return false;
+  }
+  if (row.kind === "message" && row.message.humanNote) return false;
+  if (activityRowTimelineVisibility(row) === "user_timeline") return false;
+  if (row.kind === "message" && row.message.timelineVisibility === "user_timeline") return false;
+  const runIds = activityRowRunIds(row);
+  return runIds.length > 0 && runIds.every((runId) => context.hiddenSilentRuns.has(runId));
 }
 
 /**
@@ -2659,9 +2690,16 @@ export function collapseTimelineActivity(
   expandedIds: ReadonlySet<string>,
   context?: ChatActivityContext,
 ): MessagesTimelineRow[] {
+  const visibleRows =
+    context && context.hiddenSilentRuns.size > 0
+      ? rows.filter((row) => !isHiddenSilentRow(row, context))
+      : rows;
+  const hasHiddenSilent = visibleRows.length !== rows.length;
   const collapsed: MessagesTimelineRow[] = [];
   let hasActivity = false;
-  for (const group of chatActivityGroups(rows, (row) => activityRowIsBoundary(row, context))) {
+  for (const group of chatActivityGroups(visibleRows, (row) =>
+    activityRowIsBoundary(row, context),
+  )) {
     if (!("rows" in group)) {
       collapsed.push(group);
       continue;
@@ -2710,7 +2748,7 @@ export function collapseTimelineActivity(
       }
     }
   }
-  return hasActivity ? collapsed : rows;
+  return hasActivity || hasHiddenSilent ? collapsed : rows;
 }
 
 const NEW_MESSAGES_DIVIDER_ROW_ID = "new-messages-divider";
@@ -2743,7 +2781,13 @@ export function activityPillIdForEntry(
   entryId: string,
   context?: ChatActivityContext,
 ): string | undefined {
-  for (const group of chatActivityGroups(rows, (row) => activityRowIsBoundary(row, context))) {
+  const visibleRows =
+    context && context.hiddenSilentRuns.size > 0
+      ? rows.filter((row) => !isHiddenSilentRow(row, context))
+      : rows;
+  for (const group of chatActivityGroups(visibleRows, (row) =>
+    activityRowIsBoundary(row, context),
+  )) {
     if ("rows" in group && group.rows.some((row) => row.id === entryId)) return group.id;
   }
   return undefined;

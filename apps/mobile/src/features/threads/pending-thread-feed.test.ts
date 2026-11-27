@@ -123,6 +123,83 @@ describe("pending timeline messages", () => {
     expect(folded.map(({ id }) => id)).toContain("founder-decision");
   });
 
+  it("hides silent_ack and pure agent-routed turns with zero fold pill while preserving send_to_user", () => {
+    const silentRun = RunId.make("mobile-silent-ack");
+    const routedRun = RunId.make("mobile-thread-send");
+    const surfacedRun = RunId.make("mobile-send-to-user");
+    const makeMessage = (
+      id: string,
+      runId: RunId,
+      role: "user" | "assistant",
+      createdBy: "agent" | "user",
+    ) => {
+      const row = appendPendingThreadMessages([], [], [pending(id)])[0];
+      if (row?.type !== "message") throw new Error("Expected message");
+      return {
+        ...row,
+        message: { ...row.message, role, runId, createdBy },
+      };
+    };
+    const toolGroup = (id: string, runId: RunId, toolName: string) =>
+      ({
+        type: "activity-group",
+        id,
+        createdAt: "2026-09-06T10:00:01.000Z",
+        runId,
+        activities: [
+          {
+            createdAt: "2026-09-06T10:00:01.000Z",
+            projectedItem: {
+              item: {
+                id,
+                runId,
+                type: "dynamic_tool",
+                status: "completed",
+                toolName,
+                startedAt: null,
+              },
+            } as OrchestrationV2ProjectedTurnItem,
+          },
+        ],
+      }) as unknown as ThreadFeedEntry;
+    const sentCard = {
+      type: "sent-message",
+      id: "sent-card",
+      createdAt: "2026-09-06T10:00:02.000Z",
+      runId: surfacedRun,
+      text: "Visible to founder",
+    } as unknown as ThreadFeedEntry;
+
+    const silentOnly = [
+      makeMessage("wake-ack", silentRun, "user", "agent"),
+      toolGroup("ack-tool", silentRun, "silent_ack"),
+      makeMessage("wake-send", routedRun, "user", "agent"),
+      toolGroup("send-tool", routedRun, "t3_thread_send"),
+    ];
+    expect(
+      foldThreadFeedActivity(silentOnly, silentOnly, {
+        open: {},
+        dismissed: new Map(),
+        revealedMessageId: null,
+        latestRun: null,
+      }),
+    ).toEqual([]);
+
+    const withSent = [
+      ...silentOnly,
+      makeMessage("wake-surfaced", surfacedRun, "user", "agent"),
+      toolGroup("routed-tool", surfacedRun, "t3_thread_send"),
+      sentCard,
+    ];
+    const folded = foldThreadFeedActivity(withSent, withSent, {
+      open: {},
+      dismissed: new Map(),
+      revealedMessageId: null,
+      latestRun: null,
+    });
+    expect(folded.map((row) => row.type)).toEqual(["activity-fold", "sent-message"]);
+  });
+
   it("keeps unchanged row identities while text streams and updates adjacent grouping", () => {
     const group = createThreadFeedGrouping();
     const [first, second, third] = appendPendingThreadMessages(

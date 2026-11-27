@@ -107,6 +107,13 @@ export function foldThreadFeedActivity(
       if (entry.type === "message") {
         return [{ createdAt: entry.createdAt, runId: entry.message.runId, message: entry.message }];
       }
+      if (
+        entry.type === "sent-message" ||
+        entry.type === "html-render" ||
+        entry.type === "mcp-app"
+      ) {
+        return [{ createdAt: entry.createdAt, runId: entry.runId, surfacesToUser: true }];
+      }
       if (entry.type !== "activity-group") return [];
       return entry.activities.map(({ createdAt, projectedItem }) => ({
         createdAt,
@@ -118,9 +125,45 @@ export function foldThreadFeedActivity(
     false,
     options.decisionRequestedAt,
   );
+  const visibleFeed =
+    context.hiddenSilentRuns.size > 0
+      ? feed.filter((entry) => {
+          if (options.revealedMessageId !== null && entry.id === options.revealedMessageId) {
+            return true;
+          }
+          if (
+            entry.type === "sent-message" ||
+            entry.type === "html-render" ||
+            entry.type === "mcp-app" ||
+            entry.type === "guest-pending" ||
+            entry.type === "pending-fold" ||
+            entry.type === "activity-fold"
+          ) {
+            return true;
+          }
+          if (entry.type === "message") {
+            if (entry.message.humanNote) return true;
+            return !entry.message.runId || !context.hiddenSilentRuns.has(entry.message.runId);
+          }
+          if (
+            entry.type === "activity-group" &&
+            entry.activities.some(
+              ({ projectedItem: { item } }) =>
+                item.type === "secret_request" ||
+                item.type === "link_request" ||
+                item.timelineVisibility === "user_timeline",
+            )
+          ) {
+            return true;
+          }
+          const runId = "runId" in entry ? entry.runId : null;
+          return !runId || !context.hiddenSilentRuns.has(runId);
+        })
+      : feed;
+  const hasHiddenSilent = visibleFeed.length !== feed.length;
   const folded: ThreadFeedRow[] = [];
   let hasActivity = false;
-  for (const group of chatActivityGroups(feed, (entry) => {
+  for (const group of chatActivityGroups(visibleFeed, (entry) => {
     if (entry.type === "message")
       return !isChatActivityMessage(entry.message, entry.message.runId, context);
     if (
@@ -185,7 +228,7 @@ export function foldThreadFeedActivity(
       }
     }
   }
-  return hasActivity ? folded : feed;
+  return hasActivity || hasHiddenSilent ? folded : feed;
 }
 
 export type GroupedThreadFeedRow = ThreadFeedRow & {
