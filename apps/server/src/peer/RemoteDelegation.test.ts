@@ -160,6 +160,10 @@ interface BoxThread {
   readonly afterLaunch: Ref.Ref<Effect.Effect<void>>;
   /** The box's load as its `orchestrator_capabilities` reports it. */
   readonly resources: Ref.Ref<HostResourcesSnapshot>;
+  /** Offered as each wait on the launched run starts there. */
+  readonly waitStarted: Queue.Queue<void>;
+  /** Completing the current one fails the waits on the launched run now open there. */
+  readonly dropWaits: Ref.Ref<Deferred.Deferred<void>>;
 }
 
 const GiB = 1024 ** 3;
@@ -213,6 +217,8 @@ const makeBoxThread = Effect.gen(function* () {
     sent: yield* Ref.make<ReadonlyArray<string>>([]),
     afterLaunch: yield* Ref.make<Effect.Effect<void>>(Effect.void),
     resources: yield* Ref.make(loadOf(0.1)),
+    waitStarted: yield* Queue.unbounded<void>(),
+    dropWaits: yield* Ref.make(yield* Deferred.make<void>()),
   } satisfies BoxThread;
 });
 
@@ -360,8 +366,23 @@ const boxToolkitLayer = (thread: BoxThread) => {
               : {}),
           };
         }
+        const drop = yield* Ref.get(thread.dropWaits);
+        yield* Queue.offer(thread.waitStarted, undefined);
         const done = yield* Deferred.await(thread.finished).pipe(
           Effect.timeoutOption(input.timeoutMs),
+          Effect.raceFirst(
+            Deferred.await(drop).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new ThreadManagement.ThreadManagementProjectionLoadError({
+                    projectId: boxProject,
+                    threadId: input.threadId,
+                    cause: "connection lost",
+                  }),
+                ),
+              ),
+            ),
+          ),
         );
         // Only a waiter that asks waits past the run for the thread's own task.
         if (
@@ -3933,6 +3954,250 @@ it.effect(
         expect(Result.isSuccess(kept) && kept.success).toMatchObject({
           environmentId: laptop.environmentId,
           resumed: true,
+        });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "reports unreachable with lastSeenAt once the peer link is down past threshold, and recovers without launching a duplicate",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const retries = yield* steppedRetries;
+        const a = yield* makeLaptop(database, offers).pipe(
+          Effect.provideService(RemoteDelegation.FollowRetrySchedule, retries.schedule),
+        );
+        yield* linkTo(a.links, b, "full-access");
+        yield* seedParent(a);
+
+        // Start a remote task while the link is healthy.
+        const delegated = yield* delegateToBox(a);
+        const originalRemoteThreadId = delegated.remoteChild.threadId;
+        expect(yield* Ref.get(thread.launched)).toBe(originalRemoteThreadId);
+
+        const initial = yield* a.call("task_status", { taskId: delegated.taskId });
+        const initialContent = initial.structuredContent as {
+          status: string;
+          workState: string;
+          lastSeenAt?: string;
+        };
+        expect(initialContent.status).toBe("running");
+        expect(initialContent.workState).toBe("working");
+        expect(initialContent.lastSeenAt).toBeDefined();
+        const lastSeenBeforeDrop = initialContent.lastSeenAt!;
+
+        // Drop the peer link. Within the grace period, task_status still reports running.
+        yield* Ref.set(b.descriptor, descriptorOf("environment-elsewhere", "Elsewhere"));
+        yield* TestClock.adjust("30 seconds");
+        const withinGrace = yield* a.call("task_status", { taskId: delegated.taskId });
+        expect(withinGrace.structuredContent).toMatchObject({
+          status: "running",
+          workState: "working",
+          lastSeenAt: lastSeenBeforeDrop,
+        });
+
+        // Once elapsed time without peer contact crosses the threshold, report unreachable.
+        yield* TestClock.adjust("2 minutes");
+        const unreachable = yield* a.call("task_status", { taskId: delegated.taskId });
+        expect(unreachable.structuredContent).toMatchObject({
+          taskId: delegated.taskId,
+          status: "unreachable",
+          workState: "working",
+          lastSeenAt: lastSeenBeforeDrop,
+        });
+        expect((unreachable.structuredContent as { status: string }).status).not.toBe("running");
+
+        // Projection exposes unreachable + lastSeenAt on both subagent and turn item for UI clients.
+        const unreachableProjection = yield* a.orchestrator.getThreadProjection(parentThreadId);
+        const unreachableSubagent = unreachableProjection.subagents.find(
+          (candidate) => candidate.id === delegated.taskId,
+        );
+        expect(unreachableSubagent?.remoteChild).toMatchObject({
+          peerStatus: "unreachable",
+          lastSeenAt: lastSeenBeforeDrop,
+        });
+        const unreachableItem = unreachableProjection.turnItems.find(
+          (candidate) => candidate.type === "subagent" && candidate.subagentId === delegated.taskId,
+        );
+        expect(
+          unreachableItem?.type === "subagent" ? unreachableItem.remoteChild : undefined,
+        ).toMatchObject({
+          peerStatus: "unreachable",
+          lastSeenAt: lastSeenBeforeDrop,
+        });
+
+        // Restore the peer link: status immediately returns to the real remote status and no duplicate task launches.
+        yield* Ref.set(b.descriptor, box);
+        yield* TestClock.adjust("10 seconds");
+        const recovered = yield* a.call("task_status", { taskId: delegated.taskId });
+        const recoveredContent = recovered.structuredContent as {
+          status: string;
+          workState: string;
+          lastSeenAt?: string;
+        };
+        expect(recoveredContent.status).toBe("running");
+        expect(recoveredContent.workState).toBe("working");
+        expect(recoveredContent.lastSeenAt).toBeDefined();
+        expect(Date.parse(recoveredContent.lastSeenAt!)).toBeGreaterThan(
+          Date.parse(lastSeenBeforeDrop),
+        );
+
+        const recoveredProjection = yield* a.orchestrator.getThreadProjection(parentThreadId);
+        expect(recoveredProjection.subagents).toHaveLength(1);
+        expect(recoveredProjection.subagents[0]?.remoteChild).toMatchObject({
+          peerStatus: "reachable",
+          lastSeenAt: recoveredContent.lastSeenAt,
+        });
+        expect(yield* Ref.get(thread.launched)).toBe(originalRemoteThreadId);
+
+        // Retrying delegate_task with the same key after recovery still starts no duplicate task.
+        const retried = yield* delegateToBox(a);
+        expect(retried.taskId).toBe(delegated.taskId);
+        expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toHaveLength(
+          1,
+        );
+        expect(yield* Ref.get(thread.launched)).toBe(originalRemoteThreadId);
+
+        // When the remote run completes, the follower delivers the real terminal status.
+        yield* Ref.set(thread.reply, "Finished after link recovery.");
+        yield* Ref.set(thread.status, "completed");
+        yield* Deferred.succeed(thread.finished, undefined);
+        // Release the follower if it parked on a retry backoff while the link was down.
+        yield* Queue.offer(retries.retry, undefined);
+        const completed = yield* taskResult(a, delegated.taskId);
+        expect(completed).toMatchObject({
+          status: "completed",
+          result: "Finished after link recovery.",
+        });
+        const finalStatus = yield* a.call("task_status", { taskId: delegated.taskId });
+        expect(finalStatus.structuredContent).toMatchObject({
+          status: "completed",
+          workState: "result_available",
+          summary: "Finished after link recovery.",
+        });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "marks the projection unreachable from the background follower when peer polls fail past threshold",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const retries = yield* steppedRetries;
+        const a = yield* makeLaptop(database, offers).pipe(
+          Effect.provideService(RemoteDelegation.FollowRetrySchedule, retries.schedule),
+        );
+        yield* linkTo(a.links, b, "full-access");
+        yield* seedParent(a);
+
+        // Peer drops right after launch so the follower's first poll fails.
+        yield* Ref.set(
+          thread.afterLaunch,
+          Ref.set(b.descriptor, descriptorOf("environment-elsewhere", "Elsewhere")),
+        );
+        const delegated = yield* delegateToBox(a);
+        // First failure is at t=0 (within threshold): still reachable.
+        yield* Queue.take(retries.failed);
+        const beforeThreshold = (yield* a.orchestrator.getThreadProjection(parentThreadId))
+          .subagents[0];
+        expect(beforeThreshold?.remoteChild?.peerStatus).toBe("reachable");
+
+        // Advance past threshold and step the follower retry: follower marks projection unreachable.
+        yield* TestClock.adjust("3 minutes");
+        yield* Queue.offer(retries.retry, undefined);
+        yield* Queue.take(retries.failed);
+
+        const afterThreshold = (yield* a.orchestrator.getThreadProjection(parentThreadId))
+          .subagents[0];
+        expect(afterThreshold?.remoteChild?.peerStatus).toBe("unreachable");
+        expect(afterThreshold?.remoteChild?.lastSeenAt).toBeDefined();
+
+        // Restore peer link and step retry: follower recovers and completes the task.
+        yield* Ref.set(b.descriptor, box);
+        yield* Ref.set(thread.reply, "Completed after follower reconnect.");
+        yield* Ref.set(thread.status, "completed");
+        yield* Deferred.succeed(thread.finished, undefined);
+        yield* Queue.offer(retries.retry, undefined);
+
+        const completed = yield* taskResult(a, delegated.taskId);
+        expect(completed).toMatchObject({
+          status: "completed",
+          result: "Completed after follower reconnect.",
+          remoteChild: { peerStatus: "reachable" },
+        });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "starts the unreachable clock when a long wait drops, and shows reachable as soon as the peer answers again",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const retries = yield* steppedRetries;
+        const a = yield* makeLaptop(database, offers).pipe(
+          Effect.provideService(RemoteDelegation.FollowRetrySchedule, retries.schedule),
+        );
+        yield* linkTo(a.links, b, "full-access");
+        yield* seedParent(a);
+        const peerStatus = Effect.map(
+          a.orchestrator.getThreadProjection(parentThreadId),
+          (projection) => projection.subagents[0]?.remoteChild?.peerStatus,
+        );
+
+        const delegated = yield* delegateToBox(a);
+        yield* Queue.take(thread.waitStarted);
+
+        // Five minutes into a healthy long wait, the link drops and the wait fails.
+        yield* TestClock.adjust("5 minutes");
+        yield* Ref.set(b.descriptor, descriptorOf("environment-elsewhere", "Elsewhere"));
+        const drop = yield* Ref.get(thread.dropWaits);
+        yield* Ref.set(thread.dropWaits, yield* Deferred.make<void>());
+        yield* Deferred.succeed(drop, undefined);
+        yield* Queue.take(retries.failed);
+        expect(yield* peerStatus).toBe("reachable");
+
+        // Failing past the threshold from that first failure reports unreachable.
+        yield* TestClock.adjust("3 minutes");
+        yield* Queue.offer(retries.retry, undefined);
+        yield* Queue.take(retries.failed);
+        expect(yield* peerStatus).toBe("unreachable");
+
+        // Back again while the run still works there: reachable before the next long wait returns.
+        yield* Ref.set(b.descriptor, box);
+        yield* Queue.offer(retries.retry, undefined);
+        yield* Queue.take(thread.waitStarted);
+        const recovered = (yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents[0];
+        expect(recovered?.result).toBeNull();
+        expect(recovered?.remoteChild?.peerStatus).toBe("reachable");
+
+        yield* Ref.set(thread.reply, "Finished after the dropped wait.");
+        yield* Ref.set(thread.status, "completed");
+        yield* Deferred.succeed(thread.finished, undefined);
+        expect(yield* taskResult(a, delegated.taskId)).toMatchObject({
+          status: "completed",
+          result: "Finished after the dropped wait.",
+          remoteChild: { peerStatus: "reachable" },
         });
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),

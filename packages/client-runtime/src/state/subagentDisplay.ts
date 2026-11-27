@@ -1,5 +1,6 @@
 import type {
   ModelSelection,
+  OrchestrationV2RemoteTaskChild,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2ThreadShell,
   OrchestrationProjectShell,
@@ -11,6 +12,19 @@ import { resolveModelShortName } from "../providerClients.ts";
 import { isTerminalSubagentStatus } from "./subagentRuntime.ts";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
+
+/** Whether an active remote task has lost contact with its linked peer past the threshold. */
+export function isRemoteTaskUnreachable(subagent: {
+  readonly status: OrchestrationV2TurnItemStatus;
+  readonly remoteChild?: Pick<OrchestrationV2RemoteTaskChild, "peerStatus"> | undefined;
+}): boolean {
+  return (
+    (subagent.status === "pending" ||
+      subagent.status === "running" ||
+      subagent.status === "waiting") &&
+    subagent.remoteChild?.peerStatus === "unreachable"
+  );
+}
 
 export function subagentGroupSummary(
   members: ReadonlyArray<{ readonly status: OrchestrationV2TurnItemStatus }>,

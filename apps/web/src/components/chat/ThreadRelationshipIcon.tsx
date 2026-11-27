@@ -27,6 +27,8 @@ export function threadRelationshipStatusLabel(
     case "waiting":
     case "blocked":
       return resolve(msg("Waiting", { $context: "agent status" }));
+    case "unreachable":
+      return resolve(msg("Unreachable", { $context: "agent status" }));
     case "completed":
       return resolve(msg("Done", { $context: "agent status" }));
     case "failed":
@@ -99,11 +101,13 @@ export function ThreadRelationshipIcon({
             status === "pending" ||
             status === "waiting"
             ? "bg-info"
-            : status === "failed" || status === "error"
-              ? "bg-destructive"
-              : status === "completed"
-                ? "bg-success"
-                : "bg-muted-foreground/45",
+            : status === "unreachable"
+              ? "bg-warning"
+              : status === "failed" || status === "error"
+                ? "bg-destructive"
+                : status === "completed"
+                  ? "bg-success"
+                  : "bg-muted-foreground/45",
         )}
         aria-hidden="true"
       />

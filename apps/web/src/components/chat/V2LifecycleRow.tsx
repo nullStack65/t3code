@@ -23,6 +23,7 @@ import {
 } from "@t3tools/client-runtime/handoff";
 import {
   formatSubagentDisplayTitle,
+  isRemoteTaskUnreachable,
   subagentCardDetail,
 } from "@t3tools/client-runtime/state/subagent-display";
 import {
@@ -61,7 +62,7 @@ import {
   shouldShowInstanceBadge,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
-import { formatShortTimestamp } from "../../timestampFormat";
+import { formatRelativeTimeLabel, formatShortTimestamp } from "../../timestampFormat";
 import { getTriggerDisplayModelName } from "./providerIconUtils";
 import { ProviderInstanceIcon, providerTextColor } from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
@@ -196,13 +197,16 @@ export function V2LifecycleRow(props: {
   return null;
 }
 
-const STATUS_VISUALS: Record<
-  OrchestrationV2TurnItem["status"],
-  { dotClass: string; label: string }
-> = {
+type SubagentVisualStatus = OrchestrationV2TurnItem["status"] | "unreachable";
+
+const STATUS_VISUALS: Record<SubagentVisualStatus, { dotClass: string; label: string }> = {
   pending: { dotClass: "bg-info", label: msg("Queued", { $context: "subagent status" }) },
   running: { dotClass: "bg-info", label: msg("Running", { $context: "subagent status" }) },
   waiting: { dotClass: "bg-info", label: msg("Waiting", { $context: "subagent status" }) },
+  unreachable: {
+    dotClass: "bg-warning",
+    label: msg("Unreachable", { $context: "subagent status" }),
+  },
   idle: {
     dotClass: "bg-muted-foreground/50",
     label: msg("Idle · resumable", { $context: "subagent status" }),
@@ -219,7 +223,7 @@ const STATUS_VISUALS: Record<
   },
 };
 
-function subagentStatusVisual(status: OrchestrationV2TurnItem["status"]) {
+function subagentStatusVisual(status: SubagentVisualStatus) {
   return STATUS_VISUALS[status];
 }
 
@@ -254,7 +258,7 @@ function SubagentAvatar({
   accentColor?: string | undefined;
   showBadge: boolean;
   anyInstanceBadge: boolean;
-  status?: OrchestrationV2TurnItem["status"] | undefined;
+  status?: SubagentVisualStatus | undefined;
   className?: string;
 }) {
   return (
@@ -305,7 +309,7 @@ export function EnvironmentSubagentAvatar({
   driver?: ProviderDriverKind | undefined;
   /** A task in a linked environment runs a provider instance there; its driver here is only a label. */
   remote?: OrchestrationV2RemoteTaskChild | undefined;
-  status?: OrchestrationV2TurnItem["status"] | undefined;
+  status?: SubagentVisualStatus | undefined;
 }) {
   const providerEnvironmentId = remote?.environmentId ?? environmentId;
   const providersAtom = serverEnvironment.providersValueAtom(providerEnvironmentId);
@@ -462,7 +466,8 @@ function SubagentTimelineLink(props: {
     environmentThreadDetails.threadAtom(props.parentRef),
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
-  const remote = props.remote ?? agent?.remoteChild;
+  // Live projection data first: it carries the freshest lastSeenAt for unreachable peers.
+  const remote = agent?.remoteChild ?? props.remote;
   const gt = useGT();
   const m = useMessages();
   const threadId = props.threadId;
@@ -478,8 +483,22 @@ function SubagentTimelineLink(props: {
   // A task on a connected linked environment opens there, on the main screen only.
   const panel = threadId !== null || remoteOpener?.mode === "linked";
   const liveStatus = agent?.status ?? props.status;
+  const unreachable =
+    props.event === undefined &&
+    isRemoteTaskUnreachable({ status: liveStatus, remoteChild: remote });
   const status = props.event ? props.event.status : liveStatus;
-  const statusLabel = props.event?.label ?? m(subagentStatusVisual(liveStatus).label);
+  const avatarStatus: SubagentVisualStatus | undefined = props.event
+    ? (props.event.status ?? undefined)
+    : unreachable
+      ? "unreachable"
+      : liveStatus;
+  const statusLabel =
+    props.event?.label ?? m(subagentStatusVisual(unreachable ? "unreachable" : liveStatus).label);
+  const lastSeenLabel =
+    unreachable && remote?.lastSeenAt ? formatRelativeTimeLabel(remote.lastSeenAt) : "";
+  const unreachableSubtitle = lastSeenLabel
+    ? gt("Unreachable · last seen {lastSeen}", { lastSeen: lastSeenLabel })
+    : gt("Unreachable", { $context: "subagent status" });
   const result = (agent?.result ?? props.result)?.trim();
   const progress = (agent?.progress ?? props.progress)?.trim();
   const settled = SETTLED_SUBAGENT_STATUSES.has(status ?? liveStatus);
@@ -498,7 +517,7 @@ function SubagentTimelineLink(props: {
         providerInstanceId={props.providerInstanceId}
         driver={props.driver}
         remote={remote}
-        status={status ?? undefined}
+        status={avatarStatus}
       />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2">
@@ -514,11 +533,15 @@ function SubagentTimelineLink(props: {
         <span
           className={cn(
             "block text-2xs leading-relaxed",
-            failed ? "text-destructive" : "text-muted-foreground",
+            failed ? "text-destructive" : unreachable ? "text-warning" : "text-muted-foreground",
           )}
         >
           {detail === null ? (
-            statusLabel
+            unreachable ? (
+              unreachableSubtitle
+            ) : (
+              statusLabel
+            )
           ) : detail.includes("/") && !detail.includes(" ") ? (
             <MiddleTruncate value={detail} showTitle={false} className="flex" />
           ) : (
@@ -526,9 +549,12 @@ function SubagentTimelineLink(props: {
           )}
         </span>
       </span>
-      {detail !== null && (props.event !== undefined || status !== "completed") ? (
+      {detail !== null && (props.event !== undefined || status !== "completed" || unreachable) ? (
         <span
-          className={cn("shrink-0 text-xs", failed ? "text-destructive" : "text-muted-foreground")}
+          className={cn(
+            "shrink-0 text-xs",
+            failed ? "text-destructive" : unreachable ? "text-warning" : "text-muted-foreground",
+          )}
         >
           {statusLabel}
         </span>
@@ -575,6 +601,7 @@ function SubagentTimelineLink(props: {
       <ThreadHoverCardPopup>
         <SubagentTimelineTooltip
           {...props}
+          remote={remote}
           elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
           model={agent?.model ?? null}
           modelSelection={agent?.modelSelection}
@@ -618,6 +645,7 @@ function SubagentTimelineTooltip(
       driver={props.driver}
       elapsed={props.elapsed}
       status={props.status}
+      remote={props.remote}
       result={props.result}
       progress={props.progress}
       parentThread={parent}

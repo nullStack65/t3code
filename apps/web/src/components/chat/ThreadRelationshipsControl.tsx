@@ -12,7 +12,11 @@ import {
   projectedSubagentsToRuntime,
   type RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentDisplayTitle,
+  isRemoteTaskUnreachable,
+} from "@t3tools/client-runtime/state/subagent-display";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { deriveProviderSubagentStatus } from "@t3tools/client-runtime/state/thread-execution";
 import {
   deriveThreadRelationshipGraph,
@@ -306,13 +310,17 @@ function RemoteSubagentRow(props: {
   const m = useMessages();
   const { remoteChild } = props.agent;
   const status = props.agent.status;
+  const unreachable = isRemoteTaskUnreachable(props.agent);
+  const displayStatus = unreachable ? "unreachable" : status;
   const failed = status === "failed";
+  const lastSeen =
+    unreachable && remoteChild.lastSeenAt ? formatRelativeTimeLabel(remoteChild.lastSeenAt) : "";
   const timing = {
     status,
     startedAt: props.agent.startedAt ? DateTime.formatIso(props.agent.startedAt) : null,
     completedAt: props.agent.completedAt ? DateTime.formatIso(props.agent.completedAt) : null,
   };
-  const showElapsed = !failed && deriveSubagentElapsedMs(timing, 0) !== null;
+  const showElapsed = !failed && !unreachable && deriveSubagentElapsedMs(timing, 0) !== null;
   const title = relationshipThreadTitle({
     title: props.agent.title ?? gt("Subagent"),
     isSubagent: true,
@@ -339,7 +347,7 @@ function RemoteSubagentRow(props: {
             provider={props.provider}
             anyInstanceBadge={props.anyInstanceBadge}
             fallbackIcon={BotIcon}
-            status={status}
+            status={displayStatus}
           />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
@@ -347,7 +355,7 @@ function RemoteSubagentRow(props: {
             </span>
           </span>
           <span
-            className={`flex max-w-1/2 shrink-0 gap-1 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+            className={`flex max-w-1/2 shrink-0 gap-1 text-2xs ${failed ? "text-destructive" : unreachable ? "text-warning" : "text-muted-foreground"}`}
           >
             <span className="truncate">
               <T>
@@ -359,7 +367,7 @@ function RemoteSubagentRow(props: {
               {showElapsed ? (
                 <AgentElapsed agent={timing} compact />
               ) : (
-                threadRelationshipStatusLabel(status, m)
+                threadRelationshipStatusLabel(displayStatus, m)
               )}
             </span>
           </span>
@@ -368,9 +376,13 @@ function RemoteSubagentRow(props: {
           <LineageTooltipContent
             title={title}
             hint={
-              opener?.mode === "linked"
-                ? gt("Read the thread on {label}", { label: remoteChild.label })
-                : gt("Open on {label}", { label: remoteChild.label })
+              unreachable
+                ? lastSeen
+                  ? gt("Peer unreachable · last seen {lastSeen}", { lastSeen })
+                  : gt("Peer unreachable")
+                : opener?.mode === "linked"
+                  ? gt("Read the thread on {label}", { label: remoteChild.label })
+                  : gt("Open on {label}", { label: remoteChild.label })
             }
           />
         </TooltipPopup>
@@ -668,10 +680,19 @@ export function ThreadRelationshipsPanel(props: {
       expanded: false,
     },
   ];
+  const unreachableCount =
+    projection?.subagents.filter((agent) => isRemoteTaskUnreachable(agent)).length ?? 0;
   const runningCount =
     (projection?.subagents.filter(
-      (agent) => agent.childThreadId === null && agent.status === "running",
+      (agent) =>
+        agent.childThreadId === null &&
+        agent.status === "running" &&
+        !isRemoteTaskUnreachable(agent),
     ).length ?? 0) + active.filter(({ edge }) => edge.status === "running").length;
+  const lineageStatusParts = [
+    runningCount > 0 ? `${runningCount} running` : null,
+    unreachableCount > 0 ? `${unreachableCount} unreachable` : null,
+  ].filter(Boolean);
 
   // A linked environment's agent may have delegated this thread from there.
   const delegatedFrom = currentThread?.delegatedFrom;
@@ -1063,13 +1084,21 @@ export function ThreadRelationshipsPanel(props: {
         <ThreadDetailsSection
           headingId="thread-details-lineage-heading"
           title={
-            runningCount > 0
-              ? gt("Lineage · {runningCount} running", { runningCount })
-              : gt("Lineage", { $context: "thread details section: parent and child agents" })
+            runningCount > 0 && unreachableCount > 0
+              ? gt("Lineage · {runningCount} running · {unreachableCount} unreachable", {
+                  runningCount,
+                  unreachableCount,
+                })
+              : runningCount > 0
+                ? gt("Lineage · {runningCount} running", { runningCount })
+                : unreachableCount > 0
+                  ? gt("Lineage · {unreachableCount} unreachable", { unreachableCount })
+                  : gt("Lineage", { $context: "thread details section: parent and child agents" })
           }
           // A lone "Previous agents" row names itself; the heading returns for status or actions.
           showHeading={
             runningCount > 0 ||
+            unreachableCount > 0 ||
             canDetach ||
             related.length > 0 ||
             active.length > 0 ||

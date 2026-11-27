@@ -595,3 +595,62 @@ it.each([1, 18])("continues scrolling the panel past a list of %i subagents", as
   await userEvent.wheel(list, { delta: { y: 300 } });
   await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
 });
+
+it("surfaces an unreachable marker and last-seen tooltip for a remote subagent whose peer link is down", async () => {
+  setup();
+  const projection = makeThreadProjectionFixture();
+  const now = DateTime.nowUnsafe();
+  const remoteSubagent = {
+    id: NodeId.make("node:remote-unreachable"),
+    threadId: projection.thread.id,
+    runId: projection.runs[0]?.id ?? null,
+    parentNodeId: NodeId.make("node:root"),
+    origin: "app_owned" as const,
+    createdBy: "agent" as const,
+    driver: "remote" as never,
+    providerInstanceId: "codex" as never,
+    providerThreadId: null,
+    childThreadId: null,
+    remoteChild: {
+      environmentId: EnvironmentId.make("environment:box"),
+      threadId: ThreadId.make("thread:remote-1"),
+      label: "Box",
+      peerStatus: "unreachable" as const,
+      lastSeenAt: "2026-11-25T20:00:00.000Z",
+    },
+    nativeTaskRef: null,
+    prompt: "Run the test suite on Box",
+    title: "Remote suite",
+    model: "gpt-5.4",
+    status: "running" as const,
+    result: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+  };
+  state.projection = {
+    ...projection,
+    subagents: [remoteSubagent],
+  };
+
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={projection.thread.id}
+      showLineage
+      showSideChats={false}
+    />,
+    { router: `/${environmentId}/${projection.thread.id}` },
+  );
+
+  await expect.element(screen.getByText("Lineage · 1 unreachable", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("· Unreachable", { exact: true })).toBeVisible();
+  const row = screen.getByRole("button", { name: /Remote suite/ });
+  await userEvent.hover(row);
+  await vi.waitFor(() =>
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+      "Peer unreachable",
+    ),
+  );
+  expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain("last seen");
+});

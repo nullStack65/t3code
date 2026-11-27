@@ -162,6 +162,7 @@ export const OrchestratorMcpDelegatedTaskStatus = Schema.Literals([
   "starting",
   "running",
   "waiting",
+  "unreachable",
   "completed",
   "failed",
   "cancelled",
@@ -249,8 +250,10 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus.annotate({
     description:
-      "starting means the child's provider has not started its turn yet, so no work has begun.",
+      "starting means the child's provider has not started its turn yet, so no work has begun. unreachable means peer contact failed past the staleness threshold; see lastSeenAt.",
   }),
+  /** ISO timestamp of the last successful contact with the peer for a remote task. */
+  lastSeenAt: Schema.optional(IsoDateTime),
   workState: Schema.Literals(["working", "waiting_for_children", "result_available"]),
   hasPendingChildRuns: Schema.Boolean,
   latestTerminalRunId: Schema.NullOr(RunId),

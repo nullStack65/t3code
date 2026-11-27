@@ -45,6 +45,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -112,6 +113,15 @@ const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
 const FOLLOW_MAX_BACKOFF = Duration.minutes(5);
 /** A follower that hits this many defects in a row fails its task instead of retrying. */
 const FOLLOW_MAX_DEFECTS = 3;
+/** How long a remote task may go without peer contact while polls fail before reporting unreachable. */
+export const REMOTE_PEER_UNREACHABLE_THRESHOLD = Duration.minutes(2);
+/** How long without successful peer contact while failing before reporting unreachable; tests may override. */
+export const PeerUnreachableThreshold = Context.Reference<Duration.Duration>(
+  "t3/peer/RemoteDelegation/PeerUnreachableThreshold",
+  {
+    defaultValue: () => REMOTE_PEER_UNREACHABLE_THRESHOLD,
+  },
+);
 /** How a follower retries; tests step it by hand. */
 export const FollowRetrySchedule = Context.Reference<Schedule.Schedule<unknown>>(
   "t3/peer/RemoteDelegation/FollowRetrySchedule",
@@ -134,6 +144,13 @@ const RemoteCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   failure: OrchestratorMcpFailure,
   failureMode: "return",
 });
+
+/** Reachability and run status reported for an open remote task. */
+export interface RemoteTaskStatusSnapshot {
+  readonly runStatus: OrchestratorMcpThreadRun["status"] | null;
+  readonly peerStatus: "reachable" | "unreachable";
+  readonly lastSeenAt: string | undefined;
+}
 
 /**
  * `delegate_task` to a linked environment. The task's child is an ordinary
@@ -249,13 +266,14 @@ export class RemoteDelegation extends Context.Service<
       },
     ) => Effect.Effect<OrchestratorMcpTaskCancelResult, OrchestratorMcpFailure>;
     /**
-     * The status of the task's run there, or null when it cannot be read: an
-     * unreachable machine reads as no news rather than failing the read here.
+     * Checks the task's run and peer reachability there: updates `lastSeenAt` on
+     * contact and reports `peerStatus: "unreachable"` once contact has failed past
+     * the unreachability threshold.
      */
     readonly runStatus: (
       scope: ThreadScope,
       task: OrchestrationV2Subagent,
-    ) => Effect.Effect<OrchestratorMcpThreadRun["status"] | null>;
+    ) => Effect.Effect<RemoteTaskStatusSnapshot>;
     /**
      * Follows every open remote task until it ends, including after a
      * restart, and a finished one again when a Stop here owes it a stop there.
@@ -301,6 +319,8 @@ const isFinal = (error: OrchestratorMcpFailure) =>
 
 const make = Effect.gen(function* () {
   const followRetry = yield* FollowRetrySchedule;
+  const unreachableThreshold = yield* PeerUnreachableThreshold;
+  const thresholdMs = Duration.toMillis(unreachableThreshold);
   const forwarding = yield* PeerForwarding.PeerForwarding;
   const links = yield* PeerLinks.PeerLinks;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -322,6 +342,96 @@ const make = Effect.gen(function* () {
     threads
       .getThreadRecords(parentThreadId, ["subagents"], { subagentIds: [taskId] })
       .pipe(Effect.map(({ thread, subagents }) => ({ thread, task: subagents[0] })));
+
+  const parseIsoMs = (value: string | undefined): number | undefined => {
+    if (value === undefined) return undefined;
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  };
+
+  /** Epoch millis of the latest successful peer contact per open remote task. */
+  const lastContactAt = new Map<NodeId, number>();
+  /**
+   * Epoch millis of the first failed peer call since the last contact. The
+   * unreachable clock starts here: a follower's long wait can hold the last
+   * contact up to FOLLOW_WAIT_MS old while the peer was answering all along.
+   */
+  const failingSince = new Map<NodeId, number>();
+
+  /** Whether `task` has failed to reach its peer for the whole threshold, counting this failure. */
+  const failedPastThreshold = (task: OrchestrationV2Subagent, nowMs: number): boolean => {
+    const since = failingSince.get(task.id) ?? nowMs;
+    failingSince.set(task.id, since);
+    return nowMs - Math.max(since, effectiveLastSeenMs(task)) >= thresholdMs;
+  };
+
+  const effectiveLastSeenMs = (task: OrchestrationV2Subagent): number => {
+    const inMemory = lastContactAt.get(task.id);
+    const persisted = parseIsoMs(task.remoteChild?.lastSeenAt);
+    const fallback =
+      task.startedAt !== null
+        ? DateTime.toEpochMillis(task.startedAt)
+        : DateTime.toEpochMillis(task.updatedAt);
+    return Math.max(inMemory ?? -Infinity, persisted ?? -Infinity, fallback);
+  };
+
+  const persistPeerStatus = Effect.fn("RemoteDelegation.persistPeerStatus")(function* (
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    peerStatus: "reachable" | "unreachable",
+    lastSeenAt: string,
+  ) {
+    const attempt = yield* random.uuidV4();
+    yield* threads
+      .dispatch({
+        type: "delegated_task.remote.peer-status",
+        commandId: CommandId.make(`command:remote-task-peer-status:${taskId}:${attempt}`),
+        parentThreadId,
+        taskId,
+        peerStatus,
+        lastSeenAt,
+      })
+      .pipe(Effect.ignoreCause({ log: true }));
+  });
+
+  const recordPeerContact = Effect.fn("RemoteDelegation.recordPeerContact")(function* (
+    parentThreadId: ThreadId,
+    task: OrchestrationV2Subagent,
+    options: { readonly refreshStalePersisted?: boolean } = {},
+  ) {
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const nowIso = DateTime.formatIso(now);
+    lastContactAt.set(task.id, nowMs);
+    failingSince.delete(task.id);
+    const remote = task.remoteChild;
+    if (remote === undefined || task.result !== null) return nowIso;
+    const persistedMs = parseIsoMs(remote.lastSeenAt);
+    const shouldRefresh =
+      remote.peerStatus === "unreachable" ||
+      (options.refreshStalePersisted === true &&
+        (persistedMs === undefined || nowMs - persistedMs >= thresholdMs / 2));
+    if (shouldRefresh) {
+      yield* persistPeerStatus(parentThreadId, task.id, "reachable", nowIso);
+    }
+    return nowIso;
+  });
+
+  const markUnreachableIfStale = Effect.fn("RemoteDelegation.markUnreachableIfStale")(function* (
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+  ) {
+    const { task } = yield* readTask(parentThreadId, taskId).pipe(
+      Effect.orElseSucceed(() => ({ task: undefined })),
+    );
+    const remote = task?.remoteChild;
+    if (task === undefined || remote === undefined || task.result !== null) return;
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    if (!failedPastThreshold(task, nowMs)) return;
+    const lastSeenIso = DateTime.formatIso(DateTime.makeUnsafe(effectiveLastSeenMs(task)));
+    if (remote.peerStatus === "unreachable" && remote.lastSeenAt === lastSeenIso) return;
+    yield* persistPeerStatus(parentThreadId, taskId, "unreachable", lastSeenIso);
+  });
 
   /** The peer's project with this thread's repository, or the one the caller named. */
   const resolveRemoteProject = Effect.fn("RemoteDelegation.resolveRemoteProject")(function* (
@@ -1012,12 +1122,15 @@ const make = Effect.gen(function* () {
         });
       }
       const launched = sent.launched;
+      const contactedAt = yield* DateTime.now;
       const remoteChild: OrchestrationV2RemoteTaskChild = {
         environmentId: target.environmentId,
         threadId: launched.threadId,
         label,
         title,
         ...(launched.runId === null ? {} : { runId: launched.runId }),
+        lastSeenAt: DateTime.formatIso(contactedAt),
+        peerStatus: "reachable",
       };
       const recorded = yield* threads
         .dispatch({
@@ -1086,6 +1199,7 @@ const make = Effect.gen(function* () {
           message: "The delegated task was not recorded.",
         });
       }
+      lastContactAt.set(taskId, DateTime.toEpochMillis(contactedAt));
       yield* followOne(scope.thread.threadId, taskId).pipe(Effect.forkIn(followers));
       return { taskId };
     },
@@ -1117,6 +1231,7 @@ const make = Effect.gen(function* () {
       const commandId = CommandId.make(
         `command:remote-followup:${encodeURIComponent(parentThreadId)}:${encodeURIComponent(environmentId)}:${encodeURIComponent(sent.messageId)}`,
       );
+      const contactedAt = yield* DateTime.now;
       const recorded = yield* threads
         .dispatch({
           type: "delegated_task.remote.request",
@@ -1133,6 +1248,8 @@ const make = Effect.gen(function* () {
             threadId: sent.threadId,
             label: finished.remoteChild.label,
             runId: sent.runId,
+            lastSeenAt: DateTime.formatIso(contactedAt),
+            peerStatus: "reachable",
           },
           completionWake: "always",
         })
@@ -1170,6 +1287,7 @@ const make = Effect.gen(function* () {
               Effect.orElseSucceed(() => undefined),
             );
       if (taskId === undefined) return sent;
+      lastContactAt.set(taskId, DateTime.toEpochMillis(contactedAt));
       yield* followOne(parentThreadId, taskId).pipe(Effect.forkIn(followers));
       return { ...sent, taskId };
     },
@@ -1393,7 +1511,10 @@ const make = Effect.gen(function* () {
         Effect.catchTags({
           OrchestratorMcpFailure: Effect.fn("RemoteDelegation.followFailed")(function* (error) {
             const reason = yield* finalReason(parentThreadId, taskId, error);
-            if (reason === undefined) return yield* error;
+            if (reason === undefined) {
+              yield* markUnreachableIfStale(parentThreadId, taskId);
+              return yield* error;
+            }
             // Gone there, or no link to reach it by: nothing left to stop there.
             const { task } = yield* readTask(parentThreadId, taskId);
             const stopCount = task?.remoteChild?.stopCount;
@@ -1495,6 +1616,15 @@ const make = Effect.gen(function* () {
           Option.isSome(ended) ? Effect.succeed({ endedHere: true } as const) : Effect.never,
         ),
       );
+    // Coming back from failures, a quick read shows the peer answers again
+    // now, rather than when the next long wait returns.
+    if (remote.peerStatus === "unreachable" || failingSince.has(taskId)) {
+      yield* forwarding.readThread(scope, remote.environmentId, {
+        threadId: remote.threadId,
+        limit: 1,
+      });
+      yield* recordPeerContact(parentThreadId, task);
+    }
     const waited = yield* forwarding
       .waitForThread(scope, remote.environmentId, {
         threadId: remote.threadId,
@@ -1508,6 +1638,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.raceFirst(endedHere));
     // The next look reads the result and stops it there.
     if ("endedHere" in waited) return false;
+    yield* recordPeerContact(parentThreadId, task, { refreshStalePersisted: waited.timedOut });
     if (waited.timedOut) {
       if (waited.progressAtMs !== undefined) {
         yield* threads
@@ -1628,7 +1759,11 @@ const make = Effect.gen(function* () {
         }),
         Effect.ensuring(
           Effect.sync(() => {
-            if (following.get(taskId) === state) following.delete(taskId);
+            if (following.get(taskId) === state) {
+              following.delete(taskId);
+              lastContactAt.delete(taskId);
+              failingSince.delete(taskId);
+            }
           }),
         ),
       );
@@ -1707,19 +1842,41 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const runStatus = Effect.fn("RemoteDelegation.runStatus")(
-    function* (scope: ThreadScope, task: OrchestrationV2Subagent) {
-      const remote = task.remoteChild;
-      if (remote?.runId === undefined) return null;
-      const read = yield* forwarding.readThread(
-        followScope(scope.thread, remote),
-        remote.environmentId,
-        { threadId: remote.threadId, limit: 1, runLimit: 50 },
-      );
-      return read.recentRuns.find((run) => run.runId === remote.runId)?.status ?? null;
-    },
-    Effect.orElseSucceed(() => null),
-  );
+  const runStatus: RemoteDelegation["Service"]["runStatus"] = Effect.fn(
+    "RemoteDelegation.runStatus",
+  )(function* (scope: ThreadScope, task: OrchestrationV2Subagent) {
+    const remote = task.remoteChild;
+    if (remote === undefined) {
+      return { runStatus: null, peerStatus: "reachable" as const, lastSeenAt: undefined };
+    }
+    const readResult = yield* forwarding
+      .readThread(followScope(scope.thread, remote), remote.environmentId, {
+        threadId: remote.threadId,
+        limit: 1,
+        runLimit: 50,
+      })
+      .pipe(Effect.result);
+    if (Result.isSuccess(readResult)) {
+      const lastSeenAt = yield* recordPeerContact(task.threadId, task);
+      const status =
+        remote.runId === undefined
+          ? null
+          : (readResult.success.recentRuns.find((run) => run.runId === remote.runId)?.status ??
+            null);
+      return { runStatus: status, peerStatus: "reachable" as const, lastSeenAt };
+    }
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const lastSeenAt = DateTime.formatIso(DateTime.makeUnsafe(effectiveLastSeenMs(task)));
+    const unreachable = failedPastThreshold(task, nowMs) || remote.peerStatus === "unreachable";
+    if (unreachable && (remote.peerStatus !== "unreachable" || remote.lastSeenAt !== lastSeenAt)) {
+      yield* persistPeerStatus(task.threadId, task.id, "unreachable", lastSeenAt);
+    }
+    return {
+      runStatus: null,
+      peerStatus: unreachable ? ("unreachable" as const) : ("reachable" as const),
+      lastSeenAt,
+    };
+  });
 
   const start: RemoteDelegation["Service"]["start"] = () =>
     forkParked(

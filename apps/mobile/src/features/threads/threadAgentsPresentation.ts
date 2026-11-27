@@ -1,6 +1,7 @@
 import { resolveLinkedThreadOpen } from "@t3tools/client-runtime/linked-thread";
 import {
   formatSubagentDisplayTitle,
+  isRemoteTaskUnreachable,
   resolveSubagentMetadata,
   subagentCardDetail,
   subagentDetailPreview,
@@ -23,7 +24,7 @@ import { msg } from "gt-react-native";
 
 import { m, type MessageResolver } from "../../i18n/messages";
 
-export type SubagentRowTone = "working" | "completed" | "failed" | "stopped";
+export type SubagentRowTone = "working" | "unreachable" | "completed" | "failed" | "stopped";
 
 export interface SubagentRowPresentation {
   readonly title: string;
@@ -122,12 +123,15 @@ export function resolveSubagentRowPresentation(
   canOpenRemote = false,
   resolve: MessageResolver = m,
 ): SubagentRowPresentation {
-  const live = isActiveSubagentStatus(subagent.status);
+  const unreachable = isRemoteTaskUnreachable(subagent);
+  const live = !unreachable && isActiveSubagentStatus(subagent.status);
   return {
     title: rowTitle(subagent, resolve),
     detail: subagentDetailPreview(subagent),
-    statusLabel: rowStatusLabel(subagent.status, resolve),
-    tone: rowTone(subagent.status),
+    statusLabel: unreachable
+      ? resolve(msg("Unreachable", { $context: "subagent status" }))
+      : rowStatusLabel(subagent.status, resolve),
+    tone: unreachable ? "unreachable" : rowTone(subagent.status),
     live,
     canOpenThread:
       subagent.childThreadId !== null || (subagent.remoteChild !== undefined && canOpenRemote),
@@ -135,7 +139,7 @@ export function resolveSubagentRowPresentation(
   };
 }
 
-export type WorkflowRailTone = SubagentRowTone | "queued";
+export type WorkflowRailTone = Exclude<SubagentRowTone, "unreachable"> | "queued";
 
 export interface WorkflowRailItem {
   readonly key: string;

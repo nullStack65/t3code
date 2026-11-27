@@ -420,4 +420,68 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
       assert.equal(offered[0]?.threadId, parent.threadId);
     }),
   );
+
+  it.effect("records peer reachability and clears unreachable when the remote task completes", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* seedLiveParent("peer-status");
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.request",
+        commandId: CommandId.make("command:remote-delegate:peer-status"),
+        parentThreadId: parent.threadId,
+        parentRunId: parent.runId,
+        parentNodeId: parent.rootNodeId,
+        task: "Check remote peer status.",
+        driver: ProviderDriverKind.make("remote"),
+        modelSelection,
+        remoteChild: {
+          ...remoteChild,
+          lastSeenAt: "2026-11-25T10:00:00.000Z",
+          peerStatus: "reachable",
+        },
+        completionWake: "always",
+      });
+      const task = (yield* orchestrator.getThreadProjection(parent.threadId)).subagents[0]!;
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.peer-status",
+        commandId: CommandId.make("command:remote-peer-unreachable"),
+        parentThreadId: parent.threadId,
+        taskId: task.id,
+        peerStatus: "unreachable",
+        lastSeenAt: "2026-11-25T10:00:00.000Z",
+      });
+
+      const unreachable = yield* orchestrator.getThreadProjection(parent.threadId);
+      assert.equal(unreachable.subagents[0]?.remoteChild?.peerStatus, "unreachable");
+      assert.equal(unreachable.subagents[0]?.remoteChild?.lastSeenAt, "2026-11-25T10:00:00.000Z");
+      const unreachableItem = unreachable.turnItems.find(
+        (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
+      );
+      assert.equal(
+        unreachableItem?.type === "subagent" ? unreachableItem.remoteChild?.peerStatus : undefined,
+        "unreachable",
+      );
+
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.complete",
+        commandId: CommandId.make("command:remote-complete:peer-status"),
+        parentThreadId: parent.threadId,
+        taskId: task.id,
+        status: "completed",
+        result: "Done after reconnect.",
+        stoppedThere: "ran-out",
+      });
+
+      const settled = yield* orchestrator.getThreadProjection(parent.threadId);
+      assert.equal(settled.subagents[0]?.status, "completed");
+      assert.equal(settled.subagents[0]?.remoteChild?.peerStatus, "reachable");
+      const settledItem = settled.turnItems.find(
+        (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
+      );
+      assert.equal(
+        settledItem?.type === "subagent" ? settledItem.remoteChild?.peerStatus : undefined,
+        "reachable",
+      );
+    }),
+  );
 });
