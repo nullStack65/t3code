@@ -31,9 +31,10 @@ export function reloadForChunkLoadError(
   try {
     const storage = getStorage();
     const record = readRecord(storage.getItem(CHUNK_RELOAD_GUARD_KEY));
-    if (record?.build === build && Array.isArray(record.at)) {
+    const stamps = record !== undefined && record.build === build ? record.at : undefined;
+    if (Array.isArray(stamps)) {
       // A stamp from the future (the clock moved back) would hold the cap shut, so it does not count.
-      recent = record.at.filter((at) => at <= now && now - at < RELOAD_WINDOW_MS);
+      recent = stamps.filter((at) => at <= now && now - at < RELOAD_WINDOW_MS);
     }
     if (recent.length >= MAX_RELOADS) return false;
     storage.setItem(CHUNK_RELOAD_GUARD_KEY, JSON.stringify({ build, at: [...recent, now] }));
