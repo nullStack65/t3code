@@ -380,10 +380,18 @@ export const make = Effect.gen(function* () {
   const isDue = (key: string, entries: ReadonlyArray<LinkEntry>, nowMs: number): boolean => {
     if ((failedReads.get(key)?.retryAtMs ?? 0) > nowMs) return false;
     if (requested.has(key)) return true;
-    const active = entries.filter((entry) => isUnsettled(entry.thread));
-    if (active.length === 0) return false;
     const last = lastSyncedAt.get(key);
     const sinceLastMs = last === undefined ? Number.POSITIVE_INFINITY : nowMs - last;
+    const active = entries.filter((entry) => isUnsettled(entry.thread));
+    if (active.length === 0) {
+      // Settled threads still refresh open/unsynced pull requests on the slow cadence so PRs
+      // merged or closed after settlement reach a terminal snapshot instead of staying "open".
+      const hasOpenSettled = entries.some(
+        (entry) => entry.link.snapshot === null || entry.link.snapshot.state === "open",
+      );
+      if (!hasOpenSettled) return false;
+      return sinceLastMs >= SLOW_SYNC_INTERVAL_MS;
+    }
     if (missing.has(key)) return sinceLastMs >= SLOW_SYNC_INTERVAL_MS;
     if (retryStacks.has(key) || active.some((entry) => entry.link.snapshot === null)) return true;
     // Merged snapshots without mergedAt cannot settle threads; reread slowly until supplied.
@@ -873,7 +881,7 @@ export const make = Effect.gen(function* () {
             // Every reaction skips a running command, so only an ended one forks.
             return active ? Effect.void : inThreadOrder(event.threadId, reaction);
           }
-          // Settled threads are not swept, so read their links once to settle with fresh status.
+          // Settling reads the links at once rather than waiting for the slow settled cadence.
           case "thread.settled":
             return inThreadOrder(event.threadId, refreshUnmergedLinks(event.threadId));
           case "run.updated":

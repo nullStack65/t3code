@@ -18,6 +18,7 @@ import { runModelSignals, workerAlert } from "@t3tools/provider-core/server/suba
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Option from "effect/Option";
@@ -42,6 +43,11 @@ import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
+import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import {
+  normalizeThreadPullRequestKey,
+  threadPullRequestKeyOf,
+} from "../sourceControl/threadPullRequests.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -55,18 +61,21 @@ import {
   withCursor,
 } from "./eventSubscription.ts";
 import {
+  isOpenPrLaneEndedSignature,
   isStrandedQueueSignature,
   judgeThread,
   keepStrandedQueueReport,
   type StrandedQueue,
   threadEventAlert,
   launchingThreadId,
+  openPullRequestLinks,
   ThreadEventAlert,
   type ThreadEventKind,
   threadEventMessage,
   REJUDGE_TRIGGER,
   threadEventStillHolds,
   type ThreadEventTrigger,
+  withPullRequestStates,
   type ThreadFinding,
 } from "./ThreadEventAlerts.ts";
 import {
@@ -369,6 +378,32 @@ function setReported(
       };
 }
 
+function openPrLaneEndedSignature(alert: WatcherAlert): string | undefined {
+  if (alert.type !== "thread-event" || alert.kind !== "lane-ended") return undefined;
+  const prefix = `${alert.environmentId}:${alert.threadId}:${alert.kind}:`;
+  const suffix = `:${alert.occurredAt}`;
+  if (!alert.id.startsWith(prefix) || !alert.id.endsWith(suffix)) return undefined;
+  const signature = alert.id.slice(prefix.length, -suffix.length);
+  return isOpenPrLaneEndedSignature(signature) ? signature : undefined;
+}
+
+/**
+ * An open-PR lane-ended report is shared by every run with the same open pull requests, so one
+ * dropped undelivered must be forgotten, or the next run that ends that way stays silent too.
+ */
+function forgetDroppedOpenPrReport(reported: ModelAlertState["reported"], entry: Delivery) {
+  const signature = openPrLaneEndedSignature(entry.alert);
+  if (signature === undefined || entry.alert.type !== "thread-event") return reported;
+  const key = reportedKey(entry.alert.threadId, "lane-ended");
+  const known = (reported[key] ?? "").split("\n").filter(Boolean);
+  if (!known.includes(signature)) return reported;
+  return setReported(
+    reported,
+    key,
+    known.filter((candidate) => candidate !== signature),
+  );
+}
+
 function recordStrandedDelivery(
   reported: ModelAlertState["reported"],
   entry: Delivery,
@@ -632,7 +667,7 @@ export const afterDrop = (
     (candidate) => candidate.alert.id === entry.alert.id && !sameDelivery(candidate, entry),
   )
     ? state.reported
-    : recordStrandedDelivery(state.reported, entry, false),
+    : forgetDroppedOpenPrReport(recordStrandedDelivery(state.reported, entry, false), entry),
   outbox: state.outbox.flatMap((candidate) => {
     if (!sameDelivery(candidate, entry)) return [candidate];
     if (
@@ -1016,6 +1051,7 @@ export const make = Effect.gen(function* () {
   const subscriptionStore = yield* Effect.serviceOption(
     EventSubscriptionStore.EventSubscriptionStore,
   );
+  const pullRequestService = yield* Effect.serviceOption(PullRequestService.PullRequestService);
   let eventWakeSeq = 0;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const settings = yield* ServerSettings.ServerSettingsService;
@@ -1144,10 +1180,15 @@ export const make = Effect.gen(function* () {
       alert.type === "model-degraded"
         ? { providerInstanceId: alert.providerInstanceId, newerRunSupersedes: false }
         : undefined;
-    if (!(yield* stillCurrent(alert.threadId, alert.runId, about))) return null;
+    // An open-PR report covers later runs too, so a newer run does not supersede it; the
+    // re-judge below still drops it once the run is live, failed, or the open set changed.
+    const runId = openPrLaneEndedSignature(alert) === undefined ? alert.runId : null;
+    if (!(yield* stillCurrent(alert.threadId, runId, about))) return null;
     if (alert.type === "thread-event") {
-      const shell = yield* projections.getThreadShell(ThreadId.make(alert.threadId));
-      if (shell === null) return null;
+      const stored = yield* projections.getThreadShell(ThreadId.make(alert.threadId));
+      if (stored === null) return null;
+      const shell =
+        openPrLaneEndedSignature(alert) === undefined ? stored : yield* withHostPrStates(stored);
       const holds = threadEventStillHolds({
         hasStalenessWait: yield* hasActiveStalenessWait(shell, REJUDGE_TRIGGER[alert.kind]),
         alert,
@@ -1158,6 +1199,38 @@ export const make = Effect.gen(function* () {
       if (!holds) return null;
     }
     return alert;
+  });
+
+  /**
+   * The stored snapshot can predate a merge or close by a sync interval, so an open-PR alert
+   * rereads its open links from the host. A failed read keeps the stored state.
+   */
+  const withHostPrStates = Effect.fnUntraced(function* (shell: OrchestrationV2ThreadShell) {
+    if (Option.isNone(pullRequestService)) return shell;
+    const service = pullRequestService.value;
+    const read = yield* Effect.forEach(
+      openPullRequestLinks(shell),
+      (link) =>
+        service
+          .summary(
+            {
+              projectId: shell.projectId,
+              host: normalizeThreadPullRequestKey(link).host,
+              repository: link.repository,
+              number: link.number,
+            },
+            { bypassCache: true, recoverTransientFailure: false },
+          )
+          .pipe(
+            Effect.map((summary) => [[threadPullRequestKeyOf(link), summary.state] as const]),
+            Effect.catchCauseIf(
+              (cause) => !Cause.hasInterruptsOnly(cause),
+              () => Effect.succeed([]),
+            ),
+          ),
+      { concurrency: 4 },
+    );
+    return withPullRequestStates(shell, new Map(read.flat()));
   });
 
   /** What the shell does not carry: open delegated tasks elsewhere, and children's last activity. */
