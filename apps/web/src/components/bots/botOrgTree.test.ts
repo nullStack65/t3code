@@ -1,3 +1,4 @@
+import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { isFounderName, orderBotTree, visibleBotRows } from "./botOrgTree";
@@ -65,10 +66,16 @@ describe("founders are not bots", () => {
   });
 
   it("keeps a founder thread out of the Bots shelf", () => {
+    const lineage = {
+      parentThreadId: null,
+      rootThreadId: ThreadId.make("root"),
+      relationshipToParent: null,
+    };
+    const persona = (name: string) => ({ name, avatarId: "bolt", accent: "sky" }) as const;
     const { bots, rest } = splitStandingThreads([
-      { id: "k", standing: { name: "Kameron" } },
-      { id: "c", standing: { name: "CEO" } },
-      { id: "w", standing: null },
+      { id: "k", lineage, standing: persona("Kameron") },
+      { id: "c", lineage, standing: persona("CEO") },
+      { id: "w", lineage, standing: null },
     ]);
     expect(bots.map((t) => t.id)).toEqual(["c"]);
     expect(rest.map((t) => t.id)).toEqual(["k", "w"]);

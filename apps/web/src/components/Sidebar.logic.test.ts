@@ -1942,7 +1942,7 @@ describe("standing bots bound by a scheduled task", () => {
     audience: string,
   ) => ({
     id,
-    standing,
+    standing: standing && { ...standing, avatarId: "bolt" as const, accent: "sky" as const },
     lineage: { parentThreadId: null, rootThreadId: id, relationshipToParent: null },
     source: { inbox: { audience } },
   });

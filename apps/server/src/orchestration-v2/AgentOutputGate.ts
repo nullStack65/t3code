@@ -17,7 +17,7 @@ import {
 const OUTPUT_GATE_BOUNCE_MESSAGE_PREFIX = "message:output-gate-bounce:";
 
 export const OUTPUT_GATE_BOUNCE_PROMPT =
-  "Triggered by an agent/automation wake, not the user — plain assistant text stays folded and is not delivered. Route your response now: call `send_to_user` if it is for the founder, `t3_thread_send` or `ask_agent` if it is for another agent, or `silent_ack` if nothing needs delivery.";
+  "Triggered by an agent/automation wake, not the user. Plain assistant text stays folded and is not delivered. Route your response now: call `send_to_user` if it is for the founder, `t3_thread_send` or `ask_agent` if it is for another agent, or `silent_ack` if nothing needs delivery.";
 
 const EXPLICIT_CHANNEL_TOOL_IDS: ReadonlySet<string> = new Set([
   SEND_TO_USER_TOOL_NAME,
@@ -35,7 +35,7 @@ export function outputGateBounceMessageId(runId: RunId): MessageId {
   return MessageId.make(`${OUTPUT_GATE_BOUNCE_MESSAGE_PREFIX}${runId}`);
 }
 
-export function isOutputGateBounceMessageId(messageId: MessageId | null | undefined): boolean {
+function isOutputGateBounceMessageId(messageId: MessageId | null | undefined): boolean {
   return typeof messageId === "string" && messageId.startsWith(OUTPUT_GATE_BOUNCE_MESSAGE_PREFIX);
 }
 
@@ -55,7 +55,7 @@ export function isExplicitChannelToolName(toolName: string | null | undefined): 
  * Only async agent/automation-originated turns are eligible for the turn-end output gate.
  * Human user turns (`createdBy === "user"` with no agent/automation wake metadata) are never gated.
  */
-export function isAgentOriginatedWake(
+function isAgentOriginatedWake(
   message:
     | Pick<
         OrchestrationV2ConversationMessage,

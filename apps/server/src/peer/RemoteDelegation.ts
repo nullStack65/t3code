@@ -114,9 +114,9 @@ const FOLLOW_MAX_BACKOFF = Duration.minutes(5);
 /** A follower that hits this many defects in a row fails its task instead of retrying. */
 const FOLLOW_MAX_DEFECTS = 3;
 /** How long a remote task may go without peer contact while polls fail before reporting unreachable. */
-export const REMOTE_PEER_UNREACHABLE_THRESHOLD = Duration.minutes(2);
+const REMOTE_PEER_UNREACHABLE_THRESHOLD = Duration.minutes(2);
 /** How long without successful peer contact while failing before reporting unreachable; tests may override. */
-export const PeerUnreachableThreshold = Context.Reference<Duration.Duration>(
+const PeerUnreachableThreshold = Context.Reference<Duration.Duration>(
   "t3/peer/RemoteDelegation/PeerUnreachableThreshold",
   {
     defaultValue: () => REMOTE_PEER_UNREACHABLE_THRESHOLD,
