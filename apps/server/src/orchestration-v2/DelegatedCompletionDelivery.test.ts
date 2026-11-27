@@ -2156,6 +2156,284 @@ it.layer(layerContinuationWorkerTest)("interrupted completion wakes", (it) => {
 it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
   "subagent follow-ups",
   (it) => {
+    it.effect.each(["interrupted", "failed", "cancelled", "completed"] as const)(
+      "consults observedByRunId when the observing run ends as %s",
+      (outcome) =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+          const now = yield* DateTime.now;
+          const threadId = ThreadId.make(`thread:confirmed-ack-${outcome}`);
+          const projectId = ProjectId.make(`project:confirmed-ack-${outcome}`);
+          const parentRunId = RunId.make(`run:confirmed-ack-parent-${outcome}`);
+          const earlierRunId = RunId.make(`run:confirmed-ack-earlier-${outcome}`);
+          const rootNodeId = NodeId.make(`node:confirmed-ack-root-${outcome}`);
+          const taskId = NodeId.make(`node:confirmed-ack-task-${outcome}`);
+          const confirmedTaskId = NodeId.make(`node:confirmed-ack-earlier-task-${outcome}`);
+
+          yield* seedParentWithTerminalTask({
+            threadId,
+            projectId,
+            runId: parentRunId,
+            rootNodeId,
+            taskId,
+            deliveryState: "claimed",
+            deliveryTaskIds: [taskId],
+            completionWake: "always",
+            now,
+          });
+
+          // Seed a separate completed run and a task confirmed by it so we verify observedByRunId is selective.
+          const seeded = yield* orchestrator.getThreadProjection(threadId);
+          const seededTask = seeded.subagents.find((task) => task.id === taskId)!;
+          const seededParentRun = seeded.runs.find((run) => run.id === parentRunId)!;
+          yield* sink.write({
+            commandId: reconcileCommandId(`confirmed-ack-earlier-${outcome}`),
+            events: [
+              runEvent({
+                threadId,
+                runId: earlierRunId,
+                ordinal: 2,
+                status: "completed",
+                now,
+                providerThreadId: parentProviderThreadId(threadId),
+                delegatedCompletion: { disposition: "open", nextGeneration: 2, delivery: null },
+              }),
+              {
+                id: EventId.make(`event:confirmed-ack-earlier-task-${outcome}`),
+                type: "subagent.updated",
+                threadId,
+                runId: earlierRunId,
+                nodeId: confirmedTaskId,
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: {
+                  ...seededTask,
+                  id: confirmedTaskId,
+                  runId: earlierRunId,
+                  completionDelivery: { state: "acknowledged", observedByRunId: earlierRunId },
+                },
+              },
+            ],
+          });
+
+          yield* orchestrator.dispatch({
+            type: "delegated_task.completion-delivery.acknowledge",
+            commandId: CommandId.make(`command:confirmed-ack:${outcome}`),
+            parentThreadId: threadId,
+            taskId,
+            observedByRunId: parentRunId,
+          });
+          const afterAck = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            afterAck.subagents.find((task) => task.id === taskId)?.completionDelivery,
+            { state: "acknowledged", observedByRunId: parentRunId },
+          );
+          assert.isNull(
+            afterAck.runs.find((run) => run.id === parentRunId)?.delegatedCompletion?.delivery,
+          );
+
+          const afterSequence = yield* sink.latestSequence();
+          const latestParentRun = afterAck.runs.find((run) => run.id === parentRunId)!;
+          yield* sink.write({
+            commandId: CommandId.make(`command:confirmed-ack-end-${outcome}`),
+            events: [
+              {
+                id: EventId.make(`event:confirmed-ack-end-${outcome}`),
+                type: "run.updated",
+                threadId,
+                runId: parentRunId,
+                nodeId: rootNodeId,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: {
+                  ...seededParentRun,
+                  delegatedCompletion: latestParentRun.delegatedCompletion,
+                  status: outcome,
+                  completedAt: now,
+                },
+              },
+            ],
+          });
+
+          if (outcome === "completed") {
+            yield* orchestrator.recoverDelegatedTasks;
+            const afterComplete = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(
+              afterComplete.subagents.find((task) => task.id === taskId)?.completionDelivery,
+              { state: "acknowledged", observedByRunId: parentRunId },
+            );
+            assert.isNull(
+              afterComplete.runs.find((run) => run.id === parentRunId)?.delegatedCompletion
+                ?.delivery,
+            );
+            return;
+          }
+
+          yield* sink.stream({ afterSequence, eventType: "subagent.updated" }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.id === taskId &&
+                stored.event.payload.completionDelivery?.state === "claimed",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+
+          const reopened = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            reopened.subagents.find((task) => task.id === taskId)?.completionDelivery,
+            { state: "claimed", observedByRunId: null },
+          );
+          assert.deepEqual(
+            reopened.subagents.find((task) => task.id === confirmedTaskId)?.completionDelivery,
+            { state: "acknowledged", observedByRunId: earlierRunId },
+          );
+          const delivery = reopened.runs.find((run) => run.id === parentRunId)?.delegatedCompletion
+            ?.delivery;
+          assert.isNotNull(delivery);
+          assert.deepEqual(delivery?.taskIds, [taskId]);
+
+          let offer = yield* requests.take;
+          while (offer.threadId !== threadId) offer = yield* requests.take;
+          assert.deepEqual(offer.delegatedCompletion, {
+            parentRunId,
+            generation: delivery!.generation,
+            messageId: delivery!.messageId,
+          });
+          // Dispose so later tests in this shared layer do not receive re-offers during recovery.
+          yield* orchestrator.dispatch({
+            type: "delegated_task.completion-delivery.dispose",
+            commandId: CommandId.make(`command:confirmed-ack-cleanup:${outcome}`),
+            parentThreadId: threadId,
+            taskId,
+          });
+        }),
+    );
+
+    it.effect(
+      "rejects confirming acknowledgement for an already-cut observer and reopens cut observations during recovery",
+      () =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+          const now = yield* DateTime.now;
+
+          // Case 1: a late acknowledge naming an already-cut observer must claim delivery rather than confirm.
+          const lateThreadId = ThreadId.make("thread:cut-observer-late-ack");
+          const lateRunId = RunId.make("run:cut-observer-late-ack");
+          const lateRootNodeId = NodeId.make("node:cut-observer-late-ack-root");
+          const pendingTaskId = NodeId.make("node:cut-observer-pending");
+          yield* seedParentWithTerminalTask({
+            threadId: lateThreadId,
+            projectId: ProjectId.make("project:cut-observer-late-ack"),
+            runId: lateRunId,
+            rootNodeId: lateRootNodeId,
+            taskId: pendingTaskId,
+            deliveryState: "pending",
+            completionWake: "settled_only",
+            now,
+          });
+          const lateSeeded = yield* orchestrator.getThreadProjection(lateThreadId);
+          const lateCutRun = lateSeeded.runs.find((run) => run.id === lateRunId)!;
+          yield* sink.write({
+            commandId: reconcileCommandId("cut-observer-late-ack"),
+            events: [
+              {
+                id: EventId.make("event:cut-observer-late-ack-run"),
+                type: "run.updated",
+                threadId: lateThreadId,
+                runId: lateRunId,
+                nodeId: lateRootNodeId,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: { ...lateCutRun, status: "cancelled", completedAt: now },
+              },
+            ],
+          });
+
+          yield* orchestrator.dispatch({
+            type: "delegated_task.completion-delivery.acknowledge",
+            commandId: CommandId.make("command:cut-observer-late-ack"),
+            parentThreadId: lateThreadId,
+            taskId: pendingTaskId,
+            observedByRunId: lateRunId,
+          });
+          const afterLateAck = yield* orchestrator.getThreadProjection(lateThreadId);
+          assert.deepEqual(
+            afterLateAck.subagents.find((task) => task.id === pendingTaskId)?.completionDelivery,
+            { state: "claimed", observedByRunId: null },
+          );
+          let lateOffer = yield* requests.take;
+          while (lateOffer.threadId !== lateThreadId) lateOffer = yield* requests.take;
+          assert.equal(lateOffer.delegatedCompletion?.parentRunId, lateRunId);
+          yield* orchestrator.dispatch({
+            type: "delegated_task.completion-delivery.dispose",
+            commandId: CommandId.make("command:cut-observer-late-ack-cleanup"),
+            parentThreadId: lateThreadId,
+            taskId: pendingTaskId,
+          });
+
+          // Case 2: startup recovery consults observedByRunId on reconcile-cut runs (skipped by live handleRunUpdate).
+          const recoveryThreadId = ThreadId.make("thread:cut-observer-recovery");
+          const recoveryRunId = RunId.make("run:cut-observer-recovery");
+          const recoveryRootNodeId = NodeId.make("node:cut-observer-recovery-root");
+          const recoveredTaskId = NodeId.make("node:cut-observer-recovered");
+          yield* seedParentWithTerminalTask({
+            threadId: recoveryThreadId,
+            projectId: ProjectId.make("project:cut-observer-recovery"),
+            runId: recoveryRunId,
+            rootNodeId: recoveryRootNodeId,
+            taskId: recoveredTaskId,
+            deliveryState: "acknowledged",
+            completionWake: "settled_only",
+            now,
+          });
+          const recoverySeeded = yield* orchestrator.getThreadProjection(recoveryThreadId);
+          const recoveryCutRun = recoverySeeded.runs.find((run) => run.id === recoveryRunId)!;
+          yield* sink.write({
+            commandId: reconcileCommandId("cut-observer-recovery"),
+            events: [
+              {
+                id: EventId.make("event:cut-observer-recovery-run"),
+                type: "run.updated",
+                threadId: recoveryThreadId,
+                runId: recoveryRunId,
+                nodeId: recoveryRootNodeId,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: { ...recoveryCutRun, status: "cancelled", completedAt: now },
+              },
+            ],
+          });
+
+          yield* orchestrator.recoverDelegatedTasks;
+          const afterRecovery = yield* orchestrator.getThreadProjection(recoveryThreadId);
+          assert.deepEqual(
+            afterRecovery.subagents.find((task) => task.id === recoveredTaskId)?.completionDelivery,
+            { state: "claimed", observedByRunId: null },
+          );
+          const delivery = afterRecovery.runs.find((run) => run.id === recoveryRunId)
+            ?.delegatedCompletion?.delivery;
+          assert.deepEqual(delivery?.taskIds, [recoveredTaskId]);
+
+          let recoveredOffer = yield* requests.take;
+          while (recoveredOffer.threadId !== recoveryThreadId)
+            recoveredOffer = yield* requests.take;
+          assert.equal(recoveredOffer.delegatedCompletion?.parentRunId, recoveryRunId);
+          yield* orchestrator.dispatch({
+            type: "delegated_task.completion-delivery.dispose",
+            commandId: CommandId.make("command:cut-observer-recovery-cleanup"),
+            parentThreadId: recoveryThreadId,
+            taskId: recoveredTaskId,
+          });
+        }),
+    );
+
     it.effect("a late unobserved read wakes a pending result without restarting", () =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;

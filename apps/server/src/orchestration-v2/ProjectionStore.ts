@@ -427,6 +427,7 @@ export interface ProjectionRecordFilter {
   readonly openSubagentsOnly?: true;
   readonly subagentRunIds?: ReadonlyArray<RunId>;
   readonly subagentChildThreadIds?: ReadonlyArray<ThreadId>;
+  readonly subagentObservedByRunIds?: ReadonlyArray<RunId>;
   readonly nodeIds?: ReadonlyArray<NodeId>;
   readonly turnItemRequestIds?: ReadonlyArray<RuntimeRequestId>;
   readonly turnItemTypes?: ReadonlyArray<OrchestrationV2TurnItem["type"]>;
@@ -4566,6 +4567,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               filter?.subagentIds,
               filter?.subagentRunIds,
               filter?.subagentChildThreadIds,
+              filter?.subagentObservedByRunIds,
             ))
             ? Effect.succeed([])
             : window === undefined
@@ -4577,6 +4579,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ${filter?.subagentIds === undefined ? sql`` : sql`AND subagent_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentIds)}))`}
               ${filter?.subagentChildThreadIds === undefined ? sql`` : sql`AND child_thread_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentChildThreadIds)}))`}
               ${filter?.subagentRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${encodeIdList(filter.subagentRunIds)}))`}
+              ${filter?.subagentObservedByRunIds === undefined ? sql`` : sql`AND subagent.completion_delivery_state = 'acknowledged' AND json_extract(subagent.payload_json, '$.completionDelivery.observedByRunId') IN (SELECT value FROM json_each(${encodeIdList(filter.subagentObservedByRunIds)}))`}
               ${
                 filter?.omitSettledSubagents === true
                   ? sql`AND subagent.rowid IN (${unsettledSubagentRowids(threadId)})`
@@ -5400,6 +5403,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE CASE WHEN json_valid(payload_json)
                   THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'
                   ELSE 0 END
+                UNION
+                SELECT subagent.thread_id
+                FROM orchestration_v2_projection_subagents AS subagent
+                JOIN orchestration_v2_projection_runs AS observer
+                  ON observer.thread_id = subagent.thread_id
+                  AND observer.run_id = json_extract(subagent.payload_json, '$.completionDelivery.observedByRunId')
+                WHERE subagent.origin = 'app_owned'
+                  AND subagent.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+                  AND subagent.completion_delivery_state = 'acknowledged'
+                  AND observer.status IN ('interrupted', 'failed', 'cancelled', 'rolled_back')
               `;
             case "subagent-results":
               return sql`
