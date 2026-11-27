@@ -87,21 +87,27 @@ if (changedIndex !== -1) {
     : "";
   const specFile = new Map(specs.map((spec) => [spec.id, `qa/${spec.file}`]));
 
-  for (const feature of FEATURES) {
-    const touched = code.filter((file) =>
-      feature.code.some((entry) => (entry.endsWith("/") ? file.startsWith(entry) : file === entry)),
-    );
-    if (touched.length === 0) continue;
+  const updated = (feature: (typeof FEATURES)[number]) => {
     const range = rangeOf(feature.id);
     const entryEdited =
       range !== undefined && hunks.some(([from, to]) => from <= range[1] && to >= range[0]);
     const specEdited = specFile.has(feature.id) && changed.includes(specFile.get(feature.id)!);
-    const statusEdited = statusDiff.includes(`"${feature.id}"`);
-    if (!entryEdited && !specEdited && !statusEdited) {
-      fail(
-        `${feature.id}: this change touches ${touched.slice(0, 3).join(", ")}${touched.length > 3 ? ", …" : ""} but not its map entry, spec or status. Update the entry in qa/features.ts (or re-verify it with qa/verify.ts) in this PR.`,
-      );
-    }
+    return entryEdited || specEdited || statusDiff.includes(`"${feature.id}"`);
+  };
+  // Code often serves several features (a whole directory), so each changed file needs one of its
+  // features updated, not all of them.
+  for (const file of code) {
+    const owners = FEATURES.filter((feature) =>
+      feature.code.some((entry) => (entry.endsWith("/") ? file.startsWith(entry) : file === entry)),
+    );
+    if (owners.length === 0 || owners.some(updated)) continue;
+    const names = owners
+      .slice(0, 4)
+      .map((feature) => feature.id)
+      .join(", ");
+    fail(
+      `${file} belongs to ${names}${owners.length > 4 ? ", …" : ""}, and none of their map entries, specs or statuses changed. Update the entry that describes this change in qa/features.ts, or re-verify it with qa/verify.ts, in this PR.`,
+    );
   }
 }
 
