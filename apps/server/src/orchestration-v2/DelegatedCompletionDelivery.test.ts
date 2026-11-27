@@ -55,6 +55,8 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventSubscriptionStore from "../persistence/EventSubscriptions.ts";
+import { prepareSubscribe, threadSelectorKey } from "./eventSubscription.ts";
 import * as ModelAlertReactor from "./ModelAlertReactor.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -1429,6 +1431,7 @@ const hereEnvironmentId = EnvironmentId.make("environment:model-alert-here");
 const makeModelAlertReactor = (input: {
   readonly watcher: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
   readonly failSends?: number;
+  readonly subscriptions?: EventSubscriptionStore.EventSubscriptionStore["Service"];
 }) =>
   Effect.gen(function* () {
     const sends = yield* Ref.make<ReadonlyArray<Record<string, unknown>>>([]);
@@ -1469,6 +1472,9 @@ const makeModelAlertReactor = (input: {
             HttpClient.make(() => Effect.die("no webhook is set")),
           ),
           layerServerConfig,
+          input.subscriptions === undefined
+            ? Layer.empty
+            : Layer.succeed(EventSubscriptionStore.EventSubscriptionStore, input.subscriptions),
         ).pipe(Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer))),
       ),
     );
@@ -6169,6 +6175,143 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       assert.include(toLead[0]?.text, `/${launchedByLead})`);
       assert.deepEqual(yield* threadEventsIn(archivedLauncher), []);
     }),
+  );
+
+  // CLO-1302: audit thread c964fe48 was woken about ten times by child 98fbc01a ending after it
+  // had settled. A settled launcher is detached; an active one hears each condition once.
+  it.effect(
+    "lane-ended never wakes a settled launcher and wakes an active one once per condition",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const projectId = ProjectId.make("project:lane-storm");
+        yield* ProjectService.ProjectService.pipe(
+          Effect.flatMap((projects) =>
+            projects.create({
+              commandId: CommandId.make("command:lane-storm-project"),
+              projectId,
+              title: "Lane storm",
+              workspaceRoot: "/workspace/lane-storm",
+            }),
+          ),
+        );
+        const createThread = (name: string, launcher?: ThreadId) =>
+          orchestrator
+            .dispatch({
+              type: "thread.create",
+              createdBy: "agent",
+              creationSource: "mcp",
+              ...(launcher === undefined ? {} : { inboxOrigin: { kind: "agent", id: launcher } }),
+              commandId: CommandId.make(`command:lane-storm:${name}`),
+              threadId: ThreadId.make(`thread:${name}`),
+              projectId,
+              title: name,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            })
+            .pipe(Effect.as(ThreadId.make(`thread:${name}`)));
+        const watcher = yield* createThread("lane-storm-watcher");
+        const settledLauncher = yield* createThread("c964fe48");
+        const settledChild = yield* createThread("98fbc01a", settledLauncher);
+        const activeLauncher = yield* createThread("active-launcher");
+        const activeChild = yield* createThread("active-child", activeLauncher);
+        yield* orchestrator.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("command:lane-storm:settle"),
+          threadId: settledLauncher,
+        });
+        const store = yield* EventSubscriptionStore.EventSubscriptionStore.pipe(
+          Effect.provide(
+            EventSubscriptionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        );
+        for (const [subscriber, child] of [
+          [settledLauncher, settledChild],
+          [activeLauncher, activeChild],
+        ] as const) {
+          const prepared = prepareSubscribe({
+            id: `evt_${subscriber}`,
+            subscriberThreadId: subscriber,
+            selector: { entity: "thread", by: "thread_id", threadId: child },
+            events: [{ name: "lane-ended" }],
+            createdAt: "2026-11-27T00:00:00.000Z",
+          });
+          assert.isTrue(prepared.ok);
+          if (prepared.ok) yield* store.put(prepared.subscription);
+        }
+        const { reactor } = yield* makeModelAlertReactor({
+          watcher: { environmentId: hereEnvironmentId, threadId: watcher },
+          subscriptions: store,
+        });
+        // Ten runs of each child end the same way, the storm the audit thread saw.
+        for (let ordinal = 1; ordinal <= 10; ordinal++) {
+          for (const child of [settledChild, activeChild]) {
+            const failed = runEvent({
+              threadId: child,
+              runId: RunId.make(`run:${child}:${ordinal}`),
+              ordinal,
+              status: "failed",
+              now,
+            });
+            yield* eventSink.write({
+              commandId: CommandId.make(`command:${child}:${ordinal}`),
+              events: [failed],
+            });
+            yield* reactor.handle(failed);
+          }
+          yield* reactor.flush;
+        }
+        yield* TestClock.adjust("11 minutes");
+        yield* reactor.flush;
+
+        const settled = yield* orchestrator.getThreadRecords(settledLauncher, ["messages", "runs"]);
+        assert.deepEqual(settled.messages, []);
+        assert.deepEqual(settled.runs, []);
+        assert.deepEqual(yield* store.listForSelector(threadSelectorKey(settledChild)), []);
+
+        const active = yield* orchestrator.getThreadProjection(activeLauncher);
+        const wakes = active.messages.filter((message) =>
+          message.text.startsWith("Update on thread"),
+        );
+        assert.equal(wakes.length, 1);
+        assert.include(wakes[0]?.text, "lane-ended");
+
+        // The Home wake-loop detector suppresses wakes for a thread; its next alert is a digest.
+        const suppress = prepareSubscribe({
+          id: "evt_wake_loop",
+          subscriberThreadId: watcher,
+          selector: { entity: "thread", by: "thread_id", threadId: activeLauncher },
+          events: [{ name: "wake-suppressed" }],
+          createdAt: "2026-11-27T00:00:00.000Z",
+        });
+        assert.isTrue(suppress.ok);
+        if (suppress.ok) yield* store.put(suppress.subscription);
+        const runsBefore = (yield* orchestrator.getThreadRecords(activeLauncher, ["runs"])).runs
+          .length;
+        yield* TestClock.adjust("2 hours");
+        const disk = runEvent({
+          threadId: activeChild,
+          runId: RunId.make(`run:${activeChild}:disk`),
+          ordinal: 11,
+          status: "interrupted",
+          now: yield* DateTime.now,
+        });
+        yield* eventSink.write({
+          commandId: CommandId.make("command:lane-storm:disk"),
+          events: [disk],
+        });
+        yield* reactor.handle(disk);
+        yield* reactor.flush;
+        const after = yield* orchestrator.getThreadRecords(activeLauncher, ["messages", "runs"]);
+        const added = after.runs.slice(runsBefore);
+        assert.equal(added.length, 1);
+        assert.deepStrictEqual(added[0]?.delivery, { class: "digest", category: "alert" });
+      }),
   );
 
   it.effect.each(["usage limit", "self"] as const)(

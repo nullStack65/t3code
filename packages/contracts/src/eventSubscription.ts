@@ -38,9 +38,18 @@ export const PullRequestEventFilter = Schema.Union([
 ]);
 export type PullRequestEventFilter = typeof PullRequestEventFilter.Type;
 
-/** Names match the thread-alert kinds the server already judges. */
+/**
+ * Names match the thread-alert kinds the server already judges. `wake-suppressed` matches no
+ * finding: its presence turns every server wake for the watched thread into a digest.
+ */
 export const ThreadEventFilter = Schema.Struct({
-  name: Schema.Literals(["lane-ended", "promise-without-wake", "stuck", "needs-person"]),
+  name: Schema.Literals([
+    "lane-ended",
+    "promise-without-wake",
+    "stuck",
+    "needs-person",
+    "wake-suppressed",
+  ]),
 });
 export type ThreadEventFilter = typeof ThreadEventFilter.Type;
 

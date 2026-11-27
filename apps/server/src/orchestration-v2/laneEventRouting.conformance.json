@@ -1,0 +1,126 @@
+{
+  "description": "Conformance contract for lane-event routing and standing-manager mailbox rules (CLO-1302, CLO-1303). scripts/lane_event_routing.py and the t3code port must both produce these decisions.",
+  "cases": [
+    {
+      "name": "replay-c964fe48-98fbc01a-settled-launcher-zero-wakes",
+      "comment": "Audit thread c964fe48 settled; child 98fbc01a (declarative factory RFC) ended repeatedly across 10 runs with no open PR and no failure, plus a later provider-limit failure repeated with different numbers. The launcher must never be woken.",
+      "world": {"threads": {"c964fe48": {"state": "settled"}, "98fbc01a": {"state": "idle"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "98fbc01a", "owner": "c964fe48", "kind": "lane-ended", "condition": {"outcome": "completed"}},
+        {"child_thread_id": "98fbc01a", "owner": "c964fe48", "kind": "lane-ended", "condition": {"outcome": "completed"}},
+        {"child_thread_id": "98fbc01a", "owner": "c964fe48", "kind": "lane-ended", "condition": {"outcome": "completed"}},
+        {"child_thread_id": "98fbc01a", "owner": "c964fe48", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "Antigravity usage limit reached, resets at 2026-12-03T07:01:49Z"}},
+        {"child_thread_id": "98fbc01a", "owner": "c964fe48", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "Antigravity usage limit reached, resets at 2026-12-03T07:01:50Z"}},
+        {"child_thread_id": "98fbc01a", "owner": "c964fe48", "kind": "lane-ended", "condition": {"outcome": "completed"}}
+      ],
+      "expect_actions": ["digest", "drop", "drop", "digest", "drop", "drop"],
+      "expect_wakes": 0
+    },
+    {
+      "name": "archived-or-missing-launcher-is-detached",
+      "world": {"threads": {"child": {"state": "idle"}, "gone": {"state": "archived"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "child", "owner": "gone", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "boom 3"}},
+        {"child_thread_id": "child", "owner": "never-existed", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "boom 4"}}
+      ],
+      "expect_actions": ["digest", "drop"],
+      "expect_wakes": 0
+    },
+    {
+      "name": "active-owner-one-alert-per-condition",
+      "comment": "The owner is active and the child ended with an open PR: wake once, then drop identical repeats; a changed open-PR set is a new condition.",
+      "world": {"threads": {"owner": {"state": "idle"}, "child": {"state": "idle"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "completed", "open_prs": ["org/repo#1"]}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "completed", "open_prs": ["org/repo#1"]}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "completed", "open_prs": ["org/repo#1", "org/repo#2"]}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "completed", "open_prs": ["org/repo#2", "org/repo#1"]}}
+      ],
+      "expect_actions": ["wake", "drop", "wake", "drop"],
+      "expect_wakes": 2
+    },
+    {
+      "name": "same-failure-class-different-numbers-dedupes",
+      "world": {"threads": {"owner": {"state": "idle"}, "child": {"state": "idle"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "HTTP 500 for request 1234"}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "HTTP 500 for request 9876"}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "disk full"}}
+      ],
+      "expect_actions": ["wake", "drop", "wake"],
+      "expect_wakes": 2
+    },
+    {
+      "name": "target-running-drops",
+      "world": {"threads": {"owner": {"state": "idle"}, "child": {"state": "running"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "child", "owner": "owner", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "x"}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "pr-checks-failed", "superseded": true, "condition": {"outcome": "failed"}}
+      ],
+      "expect_actions": ["drop", "drop"],
+      "expect_wakes": 0
+    },
+    {
+      "name": "pr-events-routing",
+      "comment": "Passing checks and merges go to the merge-queue code handler; only failures and review requests wake a model.",
+      "world": {"threads": {"owner": {"state": "idle"}, "child": {"state": "idle"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "child", "owner": "owner", "kind": "pr-checks-passed", "condition": {"outcome": "passed", "open_prs": ["org/repo#9"]}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "pr-merged", "condition": {"outcome": "merged", "open_prs": []}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "pr-checks-failed", "condition": {"outcome": "failed", "error": "lint failed", "open_prs": ["org/repo#9"]}},
+        {"child_thread_id": "child", "owner": "owner", "kind": "review-requested", "condition": {"outcome": "review", "open_prs": ["org/repo#9"]}}
+      ],
+      "expect_actions": ["code-handler", "code-handler", "wake", "wake"],
+      "expect_wakes": 2
+    },
+    {
+      "name": "requester-is-used-when-no-owner",
+      "world": {"threads": {"req": {"state": "settled"}, "child": {"state": "idle"}}, "delivered": []},
+      "events": [
+        {"child_thread_id": "child", "requester": "req", "kind": "lane-ended", "condition": {"outcome": "failed", "error": "z"}}
+      ],
+      "expect_actions": ["digest"],
+      "expect_wakes": 0
+    },
+    {
+      "name": "mailbox-founder-first-and-batched",
+      "comment": "Seven queued messages become one turn: founder first, then CEO, then the rest in arrival order. Digest items start no turn.",
+      "queued": [
+        {"id": "m1", "at": "2026-11-27T10:00:00Z", "sender_role": "agent"},
+        {"id": "m2", "at": "2026-11-27T10:01:00Z", "sender_role": "ceo"},
+        {"id": "m3", "at": "2026-11-27T10:02:00Z", "sender_role": "agent"},
+        {"id": "m4", "at": "2026-11-27T10:03:00Z", "sender_role": "founder"},
+        {"id": "d1", "at": "2026-11-27T10:04:00Z", "sender_role": "agent", "kind": "digest"}
+      ],
+      "current_priority": null,
+      "expect": {"turns": 1, "batch": ["m4", "m2", "m1", "m3"], "digest": ["d1"], "preempt": false}
+    },
+    {
+      "name": "mailbox-digest-only-starts-no-turn",
+      "queued": [
+        {"id": "d1", "at": "2026-11-27T10:00:00Z", "sender_role": "agent", "kind": "digest"},
+        {"id": "d2", "at": "2026-11-27T10:01:00Z", "sender_role": "agent", "kind": "digest"}
+      ],
+      "current_priority": null,
+      "expect": {"turns": 0, "batch": [], "digest": ["d1", "d2"], "preempt": false}
+    },
+    {
+      "name": "mailbox-founder-preempts-agent-turn",
+      "queued": [{"id": "f1", "at": "2026-11-27T10:00:00Z", "sender_role": "founder"}],
+      "current_priority": 2,
+      "expect": {"turns": 1, "batch": ["f1"], "digest": [], "preempt": true}
+    },
+    {
+      "name": "mailbox-ceo-preempts-agent-turn-not-founder-turn",
+      "queued": [{"id": "c1", "at": "2026-11-27T10:00:00Z", "sender_role": "ceo"}],
+      "current_priority": 0,
+      "expect": {"turns": 1, "batch": ["c1"], "digest": [], "preempt": false}
+    },
+    {
+      "name": "mailbox-agent-does-not-preempt",
+      "queued": [{"id": "a1", "at": "2026-11-27T10:00:00Z", "sender_role": "agent"}],
+      "current_priority": 2,
+      "expect": {"turns": 1, "batch": ["a1"], "digest": [], "preempt": false}
+    }
+  ]
+}

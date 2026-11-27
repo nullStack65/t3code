@@ -21,7 +21,13 @@ import type { PullRequestWatchChange } from "./pullRequestWatch.ts";
 /** Dropped before a comment or review can wake. Match ignores case and a trailing `[bot]`. */
 export const DEFAULT_PULL_REQUEST_IGNORE_AUTHORS = ["coderabbitai"] as const;
 
-const THREAD_EVENT_NAMES = new Set(["lane-ended", "promise-without-wake", "stuck", "needs-person"]);
+const THREAD_EVENT_NAMES = new Set([
+  "lane-ended",
+  "promise-without-wake",
+  "stuck",
+  "needs-person",
+  "wake-suppressed",
+]);
 
 const HOUR_MS = 3_600_000;
 const CLOCK_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;

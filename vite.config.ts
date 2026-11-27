@@ -183,6 +183,8 @@ export default defineConfig({
       "infra/task-cache/vendor/**",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
       ".macroscope/ignore.md",
+      // Closura: byte-pinned copy of the Home lane-event contract; formatting breaks its sha test.
+      "apps/server/src/orchestration-v2/laneEventRouting.conformance.json",
       ".alchemy",
       "dist",
       "dist-electron",
