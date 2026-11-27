@@ -1520,18 +1520,20 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       events: [questionItem, question, asyncQuestion, answered, approval],
     });
 
+    // The child's card is refused, so even a blocking wait cannot see it: the wake carries it.
     yield* reactor.handle(question);
-    assert.isFalse(
-      (yield* projections.getThreadProjection(parentThreadId)).messages.some(
+    assert.equal(
+      (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
-      ),
+      ).length,
+      1,
     );
     yield* reactor.handle(asyncQuestion);
     assert.equal(
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      1,
+      2,
     );
     yield* reactor.handle(asyncQuestion);
     yield* reactor.handle(answered);
@@ -1550,24 +1552,26 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     const wakes = (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
       (message) => message.notification !== undefined,
     );
-    assert.include(wakes[0]?.text, "asked a question and is still working");
+    assert.include(wakes[0]?.text, "whose human-input card was refused");
+    assert.include(wakes[1]?.text, "asked a question and is still working");
+    const notification = {
+      source: {
+        kind: "delegated_task",
+        taskIds: [task.id],
+        childThreadId: task.childThreadId!,
+      },
+      outcome: "updated",
+      summary: 'Delegated task "Research the sources" has a question',
+    } as const;
+    // question, asyncQuestion and the pending `answered` card each wake once; the resolved
+    // `answered` replay and the approval do not.
     assert.deepEqual(
       wakes.map((message) => message.notification),
-      [
-        {
-          source: {
-            kind: "delegated_task",
-            taskIds: [task.id],
-            childThreadId: task.childThreadId!,
-          },
-          outcome: "updated",
-          summary: 'Delegated task "Research the sources" has a question',
-        },
-      ],
+      [notification, notification, notification],
     );
 
     const wakeRun = (yield* projections.getThreadRecords(parentThreadId, ["runs"])).runs.find(
-      (run) => run.userMessageId === wakes[0]!.id,
+      (run) => run.userMessageId === wakes[1]!.id,
     )!;
     assert.equal(wakeRun.status, "queued");
     const resolved = {
@@ -1604,7 +1608,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     }
     assert.equal(
       (yield* projections.getThreadRecords(parentThreadId, ["messages"])).messages.length,
-      2,
+      4,
     );
     yield* eventSink.write({ events: [parentCompleted] });
     for (const state of ["disposed", "pending"] as const) {
@@ -1623,7 +1627,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       if (state === "disposed") {
         assert.equal(
           (yield* projections.getThreadRecords(parentThreadId, ["messages"])).messages.length,
-          2,
+          4,
         );
       }
     }
@@ -1631,16 +1635,19 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     const caughtUp = (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
       (message) => message.notification !== undefined,
     );
-    assert.equal(caughtUp.length, 2);
+    assert.equal(caughtUp.length, 3);
+    const questionWake = caughtUp.find((message) =>
+      message.text.includes(`requestId ${question.payload.id}.`),
+    );
     assert.equal(
       caughtUp.filter((message) => message.text.includes(`requestId ${question.payload.id}.`))
         .length,
       1,
     );
-    assert.include(caughtUp[1]?.text, "is blocked on a question");
-    assert.include(caughtUp[1]?.text, "Which source should I prioritize?");
-    assert.include(caughtUp[1]?.text, "t3_thread_send");
-    assert.isFalse(caughtUp[1]?.text.includes("action respond") ?? true);
+    assert.include(questionWake?.text, "is blocked on a question");
+    assert.include(questionWake?.text, "Which source should I prioritize?");
+    assert.include(questionWake?.text, "t3_thread_send");
+    assert.isFalse(questionWake?.text.includes("action respond") ?? true);
     const childRequestsAfterRefusal = (yield* projections.getThreadRecords(task.childThreadId!, [
       "runtimeRequests",
     ])).runtimeRequests.filter((entry) => entry.kind === "user_input");
@@ -1649,15 +1656,17 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       childRequestsAfterRefusal.find((entry) => entry.id === question.payload.id)?.decision,
       "cancel",
     );
-    assert.isFalse(
-      caughtUp.some((message) => message.text.includes(`requestId ${answered.payload.id}.`)),
+    assert.equal(
+      caughtUp.filter((message) => message.text.includes(`requestId ${answered.payload.id}.`))
+        .length,
+      1,
     );
     yield* reactor.handle(question);
     assert.equal(
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      2,
+      3,
     );
     const terminalQuestion = requestEvent(
       "event:terminal-question",
@@ -1670,7 +1679,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      3,
+      4,
     );
     yield* eventSink.write({
       events: [
@@ -1702,7 +1711,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      4,
+      5,
     );
     const waitDelivered = requestEvent("event:wait-delivered", "request:wait-delivered", "live");
     const waitDeliveredParentCompleted = {

@@ -530,6 +530,13 @@ it.effect("rejects delegated questions at MCP execution before forwarding", () =
         yield* call("t3_thread_update", child, { ...routeToFounder, environmentId: box }),
       ).toBe("capability_denied");
     }
+    // Naming a human assignee alone also moves the thread into that founder's inbox.
+    expect(
+      yield* call("t3_thread_update", child, {
+        action: "route",
+        inboxRouting: { assignee: { kind: "human", id: "kameron" }, reason: "decision" },
+      }),
+    ).toBe("capability_denied");
     const routedAgentOnly = yield* callAs(child, "t3_thread_update", {
       action: "route",
       inboxRouting: { audience: "agent-only" },

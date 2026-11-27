@@ -290,8 +290,9 @@ const handlers = {
     (input) =>
       input.action === "request_decision" ||
       (input.action === "route" &&
-        input.inboxRouting?.audience !== undefined &&
-        input.inboxRouting.audience !== "agent-only"),
+        ((input.inboxRouting?.audience !== undefined &&
+          input.inboxRouting.audience !== "agent-only") ||
+          input.inboxRouting?.assignee?.kind === "human")),
   ),
   t3_thread_send: McpToolAccess.afterForwarding(
     McpToolAccess.writesThreads(

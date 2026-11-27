@@ -302,20 +302,8 @@ const make = Effect.gen(function* () {
       ) {
         return;
       }
-      // A blocking delegate_task wait delivers the question itself.
-      if (
-        task.completionWake === "settled_only" &&
-        event.payload.responseCapability.type === "live" &&
-        parent.runs.some(
-          (candidate) =>
-            candidate.id === task.runId &&
-            (candidate.status === "preparing" ||
-              candidate.status === "starting" ||
-              candidate.status === "running"),
-        )
-      ) {
-        return;
-      }
+      // The card is refused above, so a blocking delegate_task wait no longer sees a pending
+      // question; the wake is the only way the parent learns what the child asked.
       yield* wakeParent(task, request, questions);
     },
     (effect, event) =>
