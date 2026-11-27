@@ -28,8 +28,15 @@ feature("timeline.approval", "approval request actions", async ({ page, qa }) =>
   await qa.open("/");
   await qa.newThread();
   await qa.composer();
-  await page.getByRole("button", { name: /^Permissions: / }).click();
-  await page.getByRole("menuitemradio", { name: "Supervised" }).click();
+  // On a phone the draft's composer can take focus and close the menu under the click, so the
+  // choice is retried until the button says it took.
+  await expect(async () => {
+    await page.getByRole("button", { name: /^Permissions: / }).click({ timeout: 3_000 });
+    await page.getByRole("menuitemradio", { name: "Supervised" }).click({ timeout: 3_000 });
+    await expect(page.getByRole("button", { name: "Permissions: Supervised" })).toBeVisible({
+      timeout: 3_000,
+    });
+  }).toPass({ timeout: 30_000 });
   await page.getByRole("button", { name: /^Showcase$|^Write approval$/ }).click();
   await page.getByRole("option", { name: /^Write approval/ }).click();
   // The picker stays open after a model is chosen, so the effort choices are in reach.
