@@ -1,7 +1,7 @@
 // The one command that proves the map: builds the web client if needed, boots a seeded app, runs
 // every spec in each viewport and color scheme, then writes status.json and the rendered report.
 //   node verify.ts                       all four projects
-//   node verify.ts --project desktop-light
+//   node verify.ts --project desktop-light --project phone-dark
 //   node verify.ts --skip-build          reuse apps/web/dist
 // With T3_QA_BASE_URL set it drives that deployment instead of booting one (see README below).
 // @effect-diagnostics nodeBuiltinImport:off - a plain Node script, outside the server's Effect runtime.
@@ -16,7 +16,6 @@ const ROOT = NodePath.resolve(import.meta.dirname, "..");
 const QA = import.meta.dirname;
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(name);
-const value = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 
 const sha = NodeChildProcess.execFileSync("git", ["rev-parse", "--short=10", "HEAD"], {
   cwd: ROOT,
@@ -46,12 +45,15 @@ if (
 const resultsFile = NodePath.join(QA, "test-results", "results.json");
 NodeFS.rmSync(resultsFile, { force: true });
 NodeFS.rmSync(NodePath.join(QA, "report", "shots"), { recursive: true, force: true });
-const projects = value("--project");
+// `--project a --project b`, or `--project a,b`.
+const projects = args
+  .flatMap((arg, index) => (arg === "--project" ? (args[index + 1] ?? "").split(",") : []))
+  .filter(Boolean);
 const run = NodeChildProcess.spawnSync(
   NodePath.join(QA, "node_modules/.bin/playwright"),
   [
     "test",
-    ...(projects ? [`--project=${projects}`] : []),
+    ...projects.map((project) => `--project=${project}`),
     ...args.filter((arg) => arg === "--update-snapshots"),
   ],
   { cwd: QA, stdio: "inherit", env: process.env },
@@ -161,7 +163,10 @@ for (const feature of FEATURES) {
       status: "unverified",
       sha,
       date,
-      reason: projects ? `not run in this selection (${projects})` : "no spec result",
+      reason:
+        projects.length > 0
+          ? `not run in this selection (${projects.join(", ")})`
+          : "no spec result",
       projects: projectsOf,
     };
   }
@@ -172,7 +177,7 @@ const statusFile = NodePath.join(QA, "status.json");
 const previous = NodeFS.existsSync(statusFile)
   ? (JSON.parse(NodeFS.readFileSync(statusFile, "utf8")) as { features: typeof features }).features
   : {};
-if (projects) {
+if (projects.length > 0) {
   for (const [id, entry] of Object.entries(features)) {
     if (
       entry.status === "unverified" &&

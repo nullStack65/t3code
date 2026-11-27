@@ -10,6 +10,10 @@ on:
     branches: [release/native-0.1.10]
   workflow_dispatch:
     inputs:
+      projects:
+        description: "Playwright projects to run, comma separated (all four by default on manual runs)"
+        type: string
+        default: "desktop-light,phone-light,desktop-dark,phone-dark"
       update_baselines:
         description: "Write visual baselines for this runner image (download the artifact and commit qa/baselines/ci)"
         type: boolean
@@ -120,7 +124,7 @@ jobs:
         working-directory: apps/web
         run: vp build
 
-      - name: Click through every feature (desktop and phone, light and dark)
+      - name: Click through every feature
         shell: bash
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
@@ -128,7 +132,10 @@ jobs:
           T3_QA_UPDATE_BASELINES: ${{ inputs.update_baselines && '1' || '0' }}
         run: |
           set -euo pipefail
-          args=()
+          # A PR runs one desktop and one phone project in opposite color schemes, which covers both
+          # widths and both schemes; a manual run takes the list it was given.
+          projects="${{ github.event_name == 'workflow_dispatch' && inputs.projects || 'desktop-light,phone-dark' }}"
+          args=(--project "$projects")
           if [ "$T3_QA_UPDATE_BASELINES" = 1 ]; then args+=(--update-snapshots); fi
           node qa/verify.ts --skip-build "${args[@]}"
 
