@@ -170,6 +170,29 @@ describe("chatActivityContext failed tool calls", () => {
     expect([...(ctx.attentionByRun.get(run) ?? [])]).toEqual([run]);
   });
 
+  it("treats a completed command with a failing exit code as a failure in both directions", () => {
+    for (const failing of [{ exitCode: 1 }, { outputIndicatesFailure: true }]) {
+      const recovered = attention([
+        toolItem("fail", "completed", failing),
+        toolItem("ok", "completed"),
+      ]);
+      expect(recovered.attentionByRun.size).toBe(0);
+      expect([...recovered.recoveredItemIds]).toEqual(["fail"]);
+      const trailing = attention([
+        toolItem("fail", "failed"),
+        toolItem("ok", "completed"),
+        toolItem("late", "completed", failing),
+      ]);
+      expect([...(trailing.attentionByRun.get(run) ?? [])]).toEqual(["late"]);
+      expect(trailing.recoveredRuns.has(run)).toBe(false);
+    }
+  });
+
+  it("flags an unrecovered exit-code failure on its own", () => {
+    const ctx = attention([toolItem("fail", "completed", { exitCode: 1 })]);
+    expect([...(ctx.attentionByRun.get(run) ?? [])]).toEqual(["fail"]);
+  });
+
   it("never recovers errors, which are not tool calls", () => {
     const error = { id: "err", runId: run, type: "error", status: "completed" };
     const ctx = attention([

@@ -163,7 +163,12 @@ export function foldThreadFeedActivity(
     for (const row of group.rows) {
       const runId = row.type === "message" ? row.message.runId : "runId" in row ? row.runId : null;
       if (runId) for (const id of context.attentionByRun.get(runId) ?? []) attentionIds.add(id);
-      if (row.type === "work-toggle" && row.hasFailure) attentionIds.add(row.id);
+      if (
+        row.type === "work-toggle" &&
+        row.hasFailure &&
+        !(row.runId && context.recoveredRuns.has(row.runId))
+      )
+        attentionIds.add(row.id);
     }
     const attention = attentionIds.size > 0 ? JSON.stringify([...attentionIds].sort()) : null;
     const expanded =

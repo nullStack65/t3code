@@ -75,6 +75,11 @@ function toolCallSucceeded(item: ToolCallItem): boolean {
   );
 }
 
+/** A tool call that failed outright or finished with a failing result. */
+function toolCallFailed(item: ToolCallItem): boolean {
+  return item.status === "failed" || (item.status === "completed" && !toolCallSucceeded(item));
+}
+
 export function chatActivityContext(
   entries: Iterable<ChatActivityEntry>,
   runs: ReadonlyArray<{ id: RunId; status?: OrchestrationV2RunStatus }>,
@@ -116,21 +121,23 @@ export function chatActivityContext(
       }
     }
     if (item?.type === "notification") agentRuns.add(runId);
-    if (item && isToolCallItem(item) && toolCallSucceeded(item)) {
-      const failed = unrecoveredByRun.get(runId);
-      if (failed?.length) {
-        for (const id of failed) recoveredItemIds.add(id);
-        recoveredRuns.add(runId);
-        unrecoveredByRun.delete(runId);
-      }
-    } else if (item && activityItemNeedsAttention(item)) {
-      if (isToolCallItem(item)) {
+    if (item && isToolCallItem(item)) {
+      if (toolCallSucceeded(item)) {
+        const failed = unrecoveredByRun.get(runId);
+        if (failed?.length) {
+          for (const id of failed) recoveredItemIds.add(id);
+          recoveredRuns.add(runId);
+          unrecoveredByRun.delete(runId);
+        }
+      } else if (toolCallFailed(item)) {
+        // A trailing failure is never suppressed by an earlier recovery.
+        recoveredRuns.delete(runId);
         const failed = unrecoveredByRun.get(runId);
         if (failed) failed.push(item.id);
         else unrecoveredByRun.set(runId, [item.id]);
-      } else {
-        addAttention(runId, item.id);
       }
+    } else if (item && activityItemNeedsAttention(item)) {
+      addAttention(runId, item.id);
     }
     if (isDecisionRequestItem(item)) {
       decisionRuns.add(runId);
