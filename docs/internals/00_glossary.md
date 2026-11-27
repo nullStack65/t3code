@@ -5,16 +5,18 @@ Shared vocabulary across T3 Code. Architecture and lifecycle constraints belong 
 
 ## Workspace and conversation
 
-| Term           | Meaning                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------- |
-| Environment    | One running server and the machine, credentials, workspace access, and state it owns.             |
-| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server. |
-| Project        | An environment-local workspace record rooted at a directory.                                      |
-| Workspace root | The project's base filesystem directory on the environment.                                       |
-| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
-| Thread         | The durable conversation and work history for a project. Survives provider process exits.         |
-| Turn           | One user-to-agent cycle (a run). Provider work can end before checkpoint and diff work settles.   |
-| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.             |
+| Term           | Meaning                                                                                                                                               |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Environment    | One running server and the machine, credentials, workspace access, and state it owns.                                                                 |
+| Client         | A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server.                                                     |
+| Project        | An environment-local workspace record rooted at a directory.                                                                                          |
+| Workspace root | The project's base filesystem directory on the environment.                                                                                           |
+| Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                                                                      |
+| Thread         | The durable conversation and work history for a project. Survives provider process exits.                                                             |
+| Turn           | One user-to-agent cycle (a run), including follow-up work such as checkpointing. Provider work can end before checkpoint and diff work settles.       |
+| Owner          | The founder (`kameron` or `jeff`, or `null`) an inbox-routed thread belongs to (`ThreadInbox.owner`); an organizational label, never an access check. |
+| Task           | A unit of delegated or scheduled work tracked in its own thread or run (such as a `delegate_task` child thread or a scheduled task).                  |
+| T3 home        | The base data directory. Runtime state normally lives under its `userdata` directory.                                                                 |
 
 ## Orchestration
 

@@ -4,6 +4,7 @@ import { EnvironmentId } from "./baseSchemas.ts";
 import { ClientSettingsSchema } from "./settings.ts";
 import {
   ThreadDecisionAsk,
+  ThreadInbox,
   makeThreadInbox,
   routeThreadInbox,
   matchesInboxView,
@@ -128,14 +129,12 @@ describe("shared fleet organizational inbox", () => {
       [jeff, kameron],
       [kameron, jeff],
     ] as const) {
-      expect(
-        creatorInboxOrigin(preference, { founder: bound.id, deviceType: "mobile" }),
-      ).toEqual(bound);
+      expect(creatorInboxOrigin(preference, { founder: bound.id, deviceType: "mobile" })).toEqual(
+        bound,
+      );
     }
     expect(creatorInboxOrigin(jeff, { founder: null, deviceType: "desktop" })).toEqual(jeff);
-    expect(
-      creatorInboxOrigin(undefined, { founder: null, deviceType: "mobile" }),
-    ).toBeUndefined();
+    expect(creatorInboxOrigin(undefined, { founder: null, deviceType: "mobile" })).toBeUndefined();
     expect(creatorInboxOrigin(bot, { founder: "jeff", deviceType: "bot" })).toEqual(bot);
     // The current device cannot safely supply a founder for existing unclassified history.
     for (const view of ["kameron", "jeff", "agents", "shared"] as const) {
@@ -730,5 +729,63 @@ describe("isHiddenFromFounder", () => {
   it("hides nothing from a client without a founder", () => {
     expect(isHiddenFromFounder(inbox("kameron", "kameron"), undefined)).toBe(false);
     expect(isHiddenFromFounder(inbox("kameron", "kameron"), null)).toBe(false);
+  });
+});
+
+describe("ThreadInbox wire contract", () => {
+  const decode = Schema.decodeUnknownSync(ThreadInbox);
+  const encode = Schema.encodeSync(ThreadInbox);
+
+  it("round-trips a full ThreadInbox payload", () => {
+    const payload = {
+      owner: "kameron" as const,
+      assignee: { kind: "human" as const, id: "kameron" as const },
+      audience: "kameron" as const,
+      attentionKind: "action" as const,
+      reason: "decision" as const,
+      decisionRequest: {
+        founder: "kameron" as const,
+        kind: "decision" as const,
+        question: "Ship this release?",
+        requestedAt: "2026-11-25T22:00:00.000Z",
+        signOff: [
+          { founder: "kameron" as const, signed: true },
+          { founder: "jeff" as const, signed: false },
+        ],
+      },
+      pendingHumanRequest: true,
+      origin: { kind: "agent" as const, id: "lead" },
+      requestedBy: { kind: "human" as const, id: "jeff" as const },
+      actor: { kind: "agent" as const, id: "lead" },
+      executorEnvironmentId: EnvironmentId.make("env-1"),
+    };
+
+    const decoded = decode(payload);
+    expect(decoded).toEqual(payload);
+    expect(decode(encode(decoded))).toEqual(payload);
+  });
+
+  it("decodes a legacy ThreadInbox payload without optional keys or signOff", () => {
+    const legacy = {
+      owner: null,
+      assignee: null,
+      audience: "shared" as const,
+      attentionKind: "FYI" as const,
+      decisionRequest: {
+        founder: "jeff" as const,
+        kind: "review" as const,
+        question: "Check this diff",
+        requestedAt: "2026-11-25T22:00:00.000Z",
+      },
+      origin: null,
+      requestedBy: null,
+      actor: null,
+      executorEnvironmentId: null,
+    };
+
+    const decoded = decode(legacy);
+    expect(decoded.reason).toBeUndefined();
+    expect(decoded.pendingHumanRequest).toBeUndefined();
+    expect(decoded.decisionRequest?.signOff).toBeUndefined();
   });
 });
