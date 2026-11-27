@@ -183,6 +183,8 @@ export default defineConfig({
       "infra/task-cache/vendor/**",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
       ".macroscope/ignore.md",
+      // Rendered by qa/render-map.ts from qa/features.ts; the next sweep rewrites it.
+      "docs/FEATURES.md",
       ".alchemy",
       "dist",
       "dist-electron",

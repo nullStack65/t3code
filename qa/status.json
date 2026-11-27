@@ -1,0 +1,767 @@
+{
+  "sha": "903b140c21",
+  "date": "2026-11-27",
+  "dirty": false,
+  "target": "local build",
+  "features": {
+    "sidebar.thread-list": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "sidebar.new-thread": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "sidebar.search": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "sidebar.project-filter": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "sidebar.thread-menu": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "sidebar.footer-links": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "layout.sidebar-toggle": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "thread.header": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "timeline.messages": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "timeline.approval": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "timeline.user-input": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "timeline.command-output": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "thread.details-panel": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "thread.find": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.send": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.interrupt": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.queue-steer": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "The Replay turn finishes faster than a second send can land, so the running window cannot be held open; needs a replay recording with a pause.",
+      "projects": {}
+    },
+    "composer.model-picker": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.commands": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.attachments": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.dictation": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "composer.draft-persists": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "panel.right": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "panel.files": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "panel.diff": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "panel.browser": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "terminal.drawer": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "palette.open": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "palette.add-project": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "page.home": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "page.pull-requests": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "page.usage": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "page.issues": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "page.workflows": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "page.new-thread-link": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.general": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "settings.appearance": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "settings.chat": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "settings.diffs": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.keybindings": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.voice": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.snap-shot": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.providers": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.threads": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.browser": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.devices": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.scheduled-tasks": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.projects": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.source-control": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.worktrees": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.connections": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.access": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.maintenance": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.labs": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.about": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "settings.archived": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.search": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.auto-resume": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "settings.secrets": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "Hidden unless a secrets provider is configured; the QA home has none.",
+      "projects": {}
+    },
+    "theme.appearance": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "env.linked": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "env.link-flow": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "Needs a second running server; the harness boots one.",
+      "projects": {}
+    },
+    "onboard.pair": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "onboard.welcome": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      },
+      "visual": "pending"
+    },
+    "banner.usage-limit": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "The Replay agent has no rate-limit recording; needs one (apps/server/scripts/dev-replay-agent.ts) or a fake provider that emits the limit event.",
+      "projects": {}
+    },
+    "delegates.subagents": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "Needs an agent that calls the delegate tool; the Replay recordings do not.",
+      "projects": {}
+    },
+    "timeline.html-render": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "No Replay recording calls html_render.",
+      "projects": {}
+    },
+    "thread.pr-links": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "Needs a GitHub login and a real PR; the QA home has neither.",
+      "projects": {}
+    },
+    "sidebar.status-live": {
+      "status": "unverified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "reason": "Needs a fake provider that emits a usage_limit failure and then a second run, plus a linked second server; the Replay agent has neither. Reported 2026-11-27: CTO, Platform, ARC Ops, Growth and Product Designer showed Limited and Gardening showed Failed while each server reported them running or waiting on a PR watch.",
+      "projects": {}
+    },
+    "layout.boot-recovery": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "desktop-light": "passed",
+        "phone-light": "passed",
+        "desktop-dark": "passed",
+        "phone-dark": "passed"
+      }
+    },
+    "layout.phone": {
+      "status": "verified",
+      "sha": "903b140c21",
+      "date": "2026-11-27",
+      "projects": {
+        "phone-light": "passed",
+        "phone-dark": "passed"
+      }
+    }
+  }
+}
