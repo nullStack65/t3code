@@ -2,6 +2,8 @@ import type { PullRequestActivity, PullRequestDetail } from "@t3tools/contracts"
 import type { ReviewGuideGenerationInput } from "@t3tools/provider-core/server/textGeneration";
 import { splitsSurrogatePair } from "@t3tools/shared/assistantCitations";
 
+import { frameUntrustedContent } from "../security/untrustedContent.ts";
+
 const SETTLED_REMARK_CHARS = 200;
 
 function oneLine(text: string): string {
@@ -34,12 +36,13 @@ export function reviewGuideInputFromPullRequest(
   activity: PullRequestActivity,
   baseCommit: string,
 ): Omit<ReviewGuideGenerationInput, "cwd" | "projectCwd" | "modelSelection"> {
+  const settled = settledReviewSummary(activity);
   return {
     number: detail.number,
     title: detail.title,
-    description: detail.body,
+    description: detail.body ? frameUntrustedContent(detail.body, "pr_description") : detail.body,
     baseBranch: detail.baseBranch,
     baseCommit,
-    settledReview: settledReviewSummary(activity),
+    settledReview: settled ? frameUntrustedContent(settled, "pr_comment") : settled,
   };
 }
