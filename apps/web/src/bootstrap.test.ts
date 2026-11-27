@@ -36,9 +36,14 @@ async function bootWithFailingMainChunk(storage: Storage) {
   vi.resetModules();
   mocks.showBootError.mockClear();
   const reload = vi.fn().mockName("location.reload");
+  const setTimeout = vi.fn((callback: () => void) => callback()).mockName("setTimeout");
   vi.stubGlobal(
     "window",
-    Object.assign(new EventTarget(), { sessionStorage: storage, location: { reload } }),
+    Object.assign(new EventTarget(), {
+      sessionStorage: storage,
+      location: { reload },
+      setTimeout,
+    }),
   );
   try {
     const { boot } = await import("./bootstrap");
@@ -57,10 +62,21 @@ describe("bootstrap", () => {
     expect(showBootError).not.toHaveBeenCalled();
   });
 
-  it("shows the boot error when the main chunk fails again after the reload", async () => {
-    const { reload, showBootError } = await bootWithFailingMainChunk(
-      createStorageStub({ "t3code:chunk-load-reloaded": import.meta.env.APP_VERSION }),
-    );
+  it("reloads again when the first automatic reload hit the same network blip (CLO-1310)", async () => {
+    const storage = createStorageStub();
+    await bootWithFailingMainChunk(storage);
+
+    const { reload, showBootError } = await bootWithFailingMainChunk(storage);
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(showBootError).not.toHaveBeenCalled();
+  });
+
+  it("shows the boot error once the main chunk failed on every automatic reload", async () => {
+    const storage = createStorageStub();
+    for (let i = 0; i < 3; i++) await bootWithFailingMainChunk(storage);
+
+    const { reload, showBootError } = await bootWithFailingMainChunk(storage);
 
     expect(reload).not.toHaveBeenCalled();
     expect(showBootError).toHaveBeenCalledTimes(1);

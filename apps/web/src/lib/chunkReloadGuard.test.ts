@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { isChunkLoadError, reloadOnceForChunkLoadError } from "./chunkReloadGuard";
+import {
+  isChunkLoadError,
+  MAX_RELOADS_PER_WINDOW,
+  RELOAD_WINDOW_MS,
+  reloadForChunkLoadError,
+} from "./chunkReloadGuard";
 
 function createStorageStub(): Storage {
   const store = new Map<string, string>();
@@ -20,26 +25,88 @@ function createStorageStub(): Storage {
   };
 }
 
-describe("reloadOnceForChunkLoadError", () => {
-  it("reloads on the first failure and lets the second one surface", () => {
-    const storage = createStorageStub();
-    const reload = vi.fn();
+function createHarness(build = "1.0.0") {
+  const storage = createStorageStub();
+  const reload = vi.fn().mockName("location.reload");
+  const delays: number[] = [];
+  let clock = 1_000_000;
+  const attempt = () =>
+    reloadForChunkLoadError({
+      getStorage: () => storage,
+      reload,
+      build,
+      now: () => clock,
+      schedule: (callback, delayMs) => {
+        delays.push(delayMs);
+        callback();
+      },
+    });
+  return {
+    storage,
+    reload,
+    delays,
+    attempt,
+    advance: (ms: number) => {
+      clock += ms;
+    },
+  };
+}
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload, "1.0.0")).toBe(true);
-    expect(reload).toHaveBeenCalledTimes(1);
+describe("reloadForChunkLoadError", () => {
+  it("retries a flapping network up to three times with growing delays, then lets it surface", () => {
+    const harness = createHarness();
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload, "1.0.0")).toBe(false);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(harness.attempt()).toBe(true);
+    expect(harness.attempt()).toBe(true);
+    expect(harness.attempt()).toBe(true);
+    expect(harness.attempt()).toBe(false);
+
+    expect(harness.reload).toHaveBeenCalledTimes(MAX_RELOADS_PER_WINDOW);
+    expect(harness.delays).toEqual([750, 1500, 2250]);
   });
 
-  it("reloads again once a deploy changed the build", () => {
+  it("retries again once the window has passed, so a later blip in the same tab recovers", () => {
+    const harness = createHarness();
+    for (let i = 0; i < MAX_RELOADS_PER_WINDOW; i++) harness.attempt();
+    expect(harness.attempt()).toBe(false);
+
+    harness.advance(RELOAD_WINDOW_MS);
+
+    expect(harness.attempt()).toBe(true);
+    expect(harness.delays.at(-1)).toBe(750);
+  });
+
+  it("keeps counting inside the window across reloads", () => {
+    const harness = createHarness();
+    harness.attempt();
+    harness.advance(RELOAD_WINDOW_MS - 1);
+    harness.attempt();
+    harness.attempt();
+
+    expect(harness.attempt()).toBe(false);
+  });
+
+  it("starts a fresh window once a deploy changed the build", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
+    const options = {
+      getStorage: () => storage,
+      reload,
+      now: () => 0,
+      schedule: (cb: () => void) => cb(),
+    };
+    for (let i = 0; i < MAX_RELOADS_PER_WINDOW; i++)
+      reloadForChunkLoadError({ ...options, build: "1.0.0" });
 
-    reloadOnceForChunkLoadError(() => storage, reload, "1.0.0");
+    expect(reloadForChunkLoadError({ ...options, build: "1.0.1" })).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(MAX_RELOADS_PER_WINDOW + 1);
+  });
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload, "1.0.1")).toBe(true);
-    expect(reload).toHaveBeenCalledTimes(2);
+  it("treats the old one-reload marker as a fresh window instead of a dead end", () => {
+    const harness = createHarness();
+    harness.storage.setItem("t3code:chunk-load-reloaded", "1.0.0");
+
+    expect(harness.attempt()).toBe(true);
   });
 
   it("never reloads when storage is blocked, so a persistent failure cannot loop", () => {
@@ -48,7 +115,9 @@ describe("reloadOnceForChunkLoadError", () => {
       throw new DOMException("blocked", "SecurityError");
     };
 
-    expect(reloadOnceForChunkLoadError(blocked, reload)).toBe(false);
+    expect(reloadForChunkLoadError({ getStorage: blocked, reload, schedule: (cb) => cb() })).toBe(
+      false,
+    );
     expect(reload).not.toHaveBeenCalled();
   });
 });
