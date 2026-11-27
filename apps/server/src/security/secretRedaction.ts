@@ -24,16 +24,19 @@ export function redactSecretText(input: string): SecretRedactionResult {
     redactedCount += 1;
     return SECRET_REDACTED;
   });
-  const afterInline = afterValues.replace(INLINE_SECRET_PATTERN, (match, offset: number, full: string) => {
-    // INLINE_SECRET_PATTERN stops before ']', so values already replaced with
-    // '[redacted]' match up to '[redacted'. Skip double-counting those.
-    const prefix = SECRET_REDACTED.slice(0, -1);
-    if (match.endsWith(prefix) && full[offset + match.length] === "]") {
-      return match;
-    }
-    redactedCount += 1;
-    return SECRET_REDACTED;
-  });
+  const afterInline = afterValues.replace(
+    INLINE_SECRET_PATTERN,
+    (match, offset: number, full: string) => {
+      // INLINE_SECRET_PATTERN stops before ']', so values already replaced with
+      // '[redacted]' match up to '[redacted'. Skip double-counting those.
+      const prefix = SECRET_REDACTED.slice(0, -1);
+      if (match.endsWith(prefix) && full[offset + match.length] === "]") {
+        return match;
+      }
+      redactedCount += 1;
+      return SECRET_REDACTED;
+    },
+  );
   return { text: afterInline, redactedCount };
 }
 
@@ -41,13 +44,17 @@ export function containsSecret(input: string): boolean {
   return redactSecretText(input).redactedCount > 0;
 }
 
-export function isCredentialKeyName(key: string): boolean {
+function isCredentialKeyName(key: string): boolean {
   return CREDENTIAL_KEY_PATTERN.test(key);
 }
 
 const MAX_DEEP_DEPTH = 24;
 
-export function redactSecretsDeep(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+export function redactSecretsDeep(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): unknown {
   if (typeof value === "string") {
     return redactSecretText(value).text;
   }

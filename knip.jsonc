@@ -15,6 +15,9 @@
         ".github/scripts/pr-limits.cjs",
         // Upstream release workflows invoke the documented Play APK mirror by path.
         ".github/scripts/mirror-play-apk.cjs",
+        // The upstream release workflows (not kept in this fork) invoke the version-bump scripts by path.
+        ".github/scripts/set-mobile-version.cjs",
+        ".github/scripts/set-release-version.cjs",
       ],
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
