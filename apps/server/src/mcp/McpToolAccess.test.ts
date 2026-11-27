@@ -31,6 +31,9 @@ import * as McpToolAccess from "./McpToolAccess.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
+import * as Feedback from "../feedback/FeedbackService.ts";
+import * as FeedbackHandlers from "./toolkits/feedback/handlers.ts";
+import { FeedbackToolkit } from "./toolkits/feedback/tools.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 
@@ -400,65 +403,89 @@ it.effect("refuses a change when the calling thread cannot be read", () =>
 const box = EnvironmentId.make("environment-box");
 const here = EnvironmentId.make("environment");
 
-const questionToolServer = McpHttpServer.toolkitRegistration(
-  OrchestratorToolkit,
-  OrchestratorHandlers.layer,
+const questionToolMocks = Layer.mergeAll(
+  Layer.mock(ThreadManagement.ThreadManagementService)({
+    getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
+  }),
+  Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+    requestSecret: () => Effect.succeed({ status: "timed_out" }),
+  }),
+  Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({
+    update: (_scope, input) =>
+      Effect.succeed({
+        threadId: fullAccessThreadId,
+        commandId: CommandId.make("command-update"),
+        action: input.action,
+        title: input.title ?? "Fixture",
+        sequence: 1,
+        titleRegeneration: null,
+        linkedPullRequest: null,
+        updatedAt: "2026-06-06T00:00:00.000Z",
+      }),
+  }),
+  Layer.mock(Feedback.FeedbackService)({
+    submit: () =>
+      Effect.succeed({ status: "awaiting_approval" as const, note: "Fixture feedback" }),
+  }),
+  Layer.mock(PeerForwarding.PeerForwarding)({
+    call: () => Effect.succeed({ ran: "forwarded" } as never),
+  }),
+  Layer.mock(PeerLinks.PeerLinks)({}),
+  Layer.mock(PeerLinkRequests.PeerLinkRequests)({
+    request: () => Effect.succeed({ status: "pending" as const } as never),
+  }),
+  Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+);
+
+const questionToolServer = Layer.mergeAll(
+  McpHttpServer.toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer),
+  McpHttpServer.toolkitRegistration(FeedbackToolkit, FeedbackHandlers.layer),
 ).pipe(
   Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-  Layer.provide(
-    Layer.mergeAll(
-      Layer.mock(ThreadManagement.ThreadManagementService)({
-        getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
-      }),
-      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
-        requestSecret: () => Effect.succeed({ status: "timed_out" }),
-      }),
-      Layer.mock(ThreadMetadataMcpService.ThreadMetadataMcpService)({
-        update: (_scope, input) =>
-          Effect.succeed({
-            threadId: fullAccessThreadId,
-            commandId: CommandId.make("command-update"),
-            action: input.action,
-            title: input.title ?? "Fixture",
-            sequence: 1,
-            titleRegeneration: null,
-            linkedPullRequest: null,
-            updatedAt: "2026-06-06T00:00:00.000Z",
-          }),
-      }),
-      Layer.mock(PeerForwarding.PeerForwarding)({
-        call: () => Effect.succeed({ ran: "forwarded" } as never),
-      }),
-      Layer.mock(PeerLinks.PeerLinks)({}),
-      Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
-      Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-    ),
-  ),
+  Layer.provideMerge(questionToolMocks),
 );
 
 it.effect("keeps human questions out of delegated MCP calls, including forwarded decisions", () =>
   Effect.gen(function* () {
-    const child = { ...fullAccess, thread: { ...fullAccess.thread!, subagent: true } };
+    const parentWithFeatures: McpInvocationContext.McpInvocationScope = {
+      ...fullAccess,
+      linkedEnvironments: true,
+      agentFeedback: "on-request",
+    };
+    const child: McpInvocationContext.McpInvocationScope = {
+      ...parentWithFeatures,
+      thread: { ...parentWithFeatures.thread!, subagent: true },
+    };
     const server = yield* McpServer.McpServer;
-    const secretTool = server.tools.find(({ tool }) => tool.name === "request_secret")!;
-    const visible = (scope: McpInvocationContext.McpInvocationScope) =>
-      Effect.sync(() =>
-        Context.getOrUndefined(
-          secretTool.annotations,
+    const visible = (toolName: string, scope: McpInvocationContext.McpInvocationScope) =>
+      Effect.sync(() => {
+        const entry = server.tools.find(({ tool }) => tool.name === toolName)!;
+        return Context.getOrUndefined(
+          entry.annotations,
           McpSchema.EnabledWhen,
         )?.({
           protocolVersion: mcpClient.protocolVersion,
           capabilities: mcpClient.clientCapabilities,
-        }),
-      ).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, scope));
-    expect(yield* visible(fullAccess)).toBe(true);
-    expect(yield* visible(child)).toBe(false);
+        });
+      }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, scope));
+    for (const toolName of ["request_secret", "t3_environment_link", "t3_feedback"] as const) {
+      expect(yield* visible(toolName, parentWithFeatures)).toBe(true);
+      expect(yield* visible(toolName, child)).toBe(false);
+    }
   }).pipe(Effect.provide(questionToolServer)),
 );
 
 it.effect("rejects delegated questions at MCP execution before forwarding", () =>
   Effect.gen(function* () {
-    const child = { ...fullAccess, thread: { ...fullAccess.thread!, subagent: true } };
+    const parentWithFeatures: McpInvocationContext.McpInvocationScope = {
+      ...fullAccess,
+      linkedEnvironments: true,
+      agentFeedback: "on-request",
+    };
+    const child: McpInvocationContext.McpInvocationScope = {
+      ...parentWithFeatures,
+      thread: { ...parentWithFeatures.thread!, subagent: true },
+    };
     const decision = {
       action: "request_decision",
       decision: { founder: "kameron", kind: "decision", question: "Synthetic question" },
@@ -472,19 +499,91 @@ it.effect("rejects delegated questions at MCP execution before forwarding", () =
           Effect.provideService(McpSchema.McpServerClient, mcpClient),
         );
     const secret = { label: "Fixture", reason: "Synthetic request" };
-    const parentSecret = yield* callAs(fullAccess, "request_secret", secret);
+    const parentSecret = yield* callAs(parentWithFeatures, "request_secret", secret);
     expect(parentSecret.structuredContent).toMatchObject({ status: "timed_out" });
     const childSecret = yield* callAs(child, "request_secret", secret).pipe(Effect.exit);
     expect(Exit.isFailure(childSecret) || childSecret.value.isError).toBe(true);
+    const childLink = yield* callAs(child, "t3_environment_link", { hint: "vps" }).pipe(
+      Effect.exit,
+    );
+    expect(Exit.isFailure(childLink) || childLink.value.isError).toBe(true);
+    const childFeedback = yield* callAs(child, "t3_feedback", {
+      kind: "bug",
+      subject: "general",
+      expected: "ok",
+      actual: "broken",
+      workaround: "",
+      userRequested: true,
+    }).pipe(Effect.exit);
+    expect(Exit.isFailure(childFeedback) || childFeedback.value.isError).toBe(true);
     expect(yield* call("t3_thread_update", child, decision)).toBe("capability_denied");
     expect(yield* call("t3_thread_update", child, { ...decision, environmentId: box })).toBe(
       "capability_denied",
     );
+    for (const audience of ["kameron", "jeff", "shared"] as const) {
+      const routeToFounder = {
+        action: "route",
+        inboxRouting: { audience, reason: "decision" },
+      };
+      expect(yield* call("t3_thread_update", child, routeToFounder)).toBe("capability_denied");
+      expect(
+        yield* call("t3_thread_update", child, { ...routeToFounder, environmentId: box }),
+      ).toBe("capability_denied");
+    }
+    const routedAgentOnly = yield* callAs(child, "t3_thread_update", {
+      action: "route",
+      inboxRouting: { audience: "agent-only" },
+    });
+    expect(routedAgentOnly.structuredContent).toMatchObject({ action: "route" });
     const renamed = yield* callAs(child, "t3_thread_update", {
       action: "rename",
       title: "Fixture",
     });
     expect(renamed.structuredContent).toMatchObject({ action: "rename", title: "Fixture" });
+
+    // Even if MCP discovery were bypassed, the underlying handlers still refuse subagents.
+    const directOrchestrator = yield* OrchestratorToolkit.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          McpToolAccess.HandlersLayer.layer(OrchestratorHandlers.layer),
+          questionToolMocks,
+        ),
+      ),
+    );
+    const directLink = yield* directOrchestrator
+      .handle("t3_environment_link", { hint: "vps" })
+      .pipe(
+        Stream.unwrap,
+        Stream.run(Sink.last()),
+        Effect.flatMap(Effect.fromOption),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, child),
+      );
+    expect(directLink.result).toMatchObject({ code: "capability_denied" });
+    const directFeedbackToolkit = yield* FeedbackToolkit.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          McpToolAccess.HandlersLayer.layer(FeedbackHandlers.layer),
+          questionToolMocks,
+        ),
+      ),
+    );
+    const directFeedback = yield* directFeedbackToolkit
+      .handle("t3_feedback", {
+        kind: "bug",
+        subject: "general",
+        expected: "ok",
+        actual: "broken",
+        workaround: "",
+        userRequested: true,
+        turns: 1,
+      })
+      .pipe(
+        Stream.unwrap,
+        Stream.run(Sink.last()),
+        Effect.flatMap(Effect.fromOption),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, child),
+      );
+    expect(directFeedback.result).toMatchObject({ code: "capability_denied" });
   }).pipe(Effect.provide(questionToolServer)),
 );
 

@@ -75,6 +75,7 @@ export function useComposerMenuItems({
   sideChatAvailable,
   sideChatDisabledReason,
   noteAvailable,
+  noteDisabledReason = null,
   freshSessionAvailable,
   compactSlashCommandAvailable,
   selectedProvider,
@@ -96,6 +97,7 @@ export function useComposerMenuItems({
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
   readonly noteAvailable: boolean;
+  readonly noteDisabledReason?: string | null;
   readonly freshSessionAvailable: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
@@ -289,7 +291,9 @@ export function useComposerMenuItems({
                 type: "slash-command",
                 command: "note",
                 label: "/note",
-                description: gt("Leave a note for the other founder. It does not wake the bot."),
+                description:
+                  noteDisabledReason ??
+                  gt("Leave a note for the other founder. It does not wake the bot."),
               },
             ] as const)
           : []),

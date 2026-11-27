@@ -30,5 +30,5 @@ export const FeedbackToolkit = Toolkit.make(
     success: Schema.Union([FeedbackSubmitResult, FeedbackAwaitingApproval]),
   })
     .annotate(Tool.Destructive, false)
-    .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileFeedbackOff),
+    .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileFeedbackOffAndSubagents),
 );

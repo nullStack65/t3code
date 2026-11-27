@@ -4,6 +4,7 @@ import {
   CheckpointScopeId,
   CommandId,
   EnvironmentId,
+  ExecutionEnvironmentDescriptor,
   MessageId,
   NodeId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -65,6 +66,10 @@ const TARGET = new PrimaryConnectionTarget({
   httpBaseUrl: "https://environment.example.test",
   wsBaseUrl: "wss://environment.example.test",
 });
+
+const decodeWireEnvironmentDescriptor = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ExecutionEnvironmentDescriptor),
+);
 
 const CONNECTED_STATE: SupervisorConnectionState = {
   ...AVAILABLE_CONNECTION_STATE,
@@ -381,6 +386,60 @@ describe("V2 environment commands", () => {
         expect(Exit.isFailure(exit)).toBe(true);
       }
     }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect(
+    "decodes an older server capability payload without humanNote and fails closed before RPC dispatch",
+    () =>
+      Effect.gen(function* () {
+        const legacyEnvironment = yield* decodeWireEnvironmentDescriptor(
+          JSON.stringify({
+            environmentId: "environment-legacy",
+            label: "Legacy Box",
+            platform: { os: "linux", arch: "x64", machine: "server" },
+            serverVersion: "0.1.9",
+            orchestrationProtocolVersion: 2,
+            capabilities: {
+              repositoryIdentity: true,
+              sideChats: true,
+              threadInbox: true,
+            },
+          }),
+        );
+        expect(legacyEnvironment.capabilities.humanNote).toBeUndefined();
+
+        const commands: OrchestrationV2Command[] = [];
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          ...(legacyEnvironment.capabilities.humanNote === undefined
+            ? {}
+            : { advertiseHumanNote: legacyEnvironment.capabilities.humanNote }),
+        });
+        const exit = yield* startThreadTurn({
+          commandId: CommandId.make("command-skew-note"),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make("message-skew-note"),
+            role: "user",
+            text: "Private founder note on skewed server",
+            attachments: [],
+            humanNote: true,
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          dispatchMode: "start",
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.exit,
+        );
+
+        expect(commands).toEqual([]);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("does not support private notes");
+        }
+      }).pipe(Effect.provide(layerTestRandom)),
   );
 
   it.effect(

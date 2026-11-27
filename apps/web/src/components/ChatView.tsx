@@ -3207,6 +3207,16 @@ export default function ChatView(props: ChatViewProps) {
                   )
                 ? gt("Available once the thread's worktree is set up.")
                 : null;
+  const noteDisabledReason =
+    activeThread?.source.inbox?.audience !== "shared"
+      ? null
+      : serverConfig === null
+        ? gt("Private notes are not ready yet. Try again in a moment.")
+        : serverConfig.environment.capabilities.humanNote !== true
+          ? gt("Update this environment's T3 Code server to use /note.")
+          : !isServerThread
+            ? gt("Send a message before leaving a note.")
+            : null;
   const openSideChatStable = useStableCallback(() => void sideChat.open());
   const openSurfaceInMainView = useOpenSurfaceInMainView(activeThreadRef);
   const sendSideChatStable = useStableCallback(sideChat.open);
@@ -3355,6 +3365,7 @@ export default function ChatView(props: ChatViewProps) {
     acknowledgeActiveThreadWoke,
     onSideChat: sideChat.available ? sendSideChatStable : undefined,
     sideChatDisabledReason,
+    noteDisabledReason,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -4117,6 +4128,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onToggleKeepFullHistory={toggleKeepFullHistoryStable}
                                 sideChatAvailable={sideChat.available}
                                 sideChatDisabledReason={sideChatDisabledReason}
+                                noteDisabledReason={noteDisabledReason}
                                 onFreshSession={
                                   freshSessionCommandAvailable ? armFreshSessionStable : undefined
                                 }

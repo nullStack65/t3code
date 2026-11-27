@@ -245,15 +245,23 @@ export function makeThreadRequestsResolvedAnnouncer(
 }
 
 export function derivePendingThreadRequests(
-  projection: Pick<ThreadStructure, "runtimeRequests" | "turnItems">,
+  projection: Pick<ThreadStructure, "runtimeRequests" | "turnItems"> & {
+    readonly thread?: {
+      readonly lineage?: {
+        readonly relationshipToParent?: string | null;
+      };
+    };
+  },
 ): PendingThreadRequests {
   const approvals: ThreadPendingApproval[] = [];
   const userInputs: ThreadPendingUserInput[] = [];
+  const isSubagentChild = projection.thread?.lineage?.relationshipToParent === "subagent";
 
   for (const request of projection.runtimeRequests) {
     if (request.status !== "pending") continue;
     const responseCapability = request.responseCapability.type;
     if (request.kind === "user_input") {
+      if (isSubagentChild) continue;
       const item = projection.turnItems.findLast(
         (candidate) =>
           candidate.type === "user_input_request" && candidate.requestId === request.id,

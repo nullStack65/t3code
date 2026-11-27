@@ -115,6 +115,8 @@ export function buildComposerSlashCommandItems(
     /** T3's `/clear` replaces the provider's, which would clear a session T3 still treats as live. */
     readonly offersFreshSession?: boolean;
     readonly offersSideChat?: boolean;
+    readonly offersNote?: boolean;
+    readonly noteDisabledReason?: string | null;
     readonly selectedProviderStatus: Pick<ServerProvider, "driver" | "slashCommands"> | null;
   },
   resolve: MessageResolver = m,
@@ -149,6 +151,17 @@ export function buildComposerSlashCommandItems(
         description,
       });
     }
+  }
+  if ((input.offersNote || input.noteDisabledReason) && "note".includes(query)) {
+    items.push({
+      id: "cmd:note",
+      type: "slash-command",
+      command: "note",
+      label: "/note",
+      description:
+        input.noteDisabledReason ??
+        resolve(msg("Leave a note for the other founder. It does not wake the bot.")),
+    });
   }
   if (input.offersFreshSession && "clear".includes(query)) {
     items.push({
@@ -272,6 +285,8 @@ export function useComposerCommandMenu({
   modelProviders,
   onFreshSession,
   offersSideChat = false,
+  offersNote = false,
+  noteDisabledReason = null,
 }: {
   readonly draftMessage: string;
   readonly ownerKey: string | null;
@@ -299,6 +314,8 @@ export function useComposerCommandMenu({
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   readonly onFreshSession?: () => void;
   readonly offersSideChat?: boolean;
+  readonly offersNote?: boolean;
+  readonly noteDisabledReason?: string | null;
 }) {
   const gt = useGT();
   const messages = useMessages();
@@ -408,6 +425,8 @@ export function useComposerCommandMenu({
           offersUsageLimits,
           offersFreshSession: onFreshSession !== undefined,
           offersSideChat,
+          offersNote,
+          noteDisabledReason,
           selectedProviderStatus: selectedProviderStatus
             ? {
                 ...selectedProviderStatus,
@@ -674,6 +693,10 @@ export function useComposerCommandMenu({
     }
     if (item.type === "slash-command" && item.command === "clear" && onFreshSession) {
       clearTriggerThen(onFreshSession);
+      return;
+    }
+    if (item.type === "slash-command" && item.command === "note" && noteDisabledReason) {
+      Dialog.alert(gt("Note not sent"), noteDisabledReason);
       return;
     }
     if (

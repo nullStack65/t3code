@@ -418,6 +418,7 @@ export interface ChatComposerProps {
   onUsageLimitsCommand?: (() => void) | undefined;
   sideChatAvailable?: boolean;
   sideChatDisabledReason?: string | null;
+  noteDisabledReason?: string | null;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   onFreshSession?: (() => void) | undefined;
   environmentUnavailable: {
@@ -1239,6 +1240,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
     noteAvailable: activeThread?.source.inbox?.audience === "shared",
+    noteDisabledReason: props.noteDisabledReason ?? null,
     freshSessionAvailable: props.onFreshSession !== undefined,
     compactSlashCommandAvailable,
     selectedProvider,
@@ -2116,7 +2118,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       if (item.command === "side" || item.command === "btw" || item.command === "note") {
-        if (item.command !== "note" && props.sideChatDisabledReason) return;
+        if (
+          item.command === "note"
+            ? Boolean(props.noteDisabledReason)
+            : Boolean(props.sideChatDisabledReason)
+        )
+          return;
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,
@@ -2760,6 +2767,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerEnvironmentContexts.length === 0 &&
       replyTo === null,
     sideChat: props.sideChatAvailable === true || (props.sideChatDisabledReason ?? null) !== null,
+    note: true,
     usageLimits: props.onUsageLimitsCommand !== undefined,
     codexFeedback: selectedProvider === "codex" && multipleModelSelections === null,
     freshSession: props.onFreshSession !== undefined,

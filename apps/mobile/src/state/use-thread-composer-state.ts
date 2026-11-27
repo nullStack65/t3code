@@ -44,7 +44,11 @@ import {
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
-import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
+import {
+  deriveThreadTitleSeed,
+  HumanNoteUnavailableError,
+} from "@t3tools/client-runtime/operations";
+import * as Schema from "effect/Schema";
 import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
 import { restoreAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerContextReferences";
 import {
@@ -102,7 +106,11 @@ import {
   useComposerDraft,
   useComposerDraftSettings,
 } from "./use-composer-drafts";
-import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import {
+  isClearComposerCommand,
+  parseNoteCommand,
+  parseSideChatCommand,
+} from "@t3tools/shared/composerTrigger";
 import { orchestrationV2WorktreePending } from "@t3tools/shared/orchestrationV2ThreadError";
 import {
   compactionBlocksSteering,
@@ -154,6 +162,7 @@ function setKeepFullHistory(threadKey: string, keep: boolean) {
 }
 
 const EMPTY_THREAD_SEQUENCE_ATOM = Atom.make(0);
+const isHumanNoteUnavailableError = Schema.is(HumanNoteUnavailableError);
 
 export function appendReviewCommentToDraft(input: {
   readonly environmentId: EnvironmentId;
@@ -244,6 +253,9 @@ export function useThreadComposerState(input: {
     Record<string, ReadonlyArray<CodexFeedbackSubmission>>
   >({});
   const uploadThreadFeedback = useAtomCommand(threadEnvironment.uploadFeedback, {
+    reportFailure: false,
+  });
+  const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
   const editQueuedRun = useAtomCommand(threadEnvironment.editQueuedRun, {
@@ -538,6 +550,13 @@ export function useThreadComposerState(input: {
       );
       return;
     }
+    if (parseNoteCommand(text)) {
+      Dialog.alert(
+        m(msg("Queued message not updated")),
+        m(msg("A queued message can't be a note. Remove /note to save it.")),
+      );
+      return;
+    }
     const finishSave = startQueuedRunEditSave(threadKey);
     if (finishSave === null) return;
     savingQueuedEditRef.current = true;
@@ -772,6 +791,59 @@ export function useThreadComposerState(input: {
       }
       return null;
     }
+    const noteCommand = beforeDispatch === undefined ? parseNoteCommand(text) : null;
+    if (noteCommand) {
+      if (noteUnavailableReason !== null) {
+        Dialog.alert(m(msg("Note not sent")), noteUnavailableReason);
+        return null;
+      }
+      if (noteCommand.prompt.length === 0) {
+        Dialog.alert(m(msg("Note not sent")), m(msg("Write the note after /note.")));
+        return null;
+      }
+      if (attachments.length > 0 || (draft.context?.records.length ?? 0) > 0) {
+        Dialog.alert(
+          m(msg("Notes take text only")),
+          m(msg("Remove the attachments and context, then send it again.")),
+        );
+        return null;
+      }
+      const metadata = makeQueuedMessageMetadata();
+      const messageId = MessageId.make(metadata.messageId);
+      const noted = await startThreadTurn({
+        environmentId: thread.environmentId,
+        input: {
+          commandId: CommandId.make(metadata.commandId),
+          threadId: thread.id,
+          message: {
+            messageId,
+            role: "user",
+            text: noteCommand.prompt,
+            attachments: [],
+            humanNote: true,
+          },
+          runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          dispatchMode: "start",
+          createdAt: metadata.createdAt,
+        },
+      });
+      if (noted._tag !== "Success") {
+        const error = squashAtomCommandFailure(noted);
+        Dialog.alert(
+          m(msg("Note not saved")),
+          isHumanNoteUnavailableError(error)
+            ? error.message
+            : (errorDisplayMessage(error, m) ?? m(msg("Try again."))),
+        );
+        return null;
+      }
+      const current = getComposerDraftSnapshot(threadKey);
+      if (current.text === draft.text) {
+        clearComposerDraftContent(threadKey);
+      }
+      return messageId;
+    }
     // A redirect's text answers its approval, so /clear there is that text, not the command.
     if (
       beforeDispatch === undefined &&
@@ -972,6 +1044,27 @@ export function useThreadComposerState(input: {
     return null;
   })();
 
+  const noteUnavailableReason = (() => {
+    const serverConfig = selectedEnvironmentRuntime?.serverConfig;
+    if (selectedThreadShell?.source?.inbox?.audience !== "shared") {
+      return resolve(msg("A note is for a thread you share with the other founder."));
+    }
+    if (!serverConfig) {
+      return resolve(msg("Private notes are not ready yet. Try again in a moment."));
+    }
+    if (serverConfig.environment.capabilities.humanNote !== true) {
+      return resolve(
+        msg("Update this environment's {product} server to use /note.", {
+          product: "T3 Code",
+        }),
+      );
+    }
+    if (selectedThreadCreation !== null) {
+      return resolve(msg("Send a message before leaving a note."));
+    }
+    return null;
+  })();
+
   /** Queues a standalone text command such as `/goal clear` and leaves the composer draft alone. */
   const onSendCommand = async (text: string) => {
     if (
@@ -1091,5 +1184,6 @@ export function useThreadComposerState(input: {
     onSendMessage,
     onSendCommand,
     sideChatUnavailableReason,
+    noteUnavailableReason,
   };
 }

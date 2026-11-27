@@ -366,7 +366,7 @@ const EnvironmentLinkTool = Tool.make("t3_environment_link", {
   .annotate(Tool.Title, "Link another environment")
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, true)
-  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileLinksOff);
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileLinksOffAndSubagents);
 
 const EnvironmentUnlinkTool = Tool.make("t3_environment_unlink", {
   description:

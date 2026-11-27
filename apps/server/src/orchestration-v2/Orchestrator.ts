@@ -2729,7 +2729,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return !child.runtimeRequests.some(
       (request) =>
         request.kind === "user_input" &&
-        request.status === "pending" &&
+        (request.status === "pending" ||
+          (request.status === "resolved" && request.decision === "cancel")) &&
         messageId === `message:delegated-task-question:${threadId}:${request.id}`,
     );
   });
@@ -13061,8 +13062,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ),
         );
       }
+      const resolvedNodeStatus =
+        command.decision === "decline" || command.decision === "cancel"
+          ? ("cancelled" as const)
+          : ("completed" as const);
       const providerSession = context.session;
-      if (providerSessionId !== null && providerSession === undefined) {
+      if (
+        providerSessionId !== null &&
+        providerSession === undefined &&
+        resolvedNodeStatus !== "cancelled"
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -13081,10 +13090,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const approvalTurnItem = context.item;
-      const resolvedNodeStatus =
-        command.decision === "decline" || command.decision === "cancel"
-          ? ("cancelled" as const)
-          : ("completed" as const);
       const replies: string[] = [];
       if (
         runtimeRequest.responseCapability.type === "message" &&
@@ -13359,7 +13364,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchMessage(answer, events, effects);
         return yield* recordSubagentFollowup(answer, events).pipe(mapDispatchError(answer));
       }
-      if (providerSessionId === null) return;
+      if (providerSessionId === null || providerSession === undefined) return;
       if (runtimeRequest.kind === "user_input" && resolvedNodeStatus === "completed") {
         const thread = yield* projectionStore
           .getThread(command.threadId)

@@ -4,6 +4,9 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
+  type OrchestrationV2UserInputQuestion,
+  type ProviderDriverKind,
   type RuntimeRequestId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -20,6 +23,38 @@ import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
+const CHILD_QUESTION_REFUSAL_ANSWER = "Child threads must bring questions to their parent thread.";
+
+function findQuestionItems(
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
+  requestId: RuntimeRequestId,
+): ReadonlyArray<OrchestrationV2UserInputQuestion> {
+  const item = turnItems.findLast(
+    (candidate) => candidate.type === "user_input_request" && candidate.requestId === requestId,
+  );
+  return item?.type === "user_input_request" ? item.questions : [];
+}
+
+function formatQuestionSummary(questions: ReadonlyArray<OrchestrationV2UserInputQuestion>): string {
+  const parts = questions
+    .map((entry) => {
+      const prompt = entry.question.trim();
+      if (prompt.length === 0) return "";
+      const options = (entry.options ?? [])
+        .map((option) => option.label.trim())
+        .filter((label) => label.length > 0);
+      return options.length > 0 ? `${prompt} (options: ${options.join(", ")})` : prompt;
+    })
+    .filter((entry) => entry.length > 0);
+  return parts.length > 0 ? ` Question: ${parts.join(" / ")}` : "";
+}
+
+function isActiveChildQuestion(request: OrchestrationV2RuntimeRequest): boolean {
+  return (
+    request.status === "pending" || (request.status === "resolved" && request.decision === "cancel")
+  );
+}
+
 export class DelegatedTaskQuestionReactor extends Context.Service<
   DelegatedTaskQuestionReactor,
   {
@@ -32,9 +67,36 @@ const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
 
+  const refuseChildQuestion = Effect.fnUntraced(function* (
+    childThreadId: ThreadId,
+    request: OrchestrationV2RuntimeRequest,
+    questions: ReadonlyArray<OrchestrationV2UserInputQuestion>,
+    driver: ProviderDriverKind | undefined,
+  ) {
+    if (request.status !== "pending") return;
+    const refusalAnswers =
+      driver === "codex" || (driver === "muse" && questions.length > 0)
+        ? Object.fromEntries(
+            questions.map((question) => [question.id, CHILD_QUESTION_REFUSAL_ANSWER]),
+          )
+        : undefined;
+    yield* engine.dispatch({
+      type: "runtime-request.respond",
+      commandId: CommandId.make(
+        `server:delegated-task-question-refuse:${childThreadId}:${request.id}`,
+      ),
+      threadId: childThreadId,
+      requestId: request.id,
+      decision: "cancel",
+      ...(refusalAnswers === undefined ? {} : { answers: refusalAnswers }),
+      createdBy: "agent",
+    });
+  });
+
   const wakeParent = Effect.fnUntraced(function* (
     task: OrchestrationV2Subagent,
     request: OrchestrationV2RuntimeRequest,
+    questions: ReadonlyArray<OrchestrationV2UserInputQuestion>,
   ) {
     if (task.childThreadId === null) return;
     const key = `${task.threadId}:${request.id}`;
@@ -42,13 +104,14 @@ const make = Effect.gen(function* () {
     const situation =
       request.responseCapability.type === "message"
         ? `Delegated task ${task.id} asked a question and is still working.`
-        : `Delegated task ${task.id} is blocked on a question and cannot continue until it is answered.`;
+        : `Delegated task ${task.id} is blocked on a question whose human-input card was refused on the child thread.`;
+    const questionDetail = formatQuestionSummary(questions);
     yield* engine.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`server:delegated-task-question:${key}`),
       threadId: task.threadId,
       messageId: MessageId.make(`message:delegated-task-question:${key}`),
-      text: `${situation} Read it with t3_pending_request action read, threadId ${task.childThreadId}, and requestId ${request.id}. Answer it with action respond when the answer follows from the task or the user's instructions; otherwise ask the user, then answer it. If it is no longer pending, it was answered or dismissed.`,
+      text: `${situation} Child question card requestId ${request.id}.${questionDetail} Subagent threads cannot ask the user directly; reply to the child with t3_thread_send on threadId ${task.childThreadId} when the answer follows from the task or the user's instructions, or ask the user from this parent thread first and then send the answer to threadId ${task.childThreadId}.`,
       notification: {
         source: { kind: "delegated_task", taskIds: [task.id], childThreadId: task.childThreadId },
         outcome: "updated",
@@ -112,16 +175,24 @@ const make = Effect.gen(function* () {
           }
           const child = yield* projections.getThreadRecords(task.childThreadId, [
             "runtimeRequests",
+            "turnItems",
+            "providerSessions",
           ]);
           for (const request of child.runtimeRequests) {
             if (
               request.kind !== "user_input" ||
-              request.status !== "pending" ||
+              !isActiveChildQuestion(request) ||
               request.responseCapability.type !== "live"
             ) {
               continue;
             }
-            yield* wakeParent(task, request).pipe(
+            const questions = findQuestionItems(child.turnItems, request.id);
+            const sessionId = request.responseCapability.providerSessionId;
+            const driver = child.providerSessions.find(
+              (session) => session.id === sessionId,
+            )?.driver;
+            yield* refuseChildQuestion(task.childThreadId, request, questions, driver).pipe(
+              Effect.andThen(wakeParent(task, request, questions)),
               Effect.catchCause((cause) =>
                 Effect.logWarning("catching up a delegated task question failed", {
                   taskId: task.id,
@@ -180,24 +251,52 @@ const make = Effect.gen(function* () {
       const child = yield* projections.getThread(event.threadId);
       const parentThreadId = child.lineage.parentThreadId;
       if (parentThreadId === null) return;
+      if (event.payload.status === "resolved" && event.payload.decision === "cancel") {
+        return;
+      }
       const request = yield* projections.getRuntimeRequest(event.threadId, event.payload.id);
-      if (event.payload.status !== "pending" || request?.status !== "pending") {
+      if (
+        event.payload.status !== "pending" ||
+        request === undefined ||
+        !isActiveChildQuestion(request)
+      ) {
         yield* cancelQueuedWakes(parentThreadId, [event.payload.id]);
         return;
       }
       const parent = yield* projections.getThreadRecords(parentThreadId, ["subagents", "runs"]);
-      const { runs } = yield* projections.getThreadRecords(child.id, ["runs"]);
+      const childRecords = yield* projections.getThreadRecords(child.id, [
+        "runs",
+        "turnItems",
+        "providerSessions",
+      ]);
       const run =
-        runs.find((run) => run.id === event.runId) ??
-        runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+        childRecords.runs.find((candidate) => candidate.id === event.runId) ??
+        childRecords.runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
       const taskId =
         run?.delegatedTaskId ??
         (child.forkedFrom?.type === "node" ? child.forkedFrom.nodeId : undefined);
       const task = parent.subagents.find(
         (candidate) => candidate.origin === "app_owned" && candidate.id === taskId,
       );
+      const isDelegatedChild =
+        child.lineage.relationshipToParent === "subagent" || task !== undefined;
+      if (!isDelegatedChild) {
+        return;
+      }
+      const questions = findQuestionItems(childRecords.turnItems, request.id);
+      const sessionId =
+        request.responseCapability.type === "live"
+          ? request.responseCapability.providerSessionId
+          : undefined;
+      const driver =
+        event.driver ??
+        (sessionId === undefined
+          ? undefined
+          : childRecords.providerSessions.find((session) => session.id === sessionId)?.driver);
+      yield* refuseChildQuestion(child.id, request, questions, driver);
       if (
         task === undefined ||
+        ["completed", "failed", "cancelled", "interrupted"].includes(task.status) ||
         parent.thread.archivedAt !== null ||
         parent.thread.deletedAt !== null
       ) {
@@ -208,14 +307,16 @@ const make = Effect.gen(function* () {
         task.completionWake === "settled_only" &&
         event.payload.responseCapability.type === "live" &&
         parent.runs.some(
-          (run) =>
-            run.id === task.runId &&
-            (run.status === "preparing" || run.status === "starting" || run.status === "running"),
+          (candidate) =>
+            candidate.id === task.runId &&
+            (candidate.status === "preparing" ||
+              candidate.status === "starting" ||
+              candidate.status === "running"),
         )
       ) {
         return;
       }
-      yield* wakeParent(task, request);
+      yield* wakeParent(task, request, questions);
     },
     (effect, event) =>
       effect.pipe(

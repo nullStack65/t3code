@@ -52,6 +52,7 @@ it("treats only the commands the composer runs itself as local", () => {
   const none = {
     holdsOnlyText: true,
     sideChat: false,
+    note: false,
     usageLimits: false,
     codexFeedback: false,
     freshSession: false,
@@ -59,15 +60,25 @@ it("treats only the commands the composer runs itself as local", () => {
   const all = {
     ...none,
     sideChat: true,
+    note: true,
     usageLimits: true,
     codexFeedback: true,
     freshSession: true,
   };
-  for (const text of ["/btw why?", "/usage-limits", "/feedback slow", "/clear"]) {
+  for (const text of [
+    "/btw why?",
+    "/note hold merge",
+    "/usage-limits",
+    "/feedback slow",
+    "/clear",
+  ]) {
     expect(composerRunsDraftLocally({ ...all, text })).toBe(true);
     expect(composerRunsDraftLocally({ ...none, text })).toBe(false);
   }
   expect(composerRunsDraftLocally({ ...all, text: "fix the bug" })).toBe(false);
   expect(composerRunsDraftLocally({ ...all, holdsOnlyText: false, text: "/clear" })).toBe(false);
   expect(composerRunsDraftLocally({ ...all, holdsOnlyText: false, text: "/side why?" })).toBe(true);
+  expect(
+    composerRunsDraftLocally({ ...all, holdsOnlyText: false, text: "/note keep private" }),
+  ).toBe(true);
 });

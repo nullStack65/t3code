@@ -180,8 +180,8 @@ Last sweep: 903b140c21 on 2026-11-27, target: local build. Projects: desktop (14
 
 - **Path:** Type / or @ in the composer.
 - **Drive:** 1. focus the composer 2. type / 3. expect the Commands menu 4. clear, type @ 5. expect file suggestions
-- **Success:** Both triggers open their suggestion menus.
-- **Code:** `apps/web/src/components/chat/ComposerCommandMenu.tsx`, `apps/web/src/composer-logic.ts`
+- **Success:** Both triggers open their suggestion menus. /note is listed but disabled, with a reason, when the connected server does not advertise private-note support.
+- **Code:** `apps/web/src/components/chat/ComposerCommandMenu.tsx`, `apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/chat/useComposerMenuItems.ts`, `apps/web/src/components/chat/useComposerSend.ts`, `apps/web/src/components/ChatView.tsx`, `apps/web/src/composer-logic.ts`
 - **Status:** verified: 903b140c21 2026-11-27
 
 ### composer.attachments — Attach files

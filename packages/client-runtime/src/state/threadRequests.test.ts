@@ -345,6 +345,34 @@ describe("pending v2 questions", () => {
     };
     expect(derivePendingThreadRequests(live).userInputs[0]?.dismissible).toBe(false);
   });
+
+  it("suppresses user-input cards on delegated subagent threads while keeping side chats and top-level threads", () => {
+    const subagent = {
+      ...projection,
+      thread: {
+        ...projection.thread,
+        lineage: {
+          ...projection.thread.lineage,
+          parentThreadId: ThreadId.make("parent-thread"),
+          relationshipToParent: "subagent" as const,
+        },
+      },
+    };
+    const fork = {
+      ...projection,
+      thread: {
+        ...projection.thread,
+        lineage: {
+          ...projection.thread.lineage,
+          parentThreadId: ThreadId.make("parent-thread"),
+          relationshipToParent: "fork" as const,
+          sideChat: true,
+        },
+      },
+    };
+    expect(derivePendingThreadRequests(subagent).userInputs).toEqual([]);
+    expect(derivePendingThreadRequests(fork).userInputs).toHaveLength(1);
+  });
 });
 
 it("restores old text answers without mutating history or replacing unchanged rows", () => {

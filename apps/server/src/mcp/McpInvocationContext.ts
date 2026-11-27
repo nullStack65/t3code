@@ -113,6 +113,12 @@ const interactionModeRank: Record<ProviderInteractionMode, number> = { plan: 0, 
 export const hiddenFromOutsideClientsAndSubagents = (): boolean =>
   hiddenFromOutsideClients() && hiddenFromSubagents();
 
+export const hiddenWhileLinksOffAndSubagents = (): boolean =>
+  hiddenWhileLinksOff() && hiddenFromSubagents();
+
+export const hiddenWhileFeedbackOffAndSubagents = (): boolean =>
+  hiddenWhileFeedbackOff() && hiddenFromSubagents();
+
 /**
  * The modes a client caller's writes are capped at: what it was approved
  * with, narrowed by what it asked for on this request. A read-only client

@@ -299,8 +299,16 @@ export const FEATURES: ReadonlyArray<Feature> = [
       "clear, type @",
       "expect file suggestions",
     ],
-    success: "Both triggers open their suggestion menus.",
-    code: [`${C}chat/ComposerCommandMenu.tsx`, `${W}composer-logic.ts`],
+    success:
+      "Both triggers open their suggestion menus. /note is listed but disabled, with a reason, when the connected server does not advertise private-note support.",
+    code: [
+      `${C}chat/ComposerCommandMenu.tsx`,
+      `${C}chat/ChatComposer.tsx`,
+      `${C}chat/useComposerMenuItems.ts`,
+      `${C}chat/useComposerSend.ts`,
+      `${C}ChatView.tsx`,
+      `${W}composer-logic.ts`,
+    ],
   }),
   f({
     id: "composer.attachments",
