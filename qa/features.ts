@@ -685,6 +685,28 @@ export const FEATURES: ReadonlyArray<Feature> = [
     unverified: "Needs a GitHub login and a real PR; the QA home has neither.",
   }),
   f({
+    id: "sidebar.status-live",
+    area: "Sidebar",
+    title: "Standing-bot status follows live state across environments",
+    path: "Sidebar → My Bots / Shared Bots rows, and any thread row: the status pill (Working, Waiting, Limited, Failed).",
+    drive: [
+      "start a thread whose provider run ends in a usage_limit failure; expect its row to show Limited",
+      "start a new run on that thread (after a provider switch or server restart); expect Working",
+      "repeat for a thread on a linked environment, seen through this client",
+      "expect the pill to flip with no reload, in the thread list and the standing-bot groups",
+    ],
+    success:
+      "A failed or limited run followed by a running run flips the row to Working, on the same and on a linked environment, without a reload.",
+    code: [
+      `${C}Sidebar.logic.ts`,
+      `${C}ThreadStatusIndicators.tsx`,
+      `${C}sidebar/SidebarBotsGroup.tsx`,
+      `${C}sidebar/SidebarThreadRow.tsx`,
+    ],
+    unverified:
+      "Needs a fake provider that emits a usage_limit failure and then a second run, plus a linked second server; the Replay agent has neither. Reported 2026-11-27: CTO, Platform, ARC Ops, Growth and Product Designer showed Limited and Gardening showed Failed while each server reported them running or waiting on a PR watch.",
+  }),
+  f({
     id: "layout.boot-recovery",
     area: "Reliability",
     title: "Boot survives a flapping network",

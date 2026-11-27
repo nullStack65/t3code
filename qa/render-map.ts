@@ -32,7 +32,7 @@ const loadStatus = (): Status | undefined => {
 
 const label = (entry: Entry | undefined, reason: string | undefined) =>
   entry === undefined
-    ? "unverified: not yet swept"
+    ? `unverified: ${reason ?? "not yet swept"}`
     : entry.status === "verified"
       ? `verified: ${entry.sha} ${entry.date}`
       : entry.status === "broken"
