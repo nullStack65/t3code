@@ -100,6 +100,23 @@ jobs:
       - name: Provide Chromium libraries
         uses: ./.github/actions/provide-chromium-libs
 
+      # Without a font cache Chromium finds no fonts on this image, so text has no size and
+      # Playwright calls every heading hidden. Same setup as the latency gate in closura-arc-ci.yml.
+      - name: Make fonts visible to headless Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fontconfig-cache"
+          printf '<?xml version="1.0"?>\n<fontconfig><dir>/usr/share/fonts</dir><cachedir>%s</cachedir></fontconfig>\n' \
+            "$RUNNER_TEMP/fontconfig-cache" > "$RUNNER_TEMP/fonts.conf"
+          fonts=$(find /usr/share/fonts -name '*.ttf' 2>/dev/null | wc -l)
+          if test "$fonts" -eq 0; then
+            echo "::error::No fonts for headless Chromium, so text has no size and is never visible."
+            exit 1
+          fi
+          printf 'Fonts available to Chromium: %s\n' "$fonts"
+          printf 'FONTCONFIG_FILE=%s\n' "$RUNNER_TEMP/fonts.conf" >> "$GITHUB_ENV"
+
       - name: Restore Playwright Chromium
         id: playwright_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -151,7 +168,7 @@ jobs:
           path: |
             qa/report/
             qa/status.json
-            qa/test-results/results.json
+            qa/test-results/
             qa/baselines/ci/
           if-no-files-found: ignore
           retention-days: 14
