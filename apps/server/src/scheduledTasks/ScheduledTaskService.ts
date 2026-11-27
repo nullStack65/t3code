@@ -2469,6 +2469,11 @@ export const layer = Layer.effect(
             return { _tag: "disabled" as const };
           }
           const signature = schedule.signature;
+          if (request.method.toUpperCase() === "GET" && signature === null) {
+            yield* log("rejected_signature");
+            yield* observe("rejected_signature");
+            return { _tag: "rejected_signature" as const };
+          }
           if (signature !== null) {
             const verified =
               row.webhook_secret !== null &&

@@ -157,8 +157,8 @@ import {
   interactionModeRank,
   resolveInteractionMode,
   resolveRuntimeMode,
+  resolveSafeTaskPrompt,
   runtimeModeRank,
-  taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import { WITHHELD, withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlToken.ts";
@@ -3165,6 +3165,7 @@ const make = Effect.gen(function* () {
           startFromOrigin: false,
         };
       }
+      const safeTask = yield* resolveSafeTaskPrompt(input);
       const parentNodeId = parentRun.rootNodeId;
       // The command commits the child's preparing run, which only this call
       // prepares, so a caller that goes away must not stop it in between.
@@ -3182,7 +3183,7 @@ const make = Effect.gen(function* () {
               parentThreadId: scope.thread.threadId,
               parentRunId: parentRun.id,
               parentNodeId,
-              task: taskPrompt(input),
+              task: safeTask,
               ...(input.title === undefined ? {} : { title: input.title }),
               modelSelection: target.modelSelection,
               runtimeMode,

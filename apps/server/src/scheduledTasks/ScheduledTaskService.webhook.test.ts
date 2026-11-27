@@ -2254,3 +2254,25 @@ it.effect("filters run before replay and coalescing without claiming ignored del
     { workers },
   );
 });
+
+it.effect("rejects unsigned GET webhook requests with rejected_signature (CLO-1099)", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          prompt: "Inspect {{headers.x-note}}",
+        }),
+      );
+      const res = yield* service.triggerWebhook(
+        requestFor(task, {
+          method: "GET",
+          headers: { "x-note": "hello" },
+          body: new Uint8Array(),
+          bodyText: "",
+        }),
+      );
+      assert.equal(res._tag, "rejected_signature");
+      assert.equal(yield* Queue.size(launches), 0);
+    }),
+  ),
+);

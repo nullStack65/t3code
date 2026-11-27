@@ -9,6 +9,8 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import { containsSecret } from "../security/secretRedaction.ts";
+
 /** How much a runtime mode allows, narrowest first. */
 export function runtimeModeRank(mode: RuntimeMode): number {
   switch (mode) {
@@ -92,4 +94,21 @@ export function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
   return input.role === undefined || input.role === "general"
     ? input.task
     : `Act as the ${input.role} sub-agent for this task.\n\n${input.task}`;
+}
+
+/** Rejects delegated task prompts that contain detected secrets before storage or forwarding. */
+export function resolveSafeTaskPrompt(
+  input: OrchestratorMcpDelegateTaskInput,
+): Effect.Effect<string, OrchestratorMcpFailure> {
+  const prompt = taskPrompt(input);
+  if (containsSecret(prompt)) {
+    return Effect.fail(
+      new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "Delegated task prompt appears to contain a secret or credential. Remove the secret and reference it through the vault instead.",
+      }),
+    );
+  }
+  return Effect.succeed(prompt);
 }

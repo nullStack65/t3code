@@ -57,7 +57,7 @@ import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import {
   resolveInteractionMode,
   resolveRuntimeMode,
-  taskPrompt,
+  resolveSafeTaskPrompt,
 } from "../mcp/delegatedTaskModes.ts";
 import { followUpOwnerRun } from "../orchestration-v2/CommandPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -962,7 +962,7 @@ const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => undefined),
       );
       const label = link?.label ?? target.environmentId;
-      const task = taskPrompt(input);
+      const task = yield* resolveSafeTaskPrompt(input);
       const title = input.title ?? parent.thread.title;
       const sent = yield* launchThere(scope, {
         environmentId: target.environmentId,
