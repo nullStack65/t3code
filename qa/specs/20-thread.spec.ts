@@ -32,8 +32,8 @@ feature("timeline.approval", "approval request actions", async ({ page, qa }) =>
   await page.getByRole("menuitemradio", { name: "Supervised" }).click();
   await page.getByRole("button", { name: /^Showcase$|^Write approval$/ }).click();
   await page.getByRole("option", { name: /^Write approval/ }).click();
-  // Choosing a model closes the picker on desktop; on a phone it stays open until dismissed.
-  if (qa.phone) await page.keyboard.press("Escape");
+  // The picker stays open after a model is chosen, so the effort choices are in reach.
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("toolbar", { name: "Providers" })).toBeHidden();
   await (await qa.composer()).fill("Edit a file");
   await page.getByRole("button", { name: /^(Send|Submit) message$/ }).click();
