@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { isChunkLoadError, reloadOnceForChunkLoadError } from "./chunkReloadGuard";
+import { isChunkLoadError, reloadForChunkLoadError } from "./chunkReloadGuard";
 
 function createStorageStub(): Storage {
   const store = new Map<string, string>();
@@ -20,26 +20,44 @@ function createStorageStub(): Storage {
   };
 }
 
-describe("reloadOnceForChunkLoadError", () => {
-  it("reloads on the first failure and lets the second one surface", () => {
+describe("reloadForChunkLoadError", () => {
+  it("retries with growing delays, then lets the failure surface", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
+    const reloadAt = (now: number) => reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload, "1.0.0")).toBe(true);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(reloadAt(0)).toBe(true);
+    expect(reloadAt(5_000)).toBe(true);
+    expect(reloadAt(10_000)).toBe(true);
+    expect(reloadAt(15_000)).toBe(false);
+    expect(reload.mock.calls.map(([delay]) => delay)).toEqual([750, 1500, 2250]);
+  });
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload, "1.0.0")).toBe(false);
-    expect(reload).toHaveBeenCalledTimes(1);
+  it("reloads again once the window has passed", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    for (const now of [0, 1_000, 2_000])
+      reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
+
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.0", 70_000)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(4);
   });
 
   it("reloads again once a deploy changed the build", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
+    for (const now of [0, 1_000, 2_000])
+      reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
 
-    reloadOnceForChunkLoadError(() => storage, reload, "1.0.0");
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.1", 3_000)).toBe(true);
+  });
 
-    expect(reloadOnceForChunkLoadError(() => storage, reload, "1.0.1")).toBe(true);
-    expect(reload).toHaveBeenCalledTimes(2);
+  it("treats the bare build string an older tab stored as no record", () => {
+    const storage = createStorageStub();
+    storage.setItem("t3code:chunk-load-reloaded", "1.0.0");
+    const reload = vi.fn();
+
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.0", 0)).toBe(true);
   });
 
   it("never reloads when storage is blocked, so a persistent failure cannot loop", () => {
@@ -48,7 +66,7 @@ describe("reloadOnceForChunkLoadError", () => {
       throw new DOMException("blocked", "SecurityError");
     };
 
-    expect(reloadOnceForChunkLoadError(blocked, reload)).toBe(false);
+    expect(reloadForChunkLoadError(blocked, reload)).toBe(false);
     expect(reload).not.toHaveBeenCalled();
   });
 });
