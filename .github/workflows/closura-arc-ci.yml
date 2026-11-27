@@ -165,9 +165,15 @@ jobs:
           node --test scripts/fork-drift-receipt.test.mjs scripts/fork-sync-plan.test.mjs
           # Exit 1 means the release line is past its drift budget, which is
           # reported rather than failed. Exit 2 means the receipt itself broke.
-          node scripts/fork-drift-receipt.mjs --base "origin/${{ github.base_ref || github.ref_name }}" || rc=$?
+          # `--head` is the pull request head (the pushed commit on a push), so
+          # the receipt measures the candidate merge of base and head, and it
+          # records all three tip SHAs so the numbers can be reproduced later.
+          # The head is in the shallow checkout: it is a parent of the merge ref.
+          node scripts/fork-drift-receipt.mjs --base "origin/${{ github.base_ref || github.ref_name }}" --head "$DRIFT_HEAD_SHA" || rc=$?
           if [ "${rc:-0}" -eq 2 ]; then exit 2; fi
         shell: bash
+        env:
+          DRIFT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Guard indispensable AssemblyAI voice implementation
         shell: bash
