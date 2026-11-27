@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
@@ -28,11 +31,41 @@ const rawWrite = process.stdout.write.bind(process.stdout);
 const send = (msg) => rawWrite(JSON.stringify(msg) + "\\n");
 const mode = process.env.FAKE_WORKER_MODE || "ok";
 
+// A child in the worker's group and a detached one (own session, like Cursor's shell tools),
+// each with a grandchild. Calls back with every pid once all four are running.
+function spawnTree(done) {
+  const { spawn } = require("node:child_process");
+  const childScript =
+    'const g = require("node:child_process").spawn("sleep", ["600"], { stdio: "ignore" });' +
+    'process.stdout.write(String(g.pid) + "\\\\n"); setInterval(() => {}, 1 << 30);';
+  const pids = [];
+  let pending = 2;
+  for (const detached of [false, true]) {
+    const child = spawn(process.execPath, ["-e", childScript], {
+      detached,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (detached) child.unref();
+    child.stdout.once("data", (chunk) => {
+      pids.push(child.pid, Number(String(chunk).trim()));
+      child.stdout.destroy();
+      if (--pending === 0) done(pids);
+    });
+  }
+}
+
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const req = JSON.parse(line);
   if (req.type === "open") {
+    if (mode === "spawn-tree") {
+      spawnTree((pids) => {
+        require("node:fs").writeFileSync(process.env.FAKE_WORKER_PIDS_FILE, JSON.stringify(pids));
+        send({ type: "response", id: req.id, ok: true, result: { agentId: "agent-worker-1" } });
+      });
+      return;
+    }
     if (mode === "config-error") {
       send({
         type: "response",
@@ -761,4 +794,93 @@ describe("CursorAgentSdkProcessRunner", () => {
         }),
       ).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  // Without a systemd scope (macOS, or Linux with no user manager) only process signals remain.
+  // Cursor's SDK starts its shell tools detached, in their own process groups, so a worker group
+  // kill alone leaves them running.
+  const runTreeStop = (stop: "close-session" | "runner-scope") =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const scriptPath = yield* writeFakeWorker;
+      const executable = yield* HostProcess.ExecutablePath;
+      const pidsFile = path.join(path.dirname(scriptPath), "pids.json");
+      const stoppedUnits: Array<string> = [];
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const runner = yield* CursorAgentSdkProcessRunner.makeCursorAgentSdkProcessRunner({
+            resolveLaunch: Effect.succeed({
+              command: executable,
+              args: [scriptPath],
+              env: { FAKE_WORKER_MODE: "spawn-tree", FAKE_WORKER_PIDS_FILE: pidsFile },
+            }),
+            protocolLoggerFor: () => undefined,
+          }).pipe(
+            Effect.provideService(AgentScope, {
+              // No systemd scope: wrap returns no unit, as on macOS.
+              wrap: ({ command, args }) => Effect.succeed({ command, args }),
+              oomKilled: () => Effect.succeed(false),
+              stop: (unit) => Effect.sync(() => void stoppedUnits.push(unit)),
+              kill: () => Effect.succeed(false),
+              clear: () => Effect.void,
+            }),
+          );
+          const session = yield* runner.open(openInput);
+          const pids = JSON.parse(yield* fs.readFileString(pidsFile)) as Array<number>;
+          assert.lengthOf(pids, 4);
+          for (const pid of pids) assert.isTrue(isLive(pid), `pid ${pid} should be running`);
+          if (stop === "close-session") yield* session.close;
+          // "runner-scope" leaves the session open; scope exit forces the worker down.
+          return pids;
+        }),
+      ).pipe(
+        // Teardown waits for every owned process to exit, so nothing may be running here.
+        Effect.tap((pids) =>
+          Effect.sync(() =>
+            assert.deepEqual(
+              pids.filter(isLive),
+              [],
+              "the worker's children and grandchildren outlived Stop",
+            ),
+          ),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (!NodeFS.existsSync(pidsFile)) return;
+            for (const pid of JSON.parse(NodeFS.readFileSync(pidsFile, "utf8")) as Array<number>) {
+              try {
+                process.kill(pid, "SIGKILL");
+              } catch {}
+            }
+          }),
+        ),
+      );
+      assert.deepEqual(stoppedUnits, []);
+    }).pipe(Effect.provide(NodeServices.layer));
+
+  it.live.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
+    "session Stop kills the worker's children and detached grandchildren without a systemd scope",
+    () => runTreeStop("close-session"),
+  );
+
+  it.live.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
+    "runner teardown kills the worker's children and detached grandchildren without a systemd scope",
+    () => runTreeStop("runner-scope"),
+  );
 });
+
+/** Running, not a zombie awaiting its reaper. */
+function isLive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  try {
+    const stat = NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+  } catch {
+    return false;
+  }
+}

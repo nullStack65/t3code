@@ -742,7 +742,7 @@ export function observePosixOwnershipLedger(input: {
   }
 }
 
-function observePosixOwnershipLedgerContinuously(input: {
+export function observePosixOwnershipLedgerContinuously(input: {
   readonly childQueues: Map<number, Array<number>>;
   readonly controller: AcpPosixProcessTreeController;
   readonly frontier: Map<number, AcpOwnedPosixProcess>;

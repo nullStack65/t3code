@@ -1,4 +1,5 @@
 import type { AgentMessage, InteractionUpdate, RunResult, SteerAckOutcome } from "@cursor/sdk";
+import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -86,6 +87,65 @@ function workerExitError(method: string, exitCode: number | undefined, stderr: s
   });
 }
 
+interface DescendantOwnership {
+  readonly controller: AcpSessionRuntime.AcpPosixProcessTreeController;
+  readonly state: {
+    readonly childQueues: Map<number, Array<number>>;
+    readonly frontier: Map<number, AcpSessionRuntime.AcpOwnedPosixProcess>;
+    readonly ledger: Map<string, AcpSessionRuntime.AcpOwnedPosixProcess>;
+    readonly root: AcpSessionRuntime.AcpPosixOwnershipRoot;
+  };
+}
+
+function makeDescendantOwnership(): DescendantOwnership {
+  return {
+    controller: AcpSessionRuntime.makePosixProcessTreeController("linux"),
+    state: {
+      childQueues: new Map(),
+      frontier: new Map(),
+      ledger: new Map(),
+      root: { value: undefined },
+    },
+  };
+}
+
+/**
+ * Signals the worker's tracked descendants, deepest first, then the worker. Skipped when
+ * nothing besides a dead worker is left, so an ordinary close pays no termination grace.
+ */
+const terminateOwnedDescendants = (ownership: DescendantOwnership, rootPid: number) =>
+  Effect.suspend(() => {
+    const { controller, state } = ownership;
+    const root = state.root.value;
+    if (root === undefined) return Effect.void;
+    const isLive = (owned: AcpSessionRuntime.AcpOwnedPosixProcess) => {
+      const observed = controller.identity(owned.pid);
+      return (
+        observed !== undefined &&
+        observed.startTime === owned.startTime &&
+        !AcpSessionRuntime.posixProcessIsZombie(observed)
+      );
+    };
+    const rootLive = isLive(root);
+    if (rootLive) {
+      // Catch children forked since the last background observation.
+      try {
+        AcpSessionRuntime.observePosixOwnershipLedger({ ...state, controller, rootPid });
+      } catch {}
+    }
+    const descendantsLive = [...state.ledger.values()].some(
+      (owned) => owned.pid !== rootPid && isLive(owned),
+    );
+    if (!descendantsLive) return Effect.void;
+    return AcpSessionRuntime.terminatePosixOwnedProcessTree({
+      controller,
+      grace: WORKER_EXIT_TIMEOUT,
+      ledger: state.ledger,
+      root: state.root,
+      rootPid,
+    }).pipe(Effect.ignoreCause({ log: true }));
+  });
+
 interface SpawnedCursorWorker {
   readonly scope: Scope.Scope;
   /** Routes worker-side protocol logs to the session that produced them. */
@@ -133,6 +193,7 @@ export const makeCursorAgentSdkProcessRunner = Effect.fn("makeCursorAgentSdkProc
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const agentScope = yield* AgentScope;
     const hostEnvironment = yield* HostProcess.Environment;
+    const hostPlatform = yield* HostProcess.Platform;
     const runnerContext = yield* Effect.context<never>();
     const activeCleanups = new Set<Effect.Effect<void>>();
 
@@ -180,6 +241,13 @@ export const makeCursorAgentSdkProcessRunner = Effect.fn("makeCursorAgentSdkProc
           env,
           shared: true,
         });
+        // A systemd scope reaps the whole tree. Without one, the worker's own process group
+        // (the spawner's default) misses the SDK's shell tools, which start detached in their
+        // own groups, so track descendants by parentage as the ACP runtime does for Grok.
+        const ownership =
+          wrapped.unit === undefined && hostPlatform === "linux"
+            ? makeDescendantOwnership()
+            : undefined;
 
         const handle = yield* Scope.provide(
           Effect.acquireRelease(
@@ -194,20 +262,47 @@ export const makeCursorAgentSdkProcessRunner = Effect.fn("makeCursorAgentSdkProc
               }),
             ),
             (child) =>
-              child
-                .kill()
-                .pipe(
-                  Effect.ignore,
-                  Effect.andThen(
-                    wrapped.unit === undefined ? Effect.void : agentScope.stop(wrapped.unit),
-                  ),
+              (ownership === undefined
+                ? Effect.void
+                : terminateOwnedDescendants(ownership, Number(child.pid))
+              ).pipe(
+                Effect.andThen(child.kill().pipe(Effect.ignore)),
+                Effect.andThen(
+                  wrapped.unit === undefined ? Effect.void : agentScope.stop(wrapped.unit),
                 ),
+              ),
           ),
           workerScope,
         ).pipe(
           Effect.onError(() => teardownScope()),
           Effect.mapError((cause) => toRunnerError("worker.spawn", cause)),
         );
+
+        if (ownership !== undefined) {
+          const observe = {
+            ...ownership.state,
+            controller: ownership.controller,
+            rootPid: Number(handle.pid),
+          };
+          const captured = yield* Effect.try({
+            try: () => AcpSessionRuntime.observePosixOwnershipLedger(observe),
+            catch: (cause) => toRunnerError("worker.descendants", cause),
+          }).pipe(
+            Effect.as(true),
+            Effect.catch((error) =>
+              Effect.logWarning("Cursor SDK worker descendant tracking unavailable", error).pipe(
+                Effect.as(false),
+              ),
+            ),
+          );
+          if (captured) {
+            // Keeps parentage of processes whose parent exits first, such as a shell tool
+            // that outlives the worker after a graceful close.
+            yield* AcpSessionRuntime.observePosixOwnershipLedgerContinuously(observe).pipe(
+              Effect.forkIn(workerScope),
+            );
+          }
+        }
 
         if (launch.registerProcess !== undefined) {
           const unregister = yield* Effect.try({
