@@ -5620,6 +5620,215 @@ describe("collapsing non-human activity", () => {
     });
   });
 
+  describe("zero-pill hiding for silent_ack and pure agent-routed turns", () => {
+    const toolWorkEntry = (
+      id: string,
+      second: number,
+      targetRunId: RunId,
+      toolName: string,
+      output?: unknown,
+    ) => {
+      const projectedItem = {
+        item: {
+          id,
+          type: "dynamic_tool",
+          status: "completed",
+          runId: targetRunId,
+          toolName,
+          ...(output !== undefined ? { output } : {}),
+        },
+      } as unknown as OrchestrationV2ProjectedTurnItem;
+      const workEntry = {
+        id,
+        createdAt: time(second),
+        runId: targetRunId,
+        label: toolName,
+        tone: "tool" as const,
+        projectedItem,
+      };
+      const row: Extract<MessagesTimelineRow, { kind: "work" }> = {
+        ...workRow(id, second),
+        groupedEntries: [workEntry] as unknown as Extract<
+          MessagesTimelineRow,
+          { kind: "work" }
+        >["groupedEntries"],
+      };
+      const entry: TimelineEntry = {
+        id,
+        kind: "work",
+        createdAt: time(second),
+        entry: workEntry as unknown as Extract<TimelineEntry, { kind: "work" }>["entry"],
+      };
+      return { row, entry };
+    };
+
+    const buildEntries = (
+      conversation: MessagesTimelineRow[],
+      extraEntries: ReadonlyArray<TimelineEntry>,
+    ): TimelineEntry[] => [
+      ...conversation.flatMap((row): TimelineEntry[] => {
+        if (row.kind === "message") return [{ ...row, kind: "message" }];
+        if (row.kind === "sent-message") {
+          return [
+            {
+              id: row.id,
+              kind: "sent-message",
+              createdAt: row.createdAt,
+              runId:
+                (row as Extract<MessagesTimelineRow, { kind: "sent-message" }> & { runId?: RunId })
+                  .runId ?? null,
+              text: row.text,
+            },
+          ];
+        }
+        return [];
+      }),
+      ...extraEntries,
+    ];
+
+    it("completely hides an agent-triggered turn ending in silent_ack with zero fold pill", () => {
+      const silentRun = RunId.make("silent-ack-turn");
+      const ack = toolWorkEntry("ack-tool", 3, silentRun, "mcp__t3-code__silent_ack");
+      const conversation: MessagesTimelineRow[] = [
+        messageRow("founder-prompt", 0, { runId, ...person("kameron") }),
+        messageRow("founder-reply", 1, { runId, role: "assistant" }),
+        messageRow("agent-wake", 2, { runId: silentRun, createdBy: "agent" }),
+        ack.row,
+        messageRow("silent-assistant", 4, { runId: silentRun, role: "assistant" }),
+        messageRow("founder-next", 5, { runId: RunId.make("next-user"), ...person("jeff") }),
+      ];
+      const context = timelineActivityContext(buildEntries(conversation, [ack.entry]), [], false);
+      const collapsed = collapseTimelineActivity(conversation, new Set(), context);
+      expect(collapsed.map(({ id }) => id)).toEqual([
+        "founder-prompt",
+        "founder-reply",
+        "founder-next",
+      ]);
+      expect(collapsed.some((row) => row.kind === "activity")).toBe(false);
+      expect(activityPillIdForEntry(conversation, "agent-wake", context)).toBeUndefined();
+      expect(activityPillIdForEntry(conversation, "ack-tool", context)).toBeUndefined();
+
+      // Standalone silent_ack turn renders zero rows and zero fold pill.
+      const standalone = [
+        messageRow("agent-wake", 2, { runId: silentRun, createdBy: "agent" }),
+        ack.row,
+      ];
+      const standaloneCtx = timelineActivityContext(
+        buildEntries(standalone, [ack.entry]),
+        [],
+        false,
+        undefined,
+        true,
+      );
+      expect(collapseTimelineActivity(standalone, new Set(), standaloneCtx)).toEqual([]);
+    });
+
+    it("completely hides agent-triggered turns calling t3_thread_send or ask_agent with no send_to_user", () => {
+      const sendRun = RunId.make("thread-send-turn");
+      const askRun = RunId.make("ask-agent-turn");
+      const threadSend = toolWorkEntry("send-tool", 1, sendRun, "mcp__t3-code__t3_thread_send");
+      const askAgent = toolWorkEntry("ask-tool", 4, askRun, "ask_agent");
+      const conversation: MessagesTimelineRow[] = [
+        messageRow("wake-1", 0, { runId: sendRun, createdBy: "agent" }),
+        threadSend.row,
+        messageRow("reply-1", 2, { runId: sendRun, role: "assistant" }),
+        messageRow("wake-2", 3, {
+          runId: askRun,
+          scheduledTaskId: ScheduledTaskId.make("sched-ask"),
+        }),
+        askAgent.row,
+        messageRow("reply-2", 5, { runId: askRun, role: "assistant" }),
+      ];
+      const context = timelineActivityContext(
+        buildEntries(conversation, [threadSend.entry, askAgent.entry]),
+        [],
+        false,
+        undefined,
+        true,
+      );
+      expect(collapseTimelineActivity(conversation, new Set(), context)).toEqual([]);
+    });
+
+    it("keeps an agent-triggered turn visible when send_to_user is explicitly called", () => {
+      const routedRun = RunId.make("send-to-user-turn");
+      const threadSend = toolWorkEntry("send-tool", 1, routedRun, "t3_thread_send");
+      const sentRow = {
+        kind: "sent-message" as const,
+        id: "sent-to-founder",
+        createdAt: time(2),
+        text: "Build finished — ready for review.",
+        timelineVisibility: "user_timeline" as const,
+      };
+      const conversation: MessagesTimelineRow[] = [
+        messageRow("wake", 0, { runId: routedRun, createdBy: "agent" }),
+        threadSend.row,
+        sentRow,
+      ];
+      const entries: TimelineEntry[] = [
+        { ...conversation[0]!, kind: "message" } as TimelineEntry,
+        threadSend.entry,
+        {
+          id: sentRow.id,
+          kind: "sent-message",
+          createdAt: sentRow.createdAt,
+          runId: routedRun,
+          text: sentRow.text,
+          timelineVisibility: "user_timeline",
+        },
+      ];
+      const context = timelineActivityContext(entries, [], false, undefined, true);
+      expect(context.hiddenSilentRuns.has(routedRun)).toBe(false);
+      const collapsed = collapseTimelineActivity(conversation, new Set(), context);
+      expect(collapsed.map(({ id }) => id)).toEqual(["activity:wake", "sent-to-founder"]);
+    });
+
+    it("keeps a normal user-triggered turn visible even when it calls silent_ack or t3_thread_send", () => {
+      const userRun = RunId.make("user-triggered-turn");
+      const threadSend = toolWorkEntry("user-send-tool", 1, userRun, "t3_thread_send");
+      const silentAck = toolWorkEntry("user-ack-tool", 2, userRun, "silent_ack");
+      const conversation: MessagesTimelineRow[] = [
+        messageRow("user-msg", 0, { runId: userRun, ...person("kameron") }),
+        threadSend.row,
+        silentAck.row,
+        messageRow("assistant-reply", 3, { runId: userRun, role: "assistant" }),
+      ];
+      const context = timelineActivityContext(
+        buildEntries(conversation, [threadSend.entry, silentAck.entry]),
+        [],
+        false,
+      );
+      expect(context.hiddenSilentRuns.has(userRun)).toBe(false);
+      expect(
+        collapseTimelineActivity(conversation, new Set(), context).map(({ id }) => id),
+      ).toEqual(["user-msg", "user-send-tool", "user-ack-tool", "assistant-reply"]);
+    });
+
+    it("keeps an agent-triggered turn visible when it calls t3_thread_send and @-mentions a founder", () => {
+      const mentionRun = RunId.make("founder-mention-turn");
+      const threadSend = toolWorkEntry("send-tool", 1, mentionRun, "t3_thread_send");
+      const conversation: MessagesTimelineRow[] = [
+        messageRow("wake", 0, { runId: mentionRun, createdBy: "agent" }),
+        threadSend.row,
+        messageRow("mention-reply", 2, {
+          runId: mentionRun,
+          role: "assistant",
+          text: "@kameron this needs your call",
+        }),
+      ];
+      const context = timelineActivityContext(
+        buildEntries(conversation, [threadSend.entry]),
+        [],
+        false,
+        undefined,
+        true,
+      );
+      expect(context.hiddenSilentRuns.has(mentionRun)).toBe(false);
+      expect(
+        collapseTimelineActivity(conversation, new Set(), context).map(({ id }) => id),
+      ).toEqual(["activity:wake", "mention-reply"]);
+    });
+  });
+
   it("keeps groups with failed child runs and pending approvals collapsed but marked", () => {
     const event = (
       id: string,

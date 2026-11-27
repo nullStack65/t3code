@@ -8,6 +8,12 @@ import {
   type RunId,
 } from "@t3tools/contracts";
 import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
+import {
+  compactDynamicToolOutput,
+  SEND_TO_USER_TOOL_NAME,
+  SILENT_ACK_TOOL_NAME,
+  sentMessageFromToolItem,
+} from "@t3tools/shared/toolOutput";
 import { resolveMessageSender, type MessageSenderInput } from "./messageSender.ts";
 
 type ActivityMessage = MessageSenderInput & {
@@ -20,6 +26,45 @@ export interface ChatActivityEntry {
   readonly runId: RunId | null;
   readonly message?: ActivityMessage | undefined;
   readonly item?: OrchestrationV2TurnItem | undefined;
+  /** True when the entry is an explicit user-facing card (e.g. `sent-message` from `send_to_user`). */
+  readonly surfacesToUser?: boolean | undefined;
+}
+
+const SILENT_OR_AGENT_ROUTED_TOOL_IDS: ReadonlySet<string> = new Set([
+  SILENT_ACK_TOOL_NAME,
+  "t3_thread_send",
+  "t3_thread_send_attachments",
+  "ask_agent",
+]);
+
+const TERMINAL_RUN_STATUSES: ReadonlySet<OrchestrationV2RunStatus> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+function resolveChannelToolId(toolName: string | null | undefined): string | null {
+  if (typeof toolName !== "string" || toolName.length === 0) return null;
+  const resolved = resolveT3McpToolId(toolName);
+  if (resolved !== null) return resolved;
+  if (toolName === SEND_TO_USER_TOOL_NAME || toolName.endsWith(`__${SEND_TO_USER_TOOL_NAME}`)) {
+    return SEND_TO_USER_TOOL_NAME;
+  }
+  for (const id of SILENT_OR_AGENT_ROUTED_TOOL_IDS) {
+    if (toolName === id || toolName.endsWith(`__${id}`)) return id;
+  }
+  return null;
+}
+
+function isCompletedSuccessfulTool(
+  item: OrchestrationV2TurnItem | undefined,
+): item is Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> {
+  return (
+    item?.type === "dynamic_tool" &&
+    item.status === "completed" &&
+    compactDynamicToolOutput(item.output)?.isError !== true
+  );
 }
 
 function isDecisionRequestItem(
@@ -93,6 +138,10 @@ export function chatActivityContext(
 ) {
   const agentRuns = new Set<RunId>();
   const directRuns = new Set<RunId>();
+  const agentOrAutomationWakeRuns = new Set<RunId>();
+  const humanRuns = new Set<RunId>();
+  const silentOrAgentRoutedRuns = new Set<RunId>();
+  const userSurfacingRuns = new Set<RunId>();
   const decisionRuns = new Set<RunId>();
   const attentionByRun = new Map<RunId, Set<string>>();
   // A failed tool call needs attention only until a later call in the same run succeeds.
@@ -105,12 +154,23 @@ export function chatActivityContext(
     else attentionByRun.set(runId, new Set([id]));
   };
   let firstReplyAfterDecision: RunId | undefined;
-  let latestReplyRun: RunId | undefined;
+  const replyRuns: RunId[] = [];
   let pendingDecision: { runId: RunId; startedAt: string } | undefined;
-  for (const { createdAt, runId, message, item } of entries) {
+  for (const { createdAt, runId, message, item, surfacesToUser } of entries) {
     if (!runId) continue;
+    if (surfacesToUser) userSurfacingRuns.add(runId);
+    if (message?.humanNote) userSurfacingRuns.add(runId);
+    if (message?.timelineVisibility === "user_timeline") userSurfacingRuns.add(runId);
+    if (message && !message.humanNote && mentionedFounders(message.text).length > 0) {
+      userSurfacingRuns.add(runId);
+    }
     if (message?.role === "user" && !message.humanNote) {
       const sender = resolveMessageSender(message);
+      if (sender.kind === "person" || sender.kind === "guest") {
+        humanRuns.add(runId);
+      } else if (sender.kind === "agent" || sender.kind === "automation") {
+        agentOrAutomationWakeRuns.add(runId);
+      }
       if (
         sender.kind === "agent" ||
         (includeOtherActivity && sender.kind !== "person" && sender.kind !== "guest")
@@ -120,7 +180,31 @@ export function chatActivityContext(
         directRuns.add(runId);
       }
     }
-    if (item?.type === "notification") agentRuns.add(runId);
+    if (item?.type === "notification") {
+      agentRuns.add(runId);
+      agentOrAutomationWakeRuns.add(runId);
+    }
+    if (item) {
+      if (
+        item.timelineVisibility === "user_timeline" ||
+        item.type === "proposed_plan" ||
+        item.type === "secret_request" ||
+        item.type === "link_request"
+      ) {
+        userSurfacingRuns.add(runId);
+      }
+      if (isCompletedSuccessfulTool(item)) {
+        const channelToolId = resolveChannelToolId(item.toolName);
+        if (
+          channelToolId === SEND_TO_USER_TOOL_NAME ||
+          sentMessageFromToolItem(item) !== undefined
+        ) {
+          userSurfacingRuns.add(runId);
+        } else if (channelToolId !== null && SILENT_OR_AGENT_ROUTED_TOOL_IDS.has(channelToolId)) {
+          silentOrAgentRoutedRuns.add(runId);
+        }
+      }
+    }
     if (item && isToolCallItem(item)) {
       if (toolCallSucceeded(item)) {
         const failed = unrecoveredByRun.get(runId);
@@ -141,6 +225,7 @@ export function chatActivityContext(
     }
     if (isDecisionRequestItem(item)) {
       decisionRuns.add(runId);
+      userSurfacingRuns.add(runId);
       const startedAt = item.startedAt === null ? createdAt : DateTime.formatIso(item.startedAt);
       if (
         decisionRequestedAt &&
@@ -150,7 +235,7 @@ export function chatActivityContext(
         pendingDecision = { runId, startedAt };
       }
     }
-    if (message?.role === "assistant" && !message.humanNote) latestReplyRun = runId;
+    if (message?.role === "assistant" && !message.humanNote) replyRuns.push(runId);
     if (decisionRequestedAt && message?.role === "assistant" && createdAt >= decisionRequestedAt) {
       firstReplyAfterDecision ??= runId;
     }
@@ -164,9 +249,37 @@ export function chatActivityContext(
   }
   for (const [runId, ids] of unrecoveredByRun) for (const id of ids) addAttention(runId, id);
   for (const id of directRuns) agentRuns.delete(id);
-  if (keepLatestReply && latestReplyRun !== undefined) decisionRuns.add(latestReplyRun);
+  const activeRuns = new Set<RunId>();
   for (const run of runs) {
     if (run.status === "failed") addAttention(run.id, run.id);
+    if (run.status !== undefined && !TERMINAL_RUN_STATUSES.has(run.status)) {
+      activeRuns.add(run.id);
+    }
+  }
+  // Agent/automation wakes that completed via `silent_ack` or pure agent-to-agent routing
+  // (`t3_thread_send` / `t3_thread_send_attachments` / `ask_agent`) without surfacing anything to
+  // the user are hidden completely (zero fold pill) on collapsed founder timelines.
+  const hiddenSilentRuns = new Set<RunId>();
+  for (const runId of silentOrAgentRoutedRuns) {
+    if (
+      agentOrAutomationWakeRuns.has(runId) &&
+      !humanRuns.has(runId) &&
+      !userSurfacingRuns.has(runId) &&
+      !decisionRuns.has(runId) &&
+      !attentionByRun.has(runId) &&
+      !activeRuns.has(runId)
+    ) {
+      hiddenSilentRuns.add(runId);
+    }
+  }
+  if (keepLatestReply) {
+    for (let i = replyRuns.length - 1; i >= 0; i--) {
+      const candidate = replyRuns[i]!;
+      if (!hiddenSilentRuns.has(candidate)) {
+        decisionRuns.add(candidate);
+        break;
+      }
+    }
   }
   return {
     agentRuns,
@@ -174,6 +287,7 @@ export function chatActivityContext(
     attentionByRun,
     recoveredItemIds,
     recoveredRuns,
+    hiddenSilentRuns,
     includeOtherActivity,
   };
 }
