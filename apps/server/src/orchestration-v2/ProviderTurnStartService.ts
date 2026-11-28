@@ -40,6 +40,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
+import { formatMailboxForProvider } from "./StandingMailbox.ts";
 import {
   CLAUDE_PROVIDER,
   CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
@@ -1156,19 +1157,22 @@ export const layer: Layer.Layer<
           ? (providerMessage.sentBy?.founder ?? null)
           : null;
       const messageText = formatDigestForProvider(
-        formatSeenMarkerForProvider(
-          formatSharedSenderForProvider(
-            withMessageSenderNote(
-              providerMessage,
-              projectComposerContextForProvider({
-                text: providerMessage.text,
-                records: providerMessage.context?.records ?? [],
-              }),
+        formatMailboxForProvider(
+          formatSeenMarkerForProvider(
+            formatSharedSenderForProvider(
+              withMessageSenderNote(
+                providerMessage,
+                projectComposerContextForProvider({
+                  text: providerMessage.text,
+                  records: providerMessage.context?.records ?? [],
+                }),
+              ),
+              sharedFounder,
             ),
+            providerMessage.seenMarker,
             sharedFounder,
           ),
-          providerMessage.seenMarker,
-          sharedFounder,
+          run.mailbox,
         ),
         run.digest,
       );

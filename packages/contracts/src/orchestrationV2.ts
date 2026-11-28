@@ -975,6 +975,16 @@ export const OrchestrationV2DigestEntry = Schema.Struct({
 });
 export type OrchestrationV2DigestEntry = typeof OrchestrationV2DigestEntry.Type;
 
+/** A queued message a standing thread's turn answered along with its own (Closura CLO-1303). */
+export const OrchestrationV2MailboxEntry = Schema.Struct({
+  messageId: MessageId,
+  runId: RunId,
+  senderRole: Schema.Literals(["founder", "ceo", "agent"]),
+  requestedAt: Schema.DateTimeUtc,
+  text: Schema.String,
+});
+export type OrchestrationV2MailboxEntry = typeof OrchestrationV2MailboxEntry.Type;
+
 /** What a run returned as data: a value the server accepted against the run's `outputSchema`. */
 export const OrchestrationV2RunOutput = Schema.Struct({
   value: Schema.Json,
@@ -1025,6 +1035,8 @@ export const OrchestrationV2Run = Schema.Struct({
   delivery: Schema.optional(OrchestrationV2MessageDelivery),
   /** Digest messages folded into this run's turn, sent to the provider ahead of its message. */
   digest: Schema.optional(Schema.Array(OrchestrationV2DigestEntry)),
+  /** Queued messages batched into this standing thread's turn, sent after its own message. */
+  mailbox: Schema.optional(Schema.Array(OrchestrationV2MailboxEntry)),
   /** Tool and delegation counts while the thread's delegation nudge was on. */
   delegationNudge: Schema.optional(RunDelegationNudgeStats),
   /** The JSON Schema of the result this run was asked to return as data. */

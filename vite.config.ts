@@ -203,6 +203,8 @@ export default defineConfig({
       "apps/mobile/modules/t3-highlights/cpp/generated/**",
       "apps/mobile/modules/t3-highlights/nitrogen/generated/**",
       "*.icon/**",
+      // Vendored byte-for-byte from closura-agent-config; its test pins the source hash.
+      "apps/server/src/orchestration-v2/laneEventRouting.conformance.json",
     ],
     sortPackageJson: {},
     overrides: [
