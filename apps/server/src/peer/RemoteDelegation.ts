@@ -1059,8 +1059,8 @@ const make = Effect.gen(function* () {
         target.projectId,
       );
       // One key for the launch there and the record here, so a retry finds both.
-      // Both are scoped to the provider session, as every key a caller passes is:
-      // the forwarder scopes the launch's, and the record's names it.
+      // Both are scoped to the caller's durable requestNamespace: the forwarder
+      // scopes the launch's key, and the local intents and record name it.
       const key = input.clientRequestId ?? (yield* random.uuidV4());
       const keyed = (operation: string) =>
         CommandId.make(
@@ -1189,7 +1189,11 @@ const make = Effect.gen(function* () {
             yield* threads.getThreadRecords(scope.thread.threadId, ["subagents"]).pipe(
               Effect.map(
                 ({ subagents }) =>
-                  subagents.find((task) => task.remoteChild?.threadId === launched.threadId)?.id,
+                  subagents.find(
+                    (task) =>
+                      task.remoteChild?.environmentId === target.environmentId &&
+                      task.remoteChild.threadId === launched.threadId,
+                  )?.id,
               ),
               Effect.orElseSucceed(() => undefined),
             );

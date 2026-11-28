@@ -261,3 +261,56 @@ it.effect.each(["provider-session", "thread", "all"] as const)(
       expect(yield* registry.resolve(token)).toBeUndefined();
     }),
 );
+
+it.effect(
+  "derives a durable per-thread requestNamespace across restarts and credential rotations",
+  () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-durable");
+      const otherThreadId = ThreadId.make("thread-other");
+      const firstRegistry = yield* makeRegistry(() => 1_000);
+      const firstIssued = yield* firstRegistry.issue({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      const firstToken = firstIssued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      const firstScope = yield* firstRegistry.resolve(firstToken);
+
+      // Re-issuing on the same registry rotates token and providerSessionId, keeping requestNamespace.
+      const rotatedIssued = yield* firstRegistry.issue({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      const rotatedScope = yield* firstRegistry.resolve(
+        rotatedIssued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+
+      // A brand-new registry instance (simulating a server restart) preserves the same namespace.
+      const restartedRegistry = yield* makeRegistry(() => 2_000);
+      const restartedIssued = yield* restartedRegistry.issue({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      const restartedScope = yield* restartedRegistry.resolve(
+        restartedIssued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+      const otherIssued = yield* restartedRegistry.issue({
+        threadId: otherThreadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      const otherScope = yield* restartedRegistry.resolve(
+        otherIssued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+
+      const expectedNamespace = `thread:${threadId}`;
+      expect(firstScope?.requestNamespace).toBe(expectedNamespace);
+      expect(rotatedScope?.requestNamespace).toBe(expectedNamespace);
+      expect(restartedScope?.requestNamespace).toBe(expectedNamespace);
+      expect(otherScope?.requestNamespace).toBe(`thread:${otherThreadId}`);
+      expect(otherScope?.requestNamespace).not.toBe(expectedNamespace);
+      expect(rotatedScope?.thread.providerSessionId).not.toBe(firstScope?.thread.providerSessionId);
+      expect(restartedScope?.thread.providerSessionId).not.toBe(
+        firstScope?.thread.providerSessionId,
+      );
+    }),
+);
