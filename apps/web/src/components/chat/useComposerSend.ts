@@ -309,6 +309,8 @@ interface ComposerSendInput {
   readonly onSideChat?: ((message: SideChatMessage | undefined) => Promise<boolean>) | undefined;
   /** Refuses `/side` with this reason and keeps the draft. */
   readonly sideChatDisabledReason: string | null;
+  /** Refuses `/note` with this reason and keeps the draft; nothing is sent. */
+  readonly noteDisabledReason: string | null;
   readonly handleNewThreadInActiveProject: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
@@ -399,6 +401,7 @@ export function useComposerSend(input: ComposerSendInput) {
     acknowledgeActiveThreadWoke,
     onSideChat,
     sideChatDisabledReason,
+    noteDisabledReason,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -782,6 +785,16 @@ export function useComposerSend(input: ComposerSendInput) {
             type: "warning",
             title: m(msg("Queued message not updated")),
             description: m(msg("A queued message can't be a note. Remove /note to save it.")),
+          }),
+        );
+        return;
+      }
+      if (noteDisabledReason !== null) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: m(msg("Note not sent")),
+            description: noteDisabledReason,
           }),
         );
         return;

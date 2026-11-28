@@ -418,6 +418,8 @@ export interface ChatComposerProps {
   onUsageLimitsCommand?: (() => void) | undefined;
   sideChatAvailable?: boolean;
   sideChatDisabledReason?: string | null;
+  /** Refuses `/note` with this reason, for example when the server would drop the note flag. */
+  noteDisabledReason?: string | null;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   onFreshSession?: (() => void) | undefined;
   environmentUnavailable: {
@@ -1239,6 +1241,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
     noteAvailable: activeThread?.source.inbox?.audience === "shared",
+    noteDisabledReason: props.noteDisabledReason ?? null,
     freshSessionAvailable: props.onFreshSession !== undefined,
     compactSlashCommandAvailable,
     selectedProvider,
@@ -2117,6 +2120,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       if (item.command === "side" || item.command === "btw" || item.command === "note") {
         if (item.command !== "note" && props.sideChatDisabledReason) return;
+        if (item.command === "note" && props.noteDisabledReason) {
+          toastManager.add({
+            type: "warning",
+            title: gt("/note is unavailable"),
+            description: props.noteDisabledReason,
+          });
+          return;
+        }
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,

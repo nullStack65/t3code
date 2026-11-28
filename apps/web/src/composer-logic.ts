@@ -29,6 +29,20 @@ export type ComposerTriggerKind = "path" | "pull-request" | "slash-command" | "s
 export type ComposerSlashCommand = "model" | "side" | "btw" | "clear" | "note";
 export type ComposerSubmissionIntent = "foreground" | "background" | "alternate";
 
+/**
+ * Closura (CLO-1105): an older server drops the unknown `humanNote` flag but keeps
+ * `start_immediately`, so a private note would run as a provider turn. Offer `/note`
+ * only when the connected server says it honours the flag; an unknown config fails closed.
+ */
+export function serverSupportsHumanNote(
+  serverConfig:
+    | { readonly environment: { readonly capabilities: { readonly humanNote?: boolean } } }
+    | null
+    | undefined,
+): boolean {
+  return serverConfig?.environment.capabilities.humanNote === true;
+}
+
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
   query: string;
