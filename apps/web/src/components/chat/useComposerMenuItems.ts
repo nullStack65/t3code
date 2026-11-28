@@ -75,7 +75,7 @@ export function useComposerMenuItems({
   sideChatAvailable,
   sideChatDisabledReason,
   noteAvailable,
-  noteDisabledReason = null,
+  noteDisabledReason,
   freshSessionAvailable,
   compactSlashCommandAvailable,
   selectedProvider,
@@ -97,7 +97,7 @@ export function useComposerMenuItems({
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
   readonly noteAvailable: boolean;
-  readonly noteDisabledReason?: string | null;
+  readonly noteDisabledReason: string | null;
   readonly freshSessionAvailable: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;

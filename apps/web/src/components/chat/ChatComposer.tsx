@@ -418,6 +418,7 @@ export interface ChatComposerProps {
   onUsageLimitsCommand?: (() => void) | undefined;
   sideChatAvailable?: boolean;
   sideChatDisabledReason?: string | null;
+  /** Refuses `/note` with this reason, for example when the server would drop the note flag. */
   noteDisabledReason?: string | null;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   onFreshSession?: (() => void) | undefined;
@@ -2118,12 +2119,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       if (item.command === "side" || item.command === "btw" || item.command === "note") {
-        if (
-          item.command === "note"
-            ? Boolean(props.noteDisabledReason)
-            : Boolean(props.sideChatDisabledReason)
-        )
+        if (item.command !== "note" && props.sideChatDisabledReason) return;
+        if (item.command === "note" && props.noteDisabledReason) {
+          toastManager.add({
+            type: "warning",
+            title: gt("/note is unavailable"),
+            description: props.noteDisabledReason,
+          });
           return;
+        }
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,
@@ -2767,7 +2771,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerEnvironmentContexts.length === 0 &&
       replyTo === null,
     sideChat: props.sideChatAvailable === true || (props.sideChatDisabledReason ?? null) !== null,
-    note: true,
     usageLimits: props.onUsageLimitsCommand !== undefined,
     codexFeedback: selectedProvider === "codex" && multipleModelSelections === null,
     freshSession: props.onFreshSession !== undefined,

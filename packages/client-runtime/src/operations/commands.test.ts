@@ -8,6 +8,7 @@ import {
   MessageId,
   NodeId,
   ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2Command,
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -15,7 +16,6 @@ import {
   ThreadId,
   TurnItemId,
   WS_METHODS,
-  type OrchestrationV2Command,
   type OrchestrationV2ThreadLaunchInput,
   type OrchestrationV2ThreadProjection,
   type ProjectMutation,
@@ -384,6 +384,94 @@ describe("V2 environment commands", () => {
       } else {
         expect(commands).toEqual([]);
         expect(Exit.isFailure(exit)).toBe(true);
+      }
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  /** message.dispatch as a server built before `humanNote` decodes it: the same fields minus the flag. */
+  const preHumanNoteDispatchCommand = (() => {
+    const member = OrchestrationV2Command.members.find(
+      (candidate) => candidate.fields.type.literal === "message.dispatch",
+    );
+    if (member === undefined) throw new Error("message.dispatch command schema not found");
+    const { humanNote: _dropped, ...preNoteFields } = member.fields as Schema.Struct.Fields;
+    // The fields are the dispatch command's own, so decoding needs no services.
+    return Schema.Struct(preNoteFields) as unknown as Schema.Codec<
+      Record<string, unknown>,
+      unknown
+    >;
+  })();
+
+  // CLO-1105: a server built before `humanNote` (fleet t3code 3ad1bfdd) decodes message.dispatch
+  // without the field, so the flag is dropped and `start_immediately` would start a provider turn.
+  it.effect.each([
+    ["an old server that lacks the capability", false],
+    ["a server that advertises the capability", true],
+  ] as const)("a /note sent to %s never reaches the server as a startable turn", ([, advertised]) =>
+    Effect.gen(function* () {
+      const decodeOnServer = Schema.decodeUnknownEffect(
+        advertised ? OrchestrationV2Command : preHumanNoteDispatchCommand,
+      );
+      const rawNote = {
+        type: "message.dispatch",
+        commandId: "command-old-server-note",
+        createdBy: "user",
+        creationSource: "web",
+        threadId: v2ThreadId,
+        messageId: "message-old-server-note",
+        text: "Synthetic private note",
+        attachments: [],
+        humanNote: true,
+        dispatchMode: { type: "start_immediately" },
+      };
+      if (!advertised) {
+        // The hazard this guards: the old decoder keeps the start and loses the note flag.
+        const stripped = (yield* decodeOnServer(rawNote)) as Record<string, unknown>;
+        expect(stripped.humanNote).toBeUndefined();
+        expect(stripped.dispatchMode).toEqual({ type: "start_immediately" });
+      }
+
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({
+        commands,
+        projects: [],
+        ...(advertised ? { advertiseHumanNote: true } : {}),
+      });
+      const exit = yield* startThreadTurn({
+        commandId: CommandId.make("command-old-server-note"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-old-server-note"),
+          role: "user",
+          text: "Synthetic private note",
+          attachments: [],
+          humanNote: true,
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        dispatchMode: "start",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.exit,
+      );
+
+      const received: Array<Record<string, unknown>> = [];
+      for (const command of commands) {
+        received.push((yield* decodeOnServer(command)) as Record<string, unknown>);
+      }
+      const startableTurns = received.filter(
+        (command) => command.type === "message.dispatch" && command.humanNote !== true,
+      );
+      expect(startableTurns).toEqual([]);
+      if (advertised) {
+        expect(Exit.isSuccess(exit)).toBe(true);
+        expect(commands).toMatchObject([{ type: "message.dispatch", humanNote: true }]);
+      } else {
+        expect(commands).toEqual([]);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) {
+          expect(String(Cause.squash(exit.cause))).toContain("Update the server to use /note");
+        }
       }
     }).pipe(Effect.provide(layerTestRandom)),
   );

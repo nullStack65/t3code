@@ -169,7 +169,7 @@ import {
 import { AsyncResult } from "effect/reactivity";
 import { isElectron } from "../env";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
-import { composerRequiresModifier } from "../composer-logic";
+import { composerRequiresModifier, serverSupportsHumanNote } from "../composer-logic";
 import {
   derivePhase,
   deriveActiveWorkStartedAt,
@@ -3207,16 +3207,15 @@ export default function ChatView(props: ChatViewProps) {
                   )
                 ? gt("Available once the thread's worktree is set up.")
                 : null;
+  // `/note` is refused with this reason; a note never reaches a server that would start a turn.
   const noteDisabledReason =
-    activeThread?.source.inbox?.audience !== "shared"
-      ? null
-      : serverConfig === null
-        ? gt("Private notes are not ready yet. Try again in a moment.")
-        : serverConfig.environment.capabilities.humanNote !== true
-          ? gt("Update this environment's T3 Code server to use /note.")
-          : !isServerThread
-            ? gt("Send a message before leaving a note.")
-            : null;
+    serverConfig === null
+      ? gt("Notes are not ready yet. Try again in a moment.")
+      : !serverSupportsHumanNote(serverConfig)
+        ? gt(
+            "Update this environment's T3 Code server to use /note. It would send the note to the bot.",
+          )
+        : null;
   const openSideChatStable = useStableCallback(() => void sideChat.open());
   const openSurfaceInMainView = useOpenSurfaceInMainView(activeThreadRef);
   const sendSideChatStable = useStableCallback(sideChat.open);

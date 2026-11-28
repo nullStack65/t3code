@@ -24,6 +24,7 @@ import {
   formatAssistantCitationForComposer,
   isPathSuggestionCurrent,
   replaceTextRange,
+  serverSupportsHumanNote,
 } from "./composer-logic";
 import { slashCommandItemsForPromptPosition } from "./components/chat/composerSlashCommandSearch";
 import { carryDisplacedCustomAnswerIntoPrompt } from "./pendingUserInput";
@@ -605,5 +606,19 @@ describe("side chat slash commands", () => {
     expect(slashCommandItemsForPromptPosition(items, false).map((item) => item.id)).toEqual([
       "slash:model",
     ]);
+  });
+});
+
+describe("serverSupportsHumanNote", () => {
+  it("offers /note only to a server that advertises the private-note flag", () => {
+    const config = (humanNote?: boolean) => ({
+      environment: { capabilities: humanNote === undefined ? {} : { humanNote } },
+    });
+    expect(serverSupportsHumanNote(config(true))).toBe(true);
+    // A server built before the flag (fleet t3code 3ad1bfdd) sends no key at all.
+    expect(serverSupportsHumanNote(config())).toBe(false);
+    expect(serverSupportsHumanNote(config(false))).toBe(false);
+    expect(serverSupportsHumanNote(null)).toBe(false);
+    expect(serverSupportsHumanNote(undefined)).toBe(false);
   });
 });

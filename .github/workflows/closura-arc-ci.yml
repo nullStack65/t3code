@@ -237,6 +237,7 @@ jobs:
             apps/server/src/scheduledTasks/webhookRoute.test.ts \
             apps/server/src/persistence/Migrations.test.ts \
             apps/server/src/persistence/Migrations/102_ScheduledTaskOccurrences.test.ts \
+            apps/server/src/orchestration-v2/HumanNote.test.ts \
             packages/contracts/src/environment.test.ts \
             scripts/feature-map.test.ts
 
@@ -356,7 +357,9 @@ jobs:
             apps/web/src/components/chat/draftPlacement.test.ts \
             apps/web/src/components/chat/draftAttachmentUploads.test.ts \
             apps/web/src/components/chat/draftUploadReconcile.test.ts \
-            apps/web/src/lib/attachmentUploadQueue.test.ts
+            apps/web/src/lib/attachmentUploadQueue.test.ts \
+            apps/web/src/composer-logic.test.ts \
+            packages/client-runtime/src/operations/commands.test.ts
 
       - name: Build founder inbox and voice settings web client
         shell: bash
