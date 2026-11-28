@@ -60,6 +60,7 @@ it.effect.each([false, true])(
       Effect.provide(
         Layer.mergeAll(
           FileSystem.layerNoop({
+            exists: () => Effect.succeed(true),
             realPath: (path) => Effect.succeed(path === "/link/worktree" ? "/worktree" : path),
           }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -100,6 +101,179 @@ it.effect.each([false, true])(
                     cause: "Thread moved before branch metadata could be applied.",
                   });
                 }
+                return { sequence: commands.length, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "reconciles detached HEAD when the worktree exists and clears stale branch metadata",
+  () => {
+    let threads: ReadonlyArray<OrchestrationV2ThreadShell> = [
+      {
+        id: ThreadId.make("detached-thread"),
+        branch: "feature/stale",
+        worktreePath: "/worktree",
+      } as OrchestrationV2ThreadShell,
+    ];
+    const commands: OrchestrationV2ServerCommand[] = [];
+    return Effect.gen(function* () {
+      const reconcile = yield* WorktreeBranchSync.makeReconcile;
+      yield* reconcile({ cwd: "/worktree", refName: null });
+      assert.deepEqual(
+        commands.map((command) => {
+          assert.equal(command.type, "thread.metadata.update");
+          if (command.type !== "thread.metadata.update") throw new Error("Unexpected command");
+          return [
+            command.threadId,
+            command.branch,
+            command.expectedBranch,
+            command.expectedWorktreePath,
+          ];
+        }),
+        [["detached-thread", null, "feature/stale", "/worktree"]],
+      );
+      assert.equal(threads[0]?.branch, null);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          FileSystem.layerNoop({
+            exists: () => Effect.succeed(true),
+            realPath: (path) => Effect.succeed(path),
+          }),
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadWorktreePaths: () =>
+              Effect.succeed([
+                { threadId: ThreadId.make("detached-thread"), worktreePath: "/worktree" },
+              ]),
+          }),
+          Layer.mock(GitWorkflowService.GitWorkflowService)({
+            repositoryRoot: (cwd) => Effect.succeed(cwd),
+            currentBranch: () => Effect.succeed(null),
+          }),
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getShellSnapshot: () =>
+              Effect.succeed({
+                schemaVersion: 2,
+                snapshotSequence: 0,
+                threads,
+                archivedThreads: [],
+              }),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
+                if (command.type === "thread.metadata.update" && command.branch !== undefined) {
+                  const branch = command.branch;
+                  threads = threads.map((thread) =>
+                    thread.id === command.threadId && thread.branch === command.expectedBranch
+                      ? { ...thread, branch }
+                      : thread,
+                  );
+                }
+                return { sequence: commands.length, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("ignores detached HEAD events when the worktree directory does not exist", () => {
+  const commands: OrchestrationV2ServerCommand[] = [];
+  const threads: ReadonlyArray<OrchestrationV2ThreadShell> = [
+    {
+      id: ThreadId.make("missing-worktree"),
+      branch: "feature/stale",
+      worktreePath: "/worktree",
+    } as OrchestrationV2ThreadShell,
+  ];
+  return Effect.gen(function* () {
+    const reconcile = yield* WorktreeBranchSync.makeReconcile;
+    yield* reconcile({ cwd: "/worktree", refName: null });
+    assert.deepEqual(commands, []);
+    assert.equal(threads[0]?.branch, "feature/stale");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        FileSystem.layerNoop({
+          exists: () => Effect.succeed(false),
+          realPath: (path) => Effect.succeed(path),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadWorktreePaths: () =>
+            Effect.succeed([
+              { threadId: ThreadId.make("missing-worktree"), worktreePath: "/worktree" },
+            ]),
+        }),
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          currentBranch: () => Effect.succeed(null),
+        }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getShellSnapshot: () =>
+            Effect.succeed({
+              schemaVersion: 2,
+              snapshotSequence: 0,
+              threads,
+              archivedThreads: [],
+            }),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              return { sequence: commands.length, storedEvents: [] };
+            }),
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect(
+  "ignores detached HEAD events when the worktree directory is no longer a repository",
+  () => {
+    const commands: OrchestrationV2ServerCommand[] = [];
+    return Effect.gen(function* () {
+      const reconcile = yield* WorktreeBranchSync.makeReconcile;
+      yield* reconcile({ cwd: "/worktree", refName: null });
+      assert.deepEqual(commands, []);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          FileSystem.layerNoop({
+            exists: () => Effect.succeed(true),
+            realPath: (path) => Effect.succeed(path),
+          }),
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getThreadWorktreePaths: () =>
+              Effect.succeed([
+                { threadId: ThreadId.make("pruned-worktree"), worktreePath: "/worktree" },
+              ]),
+          }),
+          Layer.mock(GitWorkflowService.GitWorkflowService)({
+            repositoryRoot: () => Effect.succeed(null),
+            currentBranch: () => Effect.succeed(null),
+          }),
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getShellSnapshot: () =>
+              Effect.succeed({
+                schemaVersion: 2,
+                snapshotSequence: 0,
+                threads: [
+                  {
+                    id: ThreadId.make("pruned-worktree"),
+                    branch: "feature/kept",
+                    worktreePath: "/worktree",
+                  } as OrchestrationV2ThreadShell,
+                ],
+                archivedThreads: [],
+              }),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
                 return { sequence: commands.length, storedEvents: [] };
               }),
           }),

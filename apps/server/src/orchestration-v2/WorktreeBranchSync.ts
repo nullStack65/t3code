@@ -21,7 +21,6 @@ export const makeReconcile = Effect.gen(function* () {
     readonly cwd: string;
     readonly refName: string | null;
   }) {
-    if (input.refName === null) return;
     const paths = yield* projections.getThreadWorktreePaths({ includeArchived: true });
     const matchingPaths = new Set<string>();
     for (const worktreePath of new Set(paths.map((thread) => thread.worktreePath))) {
@@ -43,6 +42,11 @@ export const makeReconcile = Effect.gen(function* () {
         thread.worktreePath === matchingThreads.get(thread.id) && thread.branch !== input.refName,
     );
     if (sharing.length === 0) return;
+    if (input.refName === null) {
+      if (!(yield* fs.exists(input.cwd))) return;
+      // currentBranch is also null outside a repository, e.g. a worktree whose admin dir was pruned.
+      if ((yield* git.repositoryRoot(input.cwd)) === null) return;
+    }
     // Status events may queue behind a generated rename or another checkout.
     if ((yield* git.currentBranch(input.cwd)) !== input.refName) return;
     for (const thread of sharing) {
