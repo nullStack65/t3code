@@ -1,3 +1,5 @@
+import * as Crypto from "node:crypto";
+import * as NodeFs from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -9,7 +11,12 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { awaitCliNotarization, signMacArchiveContents } from "./build-cli-archive.ts";
+import {
+  awaitCliNotarization,
+  createDeterministicTarGz,
+  resolveSourceDateEpoch,
+  signMacArchiveContents,
+} from "./build-cli-archive.ts";
 
 const signedEnv = {
   T3CODE_CLI_MAC_SIGN_IDENTITY: "Developer ID Application: Test (TEAM)",
@@ -211,6 +218,68 @@ it.layer(NodeServices.layer)("build-cli-archive notarization", (it) => {
       ).pipe(Effect.flip);
       assert.equal(error._tag, "CliArchiveNotarizationRejectedError");
       assert.isTrue(notarySubcommands(stub.calls)[0]?.includes("--wait"));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("produces byte-identical SHA-256 tarballs across distinct build orders and mtimes (CLO-1100)", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      assert.equal(resolveSourceDateEpoch(undefined), "0");
+      assert.equal(resolveSourceDateEpoch("invalid"), "0");
+      assert.equal(resolveSourceDateEpoch("1700000000"), "1700000000");
+
+      const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-repro-" });
+      const stem = "t3-0.1.10-linux-x64";
+      const stageA = path.join(workspace, "stage-a");
+      const stageB = path.join(workspace, "stage-b");
+      const dirA = path.join(stageA, stem);
+      const dirB = path.join(stageB, stem);
+
+      yield* fs.makeDirectory(path.join(dirA, "client"), { recursive: true });
+      yield* fs.makeDirectory(path.join(dirB, "client"), { recursive: true });
+
+      // Write identical contents in opposite order with different file mtimes.
+      yield* fs.writeFileString(path.join(dirA, "t3"), "binary-payload");
+      yield* fs.writeFileString(path.join(dirA, "client", "a.js"), "console.log('a');\n");
+      yield* fs.writeFileString(path.join(dirA, "client", "z.js"), "console.log('z');\n");
+      NodeFs.utimesSync(path.join(dirA, "t3"), 1700000001, 1700000001);
+      NodeFs.utimesSync(path.join(dirA, "client", "a.js"), 1700000002, 1700000002);
+      NodeFs.utimesSync(path.join(dirA, "client", "z.js"), 1700000003, 1700000003);
+
+      yield* fs.writeFileString(path.join(dirB, "client", "z.js"), "console.log('z');\n");
+      yield* fs.writeFileString(path.join(dirB, "client", "a.js"), "console.log('a');\n");
+      yield* fs.writeFileString(path.join(dirB, "t3"), "binary-payload");
+      NodeFs.utimesSync(path.join(dirB, "t3"), 1750000010, 1750000010);
+      NodeFs.utimesSync(path.join(dirB, "client", "a.js"), 1750000020, 1750000020);
+      NodeFs.utimesSync(path.join(dirB, "client", "z.js"), 1750000030, 1750000030);
+
+      const archiveA = path.join(workspace, "a.tar.gz");
+      const archiveB = path.join(workspace, "b.tar.gz");
+      yield* createDeterministicTarGz({
+        archivePath: archiveA,
+        stageRoot: stageA,
+        stem,
+        platform: "linux",
+        hostPlatform: process.platform,
+        sourceDateEpoch: "1700000000",
+      });
+      yield* createDeterministicTarGz({
+        archivePath: archiveB,
+        stageRoot: stageB,
+        stem,
+        platform: "linux",
+        hostPlatform: process.platform,
+        sourceDateEpoch: "1700000000",
+      });
+
+      const bytesA = yield* fs.readFile(archiveA);
+      const bytesB = yield* fs.readFile(archiveB);
+      const shaA = Crypto.createHash("sha256").update(bytesA).digest("hex");
+      const shaB = Crypto.createHash("sha256").update(bytesB).digest("hex");
+      assert.equal(shaA, shaB);
+      // Gzip header bytes 4..7 hold MTIME; gzip -n zeroes them for reproducibility.
+      assert.deepEqual(Array.from(bytesA.subarray(4, 8)), [0, 0, 0, 0]);
     }).pipe(Effect.scoped),
   );
 });

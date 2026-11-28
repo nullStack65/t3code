@@ -183,6 +183,10 @@ jobs:
             'packages/client-runtime/src/state/threadListFilter.ts': ['matchesPrimaryInbox', 'matchesListedInboxes', 'hiddenEnvironmentIds'],
             'apps/web/src/components/sidebar/SidebarThreadFilterMenu.tsx': ['Kameron', 'Jeff', 'Agents', 'Environments'],
             'apps/web/src/components/sidebar/threadListFilter.logic.ts': ['matchesListedInboxes', 'hiddenEnvironmentIds'],
+            'apps/server/src/orchestration-v2/SteeringCompletion.integration.test.ts': [
+              'promoting %s into a compaction stops it and sends it next',
+              'settles a steered completion wake whose parent run is before the last compaction (restart by intent: %s)',
+            ],
           };
           for (const [file, needles] of Object.entries(required)) {
             const source = readFileSync(file, 'utf8');
@@ -221,6 +225,7 @@ jobs:
             apps/server/src/orchestration-v2/ModelAlertReactor.test.ts \
             apps/server/src/orchestration-v2/ThreadEventAlerts.test.ts \
             apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts \
+            apps/server/src/orchestration-v2/SteeringCompletion.integration.test.ts \
             packages/shared/src/threadPlacement.test.ts \
             apps/server/src/peer/RemoteDelegation.test.ts \
             apps/server/src/mcp/OrchestratorMcpService.test.ts \
