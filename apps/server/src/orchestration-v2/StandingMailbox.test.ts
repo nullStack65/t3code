@@ -156,7 +156,7 @@ describe("standing manager mailbox on queued runs", () => {
       {
         ...projection,
         runs: projection.runs.map((run) =>
-          run.id === "run:a2" ? { ...run, modelSelection: { ...model, model: "other" } } : run,
+          run.id === "run:a2" ? { ...run, modelSelection: { ...run.modelSelection, model: "other" } } : run,
         ),
       },
       head,
