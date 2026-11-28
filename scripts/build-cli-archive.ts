@@ -99,6 +99,90 @@ export function cliArchiveStem(version: string, platform: BuildPlatform, arch: B
   return `t3-${version}-${cliArchivePlatformKey(platform, arch)}`;
 }
 
+export const DEFAULT_SOURCE_DATE_EPOCH = "0";
+
+export function resolveSourceDateEpoch(envValue: string | undefined): string {
+  const trimmed = envValue?.trim();
+  if (trimmed && /^\d+$/.test(trimmed)) return trimmed;
+  return DEFAULT_SOURCE_DATE_EPOCH;
+}
+
+export const createDeterministicTarGz = Effect.fn("createDeterministicTarGz")(function* (input: {
+  readonly archivePath: string;
+  readonly stageRoot: string;
+  readonly stem: string;
+  readonly platform: BuildPlatform;
+  readonly hostPlatform: NodeJS.Platform;
+  readonly sourceDateEpoch?: string;
+}) {
+  const epoch = resolveSourceDateEpoch(input.sourceDateEpoch ?? process.env.SOURCE_DATE_EPOCH);
+  if (input.hostPlatform === "darwin") {
+    // macOS ships bsdtar: normalize owner/group and strip the gzip header timestamp.
+    yield* runCommand(
+      ChildProcess.make(
+        "tar",
+        [
+          "--uid",
+          "0",
+          "--gid",
+          "0",
+          "--uname",
+          "",
+          "--gname",
+          "",
+          "--options",
+          "gzip:!timestamp",
+          "-czf",
+          input.archivePath,
+          "-C",
+          input.stageRoot,
+          input.stem,
+        ],
+        {
+          env: {
+            ...process.env,
+            TZ: "UTC",
+            LC_ALL: "C",
+          },
+        },
+      ),
+      "tar (deterministic gzip)",
+    );
+    return;
+  }
+  // GNU tar on Linux: sorted entries, fixed mtime, numeric uid/gid 0, and gzip -n (no header mtime).
+  // npm rejects Linux hardlink entries; macOS pnpm clones and bsdtar lacks --hard-dereference.
+  yield* runCommand(
+    ChildProcess.make(
+      "tar",
+      [
+        "--sort=name",
+        `--mtime=@${epoch}`,
+        "--owner=0",
+        "--group=0",
+        "--numeric-owner",
+        "--format=gnu",
+        ...(input.platform === "linux" ? ["--hard-dereference"] : []),
+        "-I",
+        "gzip -n",
+        "-cf",
+        input.archivePath,
+        "-C",
+        input.stageRoot,
+        input.stem,
+      ],
+      {
+        env: {
+          ...process.env,
+          TZ: "UTC",
+          LC_ALL: "C",
+        },
+      },
+    ),
+    "tar (deterministic gzip)",
+  );
+});
+
 export function cliArchiveFileName(version: string, platform: BuildPlatform, arch: BuildArch) {
   // Minimal hosts may lack xz, but tar and Node zlib handle gzip without it.
   return `${cliArchiveStem(version, platform, arch)}.${platform === "win" ? "zip" : "tar.gz"}`;
@@ -692,18 +776,13 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
       "tar (zip)",
     );
   } else {
-    // npm rejects Linux hardlink entries; macOS pnpm clones and bsdtar lacks this flag.
-    yield* runCommand(
-      ChildProcess.make("tar", [
-        ...(input.platform === "linux" ? ["--hard-dereference"] : []),
-        "-czf",
-        archivePath,
-        "-C",
-        stageRoot,
-        stem,
-      ]),
-      "tar (gzip)",
-    );
+    yield* createDeterministicTarGz({
+      archivePath,
+      stageRoot,
+      stem,
+      platform: input.platform,
+      hostPlatform,
+    });
   }
   const stat = yield* fs.stat(archivePath);
   yield* Effect.log(`[cli-archive] Wrote ${archivePath} (${String(stat.size)} bytes).`);

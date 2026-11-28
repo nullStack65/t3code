@@ -23,6 +23,7 @@ const REQUIRED_TESTS = [
   "apps/server/src/orchestration-v2/ModelAlertReactor.test.ts",
   "apps/server/src/orchestration-v2/ThreadEventAlerts.test.ts",
   "apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts",
+  "apps/server/src/orchestration-v2/SteeringCompletion.integration.test.ts",
   "packages/shared/src/threadPlacement.test.ts",
   "apps/server/src/peer/RemoteDelegation.test.ts",
   "apps/server/src/mcp/OrchestratorMcpService.test.ts",

@@ -83,3 +83,11 @@ test("a covering step with any step-level if: fails the check", () => {
     );
   }
 });
+
+test("compaction delivery integration suite is required by the coverage guard (CLO-1096)", () => {
+  const suite = "apps/server/src/orchestration-v2/SteeringCompletion.integration.test.ts";
+  assert.ok(REQUIRED_TESTS.includes(suite));
+  const dropped = workflow.replace(`            ${suite} \\\n`, "");
+  assert.notEqual(dropped, workflow);
+  assert.ok(checkCoverage(dropped).some((problem) => problem.includes(suite)));
+});

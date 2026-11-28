@@ -7,7 +7,14 @@ import * as Schema from "effect/Schema";
 export class DesktopUserDataInitializationError extends Schema.TaggedError<DesktopUserDataInitializationError>()(
   "DesktopUserDataInitializationError",
   {
-    operation: Schema.Literals(["inspect", "read", "create-directory", "write"]),
+    operation: Schema.Literals([
+      "inspect",
+      "read",
+      "create-directory",
+      "write",
+      "remove",
+      "rename",
+    ]),
     resourcePath: Schema.String,
     category: Schema.String,
     cause: Schema.Defect(),
@@ -31,6 +38,67 @@ export class DesktopUserDataInitializationError extends Schema.TaggedError<Deskt
   }
 }
 
+export const CLOSURA_FORK_USER_DATA_DIR = "closura-t3code-v2";
+const STOCK_V2_USER_DATA_DIR = "t3code-v2";
+const MIGRATION_MARKER_FILE = ".migrated-from-t3code-v2";
+const MIGRATION_SKIP_NAMES = new Set([
+  "SingletonLock",
+  "SingletonCookie",
+  "SingletonSocket",
+  "LOCK",
+  "GPUCache",
+  "GrShaderCache",
+  "ShaderCache",
+  "DawnGraphiteCache",
+  "DawnWebGPUCache",
+  "GPUPersistentCache",
+]);
+
+const copyProfileTree = Effect.fn("desktop.userData.copyProfileTree")(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  sourceDir: string,
+  targetDir: string,
+): Effect.fn.Return<void, DesktopUserDataInitializationError> {
+  yield* fs
+    .makeDirectory(targetDir, { recursive: true })
+    .pipe(
+      Effect.mapError((cause) =>
+        DesktopUserDataInitializationError.fromFileSystem(cause, "create-directory", targetDir),
+      ),
+    );
+  const entries = yield* fs
+    .readDirectory(sourceDir)
+    .pipe(
+      Effect.mapError((cause) =>
+        DesktopUserDataInitializationError.fromFileSystem(cause, "read", sourceDir),
+      ),
+    );
+  for (const name of entries) {
+    if (MIGRATION_SKIP_NAMES.has(name)) continue;
+    const src = path.join(sourceDir, name);
+    const dst = path.join(targetDir, name);
+    const info = yield* fs
+      .stat(src)
+      .pipe(
+        Effect.mapError((cause) =>
+          DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", src),
+        ),
+      );
+    if (info.type === "Directory") {
+      yield* copyProfileTree(fs, path, src, dst);
+    } else if (info.type === "File") {
+      yield* fs
+        .copyFile(src, dst)
+        .pipe(
+          Effect.mapError((cause) =>
+            DesktopUserDataInitializationError.fromFileSystem(cause, "write", dst),
+          ),
+        );
+    }
+  }
+});
+
 export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPath")(
   function* (input: {
     readonly appDataDirectory: string;
@@ -41,7 +109,7 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     const path = yield* Path.Path;
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
-      : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
+      : { current: CLOSURA_FORK_USER_DATA_DIR, legacy: "T3 Code (Alpha)" };
     const destinationPath = path.join(input.appDataDirectory, names.current);
     const legacyPath = path.join(input.appDataDirectory, names.legacy);
     const inspect = (resourcePath: string) =>
@@ -54,6 +122,39 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
         );
     if (input.isDevelopment) {
       return (yield* inspect(legacyPath)) ? legacyPath : destinationPath;
+    }
+    // Isolate the Closura fork profile from stock `t3code-v2` so side-by-side installs
+    // never corrupt each other. If the fork profile does not exist yet and a prior
+    // `t3code-v2` profile is present, copy it once and leave `t3code-v2` untouched.
+    const stockV2Path = path.join(input.appDataDirectory, STOCK_V2_USER_DATA_DIR);
+    if (!(yield* inspect(destinationPath)) && (yield* inspect(stockV2Path))) {
+      // Stage the copy and rename it into place so an interrupted migration never
+      // leaves a partial fork profile that later launches would treat as complete.
+      const stagingPath = `${destinationPath}.migrating`;
+      yield* fs
+        .remove(stagingPath, { recursive: true, force: true })
+        .pipe(
+          Effect.mapError((cause) =>
+            DesktopUserDataInitializationError.fromFileSystem(cause, "remove", stagingPath),
+          ),
+        );
+      yield* copyProfileTree(fs, path, stockV2Path, stagingPath);
+      const markerPath = path.join(stagingPath, MIGRATION_MARKER_FILE);
+      yield* fs
+        .writeFileString(markerPath, "migrated\n")
+        .pipe(
+          Effect.mapError((cause) =>
+            DesktopUserDataInitializationError.fromFileSystem(cause, "write", markerPath),
+          ),
+        );
+      yield* fs
+        .rename(stagingPath, destinationPath)
+        .pipe(
+          Effect.mapError((cause) =>
+            DesktopUserDataInitializationError.fromFileSystem(cause, "rename", destinationPath),
+          ),
+        );
+      return destinationPath;
     }
     // Chromium databases require their own profile for each running version.
     if (input.platform !== "win32") return destinationPath;
