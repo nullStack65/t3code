@@ -1107,7 +1107,10 @@ export const layer: Layer.Layer<
           ...(existingSessionProjection === undefined
             ? {}
             : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null || brokenNativeThread
+          ...(providerThread.nativeThreadRef?.nativeId == null ||
+          providerThread.nativeThreadRef.nativeId.trim().length === 0 ||
+          providerThread.nativeThreadRef.driver !== providerThread.driver ||
+          brokenNativeThread
             ? {}
             : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
           ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined

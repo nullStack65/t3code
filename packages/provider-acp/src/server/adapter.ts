@@ -1173,12 +1173,22 @@ function nativeThreadId(
   driver: ProviderDriverKind,
   thread: OrchestrationV2ProviderThread,
 ): Effect.Effect<string, ProviderAdapter.ProviderAdapterProtocolError> {
-  const id = thread.nativeThreadRef?.nativeId;
-  if (id === null || id === undefined || id.trim().length === 0) {
+  const ref = thread.nativeThreadRef;
+  const id = ref?.nativeId;
+  if (
+    ref === null ||
+    ref.driver !== driver ||
+    id === null ||
+    id === undefined ||
+    id.trim().length === 0
+  ) {
     return Effect.fail(
       new ProviderAdapter.ProviderAdapterProtocolError({
         driver,
-        detail: `Provider thread ${thread.id} is missing its ACP session id`,
+        detail:
+          ref !== null && ref.driver !== driver
+            ? `Provider thread ${thread.id} references ${ref.driver} session instead of ${driver}`
+            : `Provider thread ${thread.id} is missing its ACP session id`,
       }),
     );
   }
@@ -2966,68 +2976,86 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               ? notePromptProgress()
               : Effect.void,
           );
-        const handleRuntimeTerminationAtGeneration = (runtimeGeneration: number) =>
-          runRuntimeCallbackAtGeneration(
-            runtimeGeneration,
-            Effect.gen(function* () {
-              yield* Ref.set(runtimeRestartRequired, true);
-              if (!followsAgentWorkState) {
-                // An open prompt fails with its transport. A turn held open for a running tool
-                // has no prompt, so nothing else ends it.
-                const held = yield* Ref.get(activeTurn);
-                if (
-                  flavor.toolOutlivesPrompt === undefined ||
-                  held === null ||
-                  !held.promptSettled ||
-                  held.finalized ||
-                  !hasDeferredBackgroundWork(held)
-                )
-                  return;
-                for (const tool of held.tools.values()) {
-                  const status = toolStatus(tool.status);
-                  if (status === "pending" || status === "running" || status === "waiting") {
-                    yield* emitTool(held, tool, "failed");
-                  }
-                }
-                yield* finalizeTurn(
-                  held,
-                  "failed",
-                  makeProviderFailure({ class: "transport_error" }),
-                );
-                return;
-              }
-              agentWork = { sessionUpdate: "state_update", state: "idle", stopReason: "error" };
-              for (const child of nativeChildren.values()) {
-                if (child.status !== "running") continue;
-                child.status = "failed";
-                child.result = null;
-              }
-              for (const child of nativeChildren.values()) {
-                if (
-                  child.subagent === undefined ||
-                  acpSubagentStatusIsTerminal(child.subagent.task.status)
-                )
-                  continue;
-                child.result = null;
-                yield* publishNativeChildStatus(child, "failed");
-              }
+        const handleRuntimeTermination = Effect.gen(function* () {
+          yield* Ref.set(runtimeRestartRequired, true);
+          if (!followsAgentWorkState) {
+            // An open prompt fails with its transport. A turn held open for deferred
+            // background work (or idle process-owned background state) has no prompt to end it.
+            const held = yield* Ref.get(activeTurn);
+            if (held === null || held.finalized || held.promptSettled) {
               agentRequests.clear();
               yield* Ref.set(wakeBuffer, []);
               yield* Ref.set(continuationRequested, false);
+              yield* Ref.set(runningBackgroundTaskIds, new Set());
+              yield* Ref.set(detachedBackgroundCommands, new Map());
+              yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
+              yield* Ref.set(carryoverSubagents, null);
               yield* cancelPendingRuntimeRequests();
-              const context = yield* Ref.get(activeTurn);
-              if (context !== null) {
-                if (!context.finalized && !context.interrupted) {
-                  yield* terminalizeOpenForegroundTools(context, "failed");
-                }
-                yield* finalizeTurn(
-                  context,
-                  "failed",
-                  makeProviderFailure({ class: "transport_error" }),
-                );
+            }
+            if (
+              !defersFinalizeForBackgroundWork ||
+              held === null ||
+              !held.promptSettled ||
+              held.finalized ||
+              !hasDeferredBackgroundWork(held)
+            )
+              return;
+            for (const tool of held.tools.values()) {
+              const status = toolStatus(tool.status);
+              if (status === "pending" || status === "running" || status === "waiting") {
+                yield* emitTool(held, tool, "failed");
               }
-            }),
-          ).pipe(Effect.asVoid);
+            }
+            for (const subagent of held.subagents.values()) {
+              if (!acpSubagentStatusBlocksTurnSettlement(subagent.task.status)) continue;
+              yield* emitSubagent(held, {
+                nativeTaskId: subagent.task.nativeTaskRef?.nativeId ?? subagent.task.id,
+                prompt: subagent.task.prompt,
+                title: subagent.task.title,
+                model: subagent.task.model,
+                status: "failed",
+                childSessionId: subagent.childSessionId,
+                result: null,
+              });
+            }
+            yield* finalizeTurn(held, "failed", makeProviderFailure({ class: "transport_error" }));
+            return;
+          }
+          agentWork = { sessionUpdate: "state_update", state: "idle", stopReason: "error" };
+          for (const child of nativeChildren.values()) {
+            if (child.status !== "running") continue;
+            child.status = "failed";
+            child.result = null;
+          }
+          for (const child of nativeChildren.values()) {
+            if (
+              child.subagent === undefined ||
+              acpSubagentStatusIsTerminal(child.subagent.task.status)
+            )
+              continue;
+            child.result = null;
+            yield* publishNativeChildStatus(child, "failed");
+          }
+          agentRequests.clear();
+          yield* Ref.set(wakeBuffer, []);
+          yield* Ref.set(continuationRequested, false);
+          yield* cancelPendingRuntimeRequests();
+          const context = yield* Ref.get(activeTurn);
+          if (context !== null) {
+            if (!context.finalized && !context.interrupted) {
+              yield* terminalizeOpenForegroundTools(context, "failed");
+            }
+            yield* finalizeTurn(
+              context,
+              "failed",
+              makeProviderFailure({ class: "transport_error" }),
+            );
+          }
+        });
+        const handleRuntimeTerminationAtGeneration = (runtimeGeneration: number) =>
+          runRuntimeCallbackAtGeneration(runtimeGeneration, handleRuntimeTermination).pipe(
+            Effect.asVoid,
+          );
         const makeRuntimeInput = (
           runtimeGeneration: number,
           agentRequests: Set<string>,
@@ -7551,18 +7579,20 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 Effect.andThen(
                   event._tag === "ConfigOptionsUpdated"
                     ? refreshModelSwitchCapability
-                    : event._tag === "SessionSetupAdopted"
-                      ? Effect.suspend(() => {
-                          const adopt = adoptLateSessionSetup(
-                            targetRuntime,
-                            event.result,
-                            nativeBuildConfigurationBySessionId.get(event.result.sessionId),
-                          );
-                          if (lateSessionSetup.openSessionConfigured) return adopt;
-                          lateSessionSetup.pending = adopt;
-                          return Effect.void;
-                        })
-                      : Effect.void,
+                    : event._tag === "ConnectionTerminated"
+                      ? handleRuntimeTermination
+                      : event._tag === "SessionSetupAdopted"
+                        ? Effect.suspend(() => {
+                            const adopt = adoptLateSessionSetup(
+                              targetRuntime,
+                              event.result,
+                              nativeBuildConfigurationBySessionId.get(event.result.sessionId),
+                            );
+                            if (lateSessionSetup.openSessionConfigured) return adopt;
+                            lateSessionSetup.pending = adopt;
+                            return Effect.void;
+                          })
+                        : Effect.void,
                   flavor.onSessionEvent?.(event, input.runtimePolicy.cwd ?? process.cwd()) ??
                     Effect.void,
                 ),
@@ -8289,6 +8319,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           },
         );
 
+        if (
+          input.initialNativeThreadId !== undefined &&
+          input.initialNativeThreadId.trim().length === 0
+        ) {
+          return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+            driver,
+            detail: "ACP session cannot resume from an empty session id",
+          });
+        }
         // Read before the session exists: its own config updates replace what the client showed.
         const unsetOptionDefaults = yield* flavor.unsetOptionDefaults ?? Effect.succeed([]);
         const initialStart = yield* Effect.result(
@@ -10426,6 +10465,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             return providerSession;
           },
           canResumeAfterRestart: canLoadSession || canResumeSession,
+          isTransportHealthy: Ref.get(runtimeRestartRequired).pipe(
+            Effect.map((restartRequired) => !restartRequired),
+          ),
           events: Stream.fromEffectRepeat(Queue.take(events)),
           ...(flavor.getModelContextWindow === undefined
             ? {}
@@ -10481,7 +10523,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             function* (threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) {
               return yield* runtimeTransitionPermit.withPermit(
                 Effect.gen(function* () {
-                  if (threadInput.forceNewNativeThread) {
+                  const restartRequired = yield* Ref.get(runtimeRestartRequired);
+                  if (threadInput.forceNewNativeThread || restartRequired) {
                     const currentTurn = yield* Ref.get(activeTurn);
                     const pendingWork = yield* (
                       sessionRuntime.hasPendingBackgroundWork ?? Effect.succeed(false)

@@ -2137,6 +2137,24 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             ),
         }),
       ),
+      // A late RPC error means the agent rejected session/load after replay-idle
+      // provisionally succeeded; terminate the runtime so it cannot stay routable.
+      Effect.tapError((error) =>
+        error._tag === "AcpRequestError"
+          ? Effect.gen(function* () {
+              const current = yield* Ref.get(lateSessionLoadRef);
+              if (
+                Option.isNone(current) ||
+                current.value.response !== lateFiber ||
+                (yield* Ref.get(stoppingRef))
+              ) {
+                return;
+              }
+              yield* Ref.set(lateSessionLoadRef, Option.none());
+              yield* recordTermination(error);
+            })
+          : Effect.void,
+      ),
       // Supersession and shutdown interrupt the request; only a real failure
       // or timeout is worth a failed log.
       Effect.onError((cause) =>

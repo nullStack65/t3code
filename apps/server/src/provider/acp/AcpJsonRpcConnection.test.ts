@@ -13,6 +13,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Result from "effect/Result";
 import * as Scheduler from "effect/Scheduler";
@@ -1383,6 +1384,47 @@ describe("AcpSessionRuntime", () => {
         (yield* runtime.getConfigOptions).find((option) => option.category === "model"),
       ).toMatchObject({ currentValue: "gpt-5.4" });
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.live(
+    "terminates a provisional session when a late session/load reply returns an RPC error",
+    () =>
+      Effect.gen(function* () {
+        const terminatedCallback = yield* Deferred.make<EffectAcpErrors.AcpError>();
+        const runtime = yield* AcpSessionRuntime.make({
+          ...mockRuntimeOptions,
+          spawn: {
+            ...mockRuntimeOptions.spawn,
+            env: {
+              T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY: "1",
+              T3_ACP_FAIL_DELAYED_LOAD_SESSION: "1",
+              T3_ACP_LOAD_SESSION_DELAY_MS: "250",
+            },
+          },
+          resumeSessionId: "mock-session-1",
+          sessionLoadReplayIdleGap: "50 millis",
+          sessionLoadReplayIdleReadiness: true,
+          onTermination: (error) => Deferred.succeed(terminatedCallback, error).pipe(Effect.asVoid),
+        });
+        const started = yield* runtime.start();
+        expect(started.sessionSetupResult._meta).toMatchObject({
+          t3SessionLoadReady: "replay_idle",
+        });
+
+        const event = yield* runtime.getEvents().pipe(
+          Stream.filter((entry) => entry._tag === "ConnectionTerminated"),
+          Stream.runHead,
+          Effect.timeout("5 seconds"),
+        );
+        expect(Option.isSome(event)).toBe(true);
+        if (Option.isSome(event) && event.value._tag === "ConnectionTerminated") {
+          expect(event.value.error._tag).toBe("AcpRequestError");
+        }
+        const callbackError = yield* Deferred.await(terminatedCallback).pipe(
+          Effect.timeout("5 seconds"),
+        );
+        expect(callbackError._tag).toBe("AcpRequestError");
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   it.effect("keeps active configuration after a candidate session load fails", () =>

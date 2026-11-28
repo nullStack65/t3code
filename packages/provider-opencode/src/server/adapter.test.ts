@@ -11,6 +11,7 @@ import {
   CheckpointId,
   NodeId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
@@ -5020,6 +5021,32 @@ describe("OpenCodeAdapterV2", () => {
       for (const input of createInputs) {
         assert.notProperty(input, "title");
       }
+      const blankError = yield* Effect.flip(
+        session.resumeThread({
+          providerThread: {
+            ...adopted,
+            nativeThreadRef: {
+              driver: OPENCODE_PROVIDER,
+              nativeId: "   ",
+              strength: "strong",
+            },
+          },
+        }),
+      );
+      assert.equal(blankError._tag, "ProviderAdapterResumeThreadError");
+      const foreignError = yield* Effect.flip(
+        session.resumeThread({
+          providerThread: {
+            ...adopted,
+            nativeThreadRef: {
+              driver: ProviderDriverKind.make("codex"),
+              nativeId: "ses_native_1",
+              strength: "strong",
+            },
+          },
+        }),
+      );
+      assert.equal(foreignError._tag, "ProviderAdapterResumeThreadError");
     }).pipe(
       Effect.scoped,
       Effect.provide(

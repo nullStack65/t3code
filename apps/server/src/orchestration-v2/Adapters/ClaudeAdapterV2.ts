@@ -3156,11 +3156,21 @@ const isClaudeConversationLine = (line: string): boolean =>
 const getNativeThreadId = Effect.fnUntraced(function* (
   providerThread: OrchestrationV2ProviderThread,
 ) {
-  const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
-  if (nativeThreadId === undefined || nativeThreadId === null) {
+  const ref = providerThread.nativeThreadRef;
+  const nativeThreadId = ref?.nativeId;
+  if (
+    ref === null ||
+    ref.driver !== CLAUDE_PROVIDER ||
+    nativeThreadId === undefined ||
+    nativeThreadId === null ||
+    nativeThreadId.trim().length === 0
+  ) {
     return yield* new ProviderAdapter.ProviderAdapterProtocolError({
       driver: CLAUDE_PROVIDER,
-      detail: `Provider thread ${providerThread.id} is missing a native Claude session id.`,
+      detail:
+        ref !== null && ref.driver !== CLAUDE_PROVIDER
+          ? `Provider thread ${providerThread.id} references ${ref.driver} session instead of ${CLAUDE_PROVIDER}.`
+          : `Provider thread ${providerThread.id} is missing a native Claude session id.`,
     });
   }
   return nativeThreadId;
@@ -15159,16 +15169,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               readonly providerThread: OrchestrationV2ProviderThread;
               readonly importedNativeSession?: boolean;
             }) {
-              const nativeThreadId = threadInput.providerThread.nativeThreadRef?.nativeId;
-              if (nativeThreadId !== undefined && nativeThreadId !== null) {
-                const recordedTitle = threadInput.providerThread.nativeMetadata?.title;
-                if (recordedTitle !== undefined && recordedTitle !== null) {
-                  appliedSessionTitles.set(nativeThreadId, recordedTitle);
-                }
+              const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              const recordedTitle = threadInput.providerThread.nativeMetadata?.title;
+              if (recordedTitle !== undefined && recordedTitle !== null) {
+                appliedSessionTitles.set(nativeThreadId, recordedTitle);
               }
               if (
-                nativeThreadId !== undefined &&
-                nativeThreadId !== null &&
                 // A live process holds the conversation even before saving it.
                 (yield* Ref.get(queryContext))?.nativeThreadId !== nativeThreadId
               ) {
@@ -15201,10 +15207,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }
               }
               const updatedAt = yield* DateTime.now;
-              const appliedTitle =
-                nativeThreadId !== undefined && nativeThreadId !== null
-                  ? appliedSessionTitles.get(nativeThreadId)
-                  : undefined;
+              const appliedTitle = appliedSessionTitles.get(nativeThreadId);
               const providerThread: OrchestrationV2ProviderThread = {
                 ...threadInput.providerThread,
                 providerSessionId: input.providerSessionId,

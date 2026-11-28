@@ -551,12 +551,27 @@ function protocolError(
   });
 }
 
-function nativeThreadId(providerThread: OrchestrationV2ProviderThread): string {
-  const nativeId = providerThread.nativeThreadRef?.nativeId;
-  if (nativeId === null || nativeId === undefined) {
-    throw protocolError(`Provider thread ${providerThread.id} has no OpenCode session id`);
+function nativeThreadId(
+  providerThread: OrchestrationV2ProviderThread,
+): Effect.Effect<string, ProviderAdapter.ProviderAdapterProtocolError> {
+  const ref = providerThread.nativeThreadRef;
+  const nativeId = ref?.nativeId;
+  if (
+    ref === null ||
+    ref.driver !== OPENCODE_PROVIDER ||
+    nativeId === null ||
+    nativeId === undefined ||
+    nativeId.trim().length === 0
+  ) {
+    return Effect.fail(
+      protocolError(
+        ref !== null && ref.driver !== OPENCODE_PROVIDER
+          ? `Provider thread ${providerThread.id} references ${ref.driver} session instead of ${OPENCODE_PROVIDER}`
+          : `Provider thread ${providerThread.id} has no OpenCode session id`,
+      ),
+    );
   }
-  return nativeId;
+  return Effect.succeed(nativeId);
 }
 
 function dateTimeFromEpoch(value: number | undefined, fallback: DateTime.Utc): DateTime.Utc {
@@ -3435,7 +3450,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
         const readSnapshot = Effect.fnUntraced(function* (
           providerThread: OrchestrationV2ProviderThread,
         ) {
-          const sessionId = nativeThreadId(providerThread);
+          const sessionId = yield* nativeThreadId(providerThread);
           const sessionResponse = yield* sdkCall("session.get", { sessionID: sessionId }, () =>
             client.session.get({ sessionID: sessionId }),
           );
@@ -3688,7 +3703,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           ),
           resumeThread: Effect.fn("OpencodeAdapter.resumeThread")(
             function* (threadInput) {
-              const sessionId = nativeThreadId(threadInput.providerThread);
+              const sessionId = yield* nativeThreadId(threadInput.providerThread);
               const response = yield* sdkCall("session.get", { sessionID: sessionId }, () =>
                 client.session.get({ sessionID: sessionId }),
               );
@@ -3732,7 +3747,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   "OpenCode event stream has ended; reconnect the provider session before starting another turn.",
                 );
               }
-              const sessionId = nativeThreadId(turnInput.providerThread);
+              const sessionId = yield* nativeThreadId(turnInput.providerThread);
               const state = threads.get(sessionId);
               if (state === undefined) {
                 return yield* protocolError(`OpenCode session ${sessionId} is not registered`);
@@ -3997,7 +4012,8 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             },
             (effect, turnInput) =>
               Effect.suspend(() => {
-                const state = threads.get(nativeThreadId(turnInput.providerThread));
+                const nativeId = turnInput.providerThread.nativeThreadRef?.nativeId;
+                const state = nativeId != null ? threads.get(nativeId) : undefined;
                 const wake =
                   turnInput.message.createdBy === "agent" &&
                   turnInput.message.creationSource === "provider"
@@ -4022,7 +4038,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           ),
           steerTurn: Effect.fn("OpencodeAdapter.steerTurn")(
             function* (steerInput) {
-              const sessionId = nativeThreadId(steerInput.providerThread);
+              const sessionId = yield* nativeThreadId(steerInput.providerThread);
               const state = threads.get(sessionId);
               const turn = state?.activeTurn;
               if (
@@ -4150,7 +4166,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           ),
           interruptTurn: Effect.fn("OpencodeAdapter.interruptTurn")(
             function* (interruptInput) {
-              const sessionId = nativeThreadId(interruptInput.providerThread);
+              const sessionId = yield* nativeThreadId(interruptInput.providerThread);
               const state = threads.get(sessionId);
               if (state === undefined) {
                 if (interruptInput.requestRuntimeRestart !== true)
@@ -4320,7 +4336,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             ),
           rollbackThread: Effect.fn("OpencodeAdapter.rollbackThread")(
             function* (rollbackInput) {
-              const sessionId = nativeThreadId(rollbackInput.providerThread);
+              const sessionId = yield* nativeThreadId(rollbackInput.providerThread);
               const state = threads.get(sessionId);
               if (state?.activeTurn !== null && state?.activeTurn !== undefined) {
                 return yield* protocolError(
@@ -4407,7 +4423,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           ),
           forkThread: Effect.fn("OpencodeAdapter.forkThread")(
             function* (forkInput) {
-              const sourceSessionId = nativeThreadId(forkInput.sourceProviderThread);
+              const sourceSessionId = yield* nativeThreadId(forkInput.sourceProviderThread);
               const sourceState = threads.get(sourceSessionId);
               if (sourceState?.activeTurn !== null && sourceState?.activeTurn !== undefined) {
                 return yield* protocolError(

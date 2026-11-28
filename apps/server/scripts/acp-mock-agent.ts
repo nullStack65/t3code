@@ -73,6 +73,7 @@ const failLoadSessionAfterConfigReplay =
   process.env.T3_ACP_FAIL_LOAD_SESSION_AFTER_CONFIG_REPLAY === "1";
 const emitLoadReplay = process.env.T3_ACP_EMIT_LOAD_REPLAY === "1";
 const delayLoadSessionAfterReplay = process.env.T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY === "1";
+const failDelayedLoadSession = process.env.T3_ACP_FAIL_DELAYED_LOAD_SESSION === "1";
 const loadSessionDelayMs = Number(process.env.T3_ACP_LOAD_SESSION_DELAY_MS ?? "5000");
 const modeNotifiedBeforeDelayedLoadReply = process.env.T3_ACP_NOTIFY_MODE_BEFORE_LOAD_REPLY;
 const holdSetConfigOptionUntilLoadReply =
@@ -765,6 +766,9 @@ const program = Effect.gen(function* () {
         }
         yield* Effect.sleep(loadSessionDelayMs);
         yield* Deferred.succeed(delayedLoadReplied, undefined);
+        if (failDelayedLoadSession) {
+          return yield* AcpError.AcpRequestError.internalError("Mock late load session failure");
+        }
         return {
           configOptions: loadedConfigOptions,
         };

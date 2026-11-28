@@ -11,6 +11,7 @@ import {
   EnvironmentId,
   MessageId,
   NodeId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
@@ -8694,6 +8695,40 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         checks: 2,
         lastCheck: "Checked proof.txt",
       });
+
+      const blankError = yield* Effect.flip(
+        runtime.resumeThread({
+          providerThread: {
+            ...thread,
+            nativeThreadRef: {
+              driver: OPENCODE_PROVIDER,
+              nativeId: "   ",
+              strength: "strong",
+            },
+          },
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: policy(),
+        }),
+      );
+      assert.equal(blankError._tag, "ProviderAdapterProtocolError");
+
+      const foreignError = yield* Effect.flip(
+        runtime.resumeThread({
+          providerThread: {
+            ...thread,
+            nativeThreadRef: {
+              driver: ProviderDriverKind.make("codex"),
+              nativeId: SESSION,
+              strength: "strong",
+            },
+          },
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: policy(),
+        }),
+      );
+      assert.equal(foreignError._tag, "ProviderAdapterProtocolError");
     }),
   );
 

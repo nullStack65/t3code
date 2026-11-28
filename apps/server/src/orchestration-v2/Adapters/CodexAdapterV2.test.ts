@@ -23,6 +23,7 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   type ProviderApprovalDecision,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderSetupError,
@@ -5985,6 +5986,38 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         "cause.errorMessage",
         `thread ${nativeThreadId} already has an active writer`,
       );
+
+      const blankError = yield* Effect.flip(
+        harness.runtime.resumeThread({
+          providerThread: {
+            ...harness.providerThread,
+            nativeThreadRef: {
+              driver: ProviderDriverKind.make("codex"),
+              nativeId: "   ",
+              strength: "strong",
+            },
+          },
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        }),
+      );
+      assert.equal(blankError._tag, "ProviderAdapterResumeThreadError");
+
+      const foreignDriverError = yield* Effect.flip(
+        harness.runtime.resumeThread({
+          providerThread: {
+            ...harness.providerThread,
+            nativeThreadRef: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              nativeId: nativeThreadId,
+              strength: "strong",
+            },
+          },
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        }),
+      );
+      assert.equal(foreignDriverError._tag, "ProviderAdapterResumeThreadError");
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
