@@ -53,6 +53,16 @@ git fetch upstream
 node scripts/fork-drift-receipt.mjs --base origin/release/native-0.1.10
 ```
 
+In a pull request, ARC CI adds `--head <PR head SHA>`, so the receipt measures
+the candidate (the merge of the target branch and the PR head) rather than the
+target branch alone. Every receipt records `baseSha`, `headSha` and
+`upstreamSha` and prints a `reproduce` command. Running that command later
+gives the same numbers even after the branches have moved:
+
+```sh
+node scripts/fork-drift-receipt.mjs --base <baseSha> --head <headSha> --upstream <upstreamSha>
+```
+
 Run `DRY_RUN=1 UPSTREAM_URL=https://github.com/pingdotgg/t3code.git bash
 scripts/upstream-sync.sh` to probe merge conflicts without committing, pushing
 or contacting the GitHub API.
