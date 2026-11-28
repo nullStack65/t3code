@@ -34,6 +34,7 @@ import * as ServerConfig from "../../../config.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import { frameBoundedUntrustedValue } from "../../../security/untrustedContent.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
 
 /** Whether a preview the agent
@@ -88,13 +89,23 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
       ...(statusTabId === undefined ? {} : { tabId: statusTabId }),
     })
     .pipe(Effect.orElseSucceed(() => null));
+  const iconOrigin = safeWebsiteIconOrigin(page?.url);
   return {
     result,
-    ...(page?.url && /^https?:\/\//i.test(page.url) && page.url.length <= 4096
-      ? { toolIcon: { _tag: "website" as const, pageUrl: page.url } }
-      : {}),
+    ...(iconOrigin ? { toolIcon: { _tag: "website" as const, pageUrl: iconOrigin } } : {}),
   };
 });
+
+function safeWebsiteIconOrigin(rawUrl: string | null | undefined): string | undefined {
+  if (!rawUrl || rawUrl.length > 4096) return undefined;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    return parsed.origin.length > 0 && parsed.origin.length <= 255 ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const invokeTargeted = <A extends object>(
   operation: PreviewAutomationOperation,
@@ -250,7 +261,7 @@ const handlers = {
   preview_evaluate: McpToolAccess.actsAsCaller(({ tabId, ...input }) =>
     invoke<unknown>("evaluate", input, undefined, tabId).pipe(
       Effect.map(({ result, toolIcon }) => ({
-        value: result ?? null,
+        value: frameBoundedUntrustedValue(result ?? null, "preview_evaluate"),
         ...(toolIcon ? { toolIcon } : {}),
       })),
     ),

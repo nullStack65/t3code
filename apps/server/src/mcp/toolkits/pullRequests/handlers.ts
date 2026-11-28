@@ -52,6 +52,11 @@ import {
 } from "../../../sourceControl/threadPullRequests.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import {
+  frameUntrustedContent,
+  randomUntrustedFrameId,
+  unwrapUntrustedContentIfFenced,
+} from "../../../security/untrustedContent.ts";
 import { threadNotFound } from "../../threadAccess.ts";
 import {
   type ListThreadPullRequestsResult,
@@ -168,15 +173,16 @@ function conversationPage(
   };
 }
 
-function checksSummary(checks: ReadonlyArray<PullRequestCheck>) {
+function checksSummary(checks: ReadonlyArray<PullRequestCheck>, frameId: string) {
   let passed = 0;
   let pending = 0;
   let incomplete = false;
   const failed: Array<string> = [];
   for (const check of checks) {
     if (check.placeholder === true) incomplete = true;
-    else if (check.status === "failure" || check.status === "cancelled") failed.push(check.name);
-    else if (check.status === "pending" || check.status === "action-required") pending += 1;
+    else if (check.status === "failure" || check.status === "cancelled") {
+      failed.push(frameUntrustedContent(check.name, "pr_check", frameId));
+    } else if (check.status === "pending" || check.status === "action-required") pending += 1;
     else passed += 1;
   }
   return { passed, pending, failed, ...(incomplete ? { incomplete: true as const } : {}) };
@@ -561,16 +567,17 @@ const make = Effect.gen(function* () {
         .diff({ ...ref, ...(cursor === undefined ? {} : { cursor }) })
         .pipe(Effect.mapError(forgeFailure));
       for (const comment of unplaced()) {
+        const commentPath = unwrapUntrustedContentIfFenced(comment.path);
         const side = comment.side ?? "new";
-        const position = reviewPositionInPatch(diff.patch, comment.path, comment.line, side);
+        const position = reviewPositionInPatch(diff.patch, commentPath, comment.line, side);
         const start =
           comment.startLine === undefined
             ? undefined
-            : reviewPositionInPatch(diff.patch, comment.path, comment.startLine, side);
+            : reviewPositionInPatch(diff.patch, commentPath, comment.startLine, side);
         if (position !== null) lineShown.add(comment);
         if (position === null || start === null) continue;
         placed.set(comment, {
-          path: comment.path,
+          path: commentPath,
           position,
           ...(start === undefined ? {} : { startPosition: start }),
           body: comment.body,
@@ -581,12 +588,13 @@ const make = Effect.gen(function* () {
     }
     const missing = unplaced()[0];
     if (missing !== undefined) {
+      const missingPath = unwrapUntrustedContentIfFenced(missing.path);
       const missingLine =
         missing.startLine !== undefined && lineShown.has(missing)
           ? missing.startLine
           : missing.line;
       return yield* new PullRequestForgeError({
-        detail: `${missing.path} line ${missingLine} (${missing.side ?? "new"} side) is not in this PR's diff. Comment on a changed line or one shown around it.`,
+        detail: `${missingPath} line ${missingLine} (${missing.side ?? "new"} side) is not in this PR's diff. Comment on a changed line or one shown around it.`,
       });
     }
     return comments.map((comment) => placed.get(comment)!);
@@ -701,23 +709,41 @@ const make = Effect.gen(function* () {
           concurrency: 4,
         })
       : [];
+    const frameId = randomUntrustedFrameId();
     const result: Omit<ReadPullRequestResult, "host" | "repository" | "number" | "url"> = {
-      title: detail.title,
+      title: frameUntrustedContent(detail.title, "pr_title", frameId),
       state: detail.state,
       isDraft: detail.isDraft,
       ...(detail.visibility === undefined ? {} : { visibility: detail.visibility }),
       author: detail.author?.login ?? null,
-      headBranch: detail.headBranch,
+      headBranch: frameUntrustedContent(detail.headBranch, "pr_branch", frameId),
       baseBranch: detail.baseBranch,
       headSha: detail.headSha ?? null,
       mergeability: detail.mergeability,
       behindBy: detail.behindBy ?? null,
       autoMergeEnabled: detail.autoMergeEnabled ?? null,
-      checks: checksSummary(detail.checks),
+      checks: checksSummary(detail.checks, frameId),
       unresolvedThreads: activity.reviewThreads.filter((thread) => !thread.isResolved).length,
       ...(activity.reviewThreadsTruncated === true ? { unresolvedThreadsTruncated: true } : {}),
-      ...(wants("body") ? { body: detail.body } : {}),
-      ...(wants("checks") ? { checkRuns: detail.checks } : {}),
+      ...(wants("body")
+        ? { body: frameUntrustedContent(detail.body, "pr_description", frameId) }
+        : {}),
+      ...(wants("checks")
+        ? {
+            checkRuns: detail.checks.map((check) => ({
+              ...check,
+              name: TrimmedNonEmptyString.make(
+                frameUntrustedContent(check.name, "pr_check", frameId),
+              ),
+              description:
+                check.description === null
+                  ? null
+                  : frameUntrustedContent(check.description, "pr_check", frameId),
+              url:
+                check.url === null ? null : frameUntrustedContent(check.url, "pr_check", frameId),
+            })),
+          }
+        : {}),
       ...(Option.isSome(page)
         ? {
             conversation: {
@@ -725,14 +751,14 @@ const make = Effect.gen(function* () {
                 ? {
                     reviewThreads: page.value.threads.map((thread, index) => ({
                       id: thread.id,
-                      path: thread.path,
+                      path: frameUntrustedContent(thread.path, "pr_path", frameId),
                       line: thread.line,
                       isResolved: thread.isResolved,
                       isOutdated: thread.isOutdated,
                       comments: [...thread.comments, ...threadRests[index]!.comments].map(
                         (comment) => ({
                           author: comment.author?.login ?? null,
-                          body: comment.body,
+                          body: frameUntrustedContent(comment.body, "pr_comment", frameId),
                           createdAt: comment.createdAt,
                         }),
                       ),
@@ -746,9 +772,12 @@ const make = Effect.gen(function* () {
                       id: comment.id,
                       kind: comment.kind,
                       author: comment.author?.login ?? null,
-                      body: comment.body,
+                      body: frameUntrustedContent(comment.body, "pr_comment", frameId),
                       createdAt: comment.createdAt,
-                      path: comment.path,
+                      path:
+                        comment.path === null
+                          ? null
+                          : frameUntrustedContent(comment.path, "pr_path", frameId),
                       reviewState: comment.reviewState,
                     })),
                   }
@@ -763,7 +792,7 @@ const make = Effect.gen(function* () {
       ...(Option.isSome(diff)
         ? {
             diff: {
-              patch: diff.value.patch,
+              patch: frameUntrustedContent(diff.value.patch, "pr_diff", frameId),
               truncated: diff.value.truncated,
               nextCursor:
                 diff.value.nextCursor === null
@@ -1329,11 +1358,15 @@ const make = Effect.gen(function* () {
     ci_logs: McpToolAccess.reads((input) =>
       Effect.gen(function* () {
         const { target, ref } = yield* locate(input);
+        const unwrappedCheck =
+          input.check === undefined
+            ? undefined
+            : unwrapUntrustedContentIfFenced(input.check).trim();
         const checks = yield* pullRequests
           .checkLogs({
             ...ref,
             tailLines: input.tailLines ?? 200,
-            ...(input.check === undefined ? {} : { check: input.check }),
+            ...(unwrappedCheck ? { check: TrimmedNonEmptyString.make(unwrappedCheck) } : {}),
           })
           .pipe(Effect.mapError(forgeFailure));
         return { ...identityOf(target), checks };
@@ -1342,8 +1375,15 @@ const make = Effect.gen(function* () {
     ci_rerun: McpToolAccess.writesWithCapability((input) =>
       Effect.gen(function* () {
         const { thread, target, ref } = yield* locate(input);
+        const unwrappedCheck =
+          input.check === undefined
+            ? undefined
+            : unwrapUntrustedContentIfFenced(input.check).trim();
         const checks = yield* pullRequests
-          .rerunChecks({ ...ref, ...(input.check === undefined ? {} : { check: input.check }) })
+          .rerunChecks({
+            ...ref,
+            ...(unwrappedCheck ? { check: TrimmedNonEmptyString.make(unwrappedCheck) } : {}),
+          })
           .pipe(Effect.mapError(forgeFailure));
         // Like a push, a rerun makes a watch's finished checks stale, so the thread keeps working
         // until a read sees them run. The rerun already happened, so a failed reopen only logs.

@@ -16,6 +16,10 @@ import * as ThreadIssueService from "../../../orchestration-v2/ThreadIssueServic
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  frameUntrustedContent,
+  randomUntrustedFrameId,
+} from "../../../security/untrustedContent.ts";
+import {
   IssueLinkFailedError,
   IssueProjectNotFoundError,
   IssueProjectRequiredError,
@@ -199,32 +203,35 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const target = yield* resolveTarget(input);
         const detail = yield* readIssue(target);
+        const frameId = randomUntrustedFrameId();
         return {
           ...identityOf(target),
           url: target.url ?? detail.url,
           displayKey: detail.displayKey,
-          title: detail.title,
+          title: frameUntrustedContent(detail.title, "issue_title", frameId),
           state: detail.state,
           writable: detail.writable,
           capabilities: detail.capabilities,
           states: detail.states,
           author: detail.author?.login ?? null,
           assignees: detail.assignees.map((actor) => actor.login),
-          labels: detail.labels.map((label) => label.name),
+          labels: detail.labels.map((label) =>
+            frameUntrustedContent(label.name, "issue_label", frameId),
+          ),
           createdAt: detail.createdAt,
           updatedAt: detail.updatedAt,
           closedAt: detail.closedAt,
-          body: detail.body,
+          body: frameUntrustedContent(detail.body, "issue_description", frameId),
           comments: detail.comments.map((comment) => ({
             id: comment.id,
             author: comment.author?.login ?? null,
-            body: comment.body,
+            body: frameUntrustedContent(comment.body, "issue_comment", frameId),
             createdAt: comment.createdAt,
           })),
           commentsTruncated: detail.commentsCursor !== null,
           linkedPullRequests: detail.linkedPullRequests.map((pullRequest) => ({
             url: pullRequest.url,
-            title: pullRequest.title,
+            title: frameUntrustedContent(pullRequest.title, "pr_title", frameId),
             state: pullRequest.state,
             closesIssue: pullRequest.closesIssue,
           })),
