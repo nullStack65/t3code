@@ -1,0 +1,183 @@
+name: T3 fork feature QA
+
+# Drives the web app in a real browser against the feature map in qa/features.ts, in light and dark
+# at 1440 and 390 px, and fails a PR that changes a feature's code without updating that feature's
+# map entry. Self-hosted ARC only, with the same trust gate as closura-arc-ci.yml: this is a public
+# fork, so untrusted PR code never runs on the private ARC LAN.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [release/native-0.1.10]
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: "Playwright projects to run, comma separated (all four by default on manual runs)"
+        type: string
+        default: "desktop-light,phone-light,desktop-dark,phone-dark"
+      update_baselines:
+        description: "Write visual baselines for this runner image (download the artifact and commit qa/baselines/ci)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t3-fork-feature-qa-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  feature-qa:
+    name: Feature map and click QA (Linux ARC)
+    if: >-
+      ${{
+        github.repository_id == '1372173214' &&
+        (
+          (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.event.pull_request.user.login) &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor) &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.triggering_actor))
+          ||
+          (github.event_name == 'workflow_dispatch' &&
+           github.ref == 'refs/heads/release/native-0.1.10' &&
+           contains(fromJSON('["nullStack65","jeffreysmithclosura"]'), github.actor))
+        )
+      }}
+    runs-on: t3code-ci-arc
+    timeout-minutes: 60
+    env:
+      CI: "true"
+      GIT_CONFIG_NOSYSTEM: "1"
+      NODE_OPTIONS: "--max-old-space-size=3072"
+    steps:
+      - name: Checkout trusted source (no persistent credentials)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+
+      - name: Prove exact ARC repository and worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY_ID" = '1372173214'
+          test -n "${RUNNER_NAME:-}"
+          test "$RUNNER_OS" = Linux
+
+      - name: Provide libatomic for official Node binaries
+        uses: ./.github/actions/provide-libatomic
+
+      - name: Install locked dependencies from cache
+        uses: ./.github/actions/setup-ci-deps
+
+      # Cheap and first: a PR that touches a feature's code must also touch its map entry, spec or
+      # status. The three-dot diff needs the merge base, so the shallow boundary goes first.
+      - name: Feature map matches the specs, and this PR updates the entries it touches
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          base="$BASE_REF"
+          unshallow=()
+          if [ -f .git/shallow ]; then unshallow=(--unshallow); fi
+          git fetch --no-tags --filter=blob:none "${unshallow[@]}" origin "$base:refs/remotes/origin/$base"
+          node qa/check-map.ts --changed "origin/$base"
+
+      - name: Feature map matches the specs
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        run: node qa/check-map.ts
+
+      - name: Provide Chromium libraries
+        uses: ./.github/actions/provide-chromium-libs
+
+      # Without a font cache Chromium finds no fonts on this image, so text has no size and
+      # Playwright calls every heading hidden. Same setup as the latency gate in closura-arc-ci.yml.
+      - name: Make fonts visible to headless Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The image has no fonts of its own. The libraries downloaded above pull in
+          # fonts-dejavu-core as a dependency, extracted under the job temp dir.
+          dirs=(/usr/share/fonts "$RUNNER_TEMP/chromium-libs/root/usr/share/fonts")
+          mkdir -p "$RUNNER_TEMP/fontconfig-cache"
+          {
+            printf '<?xml version="1.0"?>\n<fontconfig>\n'
+            for dir in "${dirs[@]}"; do printf '<dir>%s</dir>\n' "$dir"; done
+            printf '<cachedir>%s</cachedir>\n</fontconfig>\n' "$RUNNER_TEMP/fontconfig-cache"
+          } > "$RUNNER_TEMP/fonts.conf"
+          fonts=0
+          for dir in "${dirs[@]}"; do
+            if test -d "$dir"; then fonts=$((fonts + $(find "$dir" -name '*.ttf' | wc -l))); fi
+          done
+          if test "$fonts" -eq 0; then
+            echo "::error::No fonts for headless Chromium, so text has no size and is never visible."
+            exit 1
+          fi
+          printf 'Fonts available to Chromium: %s\n' "$fonts"
+          printf 'FONTCONFIG_FILE=%s\n' "$RUNNER_TEMP/fonts.conf" >> "$GITHUB_ENV"
+
+      - name: Restore Playwright Chromium
+        id: playwright_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/playwright-browsers
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        shell: bash
+        working-directory: qa
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+        run: vp exec playwright install chromium
+
+      - name: Save Playwright Chromium
+        if: steps.playwright_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/playwright-browsers
+          key: ${{ steps.playwright_cache.outputs.cache-primary-key }}
+
+      - name: Build the web client
+        shell: bash
+        working-directory: apps/web
+        run: vp build
+
+      - name: Click through every feature
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+          T3_QA_BASELINES: ci
+          T3_QA_UPDATE_BASELINES: ${{ inputs.update_baselines && '1' || '0' }}
+          PROJECTS_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.projects || '' }}
+        run: |
+          set -euo pipefail
+          # A PR runs one desktop and one phone project in opposite color schemes, which covers both
+          # widths and both schemes; a manual run takes the list it was given.
+          projects="${PROJECTS_INPUT:-desktop-light,phone-dark}"
+          case "$projects" in *[!a-z,-]*) echo "::error::projects may only hold project names and commas"; exit 1;; esac
+          args=(--project "$projects")
+          if [ "$T3_QA_UPDATE_BASELINES" = 1 ]; then args+=(--update-snapshots); fi
+          node qa/verify.ts --skip-build "${args[@]}"
+
+      - name: Upload the report, screenshots and any new baselines
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: feature-qa-report
+          path: |
+            qa/report/
+            qa/status.json
+            qa/test-results/
+            qa/baselines/ci/
+          if-no-files-found: ignore
+          retention-days: 14

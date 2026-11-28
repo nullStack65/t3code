@@ -46,7 +46,7 @@ Kameron, 2026-11-21: a recurring bug or quality bar is a scaffold, schema, linte
 
 Lint: `t3code/no-low-value-comments`, `t3code/no-test-timeout-or-unreasoned-skip`, `t3code/no-wall-clock-in-tests`, `t3code/no-real-time-wait-in-tests`, `t3code/no-polling-loop-in-tests`, `t3code/no-frame-waits-in-browser-tests`, `t3code/require-disposable-render`, `shadcn/no-restyle`.
 
-CI: `scripts/feature-map.test.ts`, `.github/workflows/closura-deploy-line.yml`.
+CI: `scripts/feature-map.test.ts`, `qa/check-map.ts`, `.github/workflows/closura-deploy-line.yml`.
 
 ## Terminology
 
@@ -64,6 +64,7 @@ CI: `scripts/feature-map.test.ts`, `.github/workflows/closura-deploy-line.yml`.
 The most common defect in this repo is a change that works on the path you tested and is missing everywhere else. Before calling frontend work done, walk this list and say which entries applied:
 
 - **Entry points.** Chat view, Settings, command palette, and keybindings. Fixing one is not fixing the feature.
+- **Click QA.** [`qa/features.ts`](qa/README.md), rendered to `docs/FEATURES.md`, records each web feature's user path, Playwright drive steps, success state and verified status. A PR that changes a feature's code updates its entry or spec; CI runs `node qa/check-map.ts --changed <base>` and the click and visual suite.
 - **Clients.** Web, desktop (Electron shell/IPC), and mobile (React Native). Shared logic lives in `packages/client-runtime`.
 - **Providers.** Every provider adapter needs a decision, even if the decision is "not supported here".
 - **Agents.** Capabilities a user triggers should be service methods reachable by MCP tools and scheduled tasks, not inline handler code.

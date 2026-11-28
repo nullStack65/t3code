@@ -23,6 +23,19 @@
       // The grader loads these answers by path, as the server loads a definitions file.
       "entry": ["workflow-authoring/fixtures/*.ts"],
     },
+    "qa": {
+      // Run by path: the verify and check scripts, Playwright's config, specs and global setup.
+      "entry": [
+        "verify.ts",
+        "check-map.ts",
+        "render-map.ts",
+        "serve.ts",
+        "pack-report.ts",
+        "global-setup.ts",
+        "playwright.config.ts",
+        "specs/*.spec.ts",
+      ],
+    },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification and
       // worktree setup (from t3.json) run directly. release-desktop.yml bundles the

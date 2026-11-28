@@ -185,6 +185,8 @@ export default defineConfig({
       ".macroscope/ignore.md",
       // Closura: byte-pinned copy of the Home lane-event contract; formatting breaks its sha test.
       "apps/server/src/orchestration-v2/laneEventRouting.conformance.json",
+      // Rendered by qa/render-map.ts from qa/features.ts; the next sweep rewrites it.
+      "docs/FEATURES.md",
       ".alchemy",
       "dist",
       "dist-electron",
