@@ -59,6 +59,7 @@ const state = vi.hoisted(() => ({
   approve: vi.fn(),
   answer: vi.fn(),
   feedback: vi.fn(),
+  startTurn: vi.fn(),
   updateSettings: vi.fn(),
   question: {
     id: "language",
@@ -77,6 +78,7 @@ const state = vi.hoisted(() => ({
     interactionMode: "default",
     runtime: null,
     latestRun: null as unknown,
+    source: undefined as { readonly inbox?: { readonly audience?: string } } | undefined,
   },
 }));
 
@@ -184,6 +186,7 @@ vi.mock("./threads", async () => {
       respondToApproval: state.approve,
       respondToUserInput: state.answer,
       uploadFeedback: state.feedback,
+      startTurn: state.startTurn,
     },
   };
 });
@@ -267,6 +270,7 @@ beforeEach(() => {
   state.compactModel = null;
   state.compactDueAt = "";
   state.thread.latestRun = null;
+  state.thread.source = undefined;
   state.projection = null;
   state.serverConfig = {
     providers: [{ instanceId: "codex", driver: "codex", enabled: true }],
@@ -287,6 +291,7 @@ beforeEach(() => {
   state.approve.mockResolvedValue(AsyncResult.success(undefined));
   state.answer.mockResolvedValue(AsyncResult.success(undefined));
   state.feedback.mockResolvedValue(AsyncResult.success({ feedbackId: "feedback" }));
+  state.startTurn.mockResolvedValue(AsyncResult.success({ sequence: 1 }));
 });
 
 describe("mobile task permissions", () => {
@@ -802,5 +807,72 @@ describe("mobile handoff preview and submission", () => {
       }),
     );
     expect(state.clearDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed on /note without server capability and never enqueues private notes to the turn outbox", async () => {
+    state.grantedEnvironments.add("secondary");
+    state.draft = {
+      ...state.draft,
+      text: "/note hold release until audit passes",
+    };
+
+    // Non-shared thread: fails closed, keeps draft, never dispatches or enqueues.
+    const nonShared = useThreadComposerState(NO_SIDE_CHATS);
+    expect(nonShared.noteUnavailableReason).toContain("share with the other founder");
+    expect(await nonShared.onSendMessage()).toBeNull();
+    expect(Alert.alert).toHaveBeenCalledOnce();
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(state.startTurn).not.toHaveBeenCalled();
+    expect(state.clearDraft).not.toHaveBeenCalled();
+
+    // Shared thread on a skewed server without capabilities.humanNote: fails closed, keeps draft.
+    vi.clearAllMocks();
+    state.thread.source = { inbox: { audience: "shared" } };
+    state.serverConfig = {
+      ...state.serverConfig,
+      environment: { capabilities: {} },
+    } as ServerConfig;
+    const skewed = useThreadComposerState(NO_SIDE_CHATS);
+    expect(skewed.noteUnavailableReason).toContain("Update this environment's T3 Code server");
+    expect(await skewed.onSendMessage()).toBeNull();
+    expect(Alert.alert).toHaveBeenCalledOnce();
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(state.startTurn).not.toHaveBeenCalled();
+    expect(state.clearDraft).not.toHaveBeenCalled();
+
+    // Shared thread with explicit humanNote: false also fails closed.
+    vi.clearAllMocks();
+    state.serverConfig = {
+      ...state.serverConfig,
+      environment: { capabilities: { humanNote: false } },
+    } as ServerConfig;
+    expect(await useThreadComposerState(NO_SIDE_CHATS).onSendMessage()).toBeNull();
+    expect(Alert.alert).toHaveBeenCalledOnce();
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(state.startTurn).not.toHaveBeenCalled();
+
+    // Shared thread with humanNote: true dispatches startTurn with humanNote: true and never enqueues.
+    vi.clearAllMocks();
+    state.serverConfig = {
+      ...state.serverConfig,
+      environment: { capabilities: { humanNote: true } },
+    } as ServerConfig;
+    const supported = useThreadComposerState(NO_SIDE_CHATS);
+    expect(supported.noteUnavailableReason).toBeNull();
+    expect(await supported.onSendMessage()).toBe("message");
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(state.startTurn).toHaveBeenCalledExactlyOnceWith({
+      environmentId: "secondary",
+      input: expect.objectContaining({
+        threadId: "thread",
+        dispatchMode: "start",
+        message: expect.objectContaining({
+          text: "hold release until audit passes",
+          attachments: [],
+          humanNote: true,
+        }),
+      }),
+    });
+    expect(state.clearDraft).toHaveBeenCalledOnce();
   });
 });

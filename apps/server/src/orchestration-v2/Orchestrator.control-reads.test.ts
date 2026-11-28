@@ -1475,26 +1475,65 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
         },
       }) satisfies OrchestrationV2DomainEvent;
     const question = requestEvent("event:question", "request:question", "live");
+    const questionItem = {
+      id: EventId.make("event:question-item"),
+      type: "turn-item.updated",
+      threadId: task.childThreadId!,
+      runId: childRun.id,
+      nodeId: childRun.rootNodeId!,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make("item:question"),
+        threadId: task.childThreadId!,
+        runId: childRun.id,
+        nodeId: childRun.rootNodeId!,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "waiting",
+        title: "Source",
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        type: "user_input_request",
+        requestId: question.payload.id,
+        questions: [
+          {
+            id: "source",
+            header: "Source",
+            question: "Which source should I prioritize?",
+            options: [
+              { label: "Primary", description: "Canonical source" },
+              { label: "Archive", description: "Historical mirror" },
+            ],
+          },
+        ],
+      },
+    } satisfies OrchestrationV2DomainEvent;
     const asyncQuestion = requestEvent("event:async-question", "request:async-question");
     const answered = requestEvent("event:answered", "request:answered", "live");
     const approval = requestEvent("event:approval", "request:approval", "message", "command");
     const eventSink = yield* EventSink.EventSinkV2;
     yield* eventSink.write({
-      events: [question, asyncQuestion, answered, approval],
+      events: [questionItem, question, asyncQuestion, answered, approval],
     });
 
+    // The child's card is refused, so even a blocking wait cannot see it: the wake carries it.
     yield* reactor.handle(question);
-    assert.isFalse(
-      (yield* projections.getThreadProjection(parentThreadId)).messages.some(
+    assert.equal(
+      (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
-      ),
+      ).length,
+      1,
     );
     yield* reactor.handle(asyncQuestion);
     assert.equal(
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      1,
+      2,
     );
     yield* reactor.handle(asyncQuestion);
     yield* reactor.handle(answered);
@@ -1513,24 +1552,26 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     const wakes = (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
       (message) => message.notification !== undefined,
     );
-    assert.include(wakes[0]?.text, "asked a question and is still working");
+    assert.include(wakes[0]?.text, "whose human-input card was refused");
+    assert.include(wakes[1]?.text, "asked a question and is still working");
+    const notification = {
+      source: {
+        kind: "delegated_task",
+        taskIds: [task.id],
+        childThreadId: task.childThreadId!,
+      },
+      outcome: "updated",
+      summary: 'Delegated task "Research the sources" has a question',
+    } as const;
+    // question, asyncQuestion and the pending `answered` card each wake once; the resolved
+    // `answered` replay and the approval do not.
     assert.deepEqual(
       wakes.map((message) => message.notification),
-      [
-        {
-          source: {
-            kind: "delegated_task",
-            taskIds: [task.id],
-            childThreadId: task.childThreadId!,
-          },
-          outcome: "updated",
-          summary: 'Delegated task "Research the sources" has a question',
-        },
-      ],
+      [notification, notification, notification],
     );
 
     const wakeRun = (yield* projections.getThreadRecords(parentThreadId, ["runs"])).runs.find(
-      (run) => run.userMessageId === wakes[0]!.id,
+      (run) => run.userMessageId === wakes[1]!.id,
     )!;
     assert.equal(wakeRun.status, "queued");
     const resolved = {
@@ -1567,7 +1608,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     }
     assert.equal(
       (yield* projections.getThreadRecords(parentThreadId, ["messages"])).messages.length,
-      2,
+      4,
     );
     yield* eventSink.write({ events: [parentCompleted] });
     for (const state of ["disposed", "pending"] as const) {
@@ -1586,7 +1627,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       if (state === "disposed") {
         assert.equal(
           (yield* projections.getThreadRecords(parentThreadId, ["messages"])).messages.length,
-          2,
+          4,
         );
       }
     }
@@ -1594,22 +1635,38 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     const caughtUp = (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
       (message) => message.notification !== undefined,
     );
-    assert.equal(caughtUp.length, 2);
+    assert.equal(caughtUp.length, 3);
+    const questionWake = caughtUp.find((message) =>
+      message.text.includes(`requestId ${question.payload.id}.`),
+    );
     assert.equal(
       caughtUp.filter((message) => message.text.includes(`requestId ${question.payload.id}.`))
         .length,
       1,
     );
-    assert.include(caughtUp[1]?.text, "is blocked on a question");
-    assert.isFalse(
-      caughtUp.some((message) => message.text.includes(`requestId ${answered.payload.id}.`)),
+    assert.include(questionWake?.text, "is blocked on a question");
+    assert.include(questionWake?.text, "Which source should I prioritize?");
+    assert.include(questionWake?.text, "t3_thread_send");
+    assert.isFalse(questionWake?.text.includes("action respond") ?? true);
+    const childRequestsAfterRefusal = (yield* projections.getThreadRecords(task.childThreadId!, [
+      "runtimeRequests",
+    ])).runtimeRequests.filter((entry) => entry.kind === "user_input");
+    assert.isTrue(childRequestsAfterRefusal.every((entry) => entry.status === "resolved"));
+    assert.equal(
+      childRequestsAfterRefusal.find((entry) => entry.id === question.payload.id)?.decision,
+      "cancel",
+    );
+    assert.equal(
+      caughtUp.filter((message) => message.text.includes(`requestId ${answered.payload.id}.`))
+        .length,
+      1,
     );
     yield* reactor.handle(question);
     assert.equal(
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      2,
+      3,
     );
     const terminalQuestion = requestEvent(
       "event:terminal-question",
@@ -1622,7 +1679,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      3,
+      4,
     );
     yield* eventSink.write({
       events: [
@@ -1654,7 +1711,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
       (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
         (message) => message.notification !== undefined,
       ).length,
-      4,
+      5,
     );
     const waitDelivered = requestEvent("event:wait-delivered", "request:wait-delivered", "live");
     const waitDeliveredParentCompleted = {
@@ -1956,6 +2013,74 @@ it.effect.each([false, true])(
         "starting",
       );
     }).pipe(Effect.provide(DelegatedTaskQuestionReactor.layer.pipe(Layer.provideMerge(layerTest)))),
+);
+
+it.effect("leaves user-input cards pending on fork and side-chat threads", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const reactor = yield* DelegatedTaskQuestionReactor.DelegatedTaskQuestionReactor;
+    const eventSink = yield* EventSink.EventSinkV2;
+    const parentThreadId = ThreadId.make("thread:fork-question-parent");
+    const forkThreadId = ThreadId.make("thread:fork-question-child");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-fork-question-parent"),
+      threadId: parentThreadId,
+      projectId: ProjectId.make("project:fork-question"),
+      title: "Parent",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("event:fork-thread-created"),
+          type: "thread.created",
+          threadId: forkThreadId,
+          occurredAt: now,
+          payload: {
+            ...(yield* projections.getThread(parentThreadId)),
+            id: forkThreadId,
+            title: "Side chat",
+            lineage: {
+              rootThreadId: parentThreadId,
+              parentThreadId,
+              relationshipToParent: "fork",
+              sideChat: true,
+            },
+          },
+        },
+      ],
+    });
+    const forkQuestion = {
+      id: EventId.make("event:fork-question"),
+      type: "runtime-request.updated",
+      threadId: forkThreadId,
+      occurredAt: now,
+      payload: {
+        id: RuntimeRequestId.make("request:fork-question"),
+        nodeId: NodeId.make("node:fork-question"),
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input",
+        status: "pending",
+        responseCapability: { type: "message" },
+        createdAt: now,
+        resolvedAt: null,
+      },
+    } satisfies OrchestrationV2DomainEvent;
+    yield* eventSink.write({ events: [forkQuestion] });
+    yield* reactor.handle(forkQuestion);
+    const stored = yield* projections.getRuntimeRequest(forkThreadId, forkQuestion.payload.id);
+    assert.equal(stored?.status, "pending");
+  }).pipe(Effect.provide(DelegatedTaskQuestionReactor.layer.pipe(Layer.provideMerge(layerTest)))),
 );
 
 it.effect.each([false, true])("rejects thread.create for an existing id (deleted: %s)", (deleted) =>

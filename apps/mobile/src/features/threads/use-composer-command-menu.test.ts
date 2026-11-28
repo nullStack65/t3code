@@ -105,6 +105,45 @@ describe("mobile slash commands", () => {
     expect(build(false)).toEqual(["pcmd:clear"]);
     expect(build(true, false)).toEqual([]);
   });
+
+  it("shows /note on shared threads with its disabled reason when the server lacks support", () => {
+    const disabled = buildComposerSlashCommandItems({
+      query: "no",
+      atMessageStart: true,
+      hasThread: true,
+      offersNote: true,
+      noteDisabledReason: "Update this environment's T3 Code server to use /note.",
+      selectedProviderStatus: null,
+    });
+    expect(disabled).toEqual([
+      expect.objectContaining({
+        id: "cmd:note",
+        command: "note",
+        description: "Update this environment's T3 Code server to use /note.",
+      }),
+    ]);
+
+    const enabled = buildComposerSlashCommandItems({
+      query: "no",
+      atMessageStart: true,
+      hasThread: true,
+      offersNote: true,
+      noteDisabledReason: null,
+      selectedProviderStatus: null,
+    });
+    expect(enabled[0]?.description).toContain("Leave a note for the other founder");
+
+    expect(
+      buildComposerSlashCommandItems({
+        query: "no",
+        atMessageStart: true,
+        hasThread: true,
+        offersNote: false,
+        noteDisabledReason: null,
+        selectedProviderStatus: null,
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe("mobile model mentions", () => {

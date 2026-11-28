@@ -377,8 +377,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const draftRunsLocally = composerRunsDraftLocally({
     text: draftMessage,
     holdsOnlyText: draftAttachments.length === 0,
-    // A redirect's text answers its approval, so `/side` there is that text.
+    // A redirect's text answers its approval, so `/side` and `/note` there are that text.
     sideChat: !props.redirectsApproval,
+    note: !props.redirectsApproval,
     usageLimits: usageLimitsOffered,
     codexFeedback: selectedProviderStatus?.driver === "codex",
     freshSession: props.onFreshSession !== undefined && draftContext === undefined,
@@ -422,6 +423,19 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     undefined,
     props.selectedThread.projectId,
   );
+  const noteAvailable =
+    !props.redirectsApproval &&
+    queuedEdit === null &&
+    props.selectedThread.source?.inbox?.audience === "shared";
+  const noteDisabledReason = !noteAvailable
+    ? null
+    : props.serverConfig === null
+      ? gt("Private notes are not ready yet. Try again in a moment.")
+      : props.serverConfig.environment.capabilities.humanNote !== true
+        ? gt("Update this environment's T3 Code server to use /note.")
+        : props.isDraft
+          ? gt("Send a message before leaving a note.")
+          : null;
   const composerMenu = useComposerCommandMenu({
     draftMessage: draftMessage,
     ownerKey: composerDraftKey,
@@ -448,6 +462,8 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     modelProviders: props.serverConfig?.providers,
     ...(props.onFreshSession === undefined ? {} : { onFreshSession: props.onFreshSession }),
     offersSideChat: props.offersSideChat === true,
+    offersNote: noteAvailable,
+    noteDisabledReason,
   });
   const voiceInput = useVoiceInputController({
     ownerKey: composerDraftKey,

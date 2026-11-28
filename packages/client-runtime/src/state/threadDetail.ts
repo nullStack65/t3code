@@ -555,8 +555,11 @@ export function createEnvironmentThreadDetailAtoms<E>(
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-worktree:${key}`)),
   );
   const pendingRequestsAtomFamily = Atom.family((key: string) => {
-    let previous: Pick<OrchestrationV2ThreadProjection, "runtimeRequests" | "turnItems"> | null =
-      null;
+    let previous:
+      | (Pick<OrchestrationV2ThreadProjection, "runtimeRequests" | "turnItems"> & {
+          readonly relationshipToParent: string | null | undefined;
+        })
+      | null = null;
     let value: PendingThreadRequests | null = null;
     return Atom.make((get) => {
       const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
@@ -577,13 +580,19 @@ export function createEnvironmentThreadDetailAtoms<E>(
                 (item.type === "approval_request" || item.type === "user_input_request") &&
                 ids.has(item.requestId),
             );
+      const relationshipToParent = projection.thread.lineage.relationshipToParent;
       if (
         previous === null ||
+        previous.relationshipToParent !== relationshipToParent ||
         !arrayElementsEqual(previous.runtimeRequests, runtimeRequests) ||
         !arrayElementsEqual(previous.turnItems, turnItems)
       ) {
-        previous = { runtimeRequests, turnItems };
-        value = derivePendingThreadRequests(previous);
+        previous = { runtimeRequests, turnItems, relationshipToParent };
+        value = derivePendingThreadRequests({
+          runtimeRequests,
+          turnItems,
+          thread: projection.thread,
+        });
       }
       return value;
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-pending-requests:${key}`));
