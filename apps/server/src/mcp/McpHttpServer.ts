@@ -114,6 +114,7 @@ import { ShowFileToolkit } from "./toolkits/showFile/tools.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import { MCP_HTTP_PATH } from "../httpCors.ts";
 import { requestUrl } from "../requestUrl.ts";
+import { frameUntrustedContent, randomUntrustedFrameId } from "../security/untrustedContent.ts";
 
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
   requestUrl(request).pipe(
@@ -491,19 +492,19 @@ const halveToFloor = (chars: number) =>
     : Math.floor(chars / 2);
 
 const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
-  const omitted: Array<string> = [];
+  const baseOmitted: Array<string> = [];
   const { accessibilityTree, ...withoutTree } = metadata;
   const ariaTree = typeof accessibilityTree === "string" ? accessibilityTree : undefined;
   if (accessibilityTree !== undefined && ariaTree === undefined) {
-    omitted.push("accessibilityTree (use preview_evaluate)");
+    baseOmitted.push("accessibilityTree (use preview_evaluate)");
   }
   const tail = <A>(entries: ReadonlyArray<A>, label: string) => {
     if (entries.length > MAX_SNAPSHOT_LOG_ENTRIES) {
-      omitted.push(`${entries.length - MAX_SNAPSHOT_LOG_ENTRIES} older ${label}`);
+      baseOmitted.push(`${entries.length - MAX_SNAPSHOT_LOG_ENTRIES} older ${label}`);
     }
     const kept = entries.slice(-MAX_SNAPSHOT_LOG_ENTRIES);
     if (kept.some((entry) => hasLongString(entry, MAX_SNAPSHOT_LOG_TEXT_CHARS))) {
-      omitted.push(`${label} text after ${MAX_SNAPSHOT_LOG_TEXT_CHARS} characters`);
+      baseOmitted.push(`${label} text after ${MAX_SNAPSHOT_LOG_TEXT_CHARS} characters`);
     }
     return kept.map(cutEntryStrings);
   };
@@ -511,7 +512,7 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
     metadata.url.length > MAX_SNAPSHOT_IDENTIFIER_CHARS ||
     metadata.title.length > MAX_SNAPSHOT_IDENTIFIER_CHARS
   ) {
-    omitted.push(`url or title after ${MAX_SNAPSHOT_IDENTIFIER_CHARS} characters`);
+    baseOmitted.push(`url or title after ${MAX_SNAPSHOT_IDENTIFIER_CHARS} characters`);
   }
   const bounded = {
     ...withoutTree,
@@ -536,14 +537,47 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   };
   let visibleTextChars = Math.min(metadata.visibleText.length, MAX_SNAPSHOT_VISIBLE_TEXT_CHARS);
   let ariaTreeChars = Math.min(ariaTree?.length ?? 0, 20_000);
-  const value = () => ({
+  const frameId = randomUntrustedFrameId();
+  const rawValue = () => ({
     ...bounded,
     ...(ariaTree === undefined ? {} : { accessibilityTree: cutText(ariaTree, ariaTreeChars) }),
     visibleText: cutText(metadata.visibleText, visibleTextChars),
     ...lists,
   });
-  let text = encodeJsonText(value());
-  while (utf8Length(text) > MAX_SNAPSHOT_TEXT_BYTES) {
+  const computeOmitted = () => {
+    const next = [...baseOmitted];
+    if (visibleTextChars < metadata.visibleText.length) {
+      next.push(
+        `visibleText after ${visibleTextChars} characters (use preview_evaluate for more)`,
+      );
+    }
+    if (ariaTree !== undefined && ariaTreeChars < ariaTree.length) {
+      next.push(`accessibilityTree after ${ariaTreeChars} characters`);
+    }
+    for (const key of shedOrder) {
+      if (dropped[key] > 0) {
+        next.push(`${dropped[key]} of ${bounded[key].length} ${key}`);
+      }
+    }
+    return next;
+  };
+  const structuredValue = (framedSnapshot: string, currentOmitted: ReadonlyArray<string>) => ({
+    loading: Boolean(metadata.loading),
+    screenshot: metadata.screenshot,
+    ...(typeof metadata.screenshotPath === "string"
+      ? { screenshotPath: metadata.screenshotPath }
+      : {}),
+    untrustedSnapshot: framedSnapshot,
+    ...(currentOmitted.length === 0 ? {} : { omitted: currentOmitted }),
+  });
+  let currentRaw = rawValue();
+  let omitted = computeOmitted();
+  let text = frameUntrustedContent(encodeJsonText(currentRaw), "preview_snapshot", frameId);
+  let currentStructured = structuredValue(text, omitted);
+  while (
+    utf8Length(text) > MAX_SNAPSHOT_TEXT_BYTES ||
+    utf8Length(encodeJsonText(currentStructured)) > MAX_SNAPSHOT_TEXT_BYTES
+  ) {
     // Logs shed first, oldest first. Below the floors, the locator-bearing tree goes last.
     const key =
       shedOrder.find((candidate) => lists[candidate].length > 0) ??
@@ -566,22 +600,12 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
       dropped[key] += lists[key].length - keep;
       lists[key] = keep === 0 ? [] : lists[key].slice(-keep);
     }
-    text = encodeJsonText(value());
+    currentRaw = rawValue();
+    omitted = computeOmitted();
+    text = frameUntrustedContent(encodeJsonText(currentRaw), "preview_snapshot", frameId);
+    currentStructured = structuredValue(text, omitted);
   }
-  if (visibleTextChars < metadata.visibleText.length) {
-    omitted.push(
-      `visibleText after ${visibleTextChars} characters (use preview_evaluate for more)`,
-    );
-  }
-  if (ariaTree !== undefined && ariaTreeChars < ariaTree.length) {
-    omitted.push(`accessibilityTree after ${ariaTreeChars} characters`);
-  }
-  for (const key of shedOrder) {
-    if (dropped[key] > 0) {
-      omitted.push(`${dropped[key]} of ${bounded[key].length} ${key}`);
-    }
-  }
-  return { value: value(), text, omitted };
+  return { value: currentStructured, text, omitted, frameId };
 };
 
 export class PreviewScreenshotSaveError extends Schema.TaggedError<PreviewScreenshotSaveError>()(
@@ -792,8 +816,13 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                   : undefined;
               // Providers replay images on later requests, and some reject them; include images only when requested.
               if (screenshotPath !== undefined && !includeImage) {
+                const savedFrameId = randomUntrustedFrameId();
                 const saved = {
-                  url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
+                  url: frameUntrustedContent(
+                    cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
+                    "preview_snapshot",
+                    savedFrameId,
+                  ),
                   screenshotPath,
                 };
                 return new McpSchema.CallToolResult({
@@ -814,16 +843,17 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               const bounded = boundSnapshotMetadata(metadata);
               return new McpSchema.CallToolResult({
                 isError: false,
-                structuredContent:
-                  bounded.omitted.length === 0
-                    ? bounded.value
-                    : { ...bounded.value, omitted: bounded.omitted },
+                structuredContent: bounded.value,
                 content: [
                   {
                     type: "text",
-                    text: encodeJsonText({
-                      url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
-                    }),
+                    text: frameUntrustedContent(
+                      encodeJsonText({
+                        url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
+                      }),
+                      "preview_snapshot",
+                      bounded.frameId,
+                    ),
                   },
                   { type: "text", text: bounded.text },
                   ...(bounded.omitted.length === 0
