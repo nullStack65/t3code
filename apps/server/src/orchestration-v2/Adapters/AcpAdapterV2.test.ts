@@ -6178,6 +6178,342 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "marks transport unhealthy on ConnectionTerminated events and restarts on the next turn",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const injectedEvents = yield* Queue.unbounded<AcpSessionRuntime.AcpSessionRuntimeEvent>();
+        let runtimeOrdinalSeen = 0;
+        const baseMakeRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          environment: (runtimeOrdinal) => {
+            runtimeOrdinalSeen = runtimeOrdinal;
+            return {};
+          },
+          wrapRuntime: (runtime) => ({
+            ...runtime,
+            getEvents: () =>
+              runtimeOrdinalSeen === 1
+                ? Stream.merge(runtime.getEvents(), Stream.fromQueue(injectedEvents))
+                : runtime.getEvents(),
+          }),
+        });
+        const instanceId = ProviderInstanceId.make("acp-test-connection-terminated-event");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            makeRuntime: baseMakeRuntime,
+          },
+          selfInvocation,
+        });
+        const threadId = ThreadId.make("thread-acp-connection-terminated-event");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-conn-terminated"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.isTrue(yield* runtime.isTransportHealthy!);
+
+        yield* Queue.offer(injectedEvents, {
+          _tag: "ConnectionTerminated",
+          error: new EffectAcpErrors.AcpTransportError({
+            detail: "Injected ConnectionTerminated event",
+            cause: "test",
+          }),
+        });
+        const barrier = yield* Deferred.make<void>();
+        yield* Queue.offer(injectedEvents, {
+          _tag: "EventStreamBarrier",
+          acknowledge: barrier,
+        });
+        yield* Deferred.await(barrier);
+        assert.isFalse(yield* runtime.isTransportHealthy!);
+
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+        );
+        const terminal = yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(terminal));
+        assert.equal(runtimeOrdinalSeen, 2);
+        assert.isTrue(yield* runtime.isTransportHealthy!);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "finalizes a held deferred-background-work turn on termination even without toolOutlivesPrompt",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const runtimeInputs: AcpAdapterV2RuntimeInput[] = [];
+        let sessionUpdate:
+          | Parameters<AcpSessionRuntime.AcpSessionRuntime["Service"]["handleSessionUpdate"]>[0]
+          | undefined;
+        let runtimeOrdinalSeen = 0;
+        const baseMakeRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          environment: (runtimeOrdinal) => {
+            runtimeOrdinalSeen = runtimeOrdinal;
+            return {};
+          },
+          wrapRuntime: (runtime) => ({
+            ...runtime,
+            handleSessionUpdate: (handler) =>
+              Effect.sync(() => {
+                sessionUpdate = handler;
+              }).pipe(Effect.andThen(runtime.handleSessionUpdate(handler))),
+            prompt: (payload, promptOptions) =>
+              runtimeOrdinalSeen === 1
+                ? Effect.gen(function* () {
+                    if (promptOptions?.dispatched !== undefined) {
+                      yield* Deferred.succeed(promptOptions.dispatched, undefined);
+                    }
+                    yield* sessionUpdate!({
+                      sessionId: "mock-session-1",
+                      update: {
+                        sessionUpdate: "tool_call",
+                        toolCallId: "subagent-task-1",
+                        title: "Subagent",
+                        kind: "think",
+                        status: "in_progress",
+                        rawInput: { prompt: "Inspect files" },
+                      },
+                    });
+                    return { stopReason: "end_turn" as const };
+                  })
+                : runtime.prompt(payload, promptOptions),
+          }),
+        });
+        const promptSettledWithBackgroundWork = yield* Deferred.make<void>();
+        const instanceId = ProviderInstanceId.make("acp-test-held-background-termination");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            deferFinalizeForBackgroundWork: true,
+            extractSubagentUpdate: (toolCall) =>
+              toolCall.toolCallId === "subagent-task-1"
+                ? {
+                    nativeTaskId: toolCall.toolCallId,
+                    prompt: "Inspect files",
+                    title: "Subagent",
+                    model: null,
+                    status: "running",
+                    childSessionId: null,
+                    result: null,
+                  }
+                : undefined,
+            makeRuntime: (runtimeInput) =>
+              Effect.sync(() => {
+                runtimeInputs.push(runtimeInput);
+              }).pipe(Effect.andThen(baseMakeRuntime(runtimeInput))),
+          },
+          selfInvocation,
+          testHooks: {
+            afterPromptSettledWithBackgroundWork: () =>
+              Deferred.succeed(promptSettledWithBackgroundWork, undefined).pipe(Effect.asVoid),
+          },
+        });
+        const threadId = ThreadId.make("thread-acp-held-background-termination");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-held-bg-term"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 1,
+          }),
+        );
+        yield* Deferred.await(promptSettledWithBackgroundWork);
+
+        yield* runtimeInputs[0]!.onTermination!(
+          new EffectAcpErrors.AcpTransportError({
+            detail: "Grok child process exited while background subagent was running",
+            cause: "test",
+          }),
+        );
+
+        const firstTurnEvents = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        const firstTerminal = firstTurnEvents.at(-1);
+        assert.equal(firstTerminal?.type, "turn.terminal");
+        if (firstTerminal?.type === "turn.terminal") {
+          assert.equal(firstTerminal.status, "failed");
+          assert.equal(firstTerminal.failure?.class, "transport_error");
+        }
+        assert.isTrue(
+          firstTurnEvents.some(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "failed",
+          ),
+        );
+
+        // Next turn succeeds on a restarted child instead of wedging on previous_turn_active.
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 2,
+          }),
+        );
+        const secondTerminal = yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(secondTerminal));
+        if (Option.isSome(secondTerminal) && secondTerminal.value.type === "turn.terminal") {
+          assert.equal(secondTerminal.value.status, "completed");
+        }
+        assert.equal(runtimeOrdinalSeen, 2);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "rejects unrecognized or mismatched nativeThreadRef on resumeThread and blank initialNativeThreadId on openSession",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const instanceId = ProviderInstanceId.make("acp-test-invalid-resume-ref");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            makeRuntime: makeMockRuntime({ childProcessSpawner, mockAgentPath }),
+          },
+          selfInvocation,
+        });
+        const threadId = ThreadId.make("thread-acp-invalid-resume-ref");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+
+        const openBlankError = yield* Effect.flip(
+          adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("provider-session-acp-blank-initial"),
+            modelSelection,
+            runtimePolicy,
+            initialNativeThreadId: "   ",
+          }),
+        );
+        assert.equal(openBlankError._tag, "ProviderAdapterOpenSessionError");
+
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-invalid-resume-ref"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        const foreignError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: {
+              ...providerThread,
+              nativeThreadRef: {
+                driver: ProviderDriverKind.make("codex"),
+                nativeId: "codex-thread-1",
+                strength: "strong",
+              },
+            },
+            modelSelection,
+            runtimePolicy,
+          }),
+        );
+        assert.equal(foreignError._tag, "ProviderAdapterResumeThreadError");
+
+        const blankError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: {
+              ...providerThread,
+              nativeThreadRef: {
+                driver: ACP_TEST_DRIVER,
+                nativeId: "   ",
+                strength: "strong",
+              },
+            },
+            modelSelection,
+            runtimePolicy,
+          }),
+        );
+        assert.equal(blankError._tag, "ProviderAdapterResumeThreadError");
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("fails a prompt its agent leaves silent past the inactivity timeout", () =>
     Effect.gen(function* () {
       const harness = yield* makePromptInactivityHarness({

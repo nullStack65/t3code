@@ -487,6 +487,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
+    readonly isTransportHealthy?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
     readonly hangSessionScopeClose?: boolean;
     readonly startTurn?: Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
@@ -606,6 +607,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
             : {
                 hasPendingBackgroundWorkForThread: () => options.hasPendingBackgroundWorkForThread!,
               }),
+          ...(options.isTransportHealthy === undefined
+            ? {}
+            : { isTransportHealthy: options.isTransportHealthy }),
           ensureThread: () => unimplemented("ensureThread unused in test"),
           resumeThread: (threadInput) =>
             Ref.update(state, (current) => ({
@@ -677,6 +681,7 @@ function layerTest(input: {
   };
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
+  readonly isTransportHealthy?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
   readonly hangSessionScopeClose?: boolean;
   readonly startTurn?: Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
@@ -725,6 +730,9 @@ function layerTest(input: {
       ...(input.hasPendingBackgroundWorkForThread === undefined
         ? {}
         : { hasPendingBackgroundWorkForThread: input.hasPendingBackgroundWorkForThread }),
+      ...(input.isTransportHealthy === undefined
+        ? {}
+        : { isTransportHealthy: input.isTransportHealthy }),
       ...(input.backgroundTasksEndWithProcess === undefined
         ? {}
         : { backgroundTasksEndWithProcess: input.backgroundTasksEndWithProcess }),
@@ -6248,4 +6256,88 @@ it.effect("ProviderSessionManagerV2 gives a delegated child its project's device
     });
     assert.isTrue(child?.capabilities?.has("device"));
   }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 does not skip resumeThread when runtime reports unhealthy transport",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const transportHealthy = yield* Ref.make(true);
+      const effect = Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const projectId = ProjectId.make("project-provider-session-manager-unhealthy-transport");
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-unhealthy-transport",
+          projectId,
+        });
+        const providerSessionId = idAllocator.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        yield* runtime.resumeThread({
+          providerThread,
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        // Cached load skips a second native resume while transport is healthy.
+        yield* runtime.resumeThread({
+          providerThread,
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal((yield* Ref.get(state)).resumeCount, 1);
+
+        // Once the underlying transport dies, resumeThread must re-run native resume/recovery.
+        yield* Ref.set(transportHealthy, false);
+        yield* runtime.resumeThread({
+          providerThread,
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal((yield* Ref.get(state)).resumeCount, 2);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 1000,
+            isTransportHealthy: Ref.get(transportHealthy),
+          }),
+        ),
+        Effect.scoped,
+      );
+    }),
 );

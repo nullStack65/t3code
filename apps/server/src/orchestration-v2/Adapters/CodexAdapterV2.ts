@@ -1078,10 +1078,19 @@ const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const getNativeThreadId = Effect.fn("CodexAdapterV2.getNativeThreadId")(function* (
   providerThread: OrchestrationV2ProviderThread,
 ) {
-  const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
-  if (nativeThreadId === undefined || nativeThreadId === null) {
+  const ref = providerThread.nativeThreadRef;
+  const nativeThreadId = ref?.nativeId;
+  if (
+    ref === null ||
+    ref.driver !== CODEX_PROVIDER ||
+    nativeThreadId === undefined ||
+    nativeThreadId === null ||
+    nativeThreadId.trim().length === 0
+  ) {
     return yield* toProtocolError(
-      `Provider thread ${providerThread.id} is missing a native Codex thread id.`,
+      ref !== null && ref.driver !== CODEX_PROVIDER
+        ? `Provider thread ${providerThread.id} references ${ref.driver} thread instead of ${CODEX_PROVIDER}.`
+        : `Provider thread ${providerThread.id} is missing a native Codex thread id.`,
     );
   }
   return nativeThreadId;

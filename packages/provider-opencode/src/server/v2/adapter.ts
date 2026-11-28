@@ -583,12 +583,20 @@ const ref = (nativeId: string, strength: "strong" | "weak" = "strong") => ({
 });
 
 const sessionIdOf = (providerThread: OrchestrationV2ProviderThread) => {
-  const nativeId = providerThread.nativeThreadRef?.nativeId;
-  return nativeId === undefined || nativeId === null
+  const nativeRef = providerThread.nativeThreadRef;
+  const nativeId = nativeRef?.nativeId;
+  return nativeRef === null ||
+    nativeRef.driver !== OPENCODE_PROVIDER ||
+    nativeId === undefined ||
+    nativeId === null ||
+    nativeId.trim().length === 0
     ? Effect.fail(
         new ProviderAdapter.ProviderAdapterProtocolError({
           driver: OPENCODE_PROVIDER,
-          detail: `Provider thread ${providerThread.id} has no OpenCode session`,
+          detail:
+            nativeRef !== null && nativeRef.driver !== OPENCODE_PROVIDER
+              ? `Provider thread ${providerThread.id} references ${nativeRef.driver} session instead of ${OPENCODE_PROVIDER}`
+              : `Provider thread ${providerThread.id} has no OpenCode session`,
         }),
       )
     : Effect.succeed(nativeId);

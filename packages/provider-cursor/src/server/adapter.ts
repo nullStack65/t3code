@@ -289,15 +289,29 @@ function makeProviderThread(input: {
   };
 }
 
-function nativeThreadId(providerThread: OrchestrationV2ProviderThread): string {
-  const id = providerThread.nativeThreadRef?.nativeId;
-  if (id === null || id === undefined) {
-    throw new ProviderAdapter.ProviderAdapterProtocolError({
-      driver: CursorAgentSdk.CURSOR_PROVIDER,
-      detail: `Provider thread ${providerThread.id} is missing its Cursor agent id.`,
-    });
+function nativeThreadId(
+  providerThread: OrchestrationV2ProviderThread,
+): Effect.Effect<string, ProviderAdapter.ProviderAdapterProtocolError> {
+  const ref = providerThread.nativeThreadRef;
+  const id = ref?.nativeId;
+  if (
+    ref === null ||
+    ref.driver !== CursorAgentSdk.CURSOR_PROVIDER ||
+    id === null ||
+    id === undefined ||
+    id.trim().length === 0
+  ) {
+    return Effect.fail(
+      new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: CursorAgentSdk.CURSOR_PROVIDER,
+        detail:
+          ref !== null && ref.driver !== CursorAgentSdk.CURSOR_PROVIDER
+            ? `Provider thread ${providerThread.id} references ${ref.driver} agent instead of ${CursorAgentSdk.CURSOR_PROVIDER}.`
+            : `Provider thread ${providerThread.id} is missing its Cursor agent id.`,
+      }),
+    );
   }
-  return id;
+  return Effect.succeed(id);
 }
 
 /** The SDK loads no CLI settings unless `settingSources` is supplied. */
@@ -2970,7 +2984,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 reason: "previous_turn_active",
               });
             }
-            const agentId = nativeThreadId(turnInput.providerThread);
+            const agentId = yield* nativeThreadId(turnInput.providerThread);
             const agent = yield* openAgent({
               operation: "resume",
               agentId,
@@ -3338,7 +3352,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           ),
           resumeThread: Effect.fn("CursorAdapterV2.resumeThread")(
             function* (threadInput: { readonly providerThread: OrchestrationV2ProviderThread }) {
-              const agentId = nativeThreadId(threadInput.providerThread);
+              const agentId = yield* nativeThreadId(threadInput.providerThread);
               const opened = yield* openAgent({
                 operation: "resume",
                 agentId,
@@ -3521,7 +3535,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             ),
           readThreadSnapshot: Effect.fn("CursorAdapterV2.readThreadSnapshot")(
             function* (snapshotInput) {
-              const requestedAgentId = nativeThreadId(snapshotInput.providerThread);
+              const requestedAgentId = yield* nativeThreadId(snapshotInput.providerThread);
               const agent = yield* openAgent({
                 operation: "resume",
                 agentId: requestedAgentId,
@@ -3624,7 +3638,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                 }
                 const agent = yield* openAgent({
                   operation: "resume",
-                  agentId: nativeThreadId(rollbackInput.providerThread),
+                  agentId: yield* nativeThreadId(rollbackInput.providerThread),
                   storeCwd: rollbackInput.providerThread.nativeMetadata?.cursorStoreCwd,
                   threadId,
                   modelSelection: input.modelSelection,

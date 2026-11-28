@@ -12,6 +12,7 @@ import {
   NodeId,
   type OrchestrationV2ProviderTurn,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   RunAttemptId,
@@ -3889,6 +3890,97 @@ describe("CursorAdapterV2", () => {
       },
     );
   });
+
+  it.effect(
+    "fails closed when resumeThread receives a missing, blank, or foreign nativeThreadRef",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cursor-v2-invalid-resume-",
+        });
+        const instanceId = ProviderInstanceId.make("cursor");
+        const threadId = ThreadId.make("cursor-invalid-resume-thread");
+        const modelSelection = { instanceId, model: "composer-2.5" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: workspace,
+        });
+        let resumeCalls = 0;
+        const adapter = yield* makeCursorAdapterV2({
+          instanceId,
+          environment: { HOME: workspace },
+        }).pipe(
+          Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+            assertComplete: Effect.void,
+            open: (input) =>
+              Effect.sync(() => {
+                if (input.operation === "resume") resumeCalls += 1;
+                return {
+                  agentId: input.agentId ?? "native-cursor-1",
+                  listMessages: Effect.succeed([]),
+                  close: Effect.void,
+                  send: () => Effect.die("unused"),
+                };
+              }),
+          }),
+          Effect.provide(TestProviderHost.layer({ cwd: workspace })),
+        );
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("cursor-invalid-resume-session"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        const missingRefError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: { ...providerThread, nativeThreadRef: null },
+          }),
+        );
+        assert.equal(missingRefError._tag, "ProviderAdapterResumeThreadError");
+
+        const blankError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: {
+              ...providerThread,
+              nativeThreadRef: {
+                driver: CursorAgentSdk.CURSOR_PROVIDER,
+                nativeId: "   ",
+                strength: "strong",
+              },
+            },
+          }),
+        );
+        assert.equal(blankError._tag, "ProviderAdapterResumeThreadError");
+
+        const foreignError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: {
+              ...providerThread,
+              nativeThreadRef: {
+                driver: ProviderDriverKind.make("codex"),
+                nativeId: "codex-thread-1",
+                strength: "strong",
+              },
+            },
+          }),
+        );
+        assert.equal(foreignError._tag, "ProviderAdapterResumeThreadError");
+        assert.equal(resumeCalls, 0);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+        ),
+      ),
+  );
 });
 
 type CursorTaskUpdate = Extract<

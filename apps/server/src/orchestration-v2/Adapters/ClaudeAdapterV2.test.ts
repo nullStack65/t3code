@@ -2341,6 +2341,41 @@ describe("ClaudeAdapterV2 resumeThread", () => {
         });
         assert.equal(missing.nativeThreadRef?.nativeId, "native-thread-missing");
 
+        const missingRefError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: { ...providerThread, nativeThreadRef: null },
+          }),
+        );
+        assert.equal(missingRefError._tag, "ProviderAdapterResumeThreadError");
+
+        const blankIdError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: {
+              ...providerThread,
+              nativeThreadRef: {
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeId: "   ",
+                strength: "strong",
+              },
+            },
+          }),
+        );
+        assert.equal(blankIdError._tag, "ProviderAdapterResumeThreadError");
+
+        const foreignDriverError = yield* Effect.flip(
+          runtime.resumeThread({
+            providerThread: {
+              ...providerThread,
+              nativeThreadRef: {
+                driver: ProviderDriverKind.make("codex"),
+                nativeId: "native-thread-saved",
+                strength: "strong",
+              },
+            },
+          }),
+        );
+        assert.equal(foreignDriverError._tag, "ProviderAdapterResumeThreadError");
+
         // An imported session's history lives only in its transcript.
         const missingImport = yield* Effect.flip(
           runtime.resumeThread({

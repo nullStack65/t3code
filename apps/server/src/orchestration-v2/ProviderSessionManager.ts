@@ -2740,12 +2740,18 @@ export const layerWithOptions = (
                 isProviderThreadLoaded({ providerSessionId, threadId, providerThreadKey }),
               ),
               Effect.flatMap((loaded) =>
-                loaded
-                  ? Effect.succeed({
-                      loaded: input.providerThread,
-                      linkedEnvironments: undefined,
-                    })
-                  : loadNatively(runtime.resumeThread(input)),
+                Effect.gen(function* () {
+                  const usable =
+                    loaded &&
+                    (runtime.isTransportHealthy === undefined ||
+                      (yield* runtime.isTransportHealthy));
+                  return usable
+                    ? {
+                        loaded: input.providerThread,
+                        linkedEnvironments: undefined,
+                      }
+                    : yield* loadNatively(runtime.resumeThread(input));
+                }),
               ),
               Effect.tap(({ loaded: providerThread, linkedEnvironments }) =>
                 markProviderThreadLoaded({
