@@ -87,6 +87,14 @@ const getHttpMcpEndpointHost = (address: NetAddress.IpAddress): string =>
     ? "127.0.0.1"
     : NetAddress.formatUrlHostString(NetAddress.formatIp(address));
 
+/**
+ * Durable per-thread idempotency namespace for MCP tool calls (`clientRequestId`).
+ * Derived from the thread's durable identity rather than the ephemeral `providerSessionId`
+ * so retries after an origin server restart or credential rotation reconcile with prior
+ * local and remote operations instead of starting duplicates or stranding remote lanes.
+ */
+const threadRequestNamespace = (threadId: ThreadId): string => `thread:${threadId}`;
+
 const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   options: McpSessionRegistryOptions = {},
 ) {
@@ -125,11 +133,12 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const rawToken = yield* random.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
+      const threadId = ThreadId.make(request.threadId);
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
-        requestNamespace: providerSessionId,
+        requestNamespace: threadRequestNamespace(threadId),
         thread: {
-          threadId: ThreadId.make(request.threadId),
+          threadId,
           providerSessionId,
           providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
           subagent: request.subagent === true,

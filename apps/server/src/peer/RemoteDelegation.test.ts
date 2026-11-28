@@ -40,12 +40,16 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Tracer from "effect/Tracer";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as TestClock from "effect/testing/TestClock";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 import * as SqlClient from "effect/sql/SqlClient";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -107,6 +111,8 @@ interface BoxThread {
   readonly holdRefill: Ref.Ref<boolean>;
   readonly beforeTail: Ref.Ref<Effect.Effect<void>>;
   readonly launched: Ref.Ref<ThreadId | null>;
+  /** Distinct threads created on the box across launches (replays do not add a duplicate). */
+  readonly createdThreads: Ref.Ref<ReadonlyArray<ThreadId>>;
   /** The link session that launched it, as the box stamps it. */
   readonly linkOrigin: Ref.Ref<{ readonly sessionId: string; readonly label: string } | null>;
   /** The parent the launch names, so the thread there can link back to it. */
@@ -183,6 +189,7 @@ const makeBoxThread = Effect.gen(function* () {
     holdRefill: yield* Ref.make(false),
     beforeTail: yield* Ref.make<Effect.Effect<void>>(Effect.void),
     launched: yield* Ref.make<ThreadId | null>(null),
+    createdThreads: yield* Ref.make<ReadonlyArray<ThreadId>>([]),
     linkOrigin: yield* Ref.make<{ readonly sessionId: string; readonly label: string } | null>(
       null,
     ),
@@ -269,7 +276,9 @@ const boxToolkitLayer = (thread: BoxThread) => {
   const interrupts = new Set<string>();
   const shellOf = (threadId: ThreadId) =>
     Effect.gen(function* () {
-      if ((yield* Ref.get(thread.launched)) !== threadId) return null;
+      const created = yield* Ref.get(thread.createdThreads);
+      if ((yield* Ref.get(thread.launched)) !== threadId && !created.includes(threadId))
+        return null;
       const linkOrigin = yield* Ref.get(thread.linkOrigin);
       return {
         ...liveThreadShell(threadId, { runtimeMode: "full-access" }),
@@ -568,45 +577,46 @@ const boxToolkitLayer = (thread: BoxThread) => {
   const layerBoxLaunches = Layer.mock(ThreadLaunch.ThreadLaunchService)({
     checkWorktreeBase: () => Effect.void,
     launch: (input) =>
-      Ref.get(thread.runless).pipe(
-        Effect.flatMap((runless) =>
-          Ref.set(thread.launched, input.threadId!).pipe(
-            Effect.andThen(Ref.set(thread.linkOrigin, input.linkOrigin ?? null)),
-            Effect.andThen(Ref.set(thread.delegatedFrom, input.delegatedFrom ?? null)),
-            Effect.andThen(Ref.set(thread.message, input.initialMessage?.text ?? null)),
-            Effect.andThen(
-              Ref.set(thread.launchedWith, {
-                modelSelection: input.modelSelection,
-                runtimeMode: input.runtimeMode,
-                interactionMode: input.interactionMode,
-              }),
-            ),
-            Effect.andThen(Effect.flatten(Ref.get(thread.afterLaunch))),
-            Effect.as({
-              threadId: input.threadId,
-              projection: {
-                thread: {
-                  id: input.threadId,
-                  projectId: input.projectId,
-                  title: input.title,
-                  modelSelection: input.modelSelection,
-                },
-                runs:
-                  input.initialMessage?.messageId && !runless
-                    ? [
-                        {
-                          id: runId,
-                          status: "running",
-                          userMessageId: input.initialMessage.messageId,
-                        },
-                      ]
-                    : [],
-              },
-              resumed: false,
-            } as unknown as ThreadLaunch.ThreadLaunchResult),
-          ),
-        ),
-      ),
+      Effect.gen(function* () {
+        const runless = yield* Ref.get(thread.runless);
+        const alreadyCreated = yield* Ref.modify(thread.createdThreads, (seen) =>
+          seen.includes(input.threadId!)
+            ? ([true, seen] as const)
+            : ([false, [...seen, input.threadId!]] as const),
+        );
+        yield* Ref.set(thread.launched, input.threadId!);
+        yield* Ref.set(thread.linkOrigin, input.linkOrigin ?? null);
+        yield* Ref.set(thread.delegatedFrom, input.delegatedFrom ?? null);
+        yield* Ref.set(thread.message, input.initialMessage?.text ?? null);
+        yield* Ref.set(thread.launchedWith, {
+          modelSelection: input.modelSelection,
+          runtimeMode: input.runtimeMode,
+          interactionMode: input.interactionMode,
+        });
+        yield* Effect.flatten(Ref.get(thread.afterLaunch));
+        return {
+          threadId: input.threadId,
+          projection: {
+            thread: {
+              id: input.threadId,
+              projectId: input.projectId,
+              title: input.title,
+              modelSelection: input.modelSelection,
+            },
+            runs:
+              input.initialMessage?.messageId && !runless
+                ? [
+                    {
+                      id: runId,
+                      status: yield* Ref.get(thread.status),
+                      userMessageId: input.initialMessage.messageId,
+                    },
+                  ]
+                : [],
+          },
+          resumed: alreadyCreated,
+        } as unknown as ThreadLaunch.ThreadLaunchResult;
+      }),
   });
   return Layer.merge(
     McpHttpServer.layerOrchestratorToolkit,
@@ -862,6 +872,23 @@ const makeLaptop = (
     );
     const here = yield* Layer.build(layerHere);
     const server = Context.get(here, McpServer.McpServer);
+    const mcpRegistry = yield* McpSessionRegistry.__testing.make().pipe(
+      Effect.provideService(
+        HttpServer.HttpServer,
+        HttpServer.HttpServer.of({
+          address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+          serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+        }),
+      ),
+      Effect.provideService(
+        ServerEnvironment.ServerEnvironment,
+        ServerEnvironment.ServerEnvironment.of({
+          getEnvironmentId: Effect.succeed(laptop.environmentId),
+          getDescriptor: Effect.succeed(laptop),
+        }),
+      ),
+      Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    );
     return {
       links: Context.get(linking, PeerLinks.PeerLinks),
       settings: Context.get(linking, ServerSettings.ServerSettingsService),
@@ -870,6 +897,19 @@ const makeLaptop = (
       threads: Context.get(here, ThreadManagement.ThreadManagementService),
       projections: Context.get(here, ProjectionStore.ProjectionStoreV2),
       sink: Context.get(here, EventSink.EventSinkV2),
+      issueScope: (threadId: ThreadId = parentThreadId) =>
+        Effect.gen(function* () {
+          const issued = yield* mcpRegistry.issue({
+            threadId,
+            providerInstanceId: instanceId,
+          });
+          const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+          const resolved = yield* mcpRegistry.resolve(token);
+          if (resolved === undefined) {
+            return yield* Effect.die("Issued MCP credential did not resolve.");
+          }
+          return resolved;
+        }),
       call: (name: string, args: Record<string, unknown>, scope = parentScope) =>
         server
           .callTool({ name, arguments: args })
@@ -4199,6 +4239,268 @@ it.effect(
           result: "Finished after the dropped wait.",
           remoteChild: { peerStatus: "reachable" },
         });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "CLO-1091: retrying delegate_task after origin server restart reconciles without launching a duplicate",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
+
+        const first = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const before = yield* makeLaptop(database, offers, linking);
+            yield* linkTo(before.links, b, "full-access");
+            yield* seedParent(before);
+            const scopeBefore = yield* before.issueScope();
+            const result = yield* before.call(
+              "delegate_task",
+              {
+                task: "Run the full suite on the box.",
+                target: {
+                  environmentId: box.environmentId,
+                  providerInstanceId: instanceId,
+                  model: "gpt-5.4",
+                },
+                mode: "async",
+                clientRequestId: "restart-idempotent",
+              },
+              scopeBefore,
+            );
+            expect(result.isError, JSON.stringify(result.content)).toBe(false);
+            return {
+              scopeBefore,
+              delegated: result.structuredContent as {
+                taskId: NodeId;
+                remoteChild: { environmentId: string; threadId: ThreadId };
+              },
+            };
+          }),
+        );
+
+        expect(yield* Ref.get(thread.createdThreads)).toEqual([
+          first.delegated.remoteChild.threadId,
+        ]);
+
+        // Origin restarts with a fresh McpSessionRegistry and issues a new credential.
+        const after = yield* makeLaptop(database, offers, linking);
+        const scopeAfter = yield* after.issueScope();
+        expect(scopeAfter.thread.providerSessionId).not.toBe(
+          first.scopeBefore.thread.providerSessionId,
+        );
+        expect(scopeAfter.requestNamespace).toBe(first.scopeBefore.requestNamespace);
+
+        const retried = yield* after.call(
+          "delegate_task",
+          {
+            task: "Run the full suite on the box.",
+            target: {
+              environmentId: box.environmentId,
+              providerInstanceId: instanceId,
+              model: "gpt-5.4",
+            },
+            mode: "async",
+            clientRequestId: "restart-idempotent",
+          },
+          scopeAfter,
+        );
+        expect(retried.isError, JSON.stringify(retried.content)).toBe(false);
+        expect(retried.structuredContent).toMatchObject({
+          taskId: first.delegated.taskId,
+          remoteChild: {
+            environmentId: box.environmentId,
+            threadId: first.delegated.remoteChild.threadId,
+          },
+        });
+        expect(yield* Ref.get(thread.createdThreads)).toEqual([
+          first.delegated.remoteChild.threadId,
+        ]);
+        expect(
+          (yield* after.orchestrator.getThreadProjection(parentThreadId)).subagents,
+        ).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "CLO-1091: crash between remote launch and local record recovers on retry after restart and completes",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
+
+        // Box launches the remote thread (occupying a lane), then origin crashes before local record creation.
+        yield* Ref.set(thread.afterLaunch, Effect.die("origin crashed before local record"));
+        const beforeResult = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const before = yield* makeLaptop(database, offers, linking);
+            yield* linkTo(before.links, b, "full-access");
+            yield* seedParent(before);
+            const scopeBefore = yield* before.issueScope();
+            const failed = yield* before.call(
+              "delegate_task",
+              {
+                task: "Run the suite wherever there is room.",
+                placement: "auto",
+                target: { providerInstanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+                mode: "async",
+                clientRequestId: "crash-window-recovery",
+              },
+              scopeBefore,
+            );
+            expect(failed.isError).toBe(true);
+            expect(
+              (yield* before.orchestrator.getThreadProjection(parentThreadId)).subagents,
+            ).toHaveLength(0);
+            return scopeBefore;
+          }),
+        );
+
+        const launchedThere = yield* Ref.get(thread.launched);
+        expect(launchedThere).not.toBeNull();
+        expect(yield* Ref.get(thread.createdThreads)).toEqual([launchedThere]);
+
+        // Box is now full (holding the stranded lane); origin restarts with a fresh McpSessionRegistry.
+        yield* Ref.set(thread.resources, loadOf(0.99));
+        yield* Ref.set(thread.afterLaunch, Effect.void);
+        const after = yield* makeLaptop(database, offers, linking);
+        yield* after.remote.start();
+        const scopeAfter = yield* after.issueScope();
+        expect(scopeAfter.thread.providerSessionId).not.toBe(beforeResult.thread.providerSessionId);
+        expect(scopeAfter.requestNamespace).toBe(beforeResult.requestNamespace);
+
+        // Retrying with the same clientRequestId reconciles to the existing remote thread,
+        // records the local task, and attaches the follower without launching a duplicate.
+        const recovered = yield* after.call(
+          "delegate_task",
+          {
+            task: "Run the suite wherever there is room.",
+            placement: "auto",
+            target: { providerInstanceId: boxClaude.instanceId, model: "claude-sonnet-4-6" },
+            mode: "async",
+            clientRequestId: "crash-window-recovery",
+          },
+          scopeAfter,
+        );
+        expect(recovered.isError, JSON.stringify(recovered.content)).toBe(false);
+        const recoveredTask = recovered.structuredContent as {
+          taskId: NodeId;
+          remoteChild: { environmentId: string; threadId: ThreadId };
+        };
+        expect(recoveredTask.remoteChild).toMatchObject({
+          environmentId: box.environmentId,
+          threadId: launchedThere,
+        });
+        expect(yield* Ref.get(thread.createdThreads)).toEqual([launchedThere]);
+        expect(
+          (yield* after.orchestrator.getThreadProjection(parentThreadId)).subagents,
+        ).toHaveLength(1);
+
+        // When the remote thread finishes and releases its lane, the attached follower completes the task.
+        yield* Ref.set(thread.reply, "Recovered crash-window run completed.");
+        yield* Ref.set(thread.status, "completed");
+        yield* Deferred.succeed(thread.finished, undefined);
+        const completed = yield* taskResult(after, recoveredTask.taskId);
+        expect(completed).toMatchObject({
+          status: "completed",
+          result: "Recovered crash-window run completed.",
+        });
+        const offered = yield* SubscriptionRef.changes(offers).pipe(
+          Stream.filter((seen) => seen.some((offer) => offer.threadId === parentThreadId)),
+          Stream.runHead,
+        );
+        expect(Option.isSome(offered)).toBe(true);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "CLO-1091: a different clientRequestId after origin restart launches a new remote task",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
+
+        const first = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const before = yield* makeLaptop(database, offers, linking);
+            yield* linkTo(before.links, b, "full-access");
+            yield* seedParent(before);
+            const scopeBefore = yield* before.issueScope();
+            const result = yield* before.call(
+              "delegate_task",
+              {
+                task: "First task on the box.",
+                target: {
+                  environmentId: box.environmentId,
+                  providerInstanceId: instanceId,
+                  model: "gpt-5.4",
+                },
+                mode: "async",
+                clientRequestId: "task-alpha",
+              },
+              scopeBefore,
+            );
+            expect(result.isError, JSON.stringify(result.content)).toBe(false);
+            return result.structuredContent as {
+              taskId: NodeId;
+              remoteChild: { threadId: ThreadId };
+            };
+          }),
+        );
+
+        const after = yield* makeLaptop(database, offers, linking);
+        const scopeAfter = yield* after.issueScope();
+        const secondCall = yield* after.call(
+          "delegate_task",
+          {
+            task: "Second task on the box.",
+            target: {
+              environmentId: box.environmentId,
+              providerInstanceId: instanceId,
+              model: "gpt-5.4",
+            },
+            mode: "async",
+            clientRequestId: "task-beta",
+          },
+          scopeAfter,
+        );
+        expect(secondCall.isError, JSON.stringify(secondCall.content)).toBe(false);
+        const second = secondCall.structuredContent as {
+          taskId: NodeId;
+          remoteChild: { threadId: ThreadId };
+        };
+
+        expect(second.taskId).not.toBe(first.taskId);
+        expect(second.remoteChild.threadId).not.toBe(first.remoteChild.threadId);
+        expect(yield* Ref.get(thread.createdThreads)).toEqual([
+          first.remoteChild.threadId,
+          second.remoteChild.threadId,
+        ]);
+        expect(
+          (yield* after.orchestrator.getThreadProjection(parentThreadId)).subagents,
+        ).toHaveLength(2);
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
