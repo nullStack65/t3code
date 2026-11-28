@@ -65,6 +65,7 @@ import {
   isStrandedQueueSignature,
   judgeThread,
   keepStrandedQueueReport,
+  laneEventOf,
   type StrandedQueue,
   threadEventAlert,
   launchingThreadId,
@@ -78,6 +79,7 @@ import {
   withPullRequestStates,
   type ThreadFinding,
 } from "./ThreadEventAlerts.ts";
+import { decideLaneEvent, type LaneDecision, laneThreadState } from "./laneEventRouting.ts";
 import {
   alertIsStale,
   expectsAutoResume,
@@ -179,6 +181,8 @@ export const ModelAlertState = Schema.Struct({
   failureWakeSentAt: Schema.Record(Schema.String, Schema.Number).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Lane-event conditions already routed, keyed recipient > child > condition (CLO-1302). */
+  laneDelivered: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   outbox: Schema.Array(Delivery),
 });
 export type ModelAlertState = typeof ModelAlertState.Type;
@@ -190,6 +194,7 @@ export const EMPTY_MODEL_ALERT_STATE: ModelAlertState = {
   resuming: {},
   incidentSentAt: {},
   failureWakeSentAt: {},
+  laneDelivered: [],
   outbox: [],
 };
 
@@ -958,6 +963,8 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   watcher: ModelAlertWatcher,
   here: EnvironmentId,
   expiresAtMs?: number,
+  /** A wake-suppressed watcher still gets the alert, but only as a digest. */
+  wakeSuppressed = false,
 ) {
   const message = watcherAlertMessage(alert);
   // Run ids can be long; a retry key must stay under the 256 characters the peer accepts.
@@ -967,7 +974,7 @@ export const deliverAlertToWatcher = Effect.fnUntraced(function* (
   const expiresAt = DateTime.makeUnsafe(
     expiresAtMs ?? DateTime.toEpochMillis(yield* DateTime.now) + ALERT_DIGEST_TTL_MS,
   );
-  const deliveryClass = isFailureWake(alert) ? "next_turn" : "digest";
+  const deliveryClass = isFailureWake(alert) && !wakeSuppressed ? "next_turn" : "digest";
   if (watcher.environmentId === here) {
     // A retired watcher never takes a turn: the alert follows its redirect, or is dropped with a
     // warning when the chain cannot be resolved.
@@ -1092,6 +1099,22 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  /**
+   * A `wake-suppressed` subscription on a thread (set by the Home wake-loop detector,
+   * `wake-loop:<host>:<thread>`) turns every server wake for that thread into a digest.
+   */
+  const wakeSuppressed = (threadId: ThreadId) =>
+    Option.isNone(subscriptionStore)
+      ? Effect.succeed(false)
+      : subscriptionStore.value.listForSelector(threadSelectorKey(threadId)).pipe(
+          Effect.map((rows) =>
+            rows.some((row) =>
+              (row.events ?? []).some((event) => event.name === "wake-suppressed"),
+            ),
+          ),
+          Effect.catchCause(() => Effect.succeed(false)),
+        );
+
   const sha256Hex = (identity: string) =>
     crypto
       .digest(Digest.sha256, new TextEncoder().encode(identity))
@@ -1101,6 +1124,7 @@ export const make = Effect.gen(function* () {
     watcher: ModelAlertWatcher,
     here: EnvironmentId,
     expiresAtMs: number,
+    wakeSuppressed: boolean,
   ) =>
     deliverAlertToWatcher(
       {
@@ -1113,6 +1137,7 @@ export const make = Effect.gen(function* () {
       watcher,
       here,
       expiresAtMs,
+      wakeSuppressed,
     );
 
   const WatcherThreadStatus = Schema.Struct({
@@ -1432,6 +1457,7 @@ export const make = Effect.gen(function* () {
       target,
       here,
       entry.digestExpiresAt ?? nowMs + ALERT_DIGEST_TTL_MS,
+      target.environmentId === here && (yield* wakeSuppressed(target.threadId)),
     );
     return { _tag: "sent" } satisfies DeliveryResult;
   });
@@ -1494,6 +1520,7 @@ export const make = Effect.gen(function* () {
           }).pipe(Effect.as(null)),
         ),
       );
+      const suppressed = wakeTarget !== null && (yield* wakeSuppressed(wakeTarget));
       if (wakeTarget !== null)
         yield* engine
           .dispatch({
@@ -1512,6 +1539,9 @@ export const make = Effect.gen(function* () {
             },
             attachments: [],
             dispatchMode: { type: "queue_after_active" },
+            ...(suppressed
+              ? { delivery: { class: "digest" as const, category: "alert" as const } }
+              : {}),
             createdBy: "agent",
             creationSource: "server",
           })
@@ -1793,6 +1823,85 @@ export const make = Effect.gen(function* () {
     return { environmentId: here, threadId: launcher.id } satisfies ModelAlertWatcher;
   });
 
+  const threadShellOrNull = (threadId: string) =>
+    projections
+      .getThreadShell(ThreadId.make(threadId))
+      .pipe(Effect.catchCause(() => Effect.succeed(null)));
+
+  /**
+   * Routes a lane-ended finding to one recipient (CLO-1302): drop it while the lane runs or once
+   * its condition was routed, detach a settled/archived/missing recipient to an `ops-bus` digest,
+   * and wake only for open work, a failure or a question.
+   */
+  const routeLaneEnded = Effect.fnUntraced(function* (
+    shell: OrchestrationV2ThreadShell,
+    recipientId: string | null,
+  ) {
+    const recipient = recipientId === null ? null : yield* threadShellOrNull(recipientId);
+    const threads = {
+      ...(recipientId === null ? {} : { [recipientId]: { state: laneThreadState(recipient) } }),
+      [shell.id]: { state: laneThreadState(shell) },
+    };
+    const decision: LaneDecision = yield* update((current) => {
+      const decided = decideLaneEvent(laneEventOf(shell, recipientId), {
+        threads,
+        delivered: current.laneDelivered,
+      });
+      if (decided.deliveredKey === undefined) return [decided, current];
+      return [
+        decided,
+        {
+          ...current,
+          laneDelivered: [...current.laneDelivered, decided.deliveredKey].slice(-MAX_REPORTED),
+        },
+      ];
+    });
+    if (decision.action !== "wake") {
+      yield* Effect.logInfo("lane-ended event routed without a wake", {
+        threadId: shell.id,
+        recipient: decision.recipient,
+        action: decision.action,
+        reason: decision.reason,
+      });
+    }
+    return decision;
+  });
+
+  /** A settled, archived or missing subscriber no longer hears its child's lane ending. */
+  const detachLaneEnded = Effect.fnUntraced(function* (subscription: EventSubscription) {
+    const events = subscription.events ?? [];
+    if (Option.isNone(subscriptionStore) || !events.some((e) => e.name === "lane-ended")) {
+      return subscription;
+    }
+    const state = laneThreadState(yield* threadShellOrNull(subscription.subscriberThreadId));
+    if (state === "idle" || state === "running") return subscription;
+    const remaining = events.filter((e) => e.name !== "lane-ended");
+    const store = subscriptionStore.value;
+    yield* Effect.logInfo("detached an inactive subscriber from lane-ended", {
+      id: subscription.id,
+      subscriberThreadId: subscription.subscriberThreadId,
+      state,
+    });
+    if (remaining.length === 0) {
+      yield* store.remove(subscription.subscriberThreadId, subscription.id).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription removal failed", { id: subscription.id, cause }),
+        ),
+        Effect.asVoid,
+      );
+      return null;
+    }
+    const next = { ...subscription, events: remaining };
+    yield* store
+      .put(next)
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("event subscription update failed", { id: subscription.id, cause }),
+        ),
+      );
+    return next;
+  });
+
   /** Judges one thread for the kinds a trigger can change, and queues what is newly true. */
   const handleThreadEvents = Effect.fnUntraced(function* (
     threadId: ThreadId,
@@ -1827,6 +1936,27 @@ export const make = Effect.gen(function* () {
     const label = (yield* environment.getDescriptor).label;
     const occurredAt = DateTime.formatIso(yield* DateTime.now);
     const launcher = yield* launchingThread(shell, here);
+    // One routing decision per recipient per judgement: the launcher is often also a subscriber.
+    const laneDecisions = new Map<string | null, LaneDecision>();
+    const laneDecisionFor = (recipientId: string | null) =>
+      laneDecisions.has(recipientId)
+        ? Effect.succeed(laneDecisions.get(recipientId) as LaneDecision)
+        : routeLaneEnded(shell, recipientId).pipe(
+            Effect.tap((decision) => Effect.sync(() => laneDecisions.set(recipientId, decision))),
+          );
+    const laneEnded = judged.findings.some((finding) => finding.kind === "lane-ended");
+    const launcherId = launchingThreadId(shell.inbox);
+    const launcherLane =
+      laneEnded && !selfWatch && !noGlobalDestination
+        ? yield* laneDecisionFor(launcherId === shell.id ? null : launcherId)
+        : null;
+    const outboxFindings =
+      launcherLane?.action === "drop"
+        ? judged.findings.filter((finding) => finding.kind !== "lane-ended")
+        : judged.findings;
+    // A detached ops-bus digest reaches no thread: only the webhook, when one is set.
+    const laneRecipient =
+      launcherLane === null || launcherLane.recipient === launcherId ? launcher : null;
     if (
       !selfWatch &&
       !noGlobalDestination &&
@@ -1846,14 +1976,19 @@ export const make = Effect.gen(function* () {
             let state = initial;
             let queued = false;
             for (const kind of judged.evaluated) {
-              const recipient = kind === "thread-failed" ? watcher : launcher;
+              const recipient =
+                kind === "thread-failed"
+                  ? watcher
+                  : kind === "lane-ended"
+                    ? laneRecipient
+                    : launcher;
               const destinations = threadEventDestinations(
                 recipient,
                 kind === "thread-failed" ? "" : current.modelAlertWebhookUrl,
               );
               const result = recordThreadEvents(
                 state,
-                { threadId, evaluated: [kind], findings: judged.findings, ...context },
+                { threadId, evaluated: [kind], findings: outboxFindings, ...context },
                 (finding) =>
                   threadEventAlert({
                     environmentId: here,
@@ -1874,14 +2009,24 @@ export const make = Effect.gen(function* () {
     if (enqueued) yield* Queue.offer(wake, undefined);
     yield* Effect.forEach(
       subscribed,
-      (subscription) =>
-        applyThreadPlan(
-          subscription,
-          threadId,
-          shell.title,
-          judged.findings,
-          trigger === "settled",
-        ),
+      (row) =>
+        Effect.gen(function* () {
+          const subscription = yield* detachLaneEnded(row);
+          if (subscription === null) return;
+          const wakesSubscriber =
+            !laneEnded ||
+            !(subscription.events ?? []).some((event) => event.name === "lane-ended") ||
+            (yield* laneDecisionFor(subscription.subscriberThreadId)).action === "wake";
+          yield* applyThreadPlan(
+            subscription,
+            threadId,
+            shell.title,
+            wakesSubscriber
+              ? judged.findings
+              : judged.findings.filter((finding) => finding.kind !== "lane-ended"),
+            trigger === "settled",
+          );
+        }),
       { discard: true },
     );
   });

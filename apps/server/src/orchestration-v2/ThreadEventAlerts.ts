@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import { threadPullRequestKeyOf } from "../sourceControl/threadPullRequests.ts";
+import type { LaneEvent } from "./laneEventRouting.ts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -110,6 +111,22 @@ const openPullRequests = (shell: WatchedShell) =>
   visibleThreadPullRequests(shell.pullRequests ?? []).filter(
     (link) => link.snapshot === null || link.snapshot.state === "open",
   );
+
+/** The lane-routing view of this thread ending, as one recipient would receive it. */
+export const laneEventOf = (shell: WatchedShell, recipient: string | null): LaneEvent => {
+  const failed = shell.status === "failed" || shell.status === "interrupted";
+  return {
+    child_thread_id: shell.id,
+    owner: recipient,
+    kind: "lane-ended",
+    condition: {
+      outcome: shell.status,
+      error: failed ? (shell.lastError ?? shell.status) : null,
+      open_prs: openPullRequests(shell).map(threadPullRequestKeyOf),
+      question: shell.pendingRuntimeRequest === null ? null : "pending-request",
+    },
+  };
+};
 
 /** The links a lane-ended re-judge should reread from the host: the ones it counts as open. */
 export const openPullRequestLinks = (shell: Pick<WatchedShell, "pullRequests">) =>
