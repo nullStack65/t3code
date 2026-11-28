@@ -8,6 +8,7 @@ vi.mock("react-dom/client", () => ({ default: { createRoot: () => ({ render: () 
 // Boots the entry in a fresh page that shares the tab's sessionStorage, as a reload does.
 async function bootThenFailLazyChunk(sessionStorage: Map<string, string>) {
   vi.resetModules();
+  vi.useFakeTimers();
   const reload = vi.fn().mockName("location.reload");
   const page = Object.assign(new EventTarget(), {
     sessionStorage: {
@@ -23,15 +24,20 @@ async function bootThenFailLazyChunk(sessionStorage: Map<string, string>) {
     const { boot } = await import("./bootstrap");
     await boot;
     page.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    // The reload waits a moment for the network to settle.
+    await vi.advanceTimersByTimeAsync(5_000);
     return reload;
   } finally {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   }
 }
 
-it("reloads only once when a lazy chunk fails after every boot", async () => {
+it("stops reloading after three tries when a lazy chunk fails after every boot", async () => {
   const sessionStorage = new Map<string, string>();
 
-  expect(await bootThenFailLazyChunk(sessionStorage)).toHaveBeenCalledTimes(1);
+  for (let boot = 0; boot < 3; boot++) {
+    expect(await bootThenFailLazyChunk(sessionStorage)).toHaveBeenCalledTimes(1);
+  }
   expect(await bootThenFailLazyChunk(sessionStorage)).not.toHaveBeenCalled();
 });

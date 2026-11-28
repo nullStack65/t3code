@@ -1,0 +1,16 @@
+{
+  "name": "@t3tools/qa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "effect-tsgo tsrs --noEmit",
+    "verify": "node verify.ts",
+    "check": "node check-map.ts"
+  },
+  "dependencies": {
+    "playwright": "1.64.1"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
+  }
+}

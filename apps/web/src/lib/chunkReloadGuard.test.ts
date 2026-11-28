@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  chunkLoadState,
+  handleChunkLoadErrors,
   isChunkLoadError,
-  MAX_RELOADS_PER_WINDOW,
-  RELOAD_WINDOW_MS,
   reloadForChunkLoadError,
 } from "./chunkReloadGuard";
 
@@ -25,88 +25,64 @@ function createStorageStub(): Storage {
   };
 }
 
-function createHarness(build = "1.0.0") {
-  const storage = createStorageStub();
-  const reload = vi.fn().mockName("location.reload");
-  const delays: number[] = [];
-  let clock = 1_000_000;
-  const attempt = () =>
-    reloadForChunkLoadError({
-      getStorage: () => storage,
-      reload,
-      build,
-      now: () => clock,
-      schedule: (callback, delayMs) => {
-        delays.push(delayMs);
-        callback();
-      },
-    });
-  return {
-    storage,
-    reload,
-    delays,
-    attempt,
-    advance: (ms: number) => {
-      clock += ms;
-    },
-  };
-}
-
 describe("reloadForChunkLoadError", () => {
-  it("retries a flapping network up to three times with growing delays, then lets it surface", () => {
-    const harness = createHarness();
-
-    expect(harness.attempt()).toBe(true);
-    expect(harness.attempt()).toBe(true);
-    expect(harness.attempt()).toBe(true);
-    expect(harness.attempt()).toBe(false);
-
-    expect(harness.reload).toHaveBeenCalledTimes(MAX_RELOADS_PER_WINDOW);
-    expect(harness.delays).toEqual([750, 1500, 2250]);
-  });
-
-  it("retries again once the window has passed, so a later blip in the same tab recovers", () => {
-    const harness = createHarness();
-    for (let i = 0; i < MAX_RELOADS_PER_WINDOW; i++) harness.attempt();
-    expect(harness.attempt()).toBe(false);
-
-    harness.advance(RELOAD_WINDOW_MS);
-
-    expect(harness.attempt()).toBe(true);
-    expect(harness.delays.at(-1)).toBe(750);
-  });
-
-  it("keeps counting inside the window across reloads", () => {
-    const harness = createHarness();
-    harness.attempt();
-    harness.advance(RELOAD_WINDOW_MS - 1);
-    harness.attempt();
-    harness.attempt();
-
-    expect(harness.attempt()).toBe(false);
-  });
-
-  it("starts a fresh window once a deploy changed the build", () => {
+  it("retries with growing delays, then lets the failure surface", () => {
     const storage = createStorageStub();
     const reload = vi.fn();
-    const options = {
-      getStorage: () => storage,
-      reload,
-      now: () => 0,
-      schedule: (cb: () => void) => cb(),
-    };
-    for (let i = 0; i < MAX_RELOADS_PER_WINDOW; i++)
-      reloadForChunkLoadError({ ...options, build: "1.0.0" });
+    const reloadAt = (now: number) => reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
 
-    expect(reloadForChunkLoadError({ ...options, build: "1.0.1" })).toBe(true);
-    expect(reload).toHaveBeenCalledTimes(MAX_RELOADS_PER_WINDOW + 1);
+    expect(reloadAt(0)).toBe(true);
+    expect(reloadAt(5_000)).toBe(true);
+    expect(reloadAt(10_000)).toBe(true);
+    expect(reloadAt(15_000)).toBe(false);
+    expect(reload.mock.calls.map(([delay]) => delay)).toEqual([750, 1500, 2250]);
   });
 
-  it("treats the old one-reload marker as a fresh window instead of a dead end", () => {
-    const harness = createHarness();
-    harness.storage.setItem("t3code:chunk-load-reloaded", "1.0.0");
+  it("keeps a load that fails slowly, every 20 seconds, from reloading forever", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    const outcomes = [0, 20_000, 40_000, 60_000, 80_000].map((now) =>
+      reloadForChunkLoadError(() => storage, reload, "1.0.0", now),
+    );
 
-    expect(harness.attempt()).toBe(true);
+    expect(outcomes).toEqual([true, true, true, false, false]);
+  });
+
+  it("reloads again once the window has passed", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    for (const now of [0, 1_000, 2_000])
+      reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
+
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.0", 11 * 60_000)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(4);
+  });
+
+  it("ignores stamps from a clock that has since moved back", () => {
+    const storage = createStorageStub();
+    storage.setItem(
+      "t3code:chunk-load-reloaded",
+      JSON.stringify({ build: "1.0.0", at: [1_000_000, 1_001_000, 1_002_000] }),
+    );
+
+    expect(reloadForChunkLoadError(() => storage, vi.fn(), "1.0.0", 0)).toBe(true);
+  });
+
+  it("reloads again once a deploy changed the build", () => {
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    for (const now of [0, 1_000, 2_000])
+      reloadForChunkLoadError(() => storage, reload, "1.0.0", now);
+
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.1", 3_000)).toBe(true);
+  });
+
+  it("treats the bare build string an older tab stored as no record", () => {
+    const storage = createStorageStub();
+    storage.setItem("t3code:chunk-load-reloaded", "1.0.0");
+    const reload = vi.fn();
+
+    expect(reloadForChunkLoadError(() => storage, reload, "1.0.0", 0)).toBe(true);
   });
 
   it("never reloads when storage is blocked, so a persistent failure cannot loop", () => {
@@ -115,10 +91,36 @@ describe("reloadForChunkLoadError", () => {
       throw new DOMException("blocked", "SecurityError");
     };
 
-    expect(reloadForChunkLoadError({ getStorage: blocked, reload, schedule: (cb) => cb() })).toBe(
-      false,
-    );
+    expect(reloadForChunkLoadError(blocked, reload)).toBe(false);
     expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleChunkLoadErrors", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    chunkLoadState.reloadScheduled = false;
+  });
+
+  it("spends one reload on the many preload errors one failed load raises", () => {
+    vi.useFakeTimers();
+    const storage = createStorageStub();
+    const reload = vi.fn();
+    const page = Object.assign(new EventTarget(), {
+      sessionStorage: storage,
+      location: { reload },
+    });
+    vi.stubGlobal("window", page);
+    handleChunkLoadErrors();
+
+    const events = [1, 2, 3, 4].map(() => new Event("vite:preloadError", { cancelable: true }));
+    for (const event of events) page.dispatchEvent(event);
+    vi.advanceTimersByTime(5_000);
+
+    expect(events.every((event) => event.defaultPrevented)).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(storage.getItem("t3code:chunk-load-reloaded") ?? "{}").at).toHaveLength(1);
   });
 });
 

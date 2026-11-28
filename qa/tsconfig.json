@@ -1,0 +1,21 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "DOM", "esnext.disposable"],
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        // Plain Node scripts and Playwright specs, outside the server's Effect runtime.
+        "diagnosticSeverity": {
+          "globalDate": "off",
+          "globalConsole": "off",
+          "globalRandom": "off",
+          "globalTimers": "off",
+          "globalFetch": "off"
+        }
+      }
+    ]
+  },
+  "include": ["**/*.ts"]
+}
