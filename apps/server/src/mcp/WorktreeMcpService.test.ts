@@ -702,7 +702,46 @@ describe("t3_worktree_status", () => {
         attached: true,
         worktreePath: "/worktrees/project/existing",
         branch: "feature/existing",
+        detached: false,
         defaultStartFromOrigin: true,
+      });
+    });
+  });
+
+  it.effect("reports detached HEAD when an attached worktree has branch null", () => {
+    const harness = makeHarness({
+      thread: {
+        worktreePath: "/worktrees/project/existing",
+        branch: null,
+      },
+    });
+    return Effect.gen(function* () {
+      const result = yield* runStatus(harness);
+      expect(result).toMatchObject({
+        attached: true,
+        worktreePath: "/worktrees/project/existing",
+        branch: null,
+        detached: true,
+        defaultStartFromOrigin: false,
+      });
+    });
+  });
+
+  it.effect("reports detached as false when the thread is not attached to a worktree", () => {
+    const harness = makeHarness({
+      thread: {
+        worktreePath: null,
+        branch: null,
+      },
+    });
+    return Effect.gen(function* () {
+      const result = yield* runStatus(harness);
+      expect(result).toMatchObject({
+        attached: false,
+        worktreePath: null,
+        branch: null,
+        detached: false,
+        defaultStartFromOrigin: false,
       });
     });
   });

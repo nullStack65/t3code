@@ -511,6 +511,7 @@ const make = Effect.gen(function* () {
         attached: projection.thread.worktreePath !== null,
         worktreePath: projection.thread.worktreePath,
         branch: projection.thread.branch,
+        detached: projection.thread.worktreePath !== null && projection.thread.branch === null,
         projectWorkspaceRoot: project.workspaceRoot,
         defaultStartFromOrigin,
       };

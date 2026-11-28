@@ -78,6 +78,9 @@ export const WorktreeMcpStatusResult = Schema.Struct({
   attached: Schema.Boolean,
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   branch: Schema.NullOr(GitRefName),
+  detached: Schema.Boolean.annotate({
+    description: "True when the attached worktree is on a detached HEAD (`branch` is `null`).",
+  }),
   projectWorkspaceRoot: TrimmedNonEmptyString,
   defaultStartFromOrigin: Schema.Boolean.annotate({
     description: "`startFromOrigin` default for `t3_worktree_handoff`.",
